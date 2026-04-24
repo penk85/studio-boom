@@ -59,6 +59,19 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Studio tokens */
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-stage-bg: var(--stage-bg);
+  --color-track: var(--track);
+  --color-track-alt: var(--track-alt);
+  --color-clip: var(--clip);
+  --color-clip-character: var(--clip-character);
+  --color-clip-audio: var(--clip-audio);
+  --color-clip-bg: var(--clip-bg);
+  --color-playhead: var(--playhead);
+  --color-grid-line: var(--grid-line);
 }
 
 :root {
