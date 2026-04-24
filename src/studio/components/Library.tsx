@@ -37,10 +37,61 @@ export function Library() {
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         {tab === "media" && <MediaTab />}
-        {tab === "characters" && <ComingSoon what="Characters" desc="Build reusable puppet rigs with mouth shapes, eyes, body, and limbs." />}
+        {tab === "characters" && <CharactersTab />}
         {tab === "movements" && <ComingSoon what="Movement presets" desc="Author reusable animations and drop them onto any character." />}
         {tab === "blocks" && <ComingSoon what="Hyperframes blocks" desc="Drop-in titles, lower-thirds, and transitions from the Hyperframes catalog." />}
       </div>
+    </div>
+  );
+}
+
+function CharactersTab() {
+  const project = useStudio((s) => s.project);
+  const playhead = useStudio((s) => s.playhead);
+  const addClip = useStudio((s) => s.addClip);
+
+  const addStubCharacter = () => {
+    if (!project) return;
+    const trackIndex = Math.max(0, project.tracks.findIndex((t) => t.kind === "character"));
+    const w = Math.round(project.width * 0.3);
+    const h = Math.round(project.height * 0.6);
+    addClip({
+      id: crypto.randomUUID(),
+      kind: "character",
+      characterId: "stub",
+      name: "Voice Character",
+      trackIndex,
+      start: playhead,
+      duration: 4,
+      x: Math.round((project.width - w) / 2),
+      y: Math.round((project.height - h) / 2),
+      width: w,
+      height: h,
+      rotation: 0,
+      opacity: 1,
+      zIndex: project.clips.length,
+      poses: {},
+    });
+  };
+
+  return (
+    <div className="space-y-3 p-3 text-xs">
+      <div className="rounded border border-border bg-panel-2 p-3">
+        <div className="mb-1 font-medium text-foreground">Puppet rigs — coming next</div>
+        <p className="text-muted-foreground">
+          The full character editor (head, mouth shapes, eyes, body, limbs, alignment, z-index) is the next phase. In the meantime you can drop a placeholder character clip to test ElevenLabs voice + lip sync end to end.
+        </p>
+      </div>
+      <button
+        onClick={addStubCharacter}
+        disabled={!project}
+        className="w-full rounded bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+      >
+        + Add placeholder character clip
+      </button>
+      <p className="text-[10px] leading-relaxed text-muted-foreground">
+        Select the placeholder on the timeline, then open the Inspector to generate a voice line. The MP3 will be saved into your media library and an aligned audio clip will be added to the Audio track.
+      </p>
     </div>
   );
 }
