@@ -174,7 +174,7 @@ function ClipLayer({
         />
       )}
       {clip.kind === "character" && (
-        <CharacterPlaceholder clip={clip} playhead={playhead} />
+        <CharacterPlaceholder clip={clip as CharacterClip} playhead={playhead} />
       )}
       {selected && (
         <Handle clip={clip} scale={scale} onChange={onChange} />
