@@ -1,5 +1,7 @@
 // Inspector — edits the currently selected clip's properties.
 import { useStudio } from "../store";
+import type { CharacterClip } from "../types";
+import { VoiceLipSyncPanel } from "./VoiceLipSyncPanel";
 
 export function Inspector() {
   const project = useStudio((s) => s.project);
@@ -81,6 +83,9 @@ export function Inspector() {
             >
               Delete clip
             </button>
+            {clip.kind === "character" && (
+              <VoiceLipSyncPanel clip={clip as CharacterClip} />
+            )}
           </div>
         )}
       </div>

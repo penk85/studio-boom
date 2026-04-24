@@ -2,9 +2,10 @@
 // using DOM layers (img / video / audio). Selection + drag/resize handles.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStudio } from "../store";
-import type { AnyClip, MediaClip } from "../types";
+import type { AnyClip, CharacterClip, MediaClip } from "../types";
 import { clipActiveAt } from "../timeline-utils";
 import { useMediaUrl } from "../hooks/useMediaUrl";
+import { visemeAt } from "../lipsync/visemeMap";
 
 export function Stage() {
   const project = useStudio((s) => s.project);
@@ -173,9 +174,7 @@ function ClipLayer({
         />
       )}
       {clip.kind === "character" && (
-        <div className="flex h-full w-full items-center justify-center bg-clip-character/30 text-xs text-foreground">
-          {clip.name}
-        </div>
+        <CharacterPlaceholder clip={clip as CharacterClip} playhead={playhead} />
       )}
       {selected && (
         <Handle clip={clip} scale={scale} onChange={onChange} />
@@ -227,4 +226,26 @@ function AudioLayer({ clip, playhead, playing }: { clip: MediaClip; playhead: nu
   }, [playing, playhead, clip.start]);
   if (!url) return null;
   return <audio ref={ref} src={url} preload="auto" />;
+}
+
+const VISEME_GLYPH: Record<string, string> = {
+  rest: "—", A: "A", E: "E", I: "I", O: "O", U: "U",
+  MBP: "M", FV: "F", L: "L",
+};
+
+function CharacterPlaceholder({ clip, playhead }: { clip: CharacterClip; playhead: number }) {
+  const v = visemeAt(clip.visemes, playhead - clip.start);
+  return (
+    <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-clip-character/30 text-foreground">
+      <div className="text-xs">{clip.name}</div>
+      <div className="flex h-16 w-16 items-center justify-center rounded-full bg-foreground/10 text-2xl font-bold tracking-wider">
+        {VISEME_GLYPH[v] ?? "—"}
+      </div>
+      {clip.voiceLine && (
+        <div className="line-clamp-2 max-w-[80%] text-center text-[10px] text-muted-foreground">
+          “{clip.voiceLine.text}”
+        </div>
+      )}
+    </div>
+  );
 }
