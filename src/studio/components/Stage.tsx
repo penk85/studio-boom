@@ -227,3 +227,25 @@ function AudioLayer({ clip, playhead, playing }: { clip: MediaClip; playhead: nu
   if (!url) return null;
   return <audio ref={ref} src={url} preload="auto" />;
 }
+
+const VISEME_GLYPH: Record<string, string> = {
+  rest: "—", A: "A", E: "E", I: "I", O: "O", U: "U",
+  MBP: "M", FV: "F", L: "L",
+};
+
+function CharacterPlaceholder({ clip, playhead }: { clip: CharacterClip; playhead: number }) {
+  const v = visemeAt(clip.visemes, playhead - clip.start);
+  return (
+    <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-clip-character/30 text-foreground">
+      <div className="text-xs">{clip.name}</div>
+      <div className="flex h-16 w-16 items-center justify-center rounded-full bg-foreground/10 text-2xl font-bold tracking-wider">
+        {VISEME_GLYPH[v] ?? "—"}
+      </div>
+      {clip.voiceLine && (
+        <div className="line-clamp-2 max-w-[80%] text-center text-[10px] text-muted-foreground">
+          “{clip.voiceLine.text}”
+        </div>
+      )}
+    </div>
+  );
+}
