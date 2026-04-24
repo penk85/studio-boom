@@ -133,6 +133,14 @@ export interface CharacterClip extends BaseClip {
   /** Applied movement preset(s). */
   movements?: { presetId: ID; offset: number }[];
   autoBlink?: boolean;
+  /** ElevenLabs voice line that produced lipSyncAudioId + visemes. */
+  voiceLine?: {
+    text: string;
+    voiceId: string;
+    modelId: string;
+    stability: number;
+    similarityBoost: number;
+  };
 }
 
 export type AnyClip = MediaClip | CharacterClip;
