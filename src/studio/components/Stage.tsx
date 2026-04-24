@@ -2,9 +2,10 @@
 // using DOM layers (img / video / audio). Selection + drag/resize handles.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStudio } from "../store";
-import type { AnyClip, MediaClip } from "../types";
+import type { AnyClip, CharacterClip, MediaClip } from "../types";
 import { clipActiveAt } from "../timeline-utils";
 import { useMediaUrl } from "../hooks/useMediaUrl";
+import { visemeAt } from "../lipsync/visemeMap";
 
 export function Stage() {
   const project = useStudio((s) => s.project);
@@ -173,9 +174,7 @@ function ClipLayer({
         />
       )}
       {clip.kind === "character" && (
-        <div className="flex h-full w-full items-center justify-center bg-clip-character/30 text-xs text-foreground">
-          {clip.name}
-        </div>
+        <CharacterPlaceholder clip={clip} playhead={playhead} />
       )}
       {selected && (
         <Handle clip={clip} scale={scale} onChange={onChange} />
