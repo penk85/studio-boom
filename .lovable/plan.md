@@ -1,117 +1,94 @@
-# Hyperframes Movie Studio
+# Phase 2A — ElevenLabs voice + lip sync (revised)
 
-A friendly, drag-and-drop video studio in the browser that authors valid Hyperframes compositions (HTML + GSAP timelines + assets), with reusable puppet characters and automatic phoneme lip sync. Final MP4 rendering happens on the user's own machine via the Hyperframes CLI; the studio exports a ready-to-render project.
+You're switching from generic phoneme analysis to ElevenLabs as the sole audio source. We'll use their **TTS-with-timestamps** API, which returns the MP3 plus per-character start/end times. That gives us exact viseme timing without any client-side ML.
 
-## Core concept
+## What changes vs the original plan
 
-- Everything is local-only (IndexedDB for projects/characters/movement presets, OPFS / IndexedDB blobs for media). No accounts, no cloud.
-- A project is a Hyperframes-compliant scene authored visually. On export, the studio writes `meta.json`, `index.html` with proper `data-composition-id / width / height / class="clip" / data-start / data-duration / data-track-index`, registers a paused GSAP timeline on `window.__timelines`, and bundles all media under `assets/`.
-- Users render to MP4 by unzipping the export and running `npx hyperframes render --output output.mp4` (instructions shown after export).
+- **No ffmpeg.wasm / WASM phoneme model** — removed.
+- **No microphone or "bring your own audio" lip sync** — only ElevenLabs-generated audio drives mouths.
+- A character clip's "voice" is a **TTS line**: text + voiceId + settings → produces an audio asset + a viseme track in one step.
 
-## Main UI (one-screen studio)
+## Flow
 
 ```text
-┌──────────────────────────────────────────────────────────────────┐
-│  Top bar:  Project name · Resolution · Duration · Export ▼       │
-├──────────┬─────────────────────────────────────────────┬─────────┤
-│ Library  │              Preview Stage                  │ Inspect │
-│  Chars   │   (canvas, drag/resize, snap, z-order)      │  props  │
-│  Moves   │                                             │  for    │
-│  BG      │                                             │ select. │
-│  Audio   │                                             │ clip    │
-│  Blocks  │                                             │         │
-├──────────┴─────────────────────────────────────────────┴─────────┤
-│  Timeline (multi-track):  [Background] [Char A] [Char B] [Audio] │
-│  Drag presets/media onto tracks · trim · split · ripple          │
-└──────────────────────────────────────────────────────────────────┘
+User selects character clip
+  → opens "Voice" panel in Inspector
+  → types line, picks ElevenLabs voice + model
+  → "Generate"
+       → server function calls /v1/text-to-speech/{voiceId}/with-timestamps
+       → returns { audio_base64, alignment: { characters[], character_start_times_seconds[], character_end_times_seconds[] } }
+  → client stores MP3 as a MediaAsset (in IndexedDB)
+  → maps each character → viseme (rest/A/E/I/O/U/MBP/FV/L) using a letter→viseme table
+  → collapses adjacent identical visemes, snaps to fps grid
+  → writes clip.lipSyncAudioId + clip.visemes[]
+  → audio clip auto-added to the Audio track aligned to the character clip
 ```
 
-- Click or drag any library item to add it to the stage and a timeline track at the playhead.
-- Preview stage matches the project resolution; transport controls (play/pause, scrub, in/out) drive a live GSAP timeline so what you see is what gets rendered.
-- Inspector shows position/size/rotation/opacity, in/out time, track, z-index, plus per-clip extras (e.g. character pose, audio for lip sync).
+At playback time, the Stage already swaps mouth parts based on the active viseme at `playhead - clip.start`. Same logic feeds the Hyperframes export.
 
-## Character system (puppet rig with optional parts)
+## Letter → viseme mapping (English)
 
-Character editor is a dedicated modal opened from the Library. Layered like Toon Boom:
+| Letters | Viseme |
+|---|---|
+| a | A |
+| e, i, y | E / I |
+| o | O |
+| u, w | U |
+| m, b, p | MBP |
+| f, v | FV |
+| l | L |
+| space, punctuation, silence gap >120ms | rest |
+| everything else (consonants s, t, d, n, k, g, r, z, h…) | nearest preceding vowel, else rest |
 
-- **Parts (all optional, toggleable):** head base, mouth shapes (rest, A, E, I, O, U, M/B/P, F/V, L), eye states (open / half / closed), body, arm L, arm R, leg L, leg R, plus an unlimited number of named "extra parts."
-- **Pose variants:** each part can hold multiple media variants (e.g. body → `idle`, `walking`, `cheering`). Switching a pose at a timeline keyframe is one click.
-- **Alignment editor:** every part is placed on a shared character canvas with drag/resize, rotation, anchor point (the pivot used when arms swing or head turns), and explicit z-index. A ghost overlay of neighboring parts stays visible so the user can see proportion. Snap-to-pixel and onion-skin toggle.
-- **Save to library:** characters are stored in IndexedDB and reusable across all projects. Duplicate / version / export-as-JSON supported.
+Pluggable so users can extend per-language later.
 
-## Movement presets (reusable animations)
+## Pieces to build
 
-- Author once in a "Movement editor": pick a target rig (or generic transform), define keyframes (position, rotation, scale, opacity, part swaps, easing) on a mini timeline.
-- Save to the Movements library with a name + thumbnail loop.
-- Drag onto any character clip on the main timeline to apply; presets retarget by part name so they work on any compatible character.
-- Built-in starter presets: walk-cycle, idle-breath, wave, jump, head-turn, enter-from-left, exit-up, talk-gesture.
+1. **Server function** `src/server/elevenlabs-tts.ts`
+   - `generateTtsWithTimestamps({ text, voiceId, modelId, voiceSettings })`
+   - Calls `POST https://api.elevenlabs.io/v1/text-to-speech/{voiceId}/with-timestamps`
+   - Reads `ELEVENLABS_API_KEY` from runtime secrets
+   - Returns `{ audioBase64, mimeType: "audio/mpeg", alignment }`
 
-## Lip sync (phoneme-based, automatic)
+2. **Client helpers** `src/studio/lipsync/`
+   - `visemeMap.ts` — letter→viseme table + `mapAlignmentToVisemes(alignment, fps)`
+   - `elevenlabs.ts` — wraps the server function call, decodes base64 → Blob, imports as MediaAsset, attaches to clip
 
-1. User drops an audio file on a character clip (or assigns from inspector).
-2. Studio runs phoneme analysis in the browser:
-  - Decode audio with Web Audio API.
-  - Use a WASM phoneme/viseme detector (e.g. a small ONNX model + onnxruntime-web, or formant-based fallback) to produce a viseme timeline mapped to the character's mouth-shape set (rest, A, E, I, O, U, M/B/P, F/V, L).
-3. Generated viseme keyframes appear as an editable sub-track under the character clip — user can nudge, delete, or add manually.
-4. Auto-blink (random 2–6s intervals) toggle if the character has eye states.
-5. On export, viseme keyframes become GSAP `set()` calls on the character's mouth `<img>` swapping `src` at the right times.
+3. **Voices list** `src/studio/lipsync/voices.ts`
+   - Hard-coded curated list from the ElevenLabs voice ID catalog (Roger, Sarah, Laura, George, etc.) so the user gets a dropdown without an extra API call. "Custom voice ID" input for anything else.
 
-## Library tabs
+4. **Inspector panel** — new "Voice & Lip Sync" section visible when a character clip is selected:
+   - Textarea (line text)
+   - Voice dropdown (curated) + custom ID field
+   - Model: `eleven_multilingual_v2` (default) / `eleven_turbo_v2_5`
+   - Stability / similarity sliders (sane defaults)
+   - "Generate voice + lip sync" button → loading → success
+   - Shows current line, voice, viseme count; "Regenerate" / "Clear" actions
 
-- **Characters** — saved puppet rigs, drag onto stage to add a character clip.
-- **Movements** — saved animation presets, drag onto a character clip.
-- **Backgrounds** — image/video media, full-stage by default.
-- **Audio** — music, SFX, dialogue (dialogue items get a "Use for lip sync on…" action).
-- **Blocks** — Hyperframes catalog blocks (titles, lower-thirds, transitions) wrapped as draggable presets.
+5. **Secret onboarding**
+   - On first generate, if `ELEVENLABS_API_KEY` is missing, prompt the user with instructions and an `add_secret` request. No key shipped in code.
 
-All library items live in IndexedDB and are project-independent, so they appear in every new project.
+6. **Stage rendering** — already swaps `mouth` parts by viseme; just confirm it reads `clip.visemes` correctly and falls back to `rest`.
 
-## Project & timeline mechanics
+## Out of scope for this phase (future)
 
-- Multi-track timeline with drag-to-trim, split at playhead, ripple delete, snap to playhead/clip edges, zoom.
-- Tracks are typed (background, character, audio, overlay) for sensible defaults; z-order on stage is editable per clip.
-- Playhead-driven preview drives a real, paused GSAP timeline — same engine Hyperframes uses — so the preview is faithful.
-- Project autosaves to IndexedDB. Manual save creates a named snapshot. JSON import/export of the project (without media) for sharing.
+- Multi-line / multi-clip voice scripts (one line per clip for now)
+- Voice cloning UI (user can paste a custom voice ID)
+- Word-level highlighting / captions track (the alignment data supports it; we'll add later)
+- Streaming TTS (we use the non-stream timestamp endpoint because we need the full alignment payload)
 
-## Hyperframes export
+## Files touched / created
 
-"Export" produces a `.zip` containing:
+- create `src/server/elevenlabs-tts.ts`
+- create `src/studio/lipsync/visemeMap.ts`
+- create `src/studio/lipsync/elevenlabs.ts`
+- create `src/studio/lipsync/voices.ts`
+- edit `src/studio/components/Inspector.tsx` (add Voice & Lip Sync panel)
+- edit `src/studio/types.ts` (add `voiceLine?: { text, voiceId, modelId, settings }` to `CharacterClip`)
+- edit `src/studio/store.ts` (action: `setClipVoiceLine`, `applyLipSyncResult`)
 
-- `meta.json` (name, id, created date)
-- `index.html` — root composition with `data-composition-id`, `data-width`, `data-height`, `data-start`, all clips marked `class="clip"` with `data-start / data-duration / data-track-index`, GSAP loaded from CDN, a single paused timeline registered on `window.__timelines[<id>]`.
-- `compositions/` — each character instance compiled to a sub-composition loaded via `data-composition-src` (keeps `index.html` clean).
-- `assets/` — every image, audio, and video used, with stable filenames.
-- `README.md` — one-liner: `cd project && npx hyperframes preview` to inspect, `npx hyperframes render --output output.mp4` to produce MP4.
+## Confirm before I build
 
-The output passes Hyperframes' three rules (root data attributes, timed-element attributes, paused timeline registration) by construction.
-
-## Render path (user's own machine)
-
-- Primary: download the `.zip`, unzip, run `npx hyperframes render`. The README and an in-app "How to render" dialog walk through it (Node 22, FFmpeg, one command).
-- Optional later: a small companion script (provided) that watches a folder and renders any zip dropped in — documented but not required for v1.
-
-## Out of scope for v1
-
-- Cloud accounts / cross-device sync.
-- Server-side MP4 rendering inside Lovable (incompatible with Hyperframes' Node+FFmpeg requirement).
-- AI character generation.
-- Collaborative multi-user editing.
-
-## Technical notes (for the build)
-
-- TanStack Start front-end only; no Lovable Cloud needed.
-- State: Zustand for editor state; Dexie (IndexedDB) for projects, characters, movements; OPFS or Dexie blob storage for media.
-- Rendering preview: a layered DOM stage (absolute-positioned `<img>`/`<video>`/`<audio>`) animated by a real GSAP timeline — identical model to Hyperframes runtime.
-- Lip sync: Web Audio decode → viseme detector (onnxruntime-web with a small viseme model; amplitude fallback if model fails to load) → keyframe list.
-- Export: JSZip in-browser to assemble the project; deterministic filename hashing for assets.
-- Character editor: HTML canvas + DOM handles for transform/anchor; per-part z-index slider; onion-skin via reduced opacity.
-- All Hyperframes-specific patterns (required `class="clip"`, GSAP `{paused: true}`, `window.__timelines` registration, `data-composition-src`) are encoded in the exporter.
-
-## Build phases
-
-1. Studio shell: layout, project model, IndexedDB persistence, stage + timeline with simple media (image/audio/video).
-2. Hyperframes exporter (zip with valid `index.html`, GSAP timeline, assets) — verify output renders via `npx hyperframes render`.
-3. Character editor (parts, alignment, z-index, anchor, pose variants, optional parts) + Characters library. There should be very clear defined size alignment etc on character parts so its easy to change and swap out.
-4. Movement preset editor + library + retargeting onto characters.
-5. Lip sync: audio assignment, phoneme analysis, editable viseme sub-track, auto-blink.
-6. Polish: snapping, split/trim, blocks tab with a few catalog presets, in-app render guide.
+1. **API key**: I'll request `ELEVENLABS_API_KEY` as a runtime secret on first use. OK?
+2. **Audio placement**: when lip sync generates, should the resulting MP3 auto-drop on the Audio track aligned to the character clip's start, with the character clip resized to match audio duration? (Recommended — matches Toon Boom workflow.)
+3. **Curated voice list**: use the ~20 standard ElevenLabs voices I have on hand (Roger, Sarah, George, etc.) plus a "custom voice ID" input?
