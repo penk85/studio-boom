@@ -175,7 +175,37 @@ export type ActionCategory =
   | "gesture"
   | "full-body"
   | "camera"
+  | "headTurn"
   | "custom";
+
+/** Recorded pose snapshot used by the Preset Recorder.
+ *  Each part override stores a *delta* relative to that part's rest pose. */
+export interface RecordedPartOverride {
+  partRole: PartRole;
+  /** Pose/variant tag to swap to (optional). */
+  poseSwap?: string;
+  dx?: number;
+  dy?: number;
+  scale?: number;
+  rotation?: number;
+  opacity?: number;
+}
+
+export interface RecordedKeypose {
+  /** Time in seconds within the preset. */
+  t: number;
+  ease?: string;
+  parts: RecordedPartOverride[];
+  /** Optional camera state at this keypose. */
+  camera?: { dx?: number; dy?: number; zoom?: number };
+}
+
+/** Optional head-turn directive carried by headTurn presets. */
+export interface HeadTurnSpec {
+  from: HeadDirection;
+  to: HeadDirection;
+  ease?: string;
+}
 
 /** Reusable "Action Preset" — covers expressions AND movements. */
 export interface ActionPreset {
@@ -186,6 +216,10 @@ export interface ActionPreset {
   duration: number;
   loop: boolean;
   tracks: ActionTrack[];
+  /** Visual recorder data — preferred over `tracks` when present. */
+  keyposes?: RecordedKeypose[];
+  /** For headTurn category. */
+  headTurn?: HeadTurnSpec;
   /** Optional description for tooltips. */
   description?: string;
   /** Built-in presets are read-only. */
