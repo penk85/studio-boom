@@ -5,7 +5,9 @@ import type {
   ActionPreset,
   AppliedAction,
   CharacterClip,
+  HeadDirection,
   PartRole,
+  RecordedKeypose,
 } from "../types";
 
 export interface ComposedDelta {
@@ -25,6 +27,10 @@ export interface ComposedActions {
   mouthLocked: boolean;
   /** Camera transform (for scene parallax). */
   camera: { dx: number; dy: number; zoom: number };
+  /** Active head direction (from headTurn presets), if any. */
+  headDirection?: HeadDirection;
+  /** Crossfade weight 0..1 between previous and current head direction. */
+  headDirectionBlend?: { from: HeadDirection; to: HeadDirection; u: number };
 }
 
 const EASE: Record<string, (x: number) => number> = {
