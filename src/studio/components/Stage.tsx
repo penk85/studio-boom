@@ -11,7 +11,7 @@ import { visemeAt } from "../lipsync/visemeMap";
 import { ensurePresetsSeeded } from "../presets/seed";
 import { composeActionsAt, deltaFor } from "../presets/apply";
 import { pickActivePart } from "../character/character-utils";
-import { parallaxOffset } from "../character/parallax";
+import { combinedParallax } from "../character/parallax";
 
 export function Stage() {
   const project = useStudio((s) => s.project);
@@ -297,17 +297,22 @@ function CharacterRig({
     ? undefined
     : visemeAt(clip.visemes, tInClip);
 
+  // Active head variant (from headTurn presets)
+  const headVariant = useMemo(() => {
+    if (!composed.headDirection || !character.headVariants?.length) return null;
+    return character.headVariants.find((v) => v.direction === composed.headDirection) ?? null;
+  }, [composed.headDirection, character.headVariants]);
+
+  // Clip motion delta = the character's own composed camera
+  // (presets that drive __camera shift the whole character clip; treat that
+  // as clip motion for parallax purposes).
+  const clipDelta = { dx: composed.camera.dx, dy: composed.camera.dy };
+
   // Roles to render (one part per role based on viseme/eyeState/poseSwap/clip.poses)
   const allRoles = Array.from(new Set(character.parts.map((p) => p.role)));
 
   return (
-    <div
-      className="absolute inset-0 overflow-hidden"
-      style={{
-        // Inner viewport scales the character's logical canvas to the clip box.
-        // We use a wrapper at native resolution and scale via transform.
-      }}
-    >
+    <div className="absolute inset-0 overflow-hidden">
       <div
         className="absolute left-0 top-0 origin-top-left"
         style={{
@@ -326,15 +331,24 @@ function CharacterRig({
             });
             if (!part) return null;
             const d = deltaFor(composed, role);
-            const parallax = character.parallaxEnabled
-              ? parallaxOffset(part.depth, { dx: composed.camera.dx, dy: composed.camera.dy }, 0.5)
-              : { dx: 0, dy: 0 };
+            const parallax = combinedParallax(part.depth, character.parallax, {
+              clipDelta,
+            });
+            // If this is the head and a head variant is active, swap the media id.
+            const overrideMediaId = role === "head" && headVariant ? headVariant.mediaId : undefined;
+            // Apply per-direction face feature offset to face features.
+            const faceOffset =
+              headVariant && (role === "eye" || role === "eyeL" || role === "eyeR" ||
+                role === "brow" || role === "browL" || role === "browR" || role === "mouth")
+                ? { dx: headVariant.featureOffsetX ?? 0, dy: headVariant.featureOffsetY ?? 0 }
+                : { dx: 0, dy: 0 };
             return (
               <PartImage
                 key={role}
                 part={part}
-                dx={d.dx + parallax.dx}
-                dy={d.dy + parallax.dy}
+                overrideMediaId={overrideMediaId}
+                dx={d.dx + parallax.dx + faceOffset.dx}
+                dy={d.dy + parallax.dy + faceOffset.dy}
                 scale={d.scale}
                 rotation={d.rotation}
                 opacity={d.opacity ?? 1}
@@ -347,12 +361,13 @@ function CharacterRig({
 }
 
 function PartImage({
-  part, dx, dy, scale, rotation, opacity,
+  part, overrideMediaId, dx, dy, scale, rotation, opacity,
 }: {
   part: import("../types").CharacterPart;
+  overrideMediaId?: string;
   dx: number; dy: number; scale: number; rotation: number; opacity: number;
 }) {
-  const url = useMediaUrl(part.mediaId);
+  const url = useMediaUrl(overrideMediaId ?? part.mediaId);
   if (!url) return null;
   return (
     <img

@@ -16,10 +16,14 @@ import type {
   CharacterPart,
   CharacterPreset,
   EyeState,
+  HeadDirection,
+  HeadVariant,
   MouthViseme,
+  ParallaxConfig,
   PartManifest,
   PartRole,
 } from "../types";
+import { PresetRecorder } from "../presets/PresetRecorder";
 
 const ALL_ROLES: PartRole[] = [
   "head", "body", "armL", "armR", "legL", "legR",
@@ -39,6 +43,7 @@ export function CharacterEditor({ characterId }: Props) {
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [onionSkin, setOnionSkin] = useState(true);
   const [scale, setScale] = useState(0.7);
+  const [recorderOpen, setRecorderOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   // Load or create
@@ -113,14 +118,13 @@ export function CharacterEditor({ characterId }: Props) {
             <input type="checkbox" checked={onionSkin} onChange={(e) => setOnionSkin(e.target.checked)} />
             Onion skin
           </label>
-          <label className="flex items-center gap-1">
-            <input
-              type="checkbox"
-              checked={doc.parallaxEnabled}
-              onChange={(e) => update({ parallaxEnabled: e.target.checked })}
-            />
-            Parallax
-          </label>
+          <button
+            onClick={() => setRecorderOpen(true)}
+            className="rounded border border-border px-2 py-1 text-xs hover:bg-panel-2"
+            title="Record a new action preset by posing the character"
+          >
+            + Record preset
+          </button>
           <button
             onClick={async () => {
               const saved = await saveCharacter(doc);
@@ -210,8 +214,25 @@ export function CharacterEditor({ characterId }: Props) {
               </Field>
             </div>
           </div>
+
+          <ParallaxEditor
+            cfg={doc.parallax}
+            onChange={(p) => update({ parallax: p })}
+          />
+
+          <HeadVariantsEditor
+            doc={doc}
+            onChange={(vars) => update({ headVariants: vars })}
+          />
         </aside>
       </div>
+
+      {recorderOpen && (
+        <PresetRecorder
+          character={doc}
+          onClose={() => setRecorderOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -574,6 +595,102 @@ function NumberInput({ value, onChange, step = 1 }: { value: number; onChange: (
       onChange={(e) => onChange(Number(e.target.value))}
       className="w-full rounded border border-border bg-input px-2 py-1"
     />
+  );
+}
+
+
+// ParallaxEditor — per-character parallax controls.
+function ParallaxEditor({ cfg, onChange }: { cfg: ParallaxConfig; onChange: (c: ParallaxConfig) => void }) {
+  return (
+    <div className="mt-6 border-t border-border pt-3">
+      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">Parallax</div>
+      <div className="space-y-1.5">
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={cfg.onCamera} onChange={(e) => onChange({ ...cfg, onCamera: e.target.checked })} />
+          On camera moves
+        </label>
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={cfg.onClip} onChange={(e) => onChange({ ...cfg, onClip: e.target.checked })} />
+          On character movement
+        </label>
+        <Field label={`Intensity (${cfg.intensity.toFixed(2)})`}>
+          <input
+            type="range" min={0} max={1} step={0.05} value={cfg.intensity}
+            onChange={(e) => onChange({ ...cfg, intensity: Number(e.target.value) })}
+            className="w-full"
+          />
+        </Field>
+      </div>
+    </div>
+  );
+}
+
+const HEAD_DIRECTIONS: { dir: HeadDirection; label: string }[] = [
+  { dir: "front", label: "Front" },
+  { dir: "3qL", label: "¾ Left" },
+  { dir: "3qR", label: "¾ Right" },
+  { dir: "sideL", label: "Side Left" },
+  { dir: "sideR", label: "Side Right" },
+];
+
+function HeadVariantsEditor({
+  doc, onChange,
+}: { doc: CharacterPreset; onChange: (vars: HeadVariant[]) => void }) {
+  const variants = doc.headVariants ?? [];
+  const upload = async (dir: HeadDirection, file: File) => {
+    const asset = await importMediaFile(file);
+    const next = variants.filter((v) => v.direction !== dir);
+    next.push({ direction: dir, mediaId: asset.id });
+    onChange(next);
+  };
+  const remove = (dir: HeadDirection) => onChange(variants.filter((v) => v.direction !== dir));
+
+  return (
+    <div className="mt-6 border-t border-border pt-3">
+      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">Head Variants</div>
+      <div className="mb-2 text-[10px] text-muted-foreground">
+        Upload alternate head images for head-turn presets. Front falls back to the regular head part.
+      </div>
+      <div className="space-y-1.5">
+        {HEAD_DIRECTIONS.map(({ dir, label }) => {
+          const v = variants.find((x) => x.direction === dir);
+          return <HeadVariantSlot key={dir} dir={dir} label={label} variant={v} onUpload={(f) => upload(dir, f)} onRemove={() => remove(dir)} />;
+        })}
+      </div>
+    </div>
+  );
+}
+
+function HeadVariantSlot({
+  label, variant, onUpload, onRemove,
+}: {
+  dir: HeadDirection;
+  label: string;
+  variant?: HeadVariant;
+  onUpload: (f: File) => void;
+  onRemove: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const url = useMediaUrl(variant?.mediaId);
+  return (
+    <div className="flex items-center gap-2 rounded border border-border bg-panel-2 p-1.5">
+      <div className="h-10 w-10 shrink-0 overflow-hidden rounded bg-input">
+        {url
+          ? <img src={url} alt={label} className="h-full w-full object-contain" />
+          : <div className="flex h-full w-full items-center justify-center text-[9px] text-muted-foreground">—</div>}
+      </div>
+      <span className="flex-1 text-[11px]">{label}</span>
+      <button onClick={() => inputRef.current?.click()} className="rounded bg-primary/30 px-2 py-0.5 text-[10px] hover:bg-primary/50">
+        {variant ? "Replace" : "Upload"}
+      </button>
+      {variant && (
+        <button onClick={onRemove} className="rounded px-1 text-[10px] text-destructive">✕</button>
+      )}
+      <input
+        ref={inputRef} type="file" accept="image/*" className="hidden"
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) onUpload(f); if (inputRef.current) inputRef.current.value = ""; }}
+      />
+    </div>
   );
 }
 

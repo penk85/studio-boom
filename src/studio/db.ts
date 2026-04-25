@@ -37,8 +37,6 @@ class StudioDB extends Dexie {
         mediaBlobs: "id",
       })
       .upgrade(async (tx) => {
-        // Migrate any old MovementPreset { keyframes } shape into the new
-        // ActionPreset { tracks } shape.
         const table = tx.table<ActionPreset>("movements");
         const all = await table.toArray();
         for (const row of all) {
@@ -62,6 +60,37 @@ class StudioDB extends Dexie {
               tracks: [{ partRole: "extra", keyframes: norm }],
               keyframes: undefined,
               updatedAt: row.createdAt ?? Date.now(),
+            });
+          }
+        }
+      });
+    // v3: migrate CharacterPreset.parallaxEnabled → ParallaxConfig object;
+    // ensure headVariants exists.
+    this.version(3)
+      .stores({
+        projects: "id, name, updatedAt",
+        characters: "id, name, updatedAt",
+        movements: "id, name, category, createdAt",
+        media: "id, name, kind, createdAt",
+        mediaBlobs: "id",
+      })
+      .upgrade(async (tx) => {
+        const table = tx.table<CharacterPreset>("characters");
+        const all = await table.toArray();
+        for (const row of all) {
+          const legacy = row as CharacterPreset & { parallaxEnabled?: boolean };
+          if (!row.parallax) {
+            const enabled = legacy.parallaxEnabled !== false;
+            await table.put({
+              ...row,
+              parallax: {
+                onCamera: enabled,
+                onClip: enabled,
+                intensity: 0.15,
+              },
+              headVariants: row.headVariants ?? [],
+              parallaxEnabled: undefined,
+              updatedAt: Date.now(),
             });
           }
         }

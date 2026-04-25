@@ -1,11 +1,15 @@
 // Parallax math — converts a part's depth into a translation offset
-// based on the current camera/clip motion.
+// based on camera and/or clip motion.
 // Depth is -1 (background, lags) .. 0 (neutral) .. +1 (foreground, leads).
-//
-// The "delta" (dx,dy) is the displacement of the camera or clip from its
-// resting position. We multiply that by `depth * intensity` and apply with
-// inverted sign for background depth (so far things shift opposite to the
-// camera, near things shift along with it more).
+import type { ParallaxConfig } from "../types";
+
+export interface ParallaxInputs {
+  /** Scene-camera delta from rest. */
+  cameraDelta?: { dx: number; dy: number };
+  /** Character clip delta from rest. */
+  clipDelta?: { dx: number; dy: number };
+}
+
 export function parallaxOffset(
   depth: number,
   delta: { dx: number; dy: number },
@@ -13,4 +17,23 @@ export function parallaxOffset(
 ): { dx: number; dy: number } {
   const k = depth * intensity;
   return { dx: delta.dx * k, dy: delta.dy * k };
+}
+
+/** Combined parallax taking per-character config into account. */
+export function combinedParallax(
+  depth: number,
+  cfg: ParallaxConfig,
+  inputs: ParallaxInputs,
+): { dx: number; dy: number } {
+  let dx = 0;
+  let dy = 0;
+  if (cfg.onCamera && inputs.cameraDelta) {
+    const o = parallaxOffset(depth, inputs.cameraDelta, cfg.intensity);
+    dx += o.dx; dy += o.dy;
+  }
+  if (cfg.onClip && inputs.clipDelta) {
+    const o = parallaxOffset(depth, inputs.clipDelta, cfg.intensity);
+    dx += o.dx; dy += o.dy;
+  }
+  return { dx, dy };
 }

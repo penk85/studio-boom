@@ -1,6 +1,7 @@
 // Character helpers — create/load/save CharacterPreset records.
 import { db, uid } from "../db";
 import {
+  DEFAULT_PARALLAX_CONFIG,
   DEFAULT_PART_MANIFEST,
   type CharacterPart,
   type CharacterPreset,
@@ -16,7 +17,8 @@ export function createBlankCharacter(name = "New Character"): CharacterPreset {
     canvasHeight: 900,
     parts: [],
     manifest: { ...DEFAULT_PART_MANIFEST },
-    parallaxEnabled: true,
+    parallax: { ...DEFAULT_PARALLAX_CONFIG },
+    headVariants: [],
     createdAt: now,
     updatedAt: now,
   };

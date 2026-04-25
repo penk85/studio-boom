@@ -1,141 +1,64 @@
-# Phase 3 — Character Editor, Parallax & Preset System
+# Phase 3.5 — Head Turns, Dual Parallax, Preset Recorder
 
-## Hyperframes scope (honest answer)
+Building on the character editor + action presets already in place. Three additions, all designed to stay intuitive (no dopesheet, no keyframe grids).
 
-The only confirmed Hyperframes touchpoint in this app is the **export target** (Phase 5 emits Hyperframes-compatible HTML). Everything else — TTS, lip sync, rigging, presets, parallax — is custom code in this studio. If Hyperframes ships an SDK/component library you want to target instead, share the docs and I'll wire it in. Until then I'll build native and let the exporter translate. I'll flag any future request that would require an external Hyperframes capability I can't confirm.
+## 1. Head Turn system
 
-## Parallax — yes, supported
+Head turns aren't real 3D rotation — they're variant swaps with subtle motion polish. I'll formalize this as its own concept.
 
-Each character part already has a `zIndex`. I'll add a `depth` value (-1…+1) per part. Depth drives:
-- subtle motion offset when the **character clip** moves (parts further "back" lag, parts in "front" lead)
-- optional scene-level **camera parallax** (pan/zoom on the stage shifts parts by depth)
-- preserved on export as data attributes
+**In the character editor:**
+- New "Head Turn" section under the Head part group
+- Slots for: `front`, `3q-left`, `3q-right`, `side-left`, `side-right` (you upload as many or few as you have)
+- Optional: per-variant offset for eye/brow/mouth positions, so face features follow the turn
 
-This gives a 2.5D feel without requiring 3D assets.
+**As a preset:** new fifth category **"Head Turn"** (joining Expression / Gesture / Full-body / Camera). Built-in seeds: "Look left," "Look right," "Glance over shoulder," "Look up." Each one cross-fades between head variants over a chosen duration and adds a tiny parallax nudge for realism.
 
-## Character Editor
+**On the timeline:** drop a head-turn action onto a character clip just like any other preset.
 
-A new full-screen editor opened from Library → Characters → "New / Edit character". Saves to the existing `characters` Dexie table (`CharacterPreset`).
+## 2. Parallax — both triggers, per-character toggle
 
-```text
-┌─ Parts list ─┬──── Character canvas ────┬─ Part inspector ─┐
-│ head         │                          │ media: [pick]    │
-│  mouth (rest)│      [drag to align]     │ role: mouth      │
-│  mouth (A)…  │      [resize handles]    │ pose / viseme    │
-│ body (idle)  │      onion-skin toggle   │ x,y,w,h,rot      │
-│  body (walk) │                          │ anchor x,y       │
-│ armL / armR  │                          │ z-index          │
-│ legL / legR  │                          │ depth (parallax) │
-│ eye (open)…  │                          │ visible          │
-│ + Add part   │                          │ optional toggle  │
-└──────────────┴──────────────────────────┴──────────────────┘
-```
+- **Camera parallax** (already wired): scene camera pan/zoom shifts parts by depth.
+- **Clip parallax** (new): when a character clip moves on stage, that character's own parts parallax against the motion.
+- Per-character checkboxes in the character editor: `Parallax on camera` / `Parallax on movement`. Both default ON.
+- Intensity slider per character (currently hardcoded at 0.15).
 
-Key behaviors:
-- **Upload + align**: drop image → place freely on the canvas, drag/resize/rotate, set anchor point (used as pivot for rotation/scale presets).
-- **Z-index ordering**: drag-reorder parts list = z-index; live preview shows occlusion. Solves the "nothing important overlaps" requirement.
-- **Optional parts**: every role (arms, legs, eyes) can be toggled off if a character doesn't have them. Presets that target missing parts are ignored at runtime (no crash).
-- **Variants**: a part can have multiple media (e.g. body_idle, body_walk, mouth_A, mouth_O, eye_open/half/closed). Variants share transform but swap image.
-- **Parallax depth slider** per part (-1 back … 0 neutral … +1 front).
-- **Onion skin** toggles the rest pose underneath while editing variants so you can match alignment.
+## 3. Preset Recorder (replaces the dopesheet idea)
 
-Reusable: a `CharacterPreset` is referenced by `CharacterClip.characterId`, so editing a character updates everywhere it's used.
+A pose-and-capture flow. No timeline grid, no keyframe jargon.
 
-## Preset System — combined "Action Presets"
+**Flow:**
+1. Open a character, click **"New action preset"**
+2. Pick category (Expression / Gesture / Full-body / Camera / Head Turn) and name it
+3. The character appears in rest pose. Drag parts, swap variants, resize the mouth, raise the brows — whatever the pose needs
+4. Click **"Capture pose at 0.0s"**
+5. A time slider appears. Drag it to e.g. 0.3s, change the pose, click **"Capture pose at 0.3s"**
+6. Repeat for as many keyposes as you want (typically 1–3 is enough)
+7. Click **Save** — the preset interpolates between captured poses
 
-You asked whether expressions and movements should be one thing or two. Recommendation: **one unified primitive** called an **Action Preset**, with optional category tags (`expression`, `gesture`, `full-body`, `camera`). Reasons:
+**Why this works for you:**
+- You only ever see the character on a stage, posing it the way you want
+- No rows, columns, or curve editors
+- Captures *only the parts you changed* — so applying "Surprised" (mouth + brows) on top of "Wave" (arm) just works without conflicts
+- Lives behind a single "+ Record preset" button; advanced users can still hand-edit the JSON later
 
-- Both are just "change these part properties over time".
-- "Surprised" (mouth O larger + eyebrows up) and "wave" (armR rotates + hand swap) use the exact same data shape.
-- A single picker is simpler than two parallel systems, and you can still filter by category.
-- Lets you compose: e.g. apply "Surprised" + "Wave" simultaneously on overlapping ranges.
+**Quick-capture shortcut:** in the main studio, select a character, pose it, right-click → "Save current pose as preset" — same recorder, pre-filled with the current pose as keypose 1.
 
-### Action Preset shape
+## Technical notes
 
-```ts
-ActionPreset {
-  id, name, category: 'expression'|'gesture'|'full-body'|'camera'|'custom',
-  duration: number,                // base duration; clip can stretch
-  loop: boolean,                   // for idle gestures
-  tracks: {
-    partRole: string,              // e.g. 'mouth', 'armR', 'eye', 'head'
-    poseSwap?: string,             // jump to a named variant (e.g. 'O', 'walk')
-    keyframes: [
-      { t, x?, y?, scale?, rotation?, opacity?, ease? }
-    ]
-  }[]
-}
-```
+- `CharacterPreset.headVariants: Record<HeadDirection, string>` (mediaId per direction); `HeadDirection = "front" | "3qL" | "3qR" | "sideL" | "sideR"`
+- `ActionPreset.category` extended with `"headTurn"`; new `HeadTurnTrack` type with `{ from: HeadDirection, to: HeadDirection, easing }`
+- `parallax.ts` gains `clipDelta` input alongside `cameraDelta`; `Stage.tsx` computes per-frame clip motion delta and passes both
+- `CharacterPreset.parallax: { onCamera: boolean; onClip: boolean; intensity: number }`
+- New `PresetRecorder.tsx` component (modal opened from character editor and main studio): keypose array `{ t: number; partOverrides: Partial<CharacterPart>[] }`, linear interpolation between keyposes at playback time
+- `composeActionsAt` in `presets/apply.ts` extended to interpolate between recorded keyposes (currently it only blends static deltas)
+- DB migration to v3 for `headVariants`, `parallax` config, and `keyposes[]` on action presets
 
-Stored in the existing `movements` Dexie table (renamed concept; keeping the table name for back-compat) plus a `category` field.
+## What's NOT in this phase (deferred)
 
-### Authoring an Action Preset
+- Curve editors / easing graphs
+- Per-part timing offsets within one preset (everything in one preset shares the keypose timeline)
+- IK / bone constraints — parts stay independent
 
-A new **Preset Editor** route (`/presets`) opens with:
-- pick a "stand-in" character (or generic skeleton) for previewing
-- dopesheet/timeline: rows = part roles, cells = keyframes
-- per-keyframe transform deltas (relative to the part's rest pose, so the preset works on any character)
-- live scrub preview
-- save with name + category + tags
+## After this
 
-### Applying on the timeline
-
-On a `CharacterClip`, the Inspector gets a new **Actions** panel:
-- list of applied presets with `start offset` (relative to clip), `duration` (override), `intensity` (0–1 scale)
-- "+ Apply preset" → searchable picker filtered by category
-- multiple presets can overlap; transforms compose additively, pose swaps follow last-write-wins per part
-- visemes (lip sync) always win on the `mouth` role unless a preset explicitly locks the mouth
-
-This satisfies "save Surprised, apply for X seconds to any character".
-
-### Built-in starter library (shipped)
-
-Seed a few presets so it's usable day one:
-- expressions: Neutral, Surprised, Happy, Sad, Angry, Confused
-- gestures: Wave, Nod, Shake head, Point, Shrug
-- full-body: Idle bob, Walk-in-place, Jump
-- camera: Slow zoom in, Pan left/right, Shake
-
-## Data model changes
-
-```ts
-CharacterPart += { depth: number }        // -1..1 parallax
-CharacterPreset += { hasArms, hasLegs, hasEyes, hasMouth }   // optional-parts manifest
-ActionPreset (movements table) += {
-  category, loop, tracks[]                 // replaces flat keyframes[]
-}
-CharacterClip += {
-  actions: { presetId, offset, duration?, intensity? }[]   // replaces movements[]
-  parallax: { camera?: { x:number, y:number, zoom:number } } // optional
-}
-Project += { camera?: { keyframes: [...] } }  // for scene-level parallax
-```
-
-Migration: old `MovementPreset.keyframes` → wrap into a single track with `partRole: '__root'` so existing data still plays.
-
-## Files to create / edit
-
-Create:
-- `src/studio/character/CharacterEditor.tsx` (full editor surface)
-- `src/studio/character/PartList.tsx`, `PartCanvas.tsx`, `PartInspector.tsx`
-- `src/studio/character/parallax.ts` (depth → offset math, shared with Stage + export)
-- `src/studio/presets/PresetEditor.tsx` (dopesheet)
-- `src/studio/presets/PresetPicker.tsx`, `PresetList.tsx`
-- `src/studio/presets/seed.ts` (built-in library, idempotent insert on first run)
-- `src/studio/presets/apply.ts` (compose active presets at time `t` → per-part transform delta + pose map)
-- `src/studio/components/ActionsPanel.tsx` (Inspector section for character clips)
-- `src/routes/character.$id.tsx`, `src/routes/presets.tsx`, `src/routes/presets.$id.tsx`
-
-Edit:
-- `src/studio/types.ts` (additions above + migration helper)
-- `src/studio/db.ts` (bump Dexie version, run seed on first open)
-- `src/studio/components/Library.tsx` (Characters tab → list + "New" / "Edit"; Movements tab → real preset list filtered by category)
-- `src/studio/components/Inspector.tsx` (mount `ActionsPanel` for character clips)
-- `src/studio/components/Stage.tsx` (render real character rigs with z-index + depth-driven parallax; viseme mouth swap; apply composed action transforms)
-
-## Open questions before I build
-
-1. **Editor surface**: open the character editor in a **modal/sheet** over the studio, or as a **dedicated route** (`/character/:id`)? (Route preserves shareable URLs and back/forward.)
-2. **Parallax trigger**: should parts parallax on (a) character clip movement only, (b) scene camera only, or (c) both? Default I'd ship: both, with per-character toggle.
-3. **Preset categories visible to user**: the four above (expression / gesture / full-body / camera) — keep, simplify to two (face / body), or expand?
-4. **Rest-pose convention**: each character must define a "rest" variant for every active part role (used as the baseline that presets offset from). Confirm OK that the editor enforces this on save.
+Phase 4: scene camera keyframes + auto-blink + auto-breath idle. Phase 5: Hyperframes export.

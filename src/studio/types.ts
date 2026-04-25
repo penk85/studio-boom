@@ -100,6 +100,35 @@ export const DEFAULT_PART_MANIFEST: PartManifest = {
   hasMouth: true,
 };
 
+/** Direction of a head variant for head-turn animations. */
+export type HeadDirection = "front" | "3qL" | "3qR" | "sideL" | "sideR";
+
+export interface HeadVariant {
+  /** Direction this variant represents. */
+  direction: HeadDirection;
+  /** Image media id. */
+  mediaId: ID;
+  /** Optional per-direction offset for face features (eye/brow/mouth). */
+  featureOffsetX?: number;
+  featureOffsetY?: number;
+}
+
+/** Per-character parallax configuration. */
+export interface ParallaxConfig {
+  /** React to scene-level camera moves. */
+  onCamera: boolean;
+  /** React to this character clip moving on stage. */
+  onClip: boolean;
+  /** Multiplier for parallax magnitude. */
+  intensity: number;
+}
+
+export const DEFAULT_PARALLAX_CONFIG: ParallaxConfig = {
+  onCamera: true,
+  onClip: true,
+  intensity: 0.15,
+};
+
 export interface CharacterPreset {
   id: ID;
   name: string;
@@ -108,8 +137,12 @@ export interface CharacterPreset {
   canvasHeight: number;
   parts: CharacterPart[];
   manifest: PartManifest;
-  /** Enable parts to subtly shift based on depth when the clip moves or camera pans. */
-  parallaxEnabled: boolean;
+  /** @deprecated kept for migration — use `parallax` instead. */
+  parallaxEnabled?: boolean;
+  /** Per-character parallax config. */
+  parallax: ParallaxConfig;
+  /** Optional head variants for head-turn animations. */
+  headVariants?: HeadVariant[];
   createdAt: number;
   updatedAt: number;
 }
@@ -142,7 +175,37 @@ export type ActionCategory =
   | "gesture"
   | "full-body"
   | "camera"
+  | "headTurn"
   | "custom";
+
+/** Recorded pose snapshot used by the Preset Recorder.
+ *  Each part override stores a *delta* relative to that part's rest pose. */
+export interface RecordedPartOverride {
+  partRole: PartRole;
+  /** Pose/variant tag to swap to (optional). */
+  poseSwap?: string;
+  dx?: number;
+  dy?: number;
+  scale?: number;
+  rotation?: number;
+  opacity?: number;
+}
+
+export interface RecordedKeypose {
+  /** Time in seconds within the preset. */
+  t: number;
+  ease?: string;
+  parts: RecordedPartOverride[];
+  /** Optional camera state at this keypose. */
+  camera?: { dx?: number; dy?: number; zoom?: number };
+}
+
+/** Optional head-turn directive carried by headTurn presets. */
+export interface HeadTurnSpec {
+  from: HeadDirection;
+  to: HeadDirection;
+  ease?: string;
+}
 
 /** Reusable "Action Preset" — covers expressions AND movements. */
 export interface ActionPreset {
@@ -153,6 +216,10 @@ export interface ActionPreset {
   duration: number;
   loop: boolean;
   tracks: ActionTrack[];
+  /** Visual recorder data — preferred over `tracks` when present. */
+  keyposes?: RecordedKeypose[];
+  /** For headTurn category. */
+  headTurn?: HeadTurnSpec;
   /** Optional description for tooltips. */
   description?: string;
   /** Built-in presets are read-only. */

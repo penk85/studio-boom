@@ -12,7 +12,7 @@ function preset(
   category: ActionPreset["category"],
   duration: number,
   tracks: ActionTrack[],
-  opts: { loop?: boolean; description?: string } = {},
+  opts: { loop?: boolean; description?: string; headTurn?: ActionPreset["headTurn"] } = {},
 ): ActionPreset {
   return {
     id: `builtin-${name.toLowerCase().replace(/\s+/g, "-")}`,
@@ -21,6 +21,7 @@ function preset(
     duration,
     loop: opts.loop ?? false,
     tracks,
+    headTurn: opts.headTurn,
     description: opts.description,
     builtin: true,
     createdAt: now(),
@@ -201,6 +202,23 @@ const STARTERS: ActionPreset[] = [
       ],
     },
   ]),
+
+  // Head Turns -------------------------------------------------------------
+  preset("Look left", "headTurn", 0.5, [
+    { partRole: "head", keyframes: [{ t: 0, dx: 0 }, { t: 1, dx: -4, ease: "easeInOut" }] },
+  ], { headTurn: { from: "front", to: "3qL", ease: "easeInOut" }, description: "Quick head turn to the left." }),
+
+  preset("Look right", "headTurn", 0.5, [
+    { partRole: "head", keyframes: [{ t: 0, dx: 0 }, { t: 1, dx: 4, ease: "easeInOut" }] },
+  ], { headTurn: { from: "front", to: "3qR", ease: "easeInOut" }, description: "Quick head turn to the right." }),
+
+  preset("Glance over shoulder", "headTurn", 0.7, [
+    { partRole: "head", keyframes: [{ t: 0, dx: 0 }, { t: 1, dx: 6, ease: "easeInOut" }] },
+  ], { headTurn: { from: "front", to: "sideR", ease: "easeInOut" } }),
+
+  preset("Look up", "headTurn", 0.5, [
+    { partRole: "head", keyframes: [{ t: 0, dy: 0, rotation: 0 }, { t: 1, dy: -6, rotation: -4 }] },
+  ], { description: "Tilt head upward." }),
 ];
 
 let seedPromise: Promise<void> | null = null;
