@@ -2,6 +2,7 @@
 import { useStudio } from "../store";
 import type { CharacterClip } from "../types";
 import { VoiceLipSyncPanel } from "./VoiceLipSyncPanel";
+import { ActionsPanel } from "./ActionsPanel";
 
 export function Inspector() {
   const project = useStudio((s) => s.project);
@@ -84,7 +85,10 @@ export function Inspector() {
               Delete clip
             </button>
             {clip.kind === "character" && (
-              <VoiceLipSyncPanel clip={clip as CharacterClip} />
+              <>
+                <ActionsPanel clip={clip as CharacterClip} />
+                <VoiceLipSyncPanel clip={clip as CharacterClip} />
+              </>
             )}
           </div>
         )}
