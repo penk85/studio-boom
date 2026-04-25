@@ -361,12 +361,13 @@ function CharacterRig({
 }
 
 function PartImage({
-  part, dx, dy, scale, rotation, opacity,
+  part, overrideMediaId, dx, dy, scale, rotation, opacity,
 }: {
   part: import("../types").CharacterPart;
+  overrideMediaId?: string;
   dx: number; dy: number; scale: number; rotation: number; opacity: number;
 }) {
-  const url = useMediaUrl(part.mediaId);
+  const url = useMediaUrl(overrideMediaId ?? part.mediaId);
   if (!url) return null;
   return (
     <img
