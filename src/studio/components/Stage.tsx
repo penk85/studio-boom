@@ -1,11 +1,17 @@
 // Stage — the visual preview area. Renders all currently-active clips
 // using DOM layers (img / video / audio). Selection + drag/resize handles.
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useLiveQuery } from "dexie-react-hooks";
 import { useStudio } from "../store";
-import type { AnyClip, CharacterClip, MediaClip } from "../types";
+import { db } from "../db";
+import type { AnyClip, CharacterClip, CharacterPreset, MediaClip } from "../types";
 import { clipActiveAt } from "../timeline-utils";
 import { useMediaUrl } from "../hooks/useMediaUrl";
 import { visemeAt } from "../lipsync/visemeMap";
+import { ensurePresetsSeeded } from "../presets/seed";
+import { composeActionsAt, deltaFor } from "../presets/apply";
+import { pickActivePart } from "../character/character-utils";
+import { parallaxOffset } from "../character/parallax";
 
 export function Stage() {
   const project = useStudio((s) => s.project);
@@ -17,6 +23,13 @@ export function Stage() {
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
+
+  // Seed presets + load characters/presets for compositing
+  useEffect(() => { void ensurePresetsSeeded(); }, []);
+  const characters = useLiveQuery(() => db.characters.toArray(), []) ?? [];
+  const presets = useLiveQuery(() => db.movements.toArray(), []) ?? [];
+  const charMap = useMemo(() => new Map(characters.map((c) => [c.id, c] as const)), [characters]);
+  const presetMap = useMemo(() => new Map(presets.map((p) => [p.id, p] as const)), [presets]);
 
   // Fit-to-container scale
   useEffect(() => {
@@ -80,6 +93,8 @@ export function Stage() {
                 scale={scale}
                 onSelect={() => selectClip(c.id)}
                 onChange={(p) => updateClip(c.id, p)}
+                character={c.kind === "character" ? charMap.get((c as CharacterClip).characterId) : undefined}
+                presetMap={presetMap}
               />
             ),
           )}
@@ -100,6 +115,8 @@ function ClipLayer({
   scale,
   onSelect,
   onChange,
+  character,
+  presetMap,
 }: {
   clip: AnyClip;
   playhead: number;
@@ -108,6 +125,8 @@ function ClipLayer({
   scale: number;
   onSelect: () => void;
   onChange: (p: Partial<AnyClip>) => void;
+  character?: CharacterPreset;
+  presetMap: Map<string, import("../types").ActionPreset>;
 }) {
   const mediaId = clip.kind !== "character" ? (clip as MediaClip).mediaId : undefined;
   const url = useMediaUrl(mediaId);
@@ -146,17 +165,25 @@ function ClipLayer({
     window.addEventListener("pointerup", up);
   };
 
+  // For character clips: compose camera transform so the clip can apply a tiny scale.
+  let charCamera = { dx: 0, dy: 0, zoom: 1 };
+  if (clip.kind === "character") {
+    const cc = clip as CharacterClip;
+    const composed = composeActionsAt(cc, playhead - cc.start, presetMap);
+    charCamera = composed.camera;
+  }
+
   return (
     <div
       onPointerDown={onPointerDown}
       className={`absolute select-none ${selected ? "outline-2 outline-primary" : "outline-1 outline-transparent hover:outline-accent/60"} outline outline-offset-0`}
       style={{
-        left: clip.x,
-        top: clip.y,
+        left: clip.x + charCamera.dx,
+        top: clip.y + charCamera.dy,
         width: clip.width,
         height: clip.height,
         opacity: clip.opacity,
-        transform: `rotate(${clip.rotation}deg)`,
+        transform: `rotate(${clip.rotation}deg) scale(${charCamera.zoom})`,
         zIndex: clip.zIndex,
         cursor: "move",
       }}
@@ -174,7 +201,9 @@ function ClipLayer({
         />
       )}
       {clip.kind === "character" && (
-        <CharacterPlaceholder clip={clip as CharacterClip} playhead={playhead} />
+        character
+          ? <CharacterRig clip={clip as CharacterClip} character={character} playhead={playhead} presetMap={presetMap} />
+          : <CharacterPlaceholder clip={clip as CharacterClip} playhead={playhead} />
       )}
       {selected && (
         <Handle clip={clip} scale={scale} onChange={onChange} />
@@ -247,5 +276,101 @@ function CharacterPlaceholder({ clip, playhead }: { clip: CharacterClip; playhea
         </div>
       )}
     </div>
+  );
+}
+
+/** Render a real character rig: composes parts, applies actions and parallax. */
+function CharacterRig({
+  clip, character, playhead, presetMap,
+}: {
+  clip: CharacterClip;
+  character: CharacterPreset;
+  playhead: number;
+  presetMap: Map<string, import("../types").ActionPreset>;
+}) {
+  const tInClip = playhead - clip.start;
+  const composed = useMemo(
+    () => composeActionsAt(clip, tInClip, presetMap),
+    [clip, tInClip, presetMap],
+  );
+  const viseme = composed.mouthLocked
+    ? undefined
+    : visemeAt(clip.visemes, tInClip);
+
+  // Roles to render (one part per role based on viseme/eyeState/poseSwap/clip.poses)
+  const allRoles = Array.from(new Set(character.parts.map((p) => p.role)));
+
+  return (
+    <div
+      className="absolute inset-0 overflow-hidden"
+      style={{
+        // Inner viewport scales the character's logical canvas to the clip box.
+        // We use a wrapper at native resolution and scale via transform.
+      }}
+    >
+      <div
+        className="absolute left-0 top-0 origin-top-left"
+        style={{
+          width: character.canvasWidth,
+          height: character.canvasHeight,
+          transform: `scale(${clip.width / character.canvasWidth}, ${clip.height / character.canvasHeight})`,
+        }}
+      >
+        {allRoles
+          .map((role) => {
+            const poseSwap = composed.poseSwap.get(role) ?? clip.poses[role];
+            const part = pickActivePart(character.parts, role, {
+              pose: poseSwap,
+              viseme: role === "mouth" ? viseme : undefined,
+              eyeState: role.startsWith("eye") ? clip.poses["eye"] ?? "open" : undefined,
+            });
+            if (!part) return null;
+            const d = deltaFor(composed, role);
+            const parallax = character.parallaxEnabled
+              ? parallaxOffset(part.depth, { dx: composed.camera.dx, dy: composed.camera.dy }, 0.5)
+              : { dx: 0, dy: 0 };
+            return (
+              <PartImage
+                key={role}
+                part={part}
+                dx={d.dx + parallax.dx}
+                dy={d.dy + parallax.dy}
+                scale={d.scale}
+                rotation={d.rotation}
+                opacity={d.opacity ?? 1}
+              />
+            );
+          })}
+      </div>
+    </div>
+  );
+}
+
+function PartImage({
+  part, dx, dy, scale, rotation, opacity,
+}: {
+  part: import("../types").CharacterPart;
+  dx: number; dy: number; scale: number; rotation: number; opacity: number;
+}) {
+  const url = useMediaUrl(part.mediaId);
+  if (!url) return null;
+  return (
+    <img
+      src={url}
+      alt={part.name}
+      draggable={false}
+      className="absolute h-full w-full object-contain"
+      style={{
+        left: part.x + dx,
+        top: part.y + dy,
+        width: part.width,
+        height: part.height,
+        zIndex: part.zIndex,
+        opacity,
+        transform: `rotate(${part.rotation + rotation}deg) scale(${scale})`,
+        transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
+        pointerEvents: "none",
+      }}
+    />
   );
 }

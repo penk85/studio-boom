@@ -2,17 +2,19 @@
 // movement presets, and media blobs. Everything stays in the browser.
 import Dexie, { type Table } from "dexie";
 import type {
+  ActionPreset,
   CharacterPreset,
   MediaAsset,
   MediaBlobRow,
-  MovementPreset,
   Project,
 } from "./types";
 
 class StudioDB extends Dexie {
   projects!: Table<Project, string>;
   characters!: Table<CharacterPreset, string>;
-  movements!: Table<MovementPreset, string>;
+  /** Note: kept the table name `movements` for back-compat with v1 data;
+   *  it now stores ActionPreset records (movements + expressions). */
+  movements!: Table<ActionPreset, string>;
   media!: Table<MediaAsset, string>;
   mediaBlobs!: Table<MediaBlobRow, string>;
 
@@ -25,6 +27,45 @@ class StudioDB extends Dexie {
       media: "id, name, kind, createdAt",
       mediaBlobs: "id",
     });
+    // v2: same indexes, added `category` index on movements.
+    this.version(2)
+      .stores({
+        projects: "id, name, updatedAt",
+        characters: "id, name, updatedAt",
+        movements: "id, name, category, createdAt",
+        media: "id, name, kind, createdAt",
+        mediaBlobs: "id",
+      })
+      .upgrade(async (tx) => {
+        // Migrate any old MovementPreset { keyframes } shape into the new
+        // ActionPreset { tracks } shape.
+        const table = tx.table<ActionPreset>("movements");
+        const all = await table.toArray();
+        for (const row of all) {
+          const legacy = row as ActionPreset & { keyframes?: unknown };
+          if (Array.isArray(legacy.keyframes) && !row.tracks) {
+            const kfs = legacy.keyframes as Array<{
+              t: number; x?: number; y?: number; scale?: number;
+              rotation?: number; opacity?: number; ease?: string;
+              poses?: Record<string, string>;
+            }>;
+            const dur = Math.max(0.1, ...kfs.map((k) => k.t || 0));
+            const norm = kfs.map((k) => ({
+              t: dur > 0 ? Math.min(1, Math.max(0, k.t / dur)) : 0,
+              dx: k.x, dy: k.y, scale: k.scale,
+              rotation: k.rotation, opacity: k.opacity, ease: k.ease,
+            }));
+            await table.put({
+              ...row,
+              category: "custom",
+              loop: false,
+              tracks: [{ partRole: "extra", keyframes: norm }],
+              keyframes: undefined,
+              updatedAt: row.createdAt ?? Date.now(),
+            });
+          }
+        }
+      });
   }
 }
 

@@ -35,6 +35,11 @@ export type PartRole =
   | "legL"
   | "legR"
   | "eye"
+  | "eyeL"
+  | "eyeR"
+  | "brow"
+  | "browL"
+  | "browR"
   | "mouth"
   | "extra";
 
@@ -67,10 +72,33 @@ export interface CharacterPart {
   x: number; y: number;
   width: number; height: number;
   rotation: number; // degrees
-  anchorX: number; anchorY: number; // 0..1 within the part
+  anchorX: number; anchorY: number; // 0..1 within the part (used as transform origin)
   zIndex: number;
+  /** Parallax depth (-1 back .. 0 neutral .. +1 front). */
+  depth: number;
   visible: boolean;
 }
+
+/** Manifest of which optional roles this character has. */
+export interface PartManifest {
+  hasHead: boolean;
+  hasBody: boolean;
+  hasArms: boolean;
+  hasLegs: boolean;
+  hasEyes: boolean;
+  hasBrows: boolean;
+  hasMouth: boolean;
+}
+
+export const DEFAULT_PART_MANIFEST: PartManifest = {
+  hasHead: true,
+  hasBody: true,
+  hasArms: true,
+  hasLegs: true,
+  hasEyes: true,
+  hasBrows: true,
+  hasMouth: true,
+};
 
 export interface CharacterPreset {
   id: ID;
@@ -79,26 +107,66 @@ export interface CharacterPreset {
   canvasWidth: number;
   canvasHeight: number;
   parts: CharacterPart[];
+  manifest: PartManifest;
+  /** Enable parts to subtly shift based on depth when the clip moves or camera pans. */
+  parallaxEnabled: boolean;
   createdAt: number;
   updatedAt: number;
 }
 
-export interface MovementKeyframe {
-  t: number; // seconds within the movement
-  x?: number; y?: number;
-  scale?: number; rotation?: number; opacity?: number;
-  /** Optional pose swap: { partRole: poseTag } */
-  poses?: Record<string, string>;
-  ease?: string; // gsap ease name
+/** Single keyframe value for one part within an action preset. */
+export interface ActionKeyframe {
+  t: number; // 0..1 normalized (multiplied by preset.duration at runtime)
+  /** Offset deltas applied on top of the part's rest pose. */
+  dx?: number;
+  dy?: number;
+  scale?: number;     // multiplier (1 = unchanged)
+  rotation?: number;  // additive degrees
+  opacity?: number;   // 0..1, replaces base
+  ease?: string;      // simple name: linear|easeIn|easeOut|easeInOut
 }
 
-export interface MovementPreset {
+/** Per-part track inside an Action Preset. */
+export interface ActionTrack {
+  /** Which part role to drive (e.g. "mouth", "armR", "brow"). */
+  partRole: PartRole | "__camera";
+  /** Optional pose/variant swap for this part. Held for the duration. */
+  poseSwap?: string;
+  /** If true, this preset's mouth track overrides lip sync visemes. */
+  lockMouth?: boolean;
+  keyframes: ActionKeyframe[];
+}
+
+export type ActionCategory =
+  | "expression"
+  | "gesture"
+  | "full-body"
+  | "camera"
+  | "custom";
+
+/** Reusable "Action Preset" — covers expressions AND movements. */
+export interface ActionPreset {
   id: ID;
   name: string;
+  category: ActionCategory;
+  /** Base duration in seconds. */
   duration: number;
-  keyframes: MovementKeyframe[];
+  loop: boolean;
+  tracks: ActionTrack[];
+  /** Optional description for tooltips. */
+  description?: string;
+  /** Built-in presets are read-only. */
+  builtin?: boolean;
   createdAt: number;
+  updatedAt: number;
+
+  /** @deprecated v1 movement preset shape — kept for migration. */
+  keyframes?: unknown;
 }
+
+/** Backward-compat alias. */
+export type MovementPreset = ActionPreset;
+export type MovementKeyframe = ActionKeyframe;
 
 export type TrackKind = "background" | "character" | "audio" | "overlay";
 
@@ -121,6 +189,17 @@ export interface MediaClip extends BaseClip {
   mediaId: ID;
 }
 
+export interface AppliedAction {
+  id: ID;
+  presetId: ID;
+  /** Offset (seconds) within the character clip when this action starts. */
+  offset: number;
+  /** Optional duration override; defaults to preset.duration. */
+  duration?: number;
+  /** 0..1 scale of the effect. */
+  intensity: number;
+}
+
 export interface CharacterClip extends BaseClip {
   kind: "character";
   characterId: ID;
@@ -130,7 +209,9 @@ export interface CharacterClip extends BaseClip {
   lipSyncAudioId?: ID;
   /** Generated viseme keyframes (relative to clip start). */
   visemes?: { t: number; v: MouthViseme }[];
-  /** Applied movement preset(s). */
+  /** Applied action presets (expressions, gestures, etc.). */
+  actions?: AppliedAction[];
+  /** @deprecated old movements list — migrated to `actions`. */
   movements?: { presetId: ID; offset: number }[];
   autoBlink?: boolean;
   /** ElevenLabs voice line that produced lipSyncAudioId + visemes. */
@@ -153,6 +234,14 @@ export interface Track {
   locked?: boolean;
 }
 
+export interface CameraKeyframe {
+  t: number; // seconds on project timeline
+  x: number;
+  y: number;
+  zoom: number;
+  ease?: string;
+}
+
 export interface Project {
   id: ID;
   name: string;
@@ -162,6 +251,8 @@ export interface Project {
   duration: number; // seconds
   tracks: Track[];
   clips: AnyClip[];
+  /** Optional scene-level camera animation that drives parallax. */
+  camera?: { keyframes: CameraKeyframe[] };
   createdAt: number;
   updatedAt: number;
 }
