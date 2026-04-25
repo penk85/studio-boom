@@ -1,4 +1,5 @@
 // Top bar — project name, render hint, soon-to-come export.
+import { Link } from "@tanstack/react-router";
 import { useStudio } from "../store";
 
 export function TopBar() {
@@ -20,6 +21,12 @@ export function TopBar() {
         className="ml-4 max-w-xs flex-1 rounded border border-transparent bg-transparent px-2 py-1 text-sm text-foreground hover:border-border focus:border-primary focus:outline-none"
         aria-label="Project name"
       />
+      <Link
+        to="/presets"
+        className="rounded border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-panel-2 hover:text-foreground"
+      >
+        Presets
+      </Link>
       <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
         <span>{project.width}×{project.height}</span>
         <span>·</span>

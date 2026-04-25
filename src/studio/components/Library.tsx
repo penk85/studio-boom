@@ -1,16 +1,18 @@
-// Library panel — tabs for media (backgrounds/images, audio, video) + characters/movements (placeholders for later phases).
-// Drag/click adds items to the timeline at the playhead.
+// Library panel — Media, Characters (with editor), Action Presets, Blocks (later).
 import { useLiveQuery } from "dexie-react-hooks";
-import { db, deleteMedia, importMediaFile } from "../db";
+import { Link } from "@tanstack/react-router";
+import { db, deleteMedia, importMediaFile, uid } from "../db";
 import { useStudio } from "../store";
-import type { MediaAsset } from "../types";
-import { useRef, useState } from "react";
+import type { CharacterClip, MediaAsset } from "../types";
+import { useEffect, useRef, useState } from "react";
 import { useMediaUrl } from "../hooks/useMediaUrl";
+import { createBlankCharacter } from "../character/character-utils";
+import { ensurePresetsSeeded } from "../presets/seed";
 
 const TABS = [
   { id: "media", label: "Media" },
   { id: "characters", label: "Characters" },
-  { id: "movements", label: "Movements" },
+  { id: "presets", label: "Actions" },
   { id: "blocks", label: "Blocks" },
 ] as const;
 
@@ -38,8 +40,13 @@ export function Library() {
       <div className="min-h-0 flex-1 overflow-auto">
         {tab === "media" && <MediaTab />}
         {tab === "characters" && <CharactersTab />}
-        {tab === "movements" && <ComingSoon what="Movement presets" desc="Author reusable animations and drop them onto any character." />}
-        {tab === "blocks" && <ComingSoon what="Hyperframes blocks" desc="Drop-in titles, lower-thirds, and transitions from the Hyperframes catalog." />}
+        {tab === "presets" && <PresetsTab />}
+        {tab === "blocks" && (
+          <ComingSoon
+            what="Hyperframes blocks"
+            desc="Drop-in titles, lower-thirds, and transitions from the Hyperframes catalog."
+          />
+        )}
       </div>
     </div>
   );
@@ -49,17 +56,25 @@ function CharactersTab() {
   const project = useStudio((s) => s.project);
   const playhead = useStudio((s) => s.playhead);
   const addClip = useStudio((s) => s.addClip);
+  const characters = useLiveQuery(() => db.characters.orderBy("updatedAt").reverse().toArray(), []) ?? [];
 
-  const addStubCharacter = () => {
+  const newCharacter = async () => {
+    const c = createBlankCharacter();
+    await db.characters.put(c);
+    // Open editor in a new tab so the studio state isn't lost.
+    window.open(`/character/${c.id}`, "_blank");
+  };
+
+  const placeOnTimeline = (characterId: string, name: string) => {
     if (!project) return;
     const trackIndex = Math.max(0, project.tracks.findIndex((t) => t.kind === "character"));
     const w = Math.round(project.width * 0.3);
     const h = Math.round(project.height * 0.6);
-    addClip({
-      id: crypto.randomUUID(),
+    const clip: CharacterClip = {
+      id: uid(),
       kind: "character",
-      characterId: "stub",
-      name: "Voice Character",
+      characterId,
+      name,
       trackIndex,
       start: playhead,
       duration: 4,
@@ -71,27 +86,118 @@ function CharactersTab() {
       opacity: 1,
       zIndex: project.clips.length,
       poses: {},
-    });
+    };
+    addClip(clip);
+  };
+
+  const placePlaceholder = () => placeOnTimeline("stub", "Voice Character");
+
+  const deleteCharacter = async (id: string) => {
+    if (!confirm("Delete this character? Clips referencing it will keep playing as placeholders.")) return;
+    await db.characters.delete(id);
   };
 
   return (
     <div className="space-y-3 p-3 text-xs">
-      <div className="rounded border border-border bg-panel-2 p-3">
-        <div className="mb-1 font-medium text-foreground">Puppet rigs — coming next</div>
-        <p className="text-muted-foreground">
-          The full character editor (head, mouth shapes, eyes, body, limbs, alignment, z-index) is the next phase. In the meantime you can drop a placeholder character clip to test ElevenLabs voice + lip sync end to end.
-        </p>
+      <div className="flex gap-2">
+        <button
+          onClick={newCharacter}
+          className="flex-1 rounded bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:opacity-90"
+        >
+          + New character
+        </button>
+        <button
+          onClick={placePlaceholder}
+          disabled={!project}
+          title="Drop a stub character clip on the timeline"
+          className="rounded border border-border px-2 py-2 text-[11px] text-foreground hover:bg-panel-2 disabled:opacity-50"
+        >
+          Stub
+        </button>
       </div>
-      <button
-        onClick={addStubCharacter}
-        disabled={!project}
-        className="w-full rounded bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+
+      {characters.length === 0 && (
+        <div className="rounded border border-dashed border-border bg-panel-2 p-3 text-muted-foreground">
+          No characters yet. Click "+ New character" to upload parts (head, mouth shapes, eyes, body, arms, legs), align them on the canvas, and save a reusable rig.
+        </div>
+      )}
+
+      <ul className="space-y-2">
+        {characters.map((c) => (
+          <li key={c.id} className="rounded border border-border bg-panel-2 p-2">
+            <div className="mb-1 flex items-center gap-2">
+              <span className="flex-1 truncate font-medium text-foreground">{c.name}</span>
+              <button
+                onClick={() => deleteCharacter(c.id)}
+                className="text-[10px] text-destructive"
+                title="Delete character"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="mb-2 text-[10px] text-muted-foreground">
+              {c.parts.length} part{c.parts.length !== 1 ? "s" : ""} · {c.canvasWidth}×{c.canvasHeight}{c.parallaxEnabled ? " · parallax" : ""}
+            </div>
+            <div className="flex gap-1">
+              <button
+                onClick={() => placeOnTimeline(c.id, c.name)}
+                disabled={!project}
+                className="flex-1 rounded bg-primary/30 px-2 py-1 text-[11px] hover:bg-primary/50 disabled:opacity-50"
+              >
+                Add to scene
+              </button>
+              <Link
+                to="/character/$id"
+                params={{ id: c.id }}
+                className="rounded border border-border px-2 py-1 text-[11px] hover:bg-panel"
+              >
+                Edit
+              </Link>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function PresetsTab() {
+  useEffect(() => { void ensurePresetsSeeded(); }, []);
+  const presets = useLiveQuery(() => db.movements.orderBy("category").toArray(), []) ?? [];
+
+  const grouped = new Map<string, typeof presets>();
+  for (const p of presets) {
+    const arr = grouped.get(p.category) ?? [];
+    arr.push(p);
+    grouped.set(p.category, arr);
+  }
+
+  return (
+    <div className="space-y-3 p-3 text-xs">
+      <div className="rounded border border-border bg-panel-2 p-2 text-muted-foreground">
+        Apply these to a character clip from the Inspector. Built-ins cover expressions ("Surprised", "Happy"), gestures ("Wave", "Nod"), full-body ("Idle bob", "Jump") and camera moves.
+      </div>
+      <Link
+        to="/presets"
+        className="block w-full rounded border border-border bg-panel-2 px-2 py-1.5 text-center hover:bg-panel"
       >
-        + Add placeholder character clip
-      </button>
-      <p className="text-[10px] leading-relaxed text-muted-foreground">
-        Select the placeholder on the timeline, then open the Inspector to generate a voice line. The MP3 will be saved into your media library and an aligned audio clip will be added to the Audio track.
-      </p>
+        Browse all presets →
+      </Link>
+      {Array.from(grouped.entries()).map(([cat, items]) => (
+        <div key={cat}>
+          <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">{cat}</div>
+          <ul className="space-y-1">
+            {items.map((p) => (
+              <li key={p.id} className="rounded border border-border bg-panel-2 px-2 py-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="flex-1 truncate text-foreground">{p.name}</span>
+                  <span className="text-[10px] text-muted-foreground">{p.duration}s</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
     </div>
   );
 }
