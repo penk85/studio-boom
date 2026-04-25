@@ -12,7 +12,7 @@ function preset(
   category: ActionPreset["category"],
   duration: number,
   tracks: ActionTrack[],
-  opts: { loop?: boolean; description?: string } = {},
+  opts: { loop?: boolean; description?: string; headTurn?: ActionPreset["headTurn"] } = {},
 ): ActionPreset {
   return {
     id: `builtin-${name.toLowerCase().replace(/\s+/g, "-")}`,
@@ -21,6 +21,7 @@ function preset(
     duration,
     loop: opts.loop ?? false,
     tracks,
+    headTurn: opts.headTurn,
     description: opts.description,
     builtin: true,
     createdAt: now(),
