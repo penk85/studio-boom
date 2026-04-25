@@ -16,10 +16,14 @@ import type {
   CharacterPart,
   CharacterPreset,
   EyeState,
+  HeadDirection,
+  HeadVariant,
   MouthViseme,
+  ParallaxConfig,
   PartManifest,
   PartRole,
 } from "../types";
+import { PresetRecorder } from "../presets/PresetRecorder";
 
 const ALL_ROLES: PartRole[] = [
   "head", "body", "armL", "armR", "legL", "legR",
