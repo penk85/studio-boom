@@ -135,12 +135,24 @@ export function composeActionsAt(
     if (local < 0 || (!preset.loop && local > dur)) continue;
     if (preset.loop && local > dur) local = local % dur;
     const u = dur > 0 ? Math.max(0, Math.min(1, local / dur)) : 0;
+    const intensity = a.intensity ?? 1;
+
+    if (preset.category === "headTurn" && preset.headTurn) {
+      out.headDirection = u >= 0.5 ? preset.headTurn.to : preset.headTurn.from;
+      out.headDirectionBlend = {
+        from: preset.headTurn.from,
+        to: preset.headTurn.to,
+        u: ease(preset.headTurn.ease, u),
+      };
+    }
+
+    if (preset.keyposes && preset.keyposes.length > 0) {
+      applyKeyposes(out, preset.keyposes, dur, local, intensity);
+      continue;
+    }
 
     for (const track of preset.tracks) {
-      const sample = applyIntensity(
-        sampleTrack(track.keyframes, u),
-        a.intensity ?? 1,
-      );
+      const sample = applyIntensity(sampleTrack(track.keyframes, u), intensity);
       if (track.partRole === "__camera") {
         out.camera.dx += sample.dx;
         out.camera.dy += sample.dy;
@@ -155,6 +167,64 @@ export function composeActionsAt(
     }
   }
   return out;
+}
+
+/** Linearly interpolate between recorded keyposes and merge into ComposedActions. */
+function applyKeyposes(
+  out: ComposedActions,
+  keyposes: RecordedKeypose[],
+  dur: number,
+  local: number,
+  intensity: number,
+) {
+  if (keyposes.length === 0) return;
+  const sorted = [...keyposes].sort((a, b) => a.t - b.t);
+  const t = Math.max(0, Math.min(dur, local));
+  let a = sorted[0];
+  let b = sorted[sorted.length - 1];
+  for (let i = 0; i < sorted.length - 1; i++) {
+    if (sorted[i + 1].t >= t) { a = sorted[i]; b = sorted[i + 1]; break; }
+  }
+  const span = Math.max(0.0001, b.t - a.t);
+  const u = ease(b.ease ?? a.ease, Math.max(0, Math.min(1, (t - a.t) / span)));
+
+  const aCam = a.camera ?? {};
+  const bCam = b.camera ?? {};
+  const cdx = (aCam.dx ?? 0) + ((bCam.dx ?? 0) - (aCam.dx ?? 0)) * u;
+  const cdy = (aCam.dy ?? 0) + ((bCam.dy ?? 0) - (aCam.dy ?? 0)) * u;
+  const cz = (aCam.zoom ?? 1) + ((bCam.zoom ?? 1) - (aCam.zoom ?? 1)) * u;
+  out.camera.dx += cdx * intensity;
+  out.camera.dy += cdy * intensity;
+  out.camera.zoom *= 1 + (cz - 1) * intensity;
+
+  const roles = new Set<PartRole>();
+  for (const p of a.parts) roles.add(p.partRole);
+  for (const p of b.parts) roles.add(p.partRole);
+  for (const role of roles) {
+    const pa = a.parts.find((p) => p.partRole === role);
+    const pb = b.parts.find((p) => p.partRole === role);
+    const lerp = (av?: number, bv?: number, def = 0) => {
+      if (av === undefined && bv === undefined) return def;
+      if (av === undefined) return (bv as number) * u + def * (1 - u);
+      if (bv === undefined) return av * (1 - u) + def * u;
+      return av + (bv - av) * u;
+    };
+    const sample: ComposedDelta = {
+      dx: lerp(pa?.dx, pb?.dx, 0),
+      dy: lerp(pa?.dy, pb?.dy, 0),
+      scale: lerp(pa?.scale, pb?.scale, 1),
+      rotation: lerp(pa?.rotation, pb?.rotation, 0),
+      opacity:
+        pa?.opacity === undefined && pb?.opacity === undefined
+          ? null
+          : lerp(pa?.opacity, pb?.opacity, 1),
+    };
+    const scaled = applyIntensity(sample, intensity);
+    const prev = out.perPart.get(role) ?? emptyDelta();
+    out.perPart.set(role, combine(prev, scaled));
+    const swap = (u >= 0.5 ? pb?.poseSwap : pa?.poseSwap) ?? pa?.poseSwap ?? pb?.poseSwap;
+    if (swap) out.poseSwap.set(role, swap);
+  }
 }
 
 /** Get composed delta for a specific role with sensible defaults. */
