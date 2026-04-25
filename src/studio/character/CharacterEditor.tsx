@@ -39,6 +39,7 @@ export function CharacterEditor({ characterId }: Props) {
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [onionSkin, setOnionSkin] = useState(true);
   const [scale, setScale] = useState(0.7);
+  const [recorderOpen, setRecorderOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   // Load or create
