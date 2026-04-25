@@ -100,6 +100,35 @@ export const DEFAULT_PART_MANIFEST: PartManifest = {
   hasMouth: true,
 };
 
+/** Direction of a head variant for head-turn animations. */
+export type HeadDirection = "front" | "3qL" | "3qR" | "sideL" | "sideR";
+
+export interface HeadVariant {
+  /** Direction this variant represents. */
+  direction: HeadDirection;
+  /** Image media id. */
+  mediaId: ID;
+  /** Optional per-direction offset for face features (eye/brow/mouth). */
+  featureOffsetX?: number;
+  featureOffsetY?: number;
+}
+
+/** Per-character parallax configuration. */
+export interface ParallaxConfig {
+  /** React to scene-level camera moves. */
+  onCamera: boolean;
+  /** React to this character clip moving on stage. */
+  onClip: boolean;
+  /** Multiplier for parallax magnitude. */
+  intensity: number;
+}
+
+export const DEFAULT_PARALLAX_CONFIG: ParallaxConfig = {
+  onCamera: true,
+  onClip: true,
+  intensity: 0.15,
+};
+
 export interface CharacterPreset {
   id: ID;
   name: string;
@@ -108,8 +137,12 @@ export interface CharacterPreset {
   canvasHeight: number;
   parts: CharacterPart[];
   manifest: PartManifest;
-  /** Enable parts to subtly shift based on depth when the clip moves or camera pans. */
-  parallaxEnabled: boolean;
+  /** @deprecated kept for migration — use `parallax` instead. */
+  parallaxEnabled?: boolean;
+  /** Per-character parallax config. */
+  parallax: ParallaxConfig;
+  /** Optional head variants for head-turn animations. */
+  headVariants?: HeadVariant[];
   createdAt: number;
   updatedAt: number;
 }
