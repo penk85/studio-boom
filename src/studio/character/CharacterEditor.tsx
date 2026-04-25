@@ -113,14 +113,13 @@ export function CharacterEditor({ characterId }: Props) {
             <input type="checkbox" checked={onionSkin} onChange={(e) => setOnionSkin(e.target.checked)} />
             Onion skin
           </label>
-          <label className="flex items-center gap-1">
-            <input
-              type="checkbox"
-              checked={doc.parallaxEnabled}
-              onChange={(e) => update({ parallaxEnabled: e.target.checked })}
-            />
-            Parallax
-          </label>
+          <button
+            onClick={() => setRecorderOpen(true)}
+            className="rounded border border-border px-2 py-1 text-xs hover:bg-panel-2"
+            title="Record a new action preset by posing the character"
+          >
+            + Record preset
+          </button>
           <button
             onClick={async () => {
               const saved = await saveCharacter(doc);
