@@ -11,7 +11,7 @@ import { visemeAt } from "../lipsync/visemeMap";
 import { ensurePresetsSeeded } from "../presets/seed";
 import { composeActionsAt, deltaFor } from "../presets/apply";
 import { pickActivePart } from "../character/character-utils";
-import { parallaxOffset } from "../character/parallax";
+import { combinedParallax } from "../character/parallax";
 
 export function Stage() {
   const project = useStudio((s) => s.project);
