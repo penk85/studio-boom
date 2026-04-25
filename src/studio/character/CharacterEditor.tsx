@@ -210,8 +210,25 @@ export function CharacterEditor({ characterId }: Props) {
               </Field>
             </div>
           </div>
+
+          <ParallaxEditor
+            cfg={doc.parallax}
+            onChange={(p) => update({ parallax: p })}
+          />
+
+          <HeadVariantsEditor
+            doc={doc}
+            onChange={(vars) => update({ headVariants: vars })}
+          />
         </aside>
       </div>
+
+      {recorderOpen && (
+        <PresetRecorder
+          character={doc}
+          onClose={() => setRecorderOpen(false)}
+        />
+      )}
     </div>
   );
 }
