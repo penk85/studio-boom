@@ -3,10 +3,14 @@ import { useLiveQuery } from "dexie-react-hooks";
 import { Link } from "@tanstack/react-router";
 import { db, deleteMedia, importMediaFile, uid } from "../db";
 import { useStudio } from "../store";
-import type { CharacterClip, MediaAsset } from "../types";
+import type { CharacterClip, CharacterPart, CharacterPreset, MediaAsset } from "../types";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMediaUrl } from "../hooks/useMediaUrl";
-import { createBlankCharacter } from "../character/character-utils";
+import {
+  createBlankCharacter,
+  listCharacterSlots,
+  pickActivePartForSlot,
+} from "../character/character-utils";
 import { ensureStarterCharacterSeeded } from "../character/starter";
 import { ensurePresetsSeeded } from "../presets/seed";
 
@@ -148,20 +152,25 @@ function CharactersTab() {
       <ul className="space-y-2">
         {characters.map((c) => (
           <li key={c.id} className="rounded border border-border bg-panel-2 p-2">
-            <div className="mb-1 flex items-center gap-2">
-              <span className="flex-1 truncate font-medium text-foreground">{c.name}</span>
-              <button
-                onClick={() => deleteCharacter(c.id)}
-                className="text-[10px] text-destructive"
-                title="Delete character"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="mb-2 text-[10px] text-muted-foreground">
-              {c.parts.length} part{c.parts.length !== 1 ? "s" : ""} · {c.canvasWidth}×
-              {c.canvasHeight}
-              {c.parallaxEnabled ? " · parallax" : ""}
+            <div className="mb-2 flex gap-2">
+              <CharacterThumbnail character={c} />
+              <div className="min-w-0 flex-1">
+                <div className="mb-1 flex items-center gap-2">
+                  <span className="flex-1 truncate font-medium text-foreground">{c.name}</span>
+                  <button
+                    onClick={() => deleteCharacter(c.id)}
+                    className="text-[10px] text-destructive"
+                    title="Delete character"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="text-[10px] text-muted-foreground">
+                  {c.parts.length} part{c.parts.length !== 1 ? "s" : ""} · {c.canvasWidth}×
+                  {c.canvasHeight}
+                  {c.parallaxEnabled ? " · parallax" : ""}
+                </div>
+              </div>
             </div>
             <div className="flex gap-1">
               <button
@@ -183,6 +192,67 @@ function CharactersTab() {
         ))}
       </ul>
     </div>
+  );
+}
+
+function CharacterThumbnail({ character }: { character: CharacterPreset }) {
+  const slots = useMemo(() => listCharacterSlots(character.parts), [character.parts]);
+  const previewParts = useMemo(
+    () =>
+      slots
+        .map((slot) =>
+          pickActivePartForSlot(slot, {
+            pose: slot.role === "head" || slot.role === "body" ? "front" : undefined,
+            viseme: slot.role === "mouth" ? "rest" : undefined,
+            eyeState: slot.role.startsWith("eye") ? "open" : undefined,
+          }),
+        )
+        .filter((part): part is CharacterPart => Boolean(part))
+        .sort((a, b) => a.zIndex - b.zIndex),
+    [slots],
+  );
+  const boxWidth = 56;
+  const boxHeight = 72;
+  const scale = Math.min(boxWidth / character.canvasWidth, boxHeight / character.canvasHeight);
+
+  return (
+    <div className="flex h-[72px] w-[56px] shrink-0 items-center justify-center overflow-hidden rounded border border-border bg-stage-bg">
+      <div
+        className="relative origin-center"
+        style={{
+          width: character.canvasWidth,
+          height: character.canvasHeight,
+          transform: `scale(${scale})`,
+        }}
+      >
+        {previewParts.map((part) => (
+          <CharacterThumbnailPart key={part.id} part={part} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CharacterThumbnailPart({ part }: { part: CharacterPart }) {
+  const url = useMediaUrl(part.mediaId);
+  if (!url) return null;
+  return (
+    <img
+      src={url}
+      alt={part.name}
+      draggable={false}
+      className="absolute h-full w-full object-contain"
+      style={{
+        left: part.x,
+        top: part.y,
+        width: part.width,
+        height: part.height,
+        zIndex: part.zIndex,
+        transform: `rotate(${part.rotation}deg)`,
+        transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
+        pointerEvents: "none",
+      }}
+    />
   );
 }
 

@@ -7,8 +7,7 @@ import { useStudio } from "../store";
 import { db } from "../db";
 import { ELEVENLABS_VOICES, ELEVENLABS_MODELS, DEFAULT_VOICE_ID } from "../lipsync/voices";
 import { generateLipSyncForClip } from "../lipsync/elevenlabs";
-
-const MOUTH_VISEMES: MouthViseme[] = ["rest", "A", "E", "I", "O", "U", "MBP", "FV", "L"];
+import { MOUTH_VISEMES, MOUTH_VISEME_DESCRIPTIONS } from "../lipsync/viseme-schema";
 
 export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
   const update = useStudio((s) => s.updateClip);
@@ -87,7 +86,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
                       ? "bg-primary/25 text-foreground"
                       : "border border-border text-muted-foreground"
                   }`}
-                  title={available ? "Available for lip sync" : "Missing mouth image"}
+                  title={`${available ? "Available for lip sync" : "Missing mouth image"}\n${MOUTH_VISEME_DESCRIPTIONS[shape]}`}
                 >
                   {shape}
                 </span>

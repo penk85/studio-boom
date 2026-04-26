@@ -45,7 +45,7 @@ export type PartRole =
   | "mouth"
   | "extra";
 
-export type MouthViseme = "rest" | "A" | "E" | "I" | "O" | "U" | "MBP" | "FV" | "L";
+export type MouthViseme = "rest" | "MBP" | "FV" | "AI" | "E" | "O" | "U" | "L";
 
 export type EyeState = "open" | "half" | "closed" | "wink";
 

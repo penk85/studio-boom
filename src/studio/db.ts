@@ -2,6 +2,7 @@
 // movement presets, and media blobs. Everything stays in the browser.
 import Dexie, { type Table } from "dexie";
 import type { ActionPreset, CharacterPreset, MediaAsset, MediaBlobRow, Project } from "./types";
+import { legacyVisemeToStandard } from "./lipsync/viseme-schema";
 
 class StudioDB extends Dexie {
   projects!: Table<Project, string>;
@@ -120,6 +121,44 @@ class StudioDB extends Dexie {
             };
           });
           await table.put({ ...row, parts, updatedAt: Date.now() });
+        }
+      });
+    // v5: rename mouth visemes to a more standard animation-friendly set.
+    this.version(5)
+      .stores({
+        projects: "id, name, updatedAt",
+        characters: "id, name, updatedAt",
+        movements: "id, name, category, createdAt",
+        media: "id, name, kind, createdAt",
+        mediaBlobs: "id",
+      })
+      .upgrade(async (tx) => {
+        const characterTable = tx.table<CharacterPreset>("characters");
+        const projectTable = tx.table<Project>("projects");
+
+        const characters = await characterTable.toArray();
+        for (const character of characters) {
+          const parts = character.parts.map((part) => ({
+            ...part,
+            viseme: legacyVisemeToStandard(part.viseme) ?? part.viseme,
+          }));
+          await characterTable.put({ ...character, parts, updatedAt: Date.now() });
+        }
+
+        const projects = await projectTable.toArray();
+        for (const project of projects) {
+          const clips = project.clips.map((clip) =>
+            clip.kind === "character" && clip.visemes
+              ? {
+                  ...clip,
+                  visemes: clip.visemes.map((key) => ({
+                    ...key,
+                    v: legacyVisemeToStandard(key.v) ?? key.v,
+                  })),
+                }
+              : clip,
+          );
+          await projectTable.put({ ...project, clips, updatedAt: Date.now() });
         }
       });
   }

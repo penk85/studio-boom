@@ -1,6 +1,7 @@
 // Stage — the visual preview area. Renders all currently-active clips
 // using DOM layers (img / video / audio). Selection + drag/resize handles.
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, RotateCw } from "lucide-react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { useStudio } from "../store";
 import { db } from "../db";
@@ -15,7 +16,7 @@ import type {
 } from "../types";
 import { clipActiveAt } from "../timeline-utils";
 import { useMediaUrl } from "../hooks/useMediaUrl";
-import { visemeAt } from "../lipsync/visemeMap";
+import { visemeAt, visemeStateAt } from "../lipsync/visemeMap";
 import { ensurePresetsSeeded } from "../presets/seed";
 import { composeActionsAt, deltaFor, poseSwapFor } from "../presets/apply";
 import { listCharacterSlots, pickActivePartForSlot } from "../character/character-utils";
@@ -62,6 +63,24 @@ export function Stage() {
     return () => ro.disconnect();
   }, [project]);
 
+  // Keyboard shortcuts for selected clip
+  useEffect(() => {
+    if (!selectedId) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key === "]") {
+        updateClip(selectedId, {
+          zIndex: (project?.clips.find((c) => c.id === selectedId)?.zIndex ?? 0) + 1,
+        });
+      } else if (e.key === "[") {
+        const current = project?.clips.find((c) => c.id === selectedId)?.zIndex ?? 0;
+        updateClip(selectedId, { zIndex: Math.max(0, current - 1) });
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [selectedId, project, updateClip]);
+
   const activeClips = useMemo(
     () =>
       project
@@ -104,6 +123,7 @@ export function Stage() {
               <ClipLayer
                 key={c.id}
                 clip={c}
+                fps={project.fps}
                 playhead={playhead}
                 playing={playing}
                 selected={c.id === selectedId}
@@ -128,6 +148,7 @@ export function Stage() {
 
 function ClipLayer({
   clip,
+  fps,
   playhead,
   playing,
   selected,
@@ -138,6 +159,7 @@ function ClipLayer({
   presetMap,
 }: {
   clip: AnyClip;
+  fps: number;
   playhead: number;
   playing: boolean;
   selected: boolean;
@@ -225,11 +247,12 @@ function ClipLayer({
           <CharacterRig
             clip={clip as CharacterClip}
             character={character}
+            fps={fps}
             playhead={playhead}
             presetMap={presetMap}
           />
         ) : (
-          <CharacterPlaceholder clip={clip as CharacterClip} playhead={playhead} />
+          <CharacterPlaceholder clip={clip as CharacterClip} playhead={playhead} fps={fps} />
         ))}
       {selected && <Handle clip={clip} scale={scale} onChange={onChange} />}
     </div>
@@ -245,7 +268,7 @@ function Handle({
   scale: number;
   onChange: (p: Partial<AnyClip>) => void;
 }) {
-  const start = (e: React.PointerEvent) => {
+  const startResize = (e: React.PointerEvent) => {
     e.stopPropagation();
     const sx = e.clientX,
       sy = e.clientY;
@@ -264,11 +287,65 @@ function Handle({
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   };
+
+  const startRotate = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    const sx = e.clientX,
+      sy = e.clientY;
+    const oRotation = clip.rotation;
+    const cx = clip.x + clip.width / 2,
+      cy = clip.y + clip.height / 2;
+    const move = (ev: PointerEvent) => {
+      const angle = Math.atan2(ev.clientY - cy, ev.clientX - cx) * (180 / Math.PI);
+      const startAngle = Math.atan2(sy - cy, sx - cx) * (180 / Math.PI);
+      onChange({ rotation: Math.round(oRotation + angle - startAngle) });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
   return (
-    <div
-      onPointerDown={start}
-      className="absolute -bottom-1 -right-1 h-3 w-3 cursor-se-resize rounded-sm bg-primary"
-    />
+    <>
+      {/* Resize handle */}
+      <div
+        onPointerDown={startResize}
+        className="absolute -bottom-1 -right-1 h-3 w-3 cursor-se-resize rounded-sm bg-primary"
+      />
+      {/* Rotate handle */}
+      <button
+        onPointerDown={startRotate}
+        className="absolute -top-6 left-1/2 flex h-5 w-5 -translate-x-1/2 items-center justify-center rounded-full border border-primary bg-background text-primary"
+        title="Rotate"
+      >
+        <RotateCw size={12} />
+      </button>
+      {/* Bring forward */}
+      <button
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          onChange({ zIndex: clip.zIndex + 1 });
+        }}
+        className="absolute -top-6 -left-1 flex h-5 w-5 items-center justify-center rounded border border-primary bg-background text-primary"
+        title="Bring forward (])"
+      >
+        <ArrowUp size={12} />
+      </button>
+      {/* Send backward */}
+      <button
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          onChange({ zIndex: Math.max(0, clip.zIndex - 1) });
+        }}
+        className="absolute -top-6 left-0 flex h-5 w-5 items-center justify-center rounded border border-primary bg-background text-primary"
+        title="Send backward ([)"
+      >
+        <ArrowDown size={12} />
+      </button>
+    </>
   );
 }
 
@@ -302,10 +379,9 @@ function AudioLayer({
 }
 
 const VISEME_GLYPH: Record<string, string> = {
-  rest: "—",
-  A: "A",
+  rest: "-",
+  AI: "A",
   E: "E",
-  I: "I",
   O: "O",
   U: "U",
   MBP: "M",
@@ -388,8 +464,18 @@ function placementFromMouthPart(
   };
 }
 
-function CharacterPlaceholder({ clip, playhead }: { clip: CharacterClip; playhead: number }) {
-  const v = visemeAt(clip.visemes, playhead - clip.start);
+function CharacterPlaceholder({
+  clip,
+  playhead,
+  fps,
+}: {
+  clip: CharacterClip;
+  playhead: number;
+  fps: number;
+}) {
+  const v = visemeAt(clip.visemes, playhead - clip.start, {
+    minHoldSeconds: 4 / Math.max(1, fps),
+  });
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-clip-character/30 text-foreground">
       <div className="text-xs">{clip.name}</div>
@@ -409,11 +495,13 @@ function CharacterPlaceholder({ clip, playhead }: { clip: CharacterClip; playhea
 function CharacterRig({
   clip,
   character,
+  fps,
   playhead,
   presetMap,
 }: {
   clip: CharacterClip;
   character: CharacterPreset;
+  fps: number;
   playhead: number;
   presetMap: Map<string, import("../types").ActionPreset>;
 }) {
@@ -422,7 +510,14 @@ function CharacterRig({
     () => composeActionsAt(clip, tInClip, presetMap),
     [clip, tInClip, presetMap],
   );
-  const viseme = composed.mouthLocked ? undefined : visemeAt(clip.visemes, tInClip);
+  const visemeState = composed.mouthLocked
+    ? { current: undefined, next: undefined, blend: 0 }
+    : visemeStateAt(clip.visemes, tInClip, {
+        minHoldSeconds: 4 / Math.max(1, fps),
+      });
+  const viseme = visemeState.current;
+  const nextViseme = visemeState.next;
+  const visemeBlend = visemeState.blend;
 
   // Active head variant (from headTurn presets)
   const headVariant = useMemo(() => {
@@ -476,14 +571,23 @@ function CharacterRig({
           if (role === "mouth" && shouldUseFallbackMouth) return null;
           const poseSwap =
             poseSwapFor(composed, role, slot.id) ?? clip.poses[slot.id] ?? clip.poses[role];
+          const eyeState = role.startsWith("eye")
+            ? (poseSwap ?? clip.poses[slot.id] ?? clip.poses[role] ?? clip.poses["eye"] ?? "open")
+            : undefined;
           const part = pickActivePartForSlot(slot, {
             pose: poseSwap,
             viseme: role === "mouth" ? viseme : undefined,
-            eyeState: role.startsWith("eye")
-              ? (poseSwap ?? clip.poses[slot.id] ?? clip.poses[role] ?? clip.poses["eye"] ?? "open")
-              : undefined,
+            eyeState,
           });
           if (!part) return null;
+          const nextPart =
+            role === "mouth" && nextViseme && visemeBlend > 0
+              ? pickActivePartForSlot(slot, {
+                  pose: poseSwap,
+                  viseme: nextViseme,
+                  eyeState,
+                })
+              : undefined;
           const d = deltaFor(composed, role, slot.id);
           const parallax = combinedParallax(part.depth, character.parallax, {
             clipDelta,
@@ -502,32 +606,79 @@ function CharacterRig({
               role === "mouth")
               ? { dx: headVariant.featureOffsetX ?? 0, dy: headVariant.featureOffsetY ?? 0 }
               : { dx: 0, dy: 0 };
+          const sharedProps = {
+            dx: d.dx + parallax.dx + faceOffset.dx,
+            dy: d.dy + parallax.dy + faceOffset.dy,
+            scale: d.scale,
+            rotation: d.rotation,
+          };
+          if (role === "mouth" && nextPart && nextPart.id !== part.id) {
+            return (
+              <div key={slot.id}>
+                <PartImage
+                  part={part}
+                  opacity={(d.opacity ?? 1) * (1 - visemeBlend)}
+                  transitionMs={0}
+                  {...sharedProps}
+                />
+                <PartImage
+                  part={nextPart}
+                  opacity={(d.opacity ?? 1) * visemeBlend}
+                  transitionMs={0}
+                  {...sharedProps}
+                />
+              </div>
+            );
+          }
           return (
             <PartImage
               key={slot.id}
               part={part}
               overrideMediaId={overrideMediaId}
-              dx={d.dx + parallax.dx + faceOffset.dx}
-              dy={d.dy + parallax.dy + faceOffset.dy}
-              scale={d.scale}
-              rotation={d.rotation}
+              {...sharedProps}
               opacity={d.opacity ?? 1}
               transitionMs={role === "mouth" ? 30 : 0}
             />
           );
         })}
-        {shouldUseFallbackMouth && viseme && fallbackMouthDelta && (
-          <DefaultMouthShape
-            viseme={viseme}
-            placement={fallbackMouth}
-            dx={fallbackMouthDelta.dx + fallbackMouthParallax.dx + fallbackMouthFaceOffset.dx}
-            dy={fallbackMouthDelta.dy + fallbackMouthParallax.dy + fallbackMouthFaceOffset.dy}
-            scale={fallbackMouthDelta.scale}
-            rotation={fallbackMouthDelta.rotation}
-            opacity={fallbackMouthDelta.opacity ?? 1}
-            transitionMs={30}
-          />
-        )}
+        {shouldUseFallbackMouth &&
+          viseme &&
+          fallbackMouthDelta &&
+          (nextViseme && visemeBlend > 0 ? (
+            <>
+              <DefaultMouthShape
+                viseme={viseme}
+                placement={fallbackMouth}
+                dx={fallbackMouthDelta.dx + fallbackMouthParallax.dx + fallbackMouthFaceOffset.dx}
+                dy={fallbackMouthDelta.dy + fallbackMouthParallax.dy + fallbackMouthFaceOffset.dy}
+                scale={fallbackMouthDelta.scale}
+                rotation={fallbackMouthDelta.rotation}
+                opacity={(fallbackMouthDelta.opacity ?? 1) * (1 - visemeBlend)}
+                transitionMs={0}
+              />
+              <DefaultMouthShape
+                viseme={nextViseme}
+                placement={fallbackMouth}
+                dx={fallbackMouthDelta.dx + fallbackMouthParallax.dx + fallbackMouthFaceOffset.dx}
+                dy={fallbackMouthDelta.dy + fallbackMouthParallax.dy + fallbackMouthFaceOffset.dy}
+                scale={fallbackMouthDelta.scale}
+                rotation={fallbackMouthDelta.rotation}
+                opacity={(fallbackMouthDelta.opacity ?? 1) * visemeBlend}
+                transitionMs={0}
+              />
+            </>
+          ) : (
+            <DefaultMouthShape
+              viseme={viseme}
+              placement={fallbackMouth}
+              dx={fallbackMouthDelta.dx + fallbackMouthParallax.dx + fallbackMouthFaceOffset.dx}
+              dy={fallbackMouthDelta.dy + fallbackMouthParallax.dy + fallbackMouthFaceOffset.dy}
+              scale={fallbackMouthDelta.scale}
+              rotation={fallbackMouthDelta.rotation}
+              opacity={fallbackMouthDelta.opacity ?? 1}
+              transitionMs={30}
+            />
+          ))}
       </div>
     </div>
   );
@@ -579,7 +730,7 @@ function renderDefaultMouthViseme(viseme: MouthViseme) {
   const mouth = "#733f43";
   const tongue = "#e87f89";
   switch (viseme) {
-    case "A":
+    case "AI":
       return (
         <>
           <ellipse cx="50" cy="30" rx="23" ry="27" fill={mouth} />
@@ -593,8 +744,6 @@ function renderDefaultMouthViseme(viseme: MouthViseme) {
           <rect x="31" y="25" width="38" height="8" rx="3" fill="#fff" />
         </>
       );
-    case "I":
-      return <rect x="22" y="24" width="56" height="15" rx="8" fill={mouth} />;
     case "O":
       return <ellipse cx="50" cy="30" rx="18" ry="24" fill={mouth} />;
     case "U":

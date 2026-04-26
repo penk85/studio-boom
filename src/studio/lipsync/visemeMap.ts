@@ -12,21 +12,52 @@ export interface VisemeKey {
   v: MouthViseme;
 }
 
+export interface VisemeTimingOptions {
+  minHoldSeconds?: number;
+  blendWindowSeconds?: number;
+}
+
 const REST_GAP = 0.12; // silence > 120ms between chars => insert rest
 const MIN_VISEME_HOLD = 0.06; // minimum 60ms hold before switching
 const AUDIO_LEAD_MS = 30; // mouth moves this many ms before sound
+const VISEME_BLEND_WINDOW = 0.075; // crossfade near boundaries for softer swaps
 
 function letterToViseme(ch: string, lastVowel: MouthViseme | null): MouthViseme | null {
   const c = ch.toLowerCase();
   if (/\s/.test(c) || /[.,!?;:"'()\-—…]/.test(c)) return "rest";
   switch (c) {
-    case "a": return "A";
-    case "e": case "i": case "y": return "E";
-    case "o": return "O";
-    case "u": case "w": return "U";
-    case "m": case "b": case "p": return "MBP";
-    case "f": case "v": return "FV";
-    case "l": return "L";
+    case "m":
+    case "b":
+    case "p":
+      return "MBP";
+    case "f":
+    case "v":
+      return "FV";
+    case "a":
+    case "h":
+    case "j":
+      return "AI";
+    case "e":
+    case "i":
+    case "y":
+    case "s":
+    case "z":
+    case "c":
+    case "d":
+    case "g":
+    case "k":
+    case "n":
+    case "r":
+    case "t":
+      return "E";
+    case "o":
+    case "q":
+      return "O";
+    case "u":
+    case "w":
+      return "U";
+    case "l":
+      return "L";
     default:
       // Other consonants: hold last vowel shape if present, else rest
       return lastVowel ?? "rest";
@@ -55,7 +86,7 @@ export function alignmentToVisemes(a: ElevenLabsAlignment): VisemeKey[] {
 
     const v = letterToViseme(ch, lastVowel);
     if (v) {
-      if (v === "A" || v === "E" || v === "O" || v === "U") lastVowel = v;
+      if (v === "AI" || v === "E" || v === "O" || v === "U") lastVowel = v;
       pushKey(out, { t: start, v });
     }
     prevEnd = end;
@@ -73,8 +104,29 @@ function pushKey(arr: VisemeKey[], k: VisemeKey) {
 }
 
 /** Active viseme at time `t` (relative to clip start), with minimum hold enforcement. */
-export function visemeAt(keys: VisemeKey[] | undefined, t: number): MouthViseme {
-  if (!keys || keys.length === 0) return "rest";
+export function visemeAt(
+  keys: VisemeKey[] | undefined,
+  t: number,
+  options?: VisemeTimingOptions,
+): MouthViseme {
+  return visemeStateAt(keys, t, options).current;
+}
+
+export interface VisemeState {
+  current: MouthViseme;
+  next?: MouthViseme;
+  blend: number; // 0..1 blend toward next
+}
+
+/** Current viseme plus an optional short blend into the next viseme. */
+export function visemeStateAt(
+  keys: VisemeKey[] | undefined,
+  t: number,
+  options?: VisemeTimingOptions,
+): VisemeState {
+  if (!keys || keys.length === 0) return { current: "rest", blend: 0 };
+  const minHoldSeconds = options?.minHoldSeconds ?? MIN_VISEME_HOLD;
+  const blendWindowSeconds = options?.blendWindowSeconds ?? VISEME_BLEND_WINDOW;
 
   // Apply audio lead time: look up viseme slightly ahead
   const leadSec = AUDIO_LEAD_MS / 1000;
@@ -90,17 +142,22 @@ export function visemeAt(keys: VisemeKey[] | undefined, t: number): MouthViseme 
     }
   }
 
-  if (currentIdx < 0) return "rest";
-  if (currentIdx >= keys.length - 1) return keys[currentIdx].v;
+  if (currentIdx < 0) return { current: "rest", blend: 0 };
+  if (currentIdx >= keys.length - 1) return { current: keys[currentIdx].v, blend: 0 };
 
   const current = keys[currentIdx];
   const next = keys[currentIdx + 1];
   const timeUntilNext = next.t - tAdjusted;
 
-  // If next viseme is too close (< MIN_VISEME_HOLD), extend current viseme
-  if (timeUntilNext < MIN_VISEME_HOLD) {
-    return current.v;
+  // If next viseme is too close, extend current viseme.
+  if (timeUntilNext < minHoldSeconds) {
+    return { current: current.v, blend: 0 };
   }
 
-  return current.v;
+  const canBlend = next.v !== current.v && timeUntilNext <= blendWindowSeconds;
+  if (!canBlend) return { current: current.v, blend: 0 };
+
+  const raw = 1 - timeUntilNext / blendWindowSeconds;
+  const blend = Math.max(0, Math.min(1, raw * raw * (3 - 2 * raw)));
+  return { current: current.v, next: next.v, blend };
 }

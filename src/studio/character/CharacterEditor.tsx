@@ -15,6 +15,7 @@ import {
   roleLabel,
   saveCharacter,
 } from "./character-utils";
+import { MOUTH_VISEMES, MOUTH_VISEME_DESCRIPTIONS } from "../lipsync/viseme-schema";
 import type {
   CharacterPart,
   CharacterPreset,
@@ -37,7 +38,6 @@ const ROLE_SECTIONS: { title: string; roles: PartRole[] }[] = [
   { title: "Extras", roles: ["extra"] },
 ];
 
-const VISEMES: MouthViseme[] = ["rest", "A", "E", "I", "O", "U", "MBP", "FV", "L"];
 const EYE_STATES: EyeState[] = ["open", "half", "closed", "wink"];
 
 const HEAD_DIRECTIONS: { dir: HeadDirection; label: string }[] = [
@@ -106,9 +106,27 @@ export function CharacterEditor({ characterId }: Props) {
     const handleKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.key === "]") {
-        setDoc((d) => d ? { ...d, parts: d.parts.map((p) => p.id === selectedPartId ? { ...p, zIndex: p.zIndex + 1 } : p) } : d);
+        setDoc((d) =>
+          d
+            ? {
+                ...d,
+                parts: d.parts.map((p) =>
+                  p.id === selectedPartId ? { ...p, zIndex: p.zIndex + 1 } : p,
+                ),
+              }
+            : d,
+        );
       } else if (e.key === "[") {
-        setDoc((d) => d ? { ...d, parts: d.parts.map((p) => p.id === selectedPartId ? { ...p, zIndex: Math.max(0, p.zIndex - 1) } : p) } : d);
+        setDoc((d) =>
+          d
+            ? {
+                ...d,
+                parts: d.parts.map((p) =>
+                  p.id === selectedPartId ? { ...p, zIndex: Math.max(0, p.zIndex - 1) } : p,
+                ),
+              }
+            : d,
+        );
       }
     };
     window.addEventListener("keydown", handleKey);
@@ -489,6 +507,7 @@ function RoleGroup({
           <li
             key={p.id}
             onClick={() => onSelect(p.id)}
+            title={variantHoverText(p)}
             className={`flex cursor-pointer items-center gap-2 border-t border-border px-2 py-1 text-[11px] ${
               p.id === selectedId
                 ? "bg-primary/20 text-foreground"
@@ -643,6 +662,13 @@ function variantLabel(p: CharacterPart): string {
   return p.name;
 }
 
+function variantHoverText(part: CharacterPart): string | undefined {
+  if (part.role === "mouth" && part.viseme) {
+    return `${variantLabel(part)}: ${MOUTH_VISEME_DESCRIPTIONS[part.viseme]}`;
+  }
+  return undefined;
+}
+
 function defaultZIndexForRole(role: PartRole): number {
   switch (role) {
     case "legL":
@@ -734,7 +760,7 @@ function UploadVariantButton({
           // Auto-tag mouth viseme / eye state by guessing the next missing one.
           if (role === "mouth") {
             const used = new Set(existing.map((p) => p.viseme));
-            part.viseme = VISEMES.find((v) => !used.has(v)) ?? "rest";
+            part.viseme = MOUTH_VISEMES.find((v) => !used.has(v)) ?? "rest";
           }
           if (role === "eye") {
             const used = new Set(existing.map((p) => p.eyeState));
@@ -885,7 +911,10 @@ function PartLayer({
           </button>
           <button
             type="button"
-            onPointerDown={(e) => { e.stopPropagation(); onChange({ zIndex: part.zIndex + 1 }); }}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              onChange({ zIndex: part.zIndex + 1 });
+            }}
             className="absolute left-0 top-0 flex h-5 w-5 -translate-x-2 -translate-y-6 items-center justify-center rounded border border-primary bg-background text-primary shadow-[var(--shadow-panel)]"
             title="Bring forward (]"
             aria-label="Bring forward"
@@ -894,7 +923,10 @@ function PartLayer({
           </button>
           <button
             type="button"
-            onPointerDown={(e) => { e.stopPropagation(); onChange({ zIndex: part.zIndex - 1 }); }}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              onChange({ zIndex: part.zIndex - 1 });
+            }}
             className="absolute left-1/2 top-0 flex h-5 w-5 -translate-x-1/2 -translate-y-6 items-center justify-center rounded border border-primary bg-background text-primary shadow-[var(--shadow-panel)]"
             title="Send backward (["
             aria-label="Send backward"
@@ -1150,19 +1182,24 @@ function PartInspector({
         />
       </Field>
       {part.role === "mouth" && (
-        <Field label="Viseme">
-          <select
-            value={part.viseme ?? "rest"}
-            onChange={(e) => onChange({ viseme: e.target.value as MouthViseme })}
-            className="w-full rounded border border-border bg-input px-2 py-1"
-          >
-            {VISEMES.map((v) => (
-              <option key={v} value={v}>
-                {v}
-              </option>
-            ))}
-          </select>
-        </Field>
+        <>
+          <Field label="Viseme">
+            <select
+              value={part.viseme ?? "rest"}
+              onChange={(e) => onChange({ viseme: e.target.value as MouthViseme })}
+              className="w-full rounded border border-border bg-input px-2 py-1"
+            >
+              {MOUTH_VISEMES.map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
+            {MOUTH_VISEME_DESCRIPTIONS[part.viseme ?? "rest"]}
+          </p>
+        </>
       )}
       {(part.role === "eye" || part.role === "eyeL" || part.role === "eyeR") && (
         <Field label="Eye state">
