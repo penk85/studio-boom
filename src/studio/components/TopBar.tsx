@@ -1,10 +1,21 @@
 // Top bar — project name, render hint, soon-to-come export.
 import { Link } from "@tanstack/react-router";
+import { Save } from "lucide-react";
+import { useState } from "react";
 import { useStudio } from "../store";
 
 export function TopBar() {
   const project = useStudio((s) => s.project);
+  const saveProject = useStudio((s) => s.saveProject);
+  const [saved, setSaved] = useState(false);
   if (!project) return null;
+
+  const saveNow = async () => {
+    await saveProject();
+    setSaved(true);
+    window.setTimeout(() => setSaved(false), 1200);
+  };
+
   return (
     <header className="flex items-center gap-3 border-b border-border bg-panel px-4 py-2">
       <div className="flex items-center gap-2">
@@ -27,8 +38,18 @@ export function TopBar() {
       >
         Presets
       </Link>
+      <button
+        onClick={saveNow}
+        className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-panel-2 hover:text-foreground"
+        title="Save project state locally"
+      >
+        <Save size={13} />
+        {saved ? "Saved" : "Save"}
+      </button>
       <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
-        <span>{project.width}×{project.height}</span>
+        <span>
+          {project.width}×{project.height}
+        </span>
         <span>·</span>
         <span>{project.fps}fps</span>
         <span>·</span>

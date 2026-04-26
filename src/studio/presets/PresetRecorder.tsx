@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { db, uid } from "../db";
 import { useMediaUrl } from "../hooks/useMediaUrl";
-import { pickActivePart } from "../character/character-utils";
+import { listCharacterSlots, pickActivePartForSlot } from "../character/character-utils";
 import type {
   ActionCategory,
   ActionPreset,
@@ -24,9 +24,10 @@ const CATEGORIES: { value: ActionCategory; label: string; hint: string }[] = [
 ];
 
 interface RecorderPartState {
-  partId: string;
+  slotId: string;
   /** Live x/y/scale/rotation overrides relative to rest. */
-  dx: number; dy: number;
+  dx: number;
+  dy: number;
   scale: number;
   rotation: number;
 }
@@ -51,6 +52,7 @@ export function PresetRecorder({
   const [overrides, setOverrides] = useState<Map<string, RecorderPartState>>(new Map());
   const [scale, setScale] = useState(0.5);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const slots = useMemo(() => listCharacterSlots(character.parts), [character.parts]);
 
   // Fit
   useEffect(() => {
@@ -70,24 +72,27 @@ export function PresetRecorder({
   useEffect(() => {
     const interp = sampleKeyposesAtTime(keyposes, time);
     const next = new Map<string, RecorderPartState>();
-    for (const [role, ov] of interp) {
-      // Map role -> first part of that role; recorder treats the role as primary
-      const part = character.parts.find((p) => p.role === role);
-      if (!part) continue;
-      next.set(part.id, {
-        partId: part.id,
-        dx: ov.dx ?? 0, dy: ov.dy ?? 0,
-        scale: ov.scale ?? 1, rotation: ov.rotation ?? 0,
+    for (const ov of interp.values()) {
+      const slot = ov.slotId
+        ? slots.find((s) => s.id === ov.slotId)
+        : slots.find((s) => s.role === ov.partRole);
+      if (!slot) continue;
+      next.set(slot.id, {
+        slotId: slot.id,
+        dx: ov.dx ?? 0,
+        dy: ov.dy ?? 0,
+        scale: ov.scale ?? 1,
+        rotation: ov.rotation ?? 0,
       });
     }
     setOverrides(next);
-  }, [time, keyposes, character.parts]);
+  }, [time, keyposes, slots]);
 
-  const updateOverride = (partId: string, patch: Partial<RecorderPartState>) => {
+  const updateOverride = (slotId: string, patch: Partial<RecorderPartState>) => {
     setOverrides((prev) => {
       const next = new Map(prev);
-      const cur = next.get(partId) ?? { partId, dx: 0, dy: 0, scale: 1, rotation: 0 };
-      next.set(partId, { ...cur, ...patch });
+      const cur = next.get(slotId) ?? { slotId, dx: 0, dy: 0, scale: 1, rotation: 0 };
+      next.set(slotId, { ...cur, ...patch });
       return next;
     });
   };
@@ -95,14 +100,17 @@ export function PresetRecorder({
   const captureKeypose = () => {
     const parts: RecordedPartOverride[] = [];
     for (const ov of overrides.values()) {
-      const part = character.parts.find((p) => p.id === ov.partId);
-      if (!part) continue;
+      const slot = slots.find((s) => s.id === ov.slotId);
+      if (!slot) continue;
       // Only capture if there's an actual delta
       if (ov.dx === 0 && ov.dy === 0 && ov.scale === 1 && ov.rotation === 0) continue;
       parts.push({
-        partRole: part.role,
-        dx: ov.dx, dy: ov.dy,
-        scale: ov.scale, rotation: ov.rotation,
+        partRole: slot.role,
+        slotId: slot.id,
+        dx: ov.dx,
+        dy: ov.dy,
+        scale: ov.scale,
+        rotation: ov.rotation,
       });
     }
     const kp: RecordedKeypose = { t: round(time, 2), parts, ease: "easeInOut" };
@@ -153,30 +161,44 @@ export function PresetRecorder({
             className="rounded border border-border bg-input px-2 py-1 text-xs"
           >
             {CATEGORIES.map((c) => (
-              <option key={c.value} value={c.value}>{c.label}</option>
+              <option key={c.value} value={c.value}>
+                {c.label}
+              </option>
             ))}
           </select>
           <label className="flex items-center gap-1 text-xs text-muted-foreground">
             Duration
             <input
-              type="number" step={0.1} min={0.1} value={duration}
+              type="number"
+              step={0.1}
+              min={0.1}
+              value={duration}
               onChange={(e) => setDuration(Number(e.target.value))}
               className="w-16 rounded border border-border bg-input px-1 py-0.5"
             />
             s
           </label>
           <div className="ml-auto flex items-center gap-2">
-            <button onClick={onClose} className="rounded border border-border px-2 py-1 text-xs hover:bg-panel">
+            <button
+              onClick={onClose}
+              className="rounded border border-border px-2 py-1 text-xs hover:bg-panel"
+            >
               Cancel
             </button>
-            <button onClick={save} className="rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-90">
+            <button
+              onClick={save}
+              className="rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-90"
+            >
               Save preset
             </button>
           </div>
         </header>
 
         <div className="flex min-h-0 flex-1">
-          <main ref={wrapRef} className="relative flex min-w-0 flex-1 items-center justify-center bg-stage-bg p-4">
+          <main
+            ref={wrapRef}
+            className="relative flex min-w-0 flex-1 items-center justify-center bg-stage-bg p-4"
+          >
             <div
               className="relative shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] outline outline-1 outline-border"
               style={{
@@ -193,18 +215,22 @@ export function PresetRecorder({
                   transform: `scale(${scale})`,
                 }}
               >
-                {character.parts
-                  .slice()
-                  .sort((a, b) => a.zIndex - b.zIndex)
-                  .map((p) => (
+                {slots.map((slot) => {
+                  const part = pickActivePartForSlot(slot, {
+                    viseme: slot.role === "mouth" ? "rest" : undefined,
+                    eyeState: slot.role.startsWith("eye") ? "open" : undefined,
+                  });
+                  if (!part) return null;
+                  return (
                     <PoseLayer
-                      key={p.id}
-                      part={p}
-                      override={overrides.get(p.id)}
+                      key={slot.id}
+                      part={part}
+                      override={overrides.get(slot.id)}
                       scale={scale}
-                      onChange={(patch) => updateOverride(p.id, patch)}
+                      onChange={(patch) => updateOverride(slot.id, patch)}
                     />
-                  ))}
+                  );
+                })}
               </div>
             </div>
           </main>
@@ -212,17 +238,25 @@ export function PresetRecorder({
           <aside className="w-72 shrink-0 overflow-auto border-l border-border bg-panel p-3 text-xs">
             <div className="mb-3 text-[11px] text-muted-foreground">
               <strong>How it works:</strong> Drag parts to pose them. Click <em>Capture pose</em>.
-              Move the time slider, repose, capture again. Save when done.
-              The preset interpolates smoothly between captures.
+              Move the time slider, repose, capture again. Save when done. The preset interpolates
+              smoothly between captures.
             </div>
 
             <div className="mb-3">
               <div className="mb-1 flex items-center justify-between">
-                <span className="font-semibold uppercase tracking-wider text-muted-foreground">Time</span>
-                <span className="text-[10px] text-muted-foreground">{time.toFixed(2)}s / {duration.toFixed(2)}s</span>
+                <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+                  Time
+                </span>
+                <span className="text-[10px] text-muted-foreground">
+                  {time.toFixed(2)}s / {duration.toFixed(2)}s
+                </span>
               </div>
               <input
-                type="range" min={0} max={duration} step={0.05} value={time}
+                type="range"
+                min={0}
+                max={duration}
+                step={0.05}
+                value={time}
                 onChange={(e) => setTime(Number(e.target.value))}
                 className="w-full"
               />
@@ -235,7 +269,9 @@ export function PresetRecorder({
             </div>
 
             <div className="mb-3">
-              <div className="mb-1 font-semibold uppercase tracking-wider text-muted-foreground">Captured poses</div>
+              <div className="mb-1 font-semibold uppercase tracking-wider text-muted-foreground">
+                Captured poses
+              </div>
               {keyposes.length === 0 && (
                 <div className="rounded border border-dashed border-border p-2 text-center text-[10px] text-muted-foreground">
                   No poses yet. Pose the character and click capture.
@@ -252,15 +288,20 @@ export function PresetRecorder({
                     <button onClick={() => setTime(k.t)} className="flex-1 text-left">
                       {k.t.toFixed(2)}s · {k.parts.length} parts
                     </button>
-                    <button onClick={() => removeKeypose(k.t)} className="text-[10px] text-destructive">✕</button>
+                    <button
+                      onClick={() => removeKeypose(k.t)}
+                      className="text-[10px] text-destructive"
+                    >
+                      ✕
+                    </button>
                   </li>
                 ))}
               </ul>
             </div>
 
             <div className="rounded border border-border bg-panel-2 p-2 text-[10px] text-muted-foreground">
-              <strong>Tip:</strong> Only parts you change get captured. To layer this preset
-              with others (e.g. add "Surprised" on top of "Wave"), only pose the parts that matter.
+              <strong>Tip:</strong> Only parts you change get captured. To layer this preset with
+              others (e.g. add "Surprised" on top of "Wave"), only pose the parts that matter.
             </div>
           </aside>
         </div>
@@ -270,7 +311,10 @@ export function PresetRecorder({
 }
 
 function PoseLayer({
-  part, override, scale, onChange,
+  part,
+  override,
+  scale,
+  onChange,
 }: {
   part: CharacterPart;
   override?: RecorderPartState;
@@ -286,8 +330,10 @@ function PoseLayer({
   const onPointerDown = (e: React.PointerEvent) => {
     e.stopPropagation();
     if (e.button !== 0) return;
-    const sx = e.clientX, sy = e.clientY;
-    const ox = dx, oy = dy;
+    const sx = e.clientX,
+      sy = e.clientY;
+    const ox = dx,
+      oy = dy;
     const move = (ev: PointerEvent) => {
       onChange({
         dx: Math.round(ox + (ev.clientX - sx) / scale),
@@ -321,37 +367,54 @@ function PoseLayer({
       }}
       title={`${part.role} — drag to pose`}
     >
-      {url && <img src={url} alt={part.name} draggable={false} className="h-full w-full object-contain pointer-events-none" />}
+      {url && (
+        <img
+          src={url}
+          alt={part.name}
+          draggable={false}
+          className="h-full w-full object-contain pointer-events-none"
+        />
+      )}
     </div>
   );
 }
 
 /** Sample interpolated overrides at time t for the recorder UI. */
-function sampleKeyposesAtTime(keyposes: RecordedKeypose[], t: number): Map<string, RecordedPartOverride> {
+function sampleKeyposesAtTime(
+  keyposes: RecordedKeypose[],
+  t: number,
+): Map<string, RecordedPartOverride> {
   const out = new Map<string, RecordedPartOverride>();
   if (keyposes.length === 0) return out;
   const sorted = [...keyposes].sort((a, b) => a.t - b.t);
   let a = sorted[0];
   let b = sorted[sorted.length - 1];
   for (let i = 0; i < sorted.length - 1; i++) {
-    if (sorted[i + 1].t >= t) { a = sorted[i]; b = sorted[i + 1]; break; }
+    if (sorted[i + 1].t >= t) {
+      a = sorted[i];
+      b = sorted[i + 1];
+      break;
+    }
   }
   const span = Math.max(0.0001, b.t - a.t);
   const u = Math.max(0, Math.min(1, (t - a.t) / span));
-  const roles = new Set<string>();
-  for (const p of a.parts) roles.add(p.partRole);
-  for (const p of b.parts) roles.add(p.partRole);
-  for (const role of roles) {
-    const pa = a.parts.find((p) => p.partRole === role);
-    const pb = b.parts.find((p) => p.partRole === role);
+  const targets = new Set<string>();
+  for (const p of a.parts) targets.add(recordedTargetKey(p));
+  for (const p of b.parts) targets.add(recordedTargetKey(p));
+  for (const target of targets) {
+    const pa = a.parts.find((p) => recordedTargetKey(p) === target);
+    const pb = b.parts.find((p) => recordedTargetKey(p) === target);
+    const src = pa ?? pb;
+    if (!src) continue;
     const lerp = (av?: number, bv?: number, def = 0) => {
       if (av === undefined && bv === undefined) return def;
       if (av === undefined) return (bv as number) * u + def * (1 - u);
       if (bv === undefined) return av * (1 - u) + def * u;
       return av + (bv - av) * u;
     };
-    out.set(role, {
-      partRole: role as CharacterPart["role"],
+    out.set(target, {
+      partRole: src.partRole,
+      slotId: src.slotId,
       dx: lerp(pa?.dx, pb?.dx, 0),
       dy: lerp(pa?.dy, pb?.dy, 0),
       scale: lerp(pa?.scale, pb?.scale, 1),
@@ -361,8 +424,9 @@ function sampleKeyposesAtTime(keyposes: RecordedKeypose[], t: number): Map<strin
   return out;
 }
 
-// Helper: silence unused-import warning for pickActivePart (kept for future role-aware features)
-void pickActivePart;
+function recordedTargetKey(part: RecordedPartOverride) {
+  return part.slotId ?? part.partRole;
+}
 
 function round(n: number, digits: number) {
   const k = Math.pow(10, digits);

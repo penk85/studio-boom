@@ -4,9 +4,10 @@ import { Link } from "@tanstack/react-router";
 import { db, deleteMedia, importMediaFile, uid } from "../db";
 import { useStudio } from "../store";
 import type { CharacterClip, MediaAsset } from "../types";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMediaUrl } from "../hooks/useMediaUrl";
 import { createBlankCharacter } from "../character/character-utils";
+import { ensureStarterCharacterSeeded } from "../character/starter";
 import { ensurePresetsSeeded } from "../presets/seed";
 
 const TABS = [
@@ -56,7 +57,12 @@ function CharactersTab() {
   const project = useStudio((s) => s.project);
   const playhead = useStudio((s) => s.playhead);
   const addClip = useStudio((s) => s.addClip);
-  const characters = useLiveQuery(() => db.characters.orderBy("updatedAt").reverse().toArray(), []) ?? [];
+  const characters =
+    useLiveQuery(() => db.characters.orderBy("updatedAt").reverse().toArray(), []) ?? [];
+
+  useEffect(() => {
+    void ensureStarterCharacterSeeded();
+  }, []);
 
   const newCharacter = async () => {
     const c = createBlankCharacter();
@@ -65,11 +71,26 @@ function CharactersTab() {
     window.open(`/character/${c.id}`, "_blank");
   };
 
-  const placeOnTimeline = (characterId: string, name: string) => {
+  const placeOnTimeline = (
+    characterId: string,
+    name: string,
+    canvasWidth = 600,
+    canvasHeight = 900,
+  ) => {
     if (!project) return;
-    const trackIndex = Math.max(0, project.tracks.findIndex((t) => t.kind === "character"));
-    const w = Math.round(project.width * 0.3);
-    const h = Math.round(project.height * 0.6);
+    const trackIndex = Math.max(
+      0,
+      project.tracks.findIndex((t) => t.kind === "character"),
+    );
+    const aspect = canvasWidth / Math.max(1, canvasHeight);
+    const maxW = Math.round(project.width * 0.42);
+    const maxH = Math.round(project.height * 0.68);
+    let h = maxH;
+    let w = Math.round(h * aspect);
+    if (w > maxW) {
+      w = maxW;
+      h = Math.round(w / Math.max(0.1, aspect));
+    }
     const clip: CharacterClip = {
       id: uid(),
       kind: "character",
@@ -93,7 +114,8 @@ function CharactersTab() {
   const placePlaceholder = () => placeOnTimeline("stub", "Voice Character");
 
   const deleteCharacter = async (id: string) => {
-    if (!confirm("Delete this character? Clips referencing it will keep playing as placeholders.")) return;
+    if (!confirm("Delete this character? Clips referencing it will keep playing as placeholders."))
+      return;
     await db.characters.delete(id);
   };
 
@@ -118,7 +140,8 @@ function CharactersTab() {
 
       {characters.length === 0 && (
         <div className="rounded border border-dashed border-border bg-panel-2 p-3 text-muted-foreground">
-          No characters yet. Click "+ New character" to upload parts (head, mouth shapes, eyes, body, arms, legs), align them on the canvas, and save a reusable rig.
+          No characters yet. Click "+ New character" to upload parts (head, mouth shapes, eyes,
+          body, arms, legs), align them on the canvas, and save a reusable rig.
         </div>
       )}
 
@@ -136,11 +159,13 @@ function CharactersTab() {
               </button>
             </div>
             <div className="mb-2 text-[10px] text-muted-foreground">
-              {c.parts.length} part{c.parts.length !== 1 ? "s" : ""} · {c.canvasWidth}×{c.canvasHeight}{c.parallaxEnabled ? " · parallax" : ""}
+              {c.parts.length} part{c.parts.length !== 1 ? "s" : ""} · {c.canvasWidth}×
+              {c.canvasHeight}
+              {c.parallaxEnabled ? " · parallax" : ""}
             </div>
             <div className="flex gap-1">
               <button
-                onClick={() => placeOnTimeline(c.id, c.name)}
+                onClick={() => placeOnTimeline(c.id, c.name, c.canvasWidth, c.canvasHeight)}
                 disabled={!project}
                 className="flex-1 rounded bg-primary/30 px-2 py-1 text-[11px] hover:bg-primary/50 disabled:opacity-50"
               >
@@ -162,7 +187,9 @@ function CharactersTab() {
 }
 
 function PresetsTab() {
-  useEffect(() => { void ensurePresetsSeeded(); }, []);
+  useEffect(() => {
+    void ensurePresetsSeeded();
+  }, []);
   const presets = useLiveQuery(() => db.movements.orderBy("category").toArray(), []) ?? [];
 
   const grouped = new Map<string, typeof presets>();
@@ -175,7 +202,9 @@ function PresetsTab() {
   return (
     <div className="space-y-3 p-3 text-xs">
       <div className="rounded border border-border bg-panel-2 p-2 text-muted-foreground">
-        Apply these to a character clip from the Inspector. Built-ins cover expressions ("Surprised", "Happy"), gestures ("Wave", "Nod"), full-body ("Idle bob", "Jump") and camera moves.
+        Apply these to a character clip from the Inspector. Built-ins cover expressions
+        ("Surprised", "Happy"), gestures ("Wave", "Nod"), full-body ("Idle bob", "Jump") and camera
+        moves.
       </div>
       <Link
         to="/presets"
@@ -185,7 +214,9 @@ function PresetsTab() {
       </Link>
       {Array.from(grouped.entries()).map(([cat, items]) => (
         <div key={cat}>
-          <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">{cat}</div>
+          <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+            {cat}
+          </div>
           <ul className="space-y-1">
             {items.map((p) => (
               <li key={p.id} className="rounded border border-border bg-panel-2 px-2 py-1.5">
@@ -212,14 +243,36 @@ function ComingSoon({ what, desc }: { what: string; desc: string }) {
 }
 
 function MediaTab() {
-  const items = useLiveQuery(() => db.media.orderBy("createdAt").reverse().toArray(), []) ?? [];
+  const allItems = useLiveQuery(() => db.media.orderBy("createdAt").reverse().toArray(), []) ?? [];
+  const characters = useLiveQuery(() => db.characters.toArray(), []);
+  const project = useStudio((s) => s.project);
   const inputRef = useRef<HTMLInputElement>(null);
   const addMedia = useStudio((s) => s.addMediaToTimeline);
+
+  const internalMediaIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const character of characters ?? []) {
+      for (const part of character.parts) ids.add(part.mediaId);
+      for (const variant of character.headVariants ?? []) ids.add(variant.mediaId);
+    }
+    for (const clip of project?.clips ?? []) {
+      if (clip.kind === "character" && clip.lipSyncAudioId) ids.add(clip.lipSyncAudioId);
+    }
+    return ids;
+  }, [characters, project?.clips]);
+
+  const items = allItems.filter(
+    (asset) => (asset.scope ?? "library") === "library" && !internalMediaIds.has(asset.id),
+  );
 
   const onFiles = async (files: FileList | null) => {
     if (!files) return;
     for (const f of Array.from(files)) {
-      try { await importMediaFile(f); } catch (e) { console.error(e); }
+      try {
+        await importMediaFile(f);
+      } catch (e) {
+        console.error(e);
+      }
     }
   };
 
@@ -241,7 +294,12 @@ function MediaTab() {
       />
       <div className="grid grid-cols-2 gap-2">
         {items.map((m) => (
-          <MediaTile key={m.id} asset={m} onAdd={() => addMedia(m)} onDelete={() => deleteMedia(m.id)} />
+          <MediaTile
+            key={m.id}
+            asset={m}
+            onAdd={() => addMedia(m)}
+            onDelete={() => deleteMedia(m.id)}
+          />
         ))}
         {items.length === 0 && (
           <div className="col-span-2 text-center text-xs text-muted-foreground">
@@ -253,7 +311,15 @@ function MediaTab() {
   );
 }
 
-function MediaTile({ asset, onAdd, onDelete }: { asset: MediaAsset; onAdd: () => void; onDelete: () => void }) {
+function MediaTile({
+  asset,
+  onAdd,
+  onDelete,
+}: {
+  asset: MediaAsset;
+  onAdd: () => void;
+  onDelete: () => void;
+}) {
   const url = useMediaUrl(asset.id);
   return (
     <div className="group relative overflow-hidden rounded-md border border-border bg-panel-2">
@@ -265,9 +331,7 @@ function MediaTile({ asset, onAdd, onDelete }: { asset: MediaAsset; onAdd: () =>
           {asset.kind === "video" && url && (
             <video src={url} className="h-full w-full object-cover" muted />
           )}
-          {asset.kind === "audio" && (
-            <span className="text-2xl">🎵</span>
-          )}
+          {asset.kind === "audio" && <span className="text-2xl">🎵</span>}
         </div>
         <div className="px-2 py-1.5 text-left">
           <div className="truncate text-[11px] font-medium text-foreground">{asset.name}</div>
@@ -275,7 +339,10 @@ function MediaTile({ asset, onAdd, onDelete }: { asset: MediaAsset; onAdd: () =>
         </div>
       </button>
       <button
-        onClick={(e) => { e.stopPropagation(); onDelete(); }}
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
         className="absolute right-1 top-1 hidden rounded bg-black/60 px-1.5 text-[10px] text-foreground hover:bg-destructive group-hover:block"
         title="Delete"
       >

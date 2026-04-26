@@ -13,15 +13,15 @@ import type {
 export interface ComposedDelta {
   dx: number;
   dy: number;
-  scale: number;     // 1 = no change
-  rotation: number;  // additive degrees
+  scale: number; // 1 = no change
+  rotation: number; // additive degrees
   opacity: number | null; // null = inherit
 }
 
 export interface ComposedActions {
-  /** partRole -> delta */
+  /** role:<partRole> or slot:<slotId> -> delta */
   perPart: Map<string, ComposedDelta>;
-  /** partRole -> pose name to swap to */
+  /** role:<partRole> or slot:<slotId> -> pose name to swap to */
   poseSwap: Map<string, string>;
   /** partRoles whose mouth visemes should be ignored. */
   mouthLocked: boolean;
@@ -62,9 +62,7 @@ function interpKf(a: ActionKeyframe, b: ActionKeyframe, u: number): ComposedDelt
     scale: lerp(a.scale, b.scale, 1),
     rotation: lerp(a.rotation, b.rotation, 0),
     opacity:
-      a.opacity === undefined && b.opacity === undefined
-        ? null
-        : lerp(a.opacity, b.opacity, 1),
+      a.opacity === undefined && b.opacity === undefined ? null : lerp(a.opacity, b.opacity, 1),
   };
 }
 
@@ -115,6 +113,22 @@ function combine(a: ComposedDelta, b: ComposedDelta): ComposedDelta {
   };
 }
 
+function roleKey(role: PartRole) {
+  return `role:${role}`;
+}
+
+function slotKey(slotId: string) {
+  return `slot:${slotId}`;
+}
+
+function trackTargetKey(track: { partRole: PartRole | "__camera"; slotId?: string }) {
+  return track.slotId ? slotKey(track.slotId) : roleKey(track.partRole as PartRole);
+}
+
+function overrideTargetKey(override: { partRole: PartRole; slotId?: string }) {
+  return override.slotId ? slotKey(override.slotId) : roleKey(override.partRole);
+}
+
 export function composeActionsAt(
   clip: CharacterClip,
   tInClip: number,
@@ -139,6 +153,7 @@ export function composeActionsAt(
 
     if (preset.category === "headTurn" && preset.headTurn) {
       out.headDirection = u >= 0.5 ? preset.headTurn.to : preset.headTurn.from;
+      out.poseSwap.set(roleKey("body"), out.headDirection);
       out.headDirectionBlend = {
         from: preset.headTurn.from,
         to: preset.headTurn.to,
@@ -160,9 +175,10 @@ export function composeActionsAt(
         continue;
       }
       const role = track.partRole as PartRole;
-      const prev = out.perPart.get(role) ?? emptyDelta();
-      out.perPart.set(role, combine(prev, sample));
-      if (track.poseSwap) out.poseSwap.set(role, track.poseSwap);
+      const key = trackTargetKey(track);
+      const prev = out.perPart.get(key) ?? emptyDelta();
+      out.perPart.set(key, combine(prev, sample));
+      if (track.poseSwap) out.poseSwap.set(key, track.poseSwap);
       if (role === "mouth" && track.lockMouth) out.mouthLocked = true;
     }
   }
@@ -183,7 +199,11 @@ function applyKeyposes(
   let a = sorted[0];
   let b = sorted[sorted.length - 1];
   for (let i = 0; i < sorted.length - 1; i++) {
-    if (sorted[i + 1].t >= t) { a = sorted[i]; b = sorted[i + 1]; break; }
+    if (sorted[i + 1].t >= t) {
+      a = sorted[i];
+      b = sorted[i + 1];
+      break;
+    }
   }
   const span = Math.max(0.0001, b.t - a.t);
   const u = ease(b.ease ?? a.ease, Math.max(0, Math.min(1, (t - a.t) / span)));
@@ -197,12 +217,14 @@ function applyKeyposes(
   out.camera.dy += cdy * intensity;
   out.camera.zoom *= 1 + (cz - 1) * intensity;
 
-  const roles = new Set<PartRole>();
-  for (const p of a.parts) roles.add(p.partRole);
-  for (const p of b.parts) roles.add(p.partRole);
-  for (const role of roles) {
-    const pa = a.parts.find((p) => p.partRole === role);
-    const pb = b.parts.find((p) => p.partRole === role);
+  const targets = new Set<string>();
+  for (const p of a.parts) targets.add(overrideTargetKey(p));
+  for (const p of b.parts) targets.add(overrideTargetKey(p));
+  for (const key of targets) {
+    const pa = a.parts.find((p) => overrideTargetKey(p) === key);
+    const pb = b.parts.find((p) => overrideTargetKey(p) === key);
+    const role = (pa ?? pb)?.partRole;
+    if (!role) continue;
     const lerp = (av?: number, bv?: number, def = 0) => {
       if (av === undefined && bv === undefined) return def;
       if (av === undefined) return (bv as number) * u + def * (1 - u);
@@ -220,10 +242,10 @@ function applyKeyposes(
           : lerp(pa?.opacity, pb?.opacity, 1),
     };
     const scaled = applyIntensity(sample, intensity);
-    const prev = out.perPart.get(role) ?? emptyDelta();
-    out.perPart.set(role, combine(prev, scaled));
+    const prev = out.perPart.get(key) ?? emptyDelta();
+    out.perPart.set(key, combine(prev, scaled));
     const swap = (u >= 0.5 ? pb?.poseSwap : pa?.poseSwap) ?? pa?.poseSwap ?? pb?.poseSwap;
-    if (swap) out.poseSwap.set(role, swap);
+    if (swap) out.poseSwap.set(key, swap);
   }
 }
 
@@ -231,6 +253,20 @@ function applyKeyposes(
 export function deltaFor(
   composed: ComposedActions,
   role: PartRole,
+  slotId?: string,
 ): ComposedDelta {
-  return composed.perPart.get(role) ?? emptyDelta();
+  const roleDelta = composed.perPart.get(roleKey(role)) ?? emptyDelta();
+  const slotDelta = slotId ? composed.perPart.get(slotKey(slotId)) : undefined;
+  return slotDelta ? combine(roleDelta, slotDelta) : roleDelta;
+}
+
+export function poseSwapFor(
+  composed: ComposedActions,
+  role: PartRole,
+  slotId?: string,
+): string | undefined {
+  return (
+    (slotId ? composed.poseSwap.get(slotKey(slotId)) : undefined) ??
+    composed.poseSwap.get(roleKey(role))
+  );
 }

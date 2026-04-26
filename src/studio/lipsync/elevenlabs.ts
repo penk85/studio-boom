@@ -53,7 +53,7 @@ export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
   const blob = base64ToBlob(result.audioBase64, result.mimeType);
   const filename = `voice-${charClip.name || "line"}-${Date.now()}.mp3`;
   const file = new File([blob], filename, { type: result.mimeType });
-  const asset = await importMediaFile(file);
+  const asset = await importMediaFile(file, { scope: "generated-audio" });
 
   // Build viseme track
   const visemes = alignmentToVisemes(result.alignment);
@@ -97,8 +97,12 @@ export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
     trackIndex: audioTrackIndex(proj),
     start: charClip.start,
     duration: audioDuration,
-    x: 0, y: 0, width: 0, height: 0,
-    rotation: 0, opacity: 1,
+    x: 0,
+    y: 0,
+    width: 0,
+    height: 0,
+    rotation: 0,
+    opacity: 1,
     zIndex: proj.clips.length,
   };
   state.addClip(audioClip);

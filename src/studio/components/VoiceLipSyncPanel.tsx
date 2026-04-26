@@ -1,14 +1,14 @@
 // Voice & Lip Sync panel — visible when a character clip is selected.
 // Generates ElevenLabs TTS + character timestamps and applies as visemes.
-import { useState } from "react";
-import type { CharacterClip } from "../types";
+import { useMemo, useState } from "react";
+import { useLiveQuery } from "dexie-react-hooks";
+import type { CharacterClip, MouthViseme } from "../types";
 import { useStudio } from "../store";
-import {
-  ELEVENLABS_VOICES,
-  ELEVENLABS_MODELS,
-  DEFAULT_VOICE_ID,
-} from "../lipsync/voices";
+import { db } from "../db";
+import { ELEVENLABS_VOICES, ELEVENLABS_MODELS, DEFAULT_VOICE_ID } from "../lipsync/voices";
 import { generateLipSyncForClip } from "../lipsync/elevenlabs";
+
+const MOUTH_VISEMES: MouthViseme[] = ["rest", "A", "E", "I", "O", "U", "MBP", "FV", "L"];
 
 export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
   const update = useStudio((s) => s.updateClip);
@@ -16,15 +16,21 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
   const [text, setText] = useState(initial?.text ?? "");
   const [voiceId, setVoiceId] = useState(initial?.voiceId ?? DEFAULT_VOICE_ID);
   const [customId, setCustomId] = useState("");
-  const [modelId, setModelId] = useState(
-    initial?.modelId ?? "eleven_multilingual_v2",
-  );
+  const [modelId, setModelId] = useState(initial?.modelId ?? "eleven_multilingual_v2");
   const [stability, setStability] = useState(initial?.stability ?? 0.5);
   const [similarity, setSimilarity] = useState(initial?.similarityBoost ?? 0.75);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const character = useLiveQuery(() => db.characters.get(clip.characterId), [clip.characterId]);
 
   const visemeCount = clip.visemes?.length ?? 0;
+  const availableMouthShapes = useMemo(() => {
+    const shapes = new Set<MouthViseme>();
+    for (const part of character?.parts ?? []) {
+      if (part.role === "mouth" && part.viseme) shapes.add(part.viseme);
+    }
+    return shapes;
+  }, [character?.parts]);
 
   const onGenerate = async () => {
     setError(null);
@@ -61,11 +67,35 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
           Voice & Lip Sync
         </span>
         {visemeCount > 0 && (
-          <span className="text-[10px] text-primary">
-            {visemeCount} viseme keys
-          </span>
+          <span className="text-[10px] text-primary">{visemeCount} viseme keys</span>
         )}
       </div>
+
+      {character && (
+        <div className="rounded border border-border bg-panel p-2">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Mouth shapes
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {MOUTH_VISEMES.map((shape) => {
+              const available = availableMouthShapes.has(shape);
+              return (
+                <span
+                  key={shape}
+                  className={`rounded px-1.5 py-0.5 text-[10px] ${
+                    available
+                      ? "bg-primary/25 text-foreground"
+                      : "border border-border text-muted-foreground"
+                  }`}
+                  title={available ? "Available for lip sync" : "Missing mouth image"}
+                >
+                  {shape}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <label className="block">
         <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
@@ -188,9 +218,8 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
       </div>
 
       <p className="text-[10px] leading-relaxed text-muted-foreground">
-        Powered by ElevenLabs. Mouth shapes are derived from the per-character
-        audio timestamps and applied to the character&apos;s mouth parts during
-        playback.
+        Powered by ElevenLabs. Mouth shapes are derived from the per-character audio timestamps and
+        applied to the character&apos;s mouth parts during playback.
       </p>
     </div>
   );

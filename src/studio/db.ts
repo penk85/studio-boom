@@ -1,13 +1,7 @@
 // Dexie database — local-first storage for projects, characters,
 // movement presets, and media blobs. Everything stays in the browser.
 import Dexie, { type Table } from "dexie";
-import type {
-  ActionPreset,
-  CharacterPreset,
-  MediaAsset,
-  MediaBlobRow,
-  Project,
-} from "./types";
+import type { ActionPreset, CharacterPreset, MediaAsset, MediaBlobRow, Project } from "./types";
 
 class StudioDB extends Dexie {
   projects!: Table<Project, string>;
@@ -43,15 +37,24 @@ class StudioDB extends Dexie {
           const legacy = row as ActionPreset & { keyframes?: unknown };
           if (Array.isArray(legacy.keyframes) && !row.tracks) {
             const kfs = legacy.keyframes as Array<{
-              t: number; x?: number; y?: number; scale?: number;
-              rotation?: number; opacity?: number; ease?: string;
+              t: number;
+              x?: number;
+              y?: number;
+              scale?: number;
+              rotation?: number;
+              opacity?: number;
+              ease?: string;
               poses?: Record<string, string>;
             }>;
             const dur = Math.max(0.1, ...kfs.map((k) => k.t || 0));
             const norm = kfs.map((k) => ({
               t: dur > 0 ? Math.min(1, Math.max(0, k.t / dur)) : 0,
-              dx: k.x, dy: k.y, scale: k.scale,
-              rotation: k.rotation, opacity: k.opacity, ease: k.ease,
+              dx: k.x,
+              dy: k.y,
+              scale: k.scale,
+              rotation: k.rotation,
+              opacity: k.opacity,
+              ease: k.ease,
             }));
             await table.put({
               ...row,
@@ -95,15 +98,39 @@ class StudioDB extends Dexie {
           }
         }
       });
+    // v4: add stable part slot ids so actions can target exact rig layers.
+    this.version(4)
+      .stores({
+        projects: "id, name, updatedAt",
+        characters: "id, name, updatedAt",
+        movements: "id, name, category, createdAt",
+        media: "id, name, kind, createdAt",
+        mediaBlobs: "id",
+      })
+      .upgrade(async (tx) => {
+        const table = tx.table<CharacterPreset>("characters");
+        const all = await table.toArray();
+        for (const row of all) {
+          const parts = row.parts.map((part) => {
+            const slotId = part.slotId ?? slotIdForPart(part.role, part.id);
+            return {
+              ...part,
+              slotId,
+              slotName: part.slotName ?? roleLabelForSlot(part.role),
+            };
+          });
+          await table.put({ ...row, parts, updatedAt: Date.now() });
+        }
+      });
   }
 }
 
 export const db = new StudioDB();
 
 export const uid = () =>
-  (typeof crypto !== "undefined" && "randomUUID" in crypto
+  typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
-    : Math.random().toString(36).slice(2) + Date.now().toString(36));
+    : Math.random().toString(36).slice(2) + Date.now().toString(36);
 
 /** Get a Blob URL for a media asset, caching by id. */
 const blobUrlCache = new Map<string, string>();
@@ -141,32 +168,34 @@ async function probeFile(file: File, kind: MediaAsset["kind"]) {
     });
   }
   if (kind === "audio" || kind === "video") {
-    return new Promise<{ width?: number; height?: number; duration: number }>(
-      (resolve) => {
-        const url = URL.createObjectURL(file);
-        const el = document.createElement(kind === "audio" ? "audio" : "video") as
-          HTMLMediaElement & { videoWidth?: number; videoHeight?: number };
-        el.preload = "metadata";
-        el.onloadedmetadata = () => {
-          resolve({
-            duration: isFinite(el.duration) ? el.duration : 0,
-            width: (el as HTMLVideoElement).videoWidth,
-            height: (el as HTMLVideoElement).videoHeight,
-          });
-          URL.revokeObjectURL(url);
-        };
-        el.onerror = () => {
-          resolve({ duration: 0 });
-          URL.revokeObjectURL(url);
-        };
-        el.src = url;
-      },
-    );
+    return new Promise<{ width?: number; height?: number; duration: number }>((resolve) => {
+      const url = URL.createObjectURL(file);
+      const el = document.createElement(
+        kind === "audio" ? "audio" : "video",
+      ) as HTMLMediaElement & { videoWidth?: number; videoHeight?: number };
+      el.preload = "metadata";
+      el.onloadedmetadata = () => {
+        resolve({
+          duration: isFinite(el.duration) ? el.duration : 0,
+          width: (el as HTMLVideoElement).videoWidth,
+          height: (el as HTMLVideoElement).videoHeight,
+        });
+        URL.revokeObjectURL(url);
+      };
+      el.onerror = () => {
+        resolve({ duration: 0 });
+        URL.revokeObjectURL(url);
+      };
+      el.src = url;
+    });
   }
   return {};
 }
 
-export async function importMediaFile(file: File): Promise<MediaAsset> {
+export async function importMediaFile(
+  file: File,
+  opts: { scope?: MediaAsset["scope"] } = {},
+): Promise<MediaAsset> {
   const kind: MediaAsset["kind"] = file.type.startsWith("image/")
     ? "image"
     : file.type.startsWith("audio/")
@@ -178,6 +207,7 @@ export async function importMediaFile(file: File): Promise<MediaAsset> {
     name: file.name.replace(/\.[^/.]+$/, ""),
     filename: file.name,
     kind,
+    scope: opts.scope ?? "library",
     mimeType: file.type || "application/octet-stream",
     createdAt: Date.now(),
     ...probe,
@@ -195,4 +225,41 @@ export async function deleteMedia(id: string) {
     await db.media.delete(id);
     await db.mediaBlobs.delete(id);
   });
+}
+
+function slotIdForPart(role: CharacterPreset["parts"][number]["role"], partId: string) {
+  return role === "extra" ? `extra:${partId}` : `role:${role}`;
+}
+
+function roleLabelForSlot(role: CharacterPreset["parts"][number]["role"]) {
+  switch (role) {
+    case "head":
+      return "Head";
+    case "body":
+      return "Body";
+    case "armL":
+      return "Left Arm";
+    case "armR":
+      return "Right Arm";
+    case "legL":
+      return "Left Leg";
+    case "legR":
+      return "Right Leg";
+    case "eye":
+      return "Eyes";
+    case "eyeL":
+      return "Left Eye";
+    case "eyeR":
+      return "Right Eye";
+    case "brow":
+      return "Brows";
+    case "browL":
+      return "Left Brow";
+    case "browR":
+      return "Right Brow";
+    case "mouth":
+      return "Mouth";
+    case "extra":
+      return "Extra";
+  }
 }

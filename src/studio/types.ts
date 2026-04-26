@@ -10,6 +10,8 @@ export interface MediaAsset {
   name: string;
   /** "image" | "audio" | "video" */
   kind: "image" | "audio" | "video";
+  /** Internal character/voice assets stay out of the user-facing media gallery. */
+  scope?: "library" | "character-part" | "generated-audio";
   mimeType: string;
   /** Original filename (for export). */
   filename: string;
@@ -43,21 +45,16 @@ export type PartRole =
   | "mouth"
   | "extra";
 
-export type MouthViseme =
-  | "rest"
-  | "A"
-  | "E"
-  | "I"
-  | "O"
-  | "U"
-  | "MBP"
-  | "FV"
-  | "L";
+export type MouthViseme = "rest" | "A" | "E" | "I" | "O" | "U" | "MBP" | "FV" | "L";
 
 export type EyeState = "open" | "half" | "closed" | "wink";
 
 export interface CharacterPart {
   id: ID;
+  /** Stable animatable layer. Variants of the same layer share this id. */
+  slotId: ID;
+  /** User-facing slot label, e.g. "Left brow" or "Mouth". */
+  slotName?: string;
   role: PartRole;
   /** Display name, e.g. "Left Arm — raised". */
   name: string;
@@ -69,10 +66,13 @@ export interface CharacterPart {
   eyeState?: EyeState;
   mediaId: ID;
   // Transform on the character canvas:
-  x: number; y: number;
-  width: number; height: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
   rotation: number; // degrees
-  anchorX: number; anchorY: number; // 0..1 within the part (used as transform origin)
+  anchorX: number;
+  anchorY: number; // 0..1 within the part (used as transform origin)
   zIndex: number;
   /** Parallax depth (-1 back .. 0 neutral .. +1 front). */
   depth: number;
@@ -153,16 +153,18 @@ export interface ActionKeyframe {
   /** Offset deltas applied on top of the part's rest pose. */
   dx?: number;
   dy?: number;
-  scale?: number;     // multiplier (1 = unchanged)
-  rotation?: number;  // additive degrees
-  opacity?: number;   // 0..1, replaces base
-  ease?: string;      // simple name: linear|easeIn|easeOut|easeInOut
+  scale?: number; // multiplier (1 = unchanged)
+  rotation?: number; // additive degrees
+  opacity?: number; // 0..1, replaces base
+  ease?: string; // simple name: linear|easeIn|easeOut|easeInOut
 }
 
 /** Per-part track inside an Action Preset. */
 export interface ActionTrack {
   /** Which part role to drive (e.g. "mouth", "armR", "brow"). */
   partRole: PartRole | "__camera";
+  /** Optional exact slot target for character-specific presets. */
+  slotId?: ID;
   /** Optional pose/variant swap for this part. Held for the duration. */
   poseSwap?: string;
   /** If true, this preset's mouth track overrides lip sync visemes. */
@@ -182,6 +184,8 @@ export type ActionCategory =
  *  Each part override stores a *delta* relative to that part's rest pose. */
 export interface RecordedPartOverride {
   partRole: PartRole;
+  /** Exact slot target when this was recorded against a specific character. */
+  slotId?: ID;
   /** Pose/variant tag to swap to (optional). */
   poseSwap?: string;
   dx?: number;
@@ -246,8 +250,10 @@ export interface BaseClip {
   start: number; // seconds on the project timeline
   duration: number;
   // Stage transform (ignored for pure audio):
-  x: number; y: number;
-  width: number; height: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
   rotation: number;
   opacity: number;
   zIndex: number;

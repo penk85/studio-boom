@@ -9,8 +9,8 @@ import { clipActiveAt } from "../timeline-utils";
 import { useMediaUrl } from "../hooks/useMediaUrl";
 import { visemeAt } from "../lipsync/visemeMap";
 import { ensurePresetsSeeded } from "../presets/seed";
-import { composeActionsAt, deltaFor } from "../presets/apply";
-import { pickActivePart } from "../character/character-utils";
+import { composeActionsAt, deltaFor, poseSwapFor } from "../presets/apply";
+import { listCharacterSlots, pickActivePartForSlot } from "../character/character-utils";
 import { combinedParallax } from "../character/parallax";
 
 export function Stage() {
@@ -25,11 +25,19 @@ export function Stage() {
   const [scale, setScale] = useState(1);
 
   // Seed presets + load characters/presets for compositing
-  useEffect(() => { void ensurePresetsSeeded(); }, []);
-  const characters = useLiveQuery(() => db.characters.toArray(), []) ?? [];
-  const presets = useLiveQuery(() => db.movements.toArray(), []) ?? [];
-  const charMap = useMemo(() => new Map(characters.map((c) => [c.id, c] as const)), [characters]);
-  const presetMap = useMemo(() => new Map(presets.map((p) => [p.id, p] as const)), [presets]);
+  useEffect(() => {
+    void ensurePresetsSeeded();
+  }, []);
+  const characters = useLiveQuery(() => db.characters.toArray(), []);
+  const presets = useLiveQuery(() => db.movements.toArray(), []);
+  const charMap = useMemo(
+    () => new Map((characters ?? []).map((c) => [c.id, c] as const)),
+    [characters],
+  );
+  const presetMap = useMemo(
+    () => new Map((presets ?? []).map((p) => [p.id, p] as const)),
+    [presets],
+  );
 
   // Fit-to-container scale
   useEffect(() => {
@@ -49,9 +57,7 @@ export function Stage() {
   const activeClips = useMemo(
     () =>
       project
-        ? project.clips
-            .filter((c) => clipActiveAt(c, playhead))
-            .sort((a, b) => a.zIndex - b.zIndex)
+        ? project.clips.filter((c) => clipActiveAt(c, playhead)).sort((a, b) => a.zIndex - b.zIndex)
         : [],
     [project, playhead],
   );
@@ -96,7 +102,9 @@ export function Stage() {
                 scale={scale}
                 onSelect={() => selectClip(c.id)}
                 onChange={(p) => updateClip(c.id, p)}
-                character={c.kind === "character" ? charMap.get((c as CharacterClip).characterId) : undefined}
+                character={
+                  c.kind === "character" ? charMap.get((c as CharacterClip).characterId) : undefined
+                }
                 presetMap={presetMap}
               />
             ),
@@ -141,7 +149,11 @@ function ClipLayer({
     if (!v) return;
     const local = playhead - clip.start;
     if (Math.abs(v.currentTime - local) > 0.15) {
-      try { v.currentTime = Math.max(0, local); } catch { /* ignore */ }
+      try {
+        v.currentTime = Math.max(0, local);
+      } catch {
+        /* ignore */
+      }
     }
     if (playing) v.play().catch(() => {});
     else v.pause();
@@ -152,8 +164,10 @@ function ClipLayer({
     e.stopPropagation();
     onSelect();
     if (e.button !== 0) return;
-    const startX = e.clientX, startY = e.clientY;
-    const ox = clip.x, oy = clip.y;
+    const startX = e.clientX,
+      startY = e.clientY;
+    const ox = clip.x,
+      oy = clip.y;
     const move = (ev: PointerEvent) => {
       onChange({
         x: Math.round(ox + (ev.clientX - startX) / scale),
@@ -196,33 +210,39 @@ function ClipLayer({
         <img src={url} alt={clip.name} draggable={false} className="h-full w-full object-cover" />
       )}
       {clip.kind === "video" && url && (
-        <video
-          ref={videoRef}
-          src={url}
-          muted
-          playsInline
-          className="h-full w-full object-cover"
-        />
+        <video ref={videoRef} src={url} muted playsInline className="h-full w-full object-cover" />
       )}
-      {clip.kind === "character" && (
-        character
-          ? <CharacterRig clip={clip as CharacterClip} character={character} playhead={playhead} presetMap={presetMap} />
-          : <CharacterPlaceholder clip={clip as CharacterClip} playhead={playhead} />
-      )}
-      {selected && (
-        <Handle clip={clip} scale={scale} onChange={onChange} />
-      )}
+      {clip.kind === "character" &&
+        (character ? (
+          <CharacterRig
+            clip={clip as CharacterClip}
+            character={character}
+            playhead={playhead}
+            presetMap={presetMap}
+          />
+        ) : (
+          <CharacterPlaceholder clip={clip as CharacterClip} playhead={playhead} />
+        ))}
+      {selected && <Handle clip={clip} scale={scale} onChange={onChange} />}
     </div>
   );
 }
 
 function Handle({
-  clip, scale, onChange,
-}: { clip: AnyClip; scale: number; onChange: (p: Partial<AnyClip>) => void }) {
+  clip,
+  scale,
+  onChange,
+}: {
+  clip: AnyClip;
+  scale: number;
+  onChange: (p: Partial<AnyClip>) => void;
+}) {
   const start = (e: React.PointerEvent) => {
     e.stopPropagation();
-    const sx = e.clientX, sy = e.clientY;
-    const ow = clip.width, oh = clip.height;
+    const sx = e.clientX,
+      sy = e.clientY;
+    const ow = clip.width,
+      oh = clip.height;
     const move = (ev: PointerEvent) => {
       onChange({
         width: Math.max(8, Math.round(ow + (ev.clientX - sx) / scale)),
@@ -244,7 +264,15 @@ function Handle({
   );
 }
 
-function AudioLayer({ clip, playhead, playing }: { clip: MediaClip; playhead: number; playing: boolean }) {
+function AudioLayer({
+  clip,
+  playhead,
+  playing,
+}: {
+  clip: MediaClip;
+  playhead: number;
+  playing: boolean;
+}) {
   const url = useMediaUrl(clip.mediaId);
   const ref = useRef<HTMLAudioElement>(null);
   useEffect(() => {
@@ -252,7 +280,11 @@ function AudioLayer({ clip, playhead, playing }: { clip: MediaClip; playhead: nu
     if (!a) return;
     const local = playhead - clip.start;
     if (Math.abs(a.currentTime - local) > 0.15) {
-      try { a.currentTime = Math.max(0, local); } catch { /* ignore */ }
+      try {
+        a.currentTime = Math.max(0, local);
+      } catch {
+        /* ignore */
+      }
     }
     if (playing) a.play().catch(() => {});
     else a.pause();
@@ -262,8 +294,15 @@ function AudioLayer({ clip, playhead, playing }: { clip: MediaClip; playhead: nu
 }
 
 const VISEME_GLYPH: Record<string, string> = {
-  rest: "—", A: "A", E: "E", I: "I", O: "O", U: "U",
-  MBP: "M", FV: "F", L: "L",
+  rest: "—",
+  A: "A",
+  E: "E",
+  I: "I",
+  O: "O",
+  U: "U",
+  MBP: "M",
+  FV: "F",
+  L: "L",
 };
 
 function CharacterPlaceholder({ clip, playhead }: { clip: CharacterClip; playhead: number }) {
@@ -285,7 +324,10 @@ function CharacterPlaceholder({ clip, playhead }: { clip: CharacterClip; playhea
 
 /** Render a real character rig: composes parts, applies actions and parallax. */
 function CharacterRig({
-  clip, character, playhead, presetMap,
+  clip,
+  character,
+  playhead,
+  presetMap,
 }: {
   clip: CharacterClip;
   character: CharacterPreset;
@@ -297,9 +339,7 @@ function CharacterRig({
     () => composeActionsAt(clip, tInClip, presetMap),
     [clip, tInClip, presetMap],
   );
-  const viseme = composed.mouthLocked
-    ? undefined
-    : visemeAt(clip.visemes, tInClip);
+  const viseme = composed.mouthLocked ? undefined : visemeAt(clip.visemes, tInClip);
 
   // Active head variant (from headTurn presets)
   const headVariant = useMemo(() => {
@@ -312,8 +352,8 @@ function CharacterRig({
   // as clip motion for parallax purposes).
   const clipDelta = { dx: composed.camera.dx, dy: composed.camera.dy };
 
-  // Roles to render (one part per role based on viseme/eyeState/poseSwap/clip.poses)
-  const allRoles = Array.from(new Set(character.parts.map((p) => p.role)));
+  // Slots render one active variant each, while the whole rig remains one clip.
+  const slots = useMemo(() => listCharacterSlots(character.parts), [character.parts]);
 
   return (
     <div className="absolute inset-0 overflow-hidden">
@@ -325,51 +365,70 @@ function CharacterRig({
           transform: `scale(${clip.width / character.canvasWidth}, ${clip.height / character.canvasHeight})`,
         }}
       >
-        {allRoles
-          .map((role) => {
-            const poseSwap = composed.poseSwap.get(role) ?? clip.poses[role];
-            const part = pickActivePart(character.parts, role, {
-              pose: poseSwap,
-              viseme: role === "mouth" ? viseme : undefined,
-              eyeState: role.startsWith("eye") ? clip.poses["eye"] ?? "open" : undefined,
-            });
-            if (!part) return null;
-            const d = deltaFor(composed, role);
-            const parallax = combinedParallax(part.depth, character.parallax, {
-              clipDelta,
-            });
-            // If this is the head and a head variant is active, swap the media id.
-            const overrideMediaId = role === "head" && headVariant ? headVariant.mediaId : undefined;
-            // Apply per-direction face feature offset to face features.
-            const faceOffset =
-              headVariant && (role === "eye" || role === "eyeL" || role === "eyeR" ||
-                role === "brow" || role === "browL" || role === "browR" || role === "mouth")
-                ? { dx: headVariant.featureOffsetX ?? 0, dy: headVariant.featureOffsetY ?? 0 }
-                : { dx: 0, dy: 0 };
-            return (
-              <PartImage
-                key={role}
-                part={part}
-                overrideMediaId={overrideMediaId}
-                dx={d.dx + parallax.dx + faceOffset.dx}
-                dy={d.dy + parallax.dy + faceOffset.dy}
-                scale={d.scale}
-                rotation={d.rotation}
-                opacity={d.opacity ?? 1}
-              />
-            );
-          })}
+        {slots.map((slot) => {
+          const role = slot.role;
+          const poseSwap =
+            poseSwapFor(composed, role, slot.id) ?? clip.poses[slot.id] ?? clip.poses[role];
+          const part = pickActivePartForSlot(slot, {
+            pose: poseSwap,
+            viseme: role === "mouth" ? viseme : undefined,
+            eyeState: role.startsWith("eye")
+              ? (poseSwap ?? clip.poses[slot.id] ?? clip.poses[role] ?? clip.poses["eye"] ?? "open")
+              : undefined,
+          });
+          if (!part) return null;
+          const d = deltaFor(composed, role, slot.id);
+          const parallax = combinedParallax(part.depth, character.parallax, {
+            clipDelta,
+          });
+          // If this is the head and a head variant is active, swap the media id.
+          const overrideMediaId = role === "head" && headVariant ? headVariant.mediaId : undefined;
+          // Apply per-direction face feature offset to face features.
+          const faceOffset =
+            headVariant &&
+            (role === "eye" ||
+              role === "eyeL" ||
+              role === "eyeR" ||
+              role === "brow" ||
+              role === "browL" ||
+              role === "browR" ||
+              role === "mouth")
+              ? { dx: headVariant.featureOffsetX ?? 0, dy: headVariant.featureOffsetY ?? 0 }
+              : { dx: 0, dy: 0 };
+          return (
+            <PartImage
+              key={slot.id}
+              part={part}
+              overrideMediaId={overrideMediaId}
+              dx={d.dx + parallax.dx + faceOffset.dx}
+              dy={d.dy + parallax.dy + faceOffset.dy}
+              scale={d.scale}
+              rotation={d.rotation}
+              opacity={d.opacity ?? 1}
+            />
+          );
+        })}
       </div>
     </div>
   );
 }
 
 function PartImage({
-  part, overrideMediaId, dx, dy, scale, rotation, opacity,
+  part,
+  overrideMediaId,
+  dx,
+  dy,
+  scale,
+  rotation,
+  opacity,
 }: {
   part: import("../types").CharacterPart;
   overrideMediaId?: string;
-  dx: number; dy: number; scale: number; rotation: number; opacity: number;
+  dx: number;
+  dy: number;
+  scale: number;
+  rotation: number;
+  opacity: number;
 }) {
   const url = useMediaUrl(overrideMediaId ?? part.mediaId);
   if (!url) return null;
