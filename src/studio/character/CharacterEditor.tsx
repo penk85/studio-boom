@@ -414,7 +414,7 @@ function UploadVariantButton({
 }
 
 function PartLayer({
-  part, selected, scale, onionSkin, onSelect, onChange,
+  part, selected, scale, onionSkin, onChange,
 }: {
   part: CharacterPart;
   selected: boolean;
@@ -426,8 +426,8 @@ function PartLayer({
   const url = useMediaUrl(part.mediaId);
 
   const onPointerDown = (e: React.PointerEvent) => {
+    if (!selected) return; // Canvas is locked unless this part is the active one.
     e.stopPropagation();
-    onSelect();
     if (e.button !== 0) return;
     const sx = e.clientX, sy = e.clientY;
     const ox = part.x, oy = part.y;
@@ -473,7 +473,7 @@ function PartLayer({
   return (
     <div
       onPointerDown={onPointerDown}
-      className={`absolute select-none ${selected ? "outline-2 outline-primary" : "outline-1 outline-transparent hover:outline-accent/60"} outline outline-offset-0`}
+      className={`absolute select-none ${selected ? "outline-2 outline-primary" : "outline-1 outline-transparent"} outline outline-offset-0`}
       style={{
         left: part.x,
         top: part.y,
@@ -483,7 +483,9 @@ function PartLayer({
         transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
         zIndex: part.zIndex,
         opacity: skin,
-        cursor: "move",
+        // Locked unless this is the currently selected part — selection is list-only.
+        pointerEvents: selected ? "auto" : "none",
+        cursor: selected ? "move" : "default",
       }}
     >
       {url && <img src={url} alt={part.name} draggable={false} className="h-full w-full object-contain" />}
