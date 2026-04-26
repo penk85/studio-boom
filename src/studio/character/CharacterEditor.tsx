@@ -221,10 +221,7 @@ export function CharacterEditor({ characterId }: Props) {
             onChange={(p) => update({ parallax: p })}
           />
 
-          <HeadVariantsEditor
-            doc={doc}
-            onChange={(vars) => update({ headVariants: vars })}
-          />
+          {/* Head Variants moved into the Head part group on the left. */}
         </aside>
       </div>
 
