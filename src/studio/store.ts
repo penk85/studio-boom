@@ -1,7 +1,7 @@
 // Editor state — current project, playhead, selection, transport.
 // Persistence to Dexie happens via explicit save calls (autosave debounced).
 import { create } from "zustand";
-import { db, uid } from "./db";
+import { db, deleteMediaIfUnused, uid } from "./db";
 import type { AnyClip, CharacterClip, MediaAsset, MediaClip, Project, Track } from "./types";
 
 const DEFAULT_TRACKS: Track[] = [
@@ -229,11 +229,35 @@ export const useStudio = create<StudioState>((set, get) => ({
     const selectedWasRemoved = p.clips.some(
       (clip) => clip.id === selectedClipId && shouldRemove(clip),
     );
+    const removedMediaIds = new Set(
+      p.clips
+        .filter(shouldRemove)
+        .flatMap((clip) =>
+          clip.kind === "audio"
+            ? [(clip as MediaClip).mediaId]
+            : clip.kind === "character" && clip.lipSyncAudioId
+              ? [clip.lipSyncAudioId]
+              : [],
+        ),
+    );
     set({
       project: { ...p, clips: p.clips.filter((c) => !shouldRemove(c)), updatedAt: Date.now() },
       selectedClipId: selectedWasRemoved ? null : selectedClipId,
     });
     scheduleSave(get);
+    if (removedMediaIds.size > 0 && typeof window !== "undefined") {
+      window.setTimeout(() => {
+        void get()
+          .saveProject()
+          .then(() =>
+            Promise.all(
+              Array.from(removedMediaIds).map((mediaId) =>
+                deleteMediaIfUnused(mediaId, { internalOnly: true }),
+              ),
+            ),
+          );
+      }, 0);
+    }
   },
 
   addMediaToTimeline(asset, trackIndex) {

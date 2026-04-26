@@ -1,6 +1,6 @@
 // The studio shell — three-pane layout with a timeline at the bottom.
 import { useEffect } from "react";
-import { db } from "./db";
+import { db, garbageCollectUnusedInternalMedia } from "./db";
 import { useStudio } from "./store";
 import { Library } from "./components/Library";
 import { Stage } from "./components/Stage";
@@ -17,6 +17,7 @@ export function Studio() {
       const recent = await db.projects.orderBy("updatedAt").reverse().first();
       if (recent) await useStudio.getState().loadProject(recent.id);
       else await useStudio.getState().newProject();
+      void garbageCollectUnusedInternalMedia();
     })();
   }, []);
 

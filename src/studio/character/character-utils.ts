@@ -1,5 +1,5 @@
 // Character helpers — create/load/save CharacterPreset records.
-import { db, uid } from "../db";
+import { db, deleteMediaIfUnused, mediaIdsForCharacter, uid } from "../db";
 import {
   DEFAULT_PARALLAX_CONFIG,
   DEFAULT_PART_MANIFEST,
@@ -48,7 +48,13 @@ export function createBlankCharacter(name = "New Character"): CharacterPreset {
 
 export async function saveCharacter(c: CharacterPreset) {
   const updated = { ...normalizeCharacterSlots(c), updatedAt: Date.now() };
+  const previous = await db.characters.get(updated.id);
   await db.characters.put(updated);
+  const nextMediaIds = mediaIdsForCharacter(updated);
+  const removedMediaIds = Array.from(mediaIdsForCharacter(previous)).filter(
+    (id) => !nextMediaIds.has(id),
+  );
+  await Promise.all(removedMediaIds.map((id) => deleteMediaIfUnused(id, { internalOnly: true })));
   return updated;
 }
 

@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import type { CharacterClip, MediaClip, MouthViseme } from "../types";
 import { useStudio } from "../store";
-import { db } from "../db";
+import { db, deleteMediaIfUnused } from "../db";
 import { ELEVENLABS_VOICES, ELEVENLABS_MODELS, DEFAULT_VOICE_ID } from "../lipsync/voices";
 import { generateLipSyncForClip } from "../lipsync/elevenlabs";
 import { MOUTH_VISEMES, MOUTH_VISEME_DESCRIPTIONS } from "../lipsync/viseme-schema";
@@ -13,6 +13,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
   const project = useStudio((s) => s.project);
   const update = useStudio((s) => s.updateClip);
   const removeClip = useStudio((s) => s.removeClip);
+  const saveProject = useStudio((s) => s.saveProject);
   const initial = clip.voiceLine;
   const [text, setText] = useState(initial?.text ?? "");
   const [voiceId, setVoiceId] = useState(initial?.voiceId ?? DEFAULT_VOICE_ID);
@@ -53,7 +54,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
     }
   };
 
-  const onClear = () => {
+  const onClear = async () => {
     const speechClips =
       project?.clips.filter(
         (c) =>
@@ -61,12 +62,18 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
           ((c as MediaClip).linkedCharacterClipId === clip.id ||
             (!!clip.lipSyncAudioId && c.mediaId === clip.lipSyncAudioId)),
       ) ?? [];
+    const mediaIds = new Set(speechClips.map((speechClip) => (speechClip as MediaClip).mediaId));
+    if (clip.lipSyncAudioId) mediaIds.add(clip.lipSyncAudioId);
     for (const speechClip of speechClips) removeClip(speechClip.id);
     update(clip.id, {
       visemes: undefined,
       lipSyncAudioId: undefined,
       voiceLine: undefined,
     } as Partial<CharacterClip>);
+    await saveProject();
+    await Promise.all(
+      Array.from(mediaIds).map((id) => deleteMediaIfUnused(id, { internalOnly: true })),
+    );
   };
 
   return (

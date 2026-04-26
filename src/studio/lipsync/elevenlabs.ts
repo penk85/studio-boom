@@ -1,7 +1,7 @@
 // Client-side helper: generate ElevenLabs voice + lip sync for a character clip.
 // Stores the MP3 as a MediaAsset, attaches viseme keyframes to the clip,
 // and drops a synced audio clip on the Audio track.
-import { db, importMediaFile, uid } from "../db";
+import { db, deleteMediaIfUnused, importMediaFile, uid } from "../db";
 import type { CharacterClip, MediaClip, Project, Track } from "../types";
 import { useStudio } from "../store";
 import { generateTtsWithTimestamps } from "./tts.functions";
@@ -82,14 +82,16 @@ export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
   // Drop an audio clip on the Audio track aligned to the character clip's start.
   // Remove any prior auto-generated audio clip associated with this character.
   const proj = useStudio.getState().project!;
-  const stale = proj.clips.find(
+  const staleClips = proj.clips.filter(
     (c) =>
       c.kind === "audio" &&
       ((c as MediaClip).linkedCharacterClipId === charClip.id ||
         (!!charClip.lipSyncAudioId && c.mediaId === charClip.lipSyncAudioId) ||
         c.name === `🎙 ${charClip.name}`),
   );
-  if (stale) state.removeClip(stale.id);
+  const staleMediaIds = new Set(staleClips.map((clip) => (clip as MediaClip).mediaId));
+  if (charClip.lipSyncAudioId) staleMediaIds.add(charClip.lipSyncAudioId);
+  for (const stale of staleClips) state.removeClip(stale.id);
 
   const audioClip: MediaClip = {
     id: uid(),
@@ -112,5 +114,8 @@ export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
   state.selectClip(charClip.id);
 
   await db.projects.put(useStudio.getState().project!);
+  await Promise.all(
+    Array.from(staleMediaIds).map((id) => deleteMediaIfUnused(id, { internalOnly: true })),
+  );
   return { asset, visemes, audioDuration };
 }

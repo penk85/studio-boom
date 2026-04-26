@@ -1,7 +1,7 @@
 // Library panel — Media, Characters (with editor), Action Presets, Blocks (later).
 import { useLiveQuery } from "dexie-react-hooks";
 import { Link } from "@tanstack/react-router";
-import { db, deleteMedia, importMediaFile, uid } from "../db";
+import { db, deleteMediaIfUnused, importMediaFile, mediaIdsForCharacter, uid } from "../db";
 import { useStudio } from "../store";
 import type { CharacterClip, CharacterPart, CharacterPreset, MediaAsset } from "../types";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -120,7 +120,17 @@ function CharactersTab() {
   const deleteCharacter = async (id: string) => {
     if (!confirm("Delete this character? Clips referencing it will keep playing as placeholders."))
       return;
+    const character = await db.characters.get(id);
+    const mediaIds = Array.from(mediaIdsForCharacter(character));
     await db.characters.delete(id);
+    await Promise.all(
+      mediaIds.map((mediaId) =>
+        deleteMediaIfUnused(mediaId, {
+          internalOnly: true,
+          extraProjects: project ? [project] : undefined,
+        }),
+      ),
+    );
   };
 
   return (
@@ -368,7 +378,20 @@ function MediaTab() {
             key={m.id}
             asset={m}
             onAdd={() => addMedia(m)}
-            onDelete={() => deleteMedia(m.id)}
+            onDelete={async () => {
+              const result = await deleteMediaIfUnused(m.id, {
+                extraProjects: project ? [project] : undefined,
+              });
+              if (result.deleted) return;
+              if (result.usages.length === 0) return;
+              const usageList = result.usages
+                .slice(0, 5)
+                .map((usage) => `${usage.ownerName}${usage.detail ? ` — ${usage.detail}` : ""}`)
+                .join("\n");
+              alert(
+                `This media is still being used and was not deleted.\n\nRemove it from these places first:\n${usageList}`,
+              );
+            }}
           />
         ))}
         {items.length === 0 && (
@@ -388,7 +411,7 @@ function MediaTile({
 }: {
   asset: MediaAsset;
   onAdd: () => void;
-  onDelete: () => void;
+  onDelete: () => void | Promise<void>;
 }) {
   const url = useMediaUrl(asset.id);
   return (
@@ -411,7 +434,7 @@ function MediaTile({
       <button
         onClick={(e) => {
           e.stopPropagation();
-          onDelete();
+          void onDelete();
         }}
         className="absolute right-1 top-1 hidden rounded bg-black/60 px-1.5 text-[10px] text-foreground hover:bg-destructive group-hover:block"
         title="Delete"
