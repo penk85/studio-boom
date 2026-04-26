@@ -1,6 +1,7 @@
 // CharacterEditor — full-screen editor for a CharacterPreset.
 // Three panes: parts list (left), live canvas (center), part inspector (right).
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Eye, EyeOff } from "lucide-react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db, importMediaFile } from "../db";
