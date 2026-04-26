@@ -9,6 +9,7 @@ import type {
   CharacterClip,
   CharacterPart,
   CharacterPreset,
+  FallbackMouthAnchor,
   MediaClip,
   MouthViseme,
 } from "../types";
@@ -312,22 +313,15 @@ const VISEME_GLYPH: Record<string, string> = {
   L: "L",
 };
 
-interface FallbackMouthPlacement {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  rotation: number;
-  anchorX: number;
-  anchorY: number;
-  zIndex: number;
-  depth: number;
+interface FallbackMouthPlacement extends FallbackMouthAnchor {
   slotId?: string;
 }
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
 function fallbackMouthPlacement(character: CharacterPreset): FallbackMouthPlacement {
+  if (character.fallbackMouth) return character.fallbackMouth;
+
   const mouthParts = character.parts
     .filter((p) => p.role === "mouth" && p.visible)
     .sort((a, b) => a.zIndex - b.zIndex);

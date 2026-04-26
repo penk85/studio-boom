@@ -6,8 +6,28 @@ import {
   type ID,
   type CharacterPart,
   type CharacterPreset,
+  type FallbackMouthAnchor,
   type PartRole,
 } from "../types";
+
+export function defaultFallbackMouthAnchor(
+  canvasWidth: number,
+  canvasHeight: number,
+): FallbackMouthAnchor {
+  const width = Math.round(canvasWidth * 0.14);
+  const height = Math.round(width * 0.42);
+  return {
+    x: Math.round((canvasWidth - width) / 2),
+    y: Math.round(canvasHeight * 0.42 - height / 2),
+    width,
+    height,
+    rotation: 0,
+    anchorX: 0.5,
+    anchorY: 0.5,
+    zIndex: 50,
+    depth: 0,
+  };
+}
 
 export function createBlankCharacter(name = "New Character"): CharacterPreset {
   const now = Date.now();
@@ -20,6 +40,7 @@ export function createBlankCharacter(name = "New Character"): CharacterPreset {
     manifest: { ...DEFAULT_PART_MANIFEST },
     parallax: { ...DEFAULT_PARALLAX_CONFIG },
     headVariants: [],
+    fallbackMouth: defaultFallbackMouthAnchor(600, 900),
     createdAt: now,
     updatedAt: now,
   };
@@ -42,6 +63,7 @@ export function getPartSlotId(part: CharacterPart): ID {
 export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
   return {
     ...c,
+    fallbackMouth: c.fallbackMouth ?? defaultFallbackMouthAnchor(c.canvasWidth, c.canvasHeight),
     parts: c.parts.map((part) => {
       const slotId = getPartSlotId(part);
       return {

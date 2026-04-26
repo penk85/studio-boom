@@ -7,6 +7,7 @@ import { db, importMediaFile } from "../db";
 import { useMediaUrl } from "../hooks/useMediaUrl";
 import {
   createBlankCharacter,
+  defaultFallbackMouthAnchor,
   defaultSlotIdForRole,
   groupParts,
   makePart,
@@ -18,6 +19,7 @@ import type {
   CharacterPart,
   CharacterPreset,
   EyeState,
+  FallbackMouthAnchor,
   HeadDirection,
   HeadVariant,
   MouthViseme,
@@ -59,6 +61,7 @@ export function CharacterEditor({ characterId }: Props) {
   const [onionSkin, setOnionSkin] = useState(true);
   const [scale, setScale] = useState(0.7);
   const [recorderOpen, setRecorderOpen] = useState(false);
+  const [showFallbackMouth, setShowFallbackMouth] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   // Load or create
@@ -110,6 +113,19 @@ export function CharacterEditor({ characterId }: Props) {
   const updatePart = (id: string, patch: Partial<CharacterPart>) =>
     setDoc((d) =>
       d ? { ...d, parts: d.parts.map((p) => (p.id === id ? { ...p, ...patch } : p)) } : d,
+    );
+
+  const updateFallbackMouth = (patch: Partial<FallbackMouthAnchor>) =>
+    setDoc((d) =>
+      d
+        ? {
+            ...d,
+            fallbackMouth: {
+              ...(d.fallbackMouth ?? defaultFallbackMouthAnchor(d.canvasWidth, d.canvasHeight)),
+              ...patch,
+            },
+          }
+        : d,
     );
 
   const removePart = (id: string) =>
@@ -214,6 +230,16 @@ export function CharacterEditor({ characterId }: Props) {
                     onChange={(patch) => updatePart(p.id, patch)}
                   />
                 ))}
+              {showFallbackMouth && (
+                <FallbackMouthMarker
+                  anchor={
+                    doc.fallbackMouth ??
+                    defaultFallbackMouthAnchor(doc.canvasWidth, doc.canvasHeight)
+                  }
+                  scale={scale}
+                  onChange={updateFallbackMouth}
+                />
+              )}
             </div>
           </div>
           {selectedPart && (
@@ -266,6 +292,15 @@ export function CharacterEditor({ characterId }: Props) {
               </Field>
             </div>
           </div>
+
+          <FallbackMouthEditor
+            anchor={
+              doc.fallbackMouth ?? defaultFallbackMouthAnchor(doc.canvasWidth, doc.canvasHeight)
+            }
+            visible={showFallbackMouth}
+            onVisibleChange={setShowFallbackMouth}
+            onChange={updateFallbackMouth}
+          />
 
           <ParallaxEditor cfg={doc.parallax} onChange={(p) => update({ parallax: p })} />
 
@@ -862,6 +897,197 @@ function ResizeHandle({
       onPointerDown={onResize(corner)}
       className={`absolute ${vertical} ${horizontal} h-3.5 w-3.5 rounded-sm border border-background bg-primary ${cursor}`}
     />
+  );
+}
+
+function FallbackMouthMarker({
+  anchor,
+  scale,
+  onChange,
+}: {
+  anchor: FallbackMouthAnchor;
+  scale: number;
+  onChange: (patch: Partial<FallbackMouthAnchor>) => void;
+}) {
+  const markerRef = useRef<HTMLDivElement>(null);
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const ox = anchor.x;
+    const oy = anchor.y;
+    const move = (ev: PointerEvent) => {
+      onChange({
+        x: Math.round(ox + (ev.clientX - sx) / scale),
+        y: Math.round(oy + (ev.clientY - sy) / scale),
+      });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  const onResize = (corner: ResizeCorner) => (e: React.PointerEvent) => {
+    e.stopPropagation();
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const ow = anchor.width;
+    const oh = anchor.height;
+    const ox = anchor.x;
+    const oy = anchor.y;
+    const move = (ev: PointerEvent) => {
+      const dw = (ev.clientX - sx) / scale;
+      const dh = (ev.clientY - sy) / scale;
+      let width = corner.includes("e") ? ow + dw : ow - dw;
+      let height = corner.includes("s") ? oh + dh : oh - dh;
+      width = Math.max(12, width);
+      height = Math.max(8, height);
+      const x = corner.includes("w") ? ox + (ow - width) : ox;
+      const y = corner.includes("n") ? oy + (oh - height) : oy;
+      onChange({
+        x: Math.round(x),
+        y: Math.round(y),
+        width: Math.round(width),
+        height: Math.round(height),
+      });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  const onRotate = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    const el = markerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const startAngle = Math.atan2(e.clientY - cy, e.clientX - cx);
+    const startRotation = anchor.rotation;
+    const move = (ev: PointerEvent) => {
+      const angle = Math.atan2(ev.clientY - cy, ev.clientX - cx);
+      const delta = ((angle - startAngle) * 180) / Math.PI;
+      onChange({ rotation: Math.round(startRotation + delta) });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  return (
+    <div
+      ref={markerRef}
+      onPointerDown={onPointerDown}
+      className="absolute select-none outline outline-2 outline-dashed outline-amber-300"
+      style={{
+        left: anchor.x,
+        top: anchor.y,
+        width: anchor.width,
+        height: anchor.height,
+        transform: `rotate(${anchor.rotation}deg)`,
+        transformOrigin: `${anchor.anchorX * 100}% ${anchor.anchorY * 100}%`,
+        zIndex: 10000,
+        cursor: "move",
+      }}
+    >
+      <svg viewBox="0 0 100 60" className="h-full w-full overflow-visible">
+        <path
+          d="M22 31c18 8 38 8 56 0"
+          fill="none"
+          stroke="#fbbf24"
+          strokeWidth="8"
+          strokeLinecap="round"
+        />
+      </svg>
+      <div className="pointer-events-none absolute -top-7 left-0 rounded bg-amber-300 px-1.5 py-0.5 text-[10px] font-medium text-black">
+        fallback mouth
+      </div>
+      <ResizeHandle corner="nw" onResize={onResize} />
+      <ResizeHandle corner="ne" onResize={onResize} />
+      <ResizeHandle corner="sw" onResize={onResize} />
+      <ResizeHandle corner="se" onResize={onResize} />
+      <button
+        type="button"
+        onPointerDown={onRotate}
+        className="absolute left-1/2 top-0 flex h-6 w-6 -translate-x-1/2 -translate-y-9 items-center justify-center rounded-full border border-amber-300 bg-background text-amber-300 shadow-[var(--shadow-panel)]"
+        title="Rotate fallback mouth"
+        aria-label="Rotate fallback mouth"
+      >
+        <RotateCw size={14} />
+      </button>
+    </div>
+  );
+}
+
+function FallbackMouthEditor({
+  anchor,
+  visible,
+  onVisibleChange,
+  onChange,
+}: {
+  anchor: FallbackMouthAnchor;
+  visible: boolean;
+  onVisibleChange: (visible: boolean) => void;
+  onChange: (patch: Partial<FallbackMouthAnchor>) => void;
+}) {
+  return (
+    <div className="mt-6 border-t border-border pt-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="font-semibold uppercase tracking-wider text-muted-foreground">
+          Fallback mouth
+        </div>
+        <label className="flex items-center gap-1 text-[10px] text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={visible}
+            onChange={(e) => onVisibleChange(e.target.checked)}
+          />
+          Show marker
+        </label>
+      </div>
+      <p className="mb-2 text-[11px] leading-relaxed text-muted-foreground">
+        Used by lip sync when this character has no custom mouth image for the active viseme. Turn
+        on the marker, then drag it onto the character&apos;s mouth area.
+      </p>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="X">
+          <NumberInput value={anchor.x} onChange={(v) => onChange({ x: v })} />
+        </Field>
+        <Field label="Y">
+          <NumberInput value={anchor.y} onChange={(v) => onChange({ y: v })} />
+        </Field>
+        <Field label="Width">
+          <NumberInput
+            value={anchor.width}
+            onChange={(v) => onChange({ width: Math.max(12, v) })}
+          />
+        </Field>
+        <Field label="Height">
+          <NumberInput
+            value={anchor.height}
+            onChange={(v) => onChange({ height: Math.max(8, v) })}
+          />
+        </Field>
+        <Field label="Rotation°">
+          <NumberInput value={anchor.rotation} onChange={(v) => onChange({ rotation: v })} />
+        </Field>
+        <Field label="Layer">
+          <NumberInput value={anchor.zIndex} onChange={(v) => onChange({ zIndex: v })} />
+        </Field>
+      </div>
+    </div>
   );
 }
 

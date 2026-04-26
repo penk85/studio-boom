@@ -113,6 +113,19 @@ export interface HeadVariant {
   featureOffsetY?: number;
 }
 
+/** Placement for generated fallback mouth shapes when a rig has no custom mouth visemes. */
+export interface FallbackMouthAnchor {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  anchorX: number;
+  anchorY: number;
+  zIndex: number;
+  depth: number;
+}
+
 /** Per-character parallax configuration. */
 export interface ParallaxConfig {
   /** React to scene-level camera moves. */
@@ -143,6 +156,8 @@ export interface CharacterPreset {
   parallax: ParallaxConfig;
   /** Optional head variants for head-turn animations. */
   headVariants?: HeadVariant[];
+  /** Where generated fallback lip-sync mouth shapes should appear. */
+  fallbackMouth?: FallbackMouthAnchor;
   createdAt: number;
   updatedAt: number;
 }
