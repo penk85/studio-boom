@@ -241,6 +241,8 @@ export interface BaseClip {
   id: ID;
   name: string;
   trackIndex: number;
+  /** Sub-track lane within the parent track (0-based). Default 0. */
+  laneIndex?: number;
   start: number; // seconds on the project timeline
   duration: number;
   // Stage transform (ignored for pure audio):
