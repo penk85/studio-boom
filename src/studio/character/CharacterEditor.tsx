@@ -364,6 +364,46 @@ function RoleGroup({
           </li>
         ))}
       </ul>
+      {role === "head" && headVariants && onHeadVariantsChange && (
+        <HeadTurnVariants variants={headVariants} onChange={onHeadVariantsChange} />
+      )}
+    </div>
+  );
+}
+
+/** Nested head-turn variants (front, ¾, side directions) shown inside the Head group. */
+function HeadTurnVariants({
+  variants, onChange,
+}: { variants: HeadVariant[]; onChange: (v: HeadVariant[]) => void }) {
+  const upload = async (dir: HeadDirection, file: File) => {
+    const asset = await importMediaFile(file);
+    const next = variants.filter((v) => v.direction !== dir);
+    next.push({ direction: dir, mediaId: asset.id });
+    onChange(next);
+  };
+  const remove = (dir: HeadDirection) =>
+    onChange(variants.filter((v) => v.direction !== dir));
+
+  return (
+    <div className="border-t border-border p-2">
+      <div className="mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Variants — turn directions
+      </div>
+      <div className="space-y-1">
+        {HEAD_DIRECTIONS.map(({ dir, label }) => {
+          const v = variants.find((x) => x.direction === dir);
+          return (
+            <HeadVariantSlot
+              key={dir}
+              dir={dir}
+              label={label}
+              variant={v}
+              onUpload={(f) => upload(dir, f)}
+              onRemove={() => remove(dir)}
+            />
+          );
+        })}
+      </div>
     </div>
   );
 }
