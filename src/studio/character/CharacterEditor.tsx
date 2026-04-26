@@ -32,7 +32,15 @@ const ALL_ROLES: PartRole[] = [
 ];
 
 const VISEMES: MouthViseme[] = ["rest", "A", "E", "I", "O", "U", "MBP", "FV", "L"];
-const EYE_STATES: EyeState[] = ["open", "half", "closed"];
+const EYE_STATES: EyeState[] = ["open", "half", "closed", "wink"];
+
+const HEAD_DIRECTIONS: { dir: HeadDirection; label: string }[] = [
+  { dir: "front", label: "Front" },
+  { dir: "3qL", label: "¾ Left" },
+  { dir: "3qR", label: "¾ Right" },
+  { dir: "sideL", label: "Side Left" },
+  { dir: "sideR", label: "Side Right" },
+];
 
 interface Props {
   characterId: string;
