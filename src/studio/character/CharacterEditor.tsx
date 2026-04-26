@@ -100,6 +100,21 @@ export function CharacterEditor({ characterId }: Props) {
     return () => clearTimeout(t);
   }, [doc]);
 
+  // Keyboard shortcuts for layer ordering
+  useEffect(() => {
+    if (!selectedPartId) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key === "]") {
+        setDoc((d) => d ? { ...d, parts: d.parts.map((p) => p.id === selectedPartId ? { ...p, zIndex: p.zIndex + 1 } : p) } : d);
+      } else if (e.key === "[") {
+        setDoc((d) => d ? { ...d, parts: d.parts.map((p) => p.id === selectedPartId ? { ...p, zIndex: Math.max(0, p.zIndex - 1) } : p) } : d);
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [selectedPartId]);
+
   if (!doc) {
     return (
       <div className="flex h-screen items-center justify-center bg-background text-muted-foreground">
