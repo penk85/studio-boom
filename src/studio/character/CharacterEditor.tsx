@@ -684,41 +684,8 @@ function ParallaxEditor({ cfg, onChange }: { cfg: ParallaxConfig; onChange: (c: 
   );
 }
 
-const HEAD_DIRECTIONS: { dir: HeadDirection; label: string }[] = [
-  { dir: "front", label: "Front" },
-  { dir: "3qL", label: "¾ Left" },
-  { dir: "3qR", label: "¾ Right" },
-  { dir: "sideL", label: "Side Left" },
-  { dir: "sideR", label: "Side Right" },
-];
-
-function HeadVariantsEditor({
-  doc, onChange,
-}: { doc: CharacterPreset; onChange: (vars: HeadVariant[]) => void }) {
-  const variants = doc.headVariants ?? [];
-  const upload = async (dir: HeadDirection, file: File) => {
-    const asset = await importMediaFile(file);
-    const next = variants.filter((v) => v.direction !== dir);
-    next.push({ direction: dir, mediaId: asset.id });
-    onChange(next);
-  };
-  const remove = (dir: HeadDirection) => onChange(variants.filter((v) => v.direction !== dir));
-
-  return (
-    <div className="mt-6 border-t border-border pt-3">
-      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">Head Variants</div>
-      <div className="mb-2 text-[10px] text-muted-foreground">
-        Upload alternate head images for head-turn presets. Front falls back to the regular head part.
-      </div>
-      <div className="space-y-1.5">
-        {HEAD_DIRECTIONS.map(({ dir, label }) => {
-          const v = variants.find((x) => x.direction === dir);
-          return <HeadVariantSlot key={dir} dir={dir} label={label} variant={v} onUpload={(f) => upload(dir, f)} onRemove={() => remove(dir)} />;
-        })}
-      </div>
-    </div>
-  );
-}
+// HeadVariantsEditor removed — head-turn variants are now nested inside the
+// Head part group via <HeadTurnVariants /> in PartsList.
 
 function HeadVariantSlot({
   label, variant, onUpload, onRemove,
