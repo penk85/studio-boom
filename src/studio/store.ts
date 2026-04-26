@@ -139,9 +139,25 @@ export const useStudio = create<StudioState>((set, get) => ({
   addClip(clip) {
     const p = get().project;
     if (!p) return;
+    let project = p;
+    let nextClip = clip;
+    // Auto-assign laneIndex if not already set on the clip.
+    if (clip.laneIndex === undefined) {
+      const track = project.tracks[clip.trackIndex];
+      const maxLanes = track?.lanes ?? 1;
+      const lane = pickFreeLane(project.clips, clip.trackIndex, clip.start, clip.duration, maxLanes);
+      // Grow the track if no existing lane was free.
+      if (lane >= maxLanes) {
+        const tracks = project.tracks.map((t, i) =>
+          i === clip.trackIndex ? { ...t, lanes: lane + 1 } : t,
+        );
+        project = { ...project, tracks };
+      }
+      nextClip = { ...clip, laneIndex: lane };
+    }
     set({
-      project: { ...p, clips: [...p.clips, clip], updatedAt: Date.now() },
-      selectedClipId: clip.id,
+      project: { ...project, clips: [...project.clips, nextClip], updatedAt: Date.now() },
+      selectedClipId: nextClip.id,
     });
     scheduleSave(get);
   },
