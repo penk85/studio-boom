@@ -299,6 +299,8 @@ export interface Track {
   id: ID;
   name: string;
   kind: TrackKind;
+  /** Number of sub-track lanes (default 1). */
+  lanes?: number;
   muted?: boolean;
   locked?: boolean;
 }
