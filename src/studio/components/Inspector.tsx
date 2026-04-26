@@ -118,6 +118,21 @@ export function Inspector() {
             </button>
             {clip.kind === "character" && (
               <>
+                <div className="rounded border border-border bg-panel-2 p-3">
+                  <label className="flex items-center gap-2 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={(clip as CharacterClip).autoBlink !== false}
+                      onChange={(e) =>
+                        update((clip as CharacterClip).id, { autoBlink: e.target.checked })
+                      }
+                    />
+                    Auto blink
+                  </label>
+                  <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                    Adds a subtle regular blink during playback when the eyes are otherwise open.
+                  </p>
+                </div>
                 <ActionsPanel clip={clip as CharacterClip} />
                 <VoiceLipSyncPanel clip={clip as CharacterClip} />
               </>

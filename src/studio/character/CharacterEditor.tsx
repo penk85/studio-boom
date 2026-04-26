@@ -38,7 +38,12 @@ const ROLE_SECTIONS: { title: string; roles: PartRole[] }[] = [
   { title: "Extras", roles: ["extra"] },
 ];
 
-const EYE_STATES: EyeState[] = ["open", "half", "closed", "wink"];
+const EYE_STATES: EyeState[] = ["open", "closed"];
+
+const BROW_POSES = [
+  { pose: "neutral", label: "Neutral", description: "Default relaxed brows." },
+  { pose: "raised", label: "Raised", description: "Lifted brows for surprise or curiosity." },
+] as const;
 
 const HEAD_DIRECTIONS: { dir: HeadDirection; label: string }[] = [
   { dir: "front", label: "Front" },
@@ -480,6 +485,22 @@ function RoleGroup({
   canvasHeight: number;
 }) {
   const active = variants.some((p) => p.id === selectedId);
+  const usesFixedSlots =
+    role === "mouth" ||
+    role === "eye" ||
+    role === "eyeL" ||
+    role === "eyeR" ||
+    role === "brow" ||
+    role === "browL" ||
+    role === "browR";
+  const countLabel =
+    role === "mouth"
+      ? `${variants.length}/${MOUTH_VISEMES.length}`
+      : role === "eye" || role === "eyeL" || role === "eyeR"
+        ? `${variants.length}/${EYE_STATES.length}`
+        : role === "brow" || role === "browL" || role === "browR"
+          ? `${variants.length}/${BROW_POSES.length}`
+          : `${variants.length}`;
   return (
     <div
       className={`rounded border bg-panel-2 ${
@@ -488,59 +509,101 @@ function RoleGroup({
     >
       <div className="flex items-center gap-2 px-2 py-1.5">
         <span className="font-medium text-foreground">{roleLabel(role)}</span>
-        <span className="text-[10px] text-muted-foreground">({variants.length})</span>
+        <span className="text-[10px] text-muted-foreground">({countLabel})</span>
         {active && (
           <span className="rounded bg-primary/20 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-foreground">
             Active
           </span>
         )}
-        <UploadVariantButton
-          role={role}
+        {!usesFixedSlots && (
+          <UploadVariantButton
+            role={role}
+            onAdd={onAdd}
+            existing={variants}
+            canvasWidth={canvasWidth}
+            canvasHeight={canvasHeight}
+          />
+        )}
+      </div>
+      {!usesFixedSlots && (
+        <ul>
+          {variants.map((p) => (
+            <li
+              key={p.id}
+              onClick={() => onSelect(p.id)}
+              title={variantHoverText(p)}
+              className={`flex cursor-pointer items-center gap-2 border-t border-border px-2 py-1 text-[11px] ${
+                p.id === selectedId
+                  ? "bg-primary/20 text-foreground"
+                  : "text-muted-foreground hover:bg-panel"
+              }`}
+            >
+              <span className="flex-1 truncate">{variantLabel(p)}</span>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onUpdate(p.id, { visible: !p.visible });
+                }}
+                className="rounded p-1 text-muted-foreground hover:text-foreground"
+                title={p.visible ? "Hide" : "Show"}
+                aria-label={p.visible ? "Hide part" : "Show part"}
+              >
+                {p.visible ? <Eye size={14} /> : <EyeOff size={14} />}
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRemove(p.id);
+                }}
+                className="rounded px-1 text-[10px] text-destructive"
+                title="Remove"
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {role === "head" && headVariants && onHeadVariantsChange && (
+        <HeadTurnVariants variants={headVariants} onChange={onHeadVariantsChange} />
+      )}
+      {role === "mouth" && (
+        <MouthVariants
+          variants={variants}
+          selectedId={selectedId}
+          onSelect={onSelect}
           onAdd={onAdd}
-          existing={variants}
+          onUpdate={onUpdate}
+          onRemove={onRemove}
           canvasWidth={canvasWidth}
           canvasHeight={canvasHeight}
         />
-      </div>
-      <ul>
-        {variants.map((p) => (
-          <li
-            key={p.id}
-            onClick={() => onSelect(p.id)}
-            title={variantHoverText(p)}
-            className={`flex cursor-pointer items-center gap-2 border-t border-border px-2 py-1 text-[11px] ${
-              p.id === selectedId
-                ? "bg-primary/20 text-foreground"
-                : "text-muted-foreground hover:bg-panel"
-            }`}
-          >
-            <span className="flex-1 truncate">{variantLabel(p)}</span>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onUpdate(p.id, { visible: !p.visible });
-              }}
-              className="rounded p-1 text-muted-foreground hover:text-foreground"
-              title={p.visible ? "Hide" : "Show"}
-              aria-label={p.visible ? "Hide part" : "Show part"}
-            >
-              {p.visible ? <Eye size={14} /> : <EyeOff size={14} />}
-            </button>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onRemove(p.id);
-              }}
-              className="rounded px-1 text-[10px] text-destructive"
-              title="Remove"
-            >
-              ✕
-            </button>
-          </li>
-        ))}
-      </ul>
-      {role === "head" && headVariants && onHeadVariantsChange && (
-        <HeadTurnVariants variants={headVariants} onChange={onHeadVariantsChange} />
+      )}
+      {(role === "eye" || role === "eyeL" || role === "eyeR") && (
+        <EyeVariants
+          role={role}
+          variants={variants}
+          selectedId={selectedId}
+          onSelect={onSelect}
+          onAdd={onAdd}
+          onUpdate={onUpdate}
+          onRemove={onRemove}
+          canvasWidth={canvasWidth}
+          canvasHeight={canvasHeight}
+        />
+      )}
+      {(role === "brow" || role === "browL" || role === "browR") && (
+        <BrowVariants
+          role={role}
+          variants={variants}
+          selectedId={selectedId}
+          onSelect={onSelect}
+          onAdd={onAdd}
+          onUpdate={onUpdate}
+          onRemove={onRemove}
+          canvasWidth={canvasWidth}
+          canvasHeight={canvasHeight}
+        />
       )}
       {role === "body" && (
         <BodyDirectionVariants
@@ -588,6 +651,149 @@ function HeadTurnVariants({
               variant={v}
               onUpload={(f) => upload(dir, f)}
               onRemove={() => remove(dir)}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function EyeVariants({
+  role,
+  variants,
+  selectedId,
+  onSelect,
+  onAdd,
+  onUpdate,
+  onRemove,
+  canvasWidth,
+  canvasHeight,
+}: {
+  role: PartRole;
+  variants: CharacterPart[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onAdd: (p: CharacterPart) => void;
+  onUpdate: (id: string, patch: Partial<CharacterPart>) => void;
+  onRemove: (id: string) => void;
+  canvasWidth: number;
+  canvasHeight: number;
+}) {
+  const upload = async (eyeState: EyeState, file: File) => {
+    const asset = await importMediaFile(file, { scope: "character-part" });
+    const fitted = fitAssetToCanvas(asset.width, asset.height, canvasWidth, canvasHeight);
+    const existing = variants.find((p) => p.eyeState === eyeState);
+    if (existing) {
+      onUpdate(existing.id, { mediaId: asset.id, ...fitted });
+      return;
+    }
+    const reusableSlotId = variants.find((p) => p.slotId)?.slotId ?? defaultSlotIdForRole(role);
+    onAdd(
+      makePart(role, asset.id, {
+        name: `${roleLabel(role)} ${eyeState}`,
+        slotId: reusableSlotId,
+        slotName: variants.find((p) => p.slotName)?.slotName ?? roleLabel(role),
+        eyeState,
+        ...fitted,
+        zIndex: variants[0]?.zIndex ?? defaultZIndexForRole(role),
+      }),
+    );
+  };
+
+  return (
+    <div className="border-t border-border p-2">
+      <div className="mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Variants - eye states
+      </div>
+      <div className="space-y-1">
+        {EYE_STATES.map((eyeState) => {
+          const variant = variants.find((p) => p.eyeState === eyeState);
+          return (
+            <StateVariantSlot
+              key={eyeState}
+              label={eyeState}
+              description={`Eye state: ${eyeState}.`}
+              variant={variant}
+              selected={variant?.id === selectedId}
+              onSelect={() => variant && onSelect(variant.id)}
+              onToggleVisible={() => variant && onUpdate(variant.id, { visible: !variant.visible })}
+              onUpload={(f) => upload(eyeState, f)}
+              onRemove={() => variant && onRemove(variant.id)}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function BrowVariants({
+  role,
+  variants,
+  selectedId,
+  onSelect,
+  onAdd,
+  onUpdate,
+  onRemove,
+  canvasWidth,
+  canvasHeight,
+}: {
+  role: PartRole;
+  variants: CharacterPart[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onAdd: (p: CharacterPart) => void;
+  onUpdate: (id: string, patch: Partial<CharacterPart>) => void;
+  onRemove: (id: string) => void;
+  canvasWidth: number;
+  canvasHeight: number;
+}) {
+  const upload = async (pose: string, label: string, file: File) => {
+    const asset = await importMediaFile(file, { scope: "character-part" });
+    const fitted = fitAssetToCanvas(asset.width, asset.height, canvasWidth, canvasHeight);
+    const existing = variants.find((p) => (p.pose ?? "neutral") === pose);
+    if (existing) {
+      onUpdate(existing.id, {
+        mediaId: asset.id,
+        pose,
+        name: `${roleLabel(role)} ${label}`,
+        ...fitted,
+      });
+      return;
+    }
+    const reusableSlotId = variants.find((p) => p.slotId)?.slotId ?? defaultSlotIdForRole(role);
+    onAdd(
+      makePart(role, asset.id, {
+        name: `${roleLabel(role)} ${label}`,
+        slotId: reusableSlotId,
+        slotName: variants.find((p) => p.slotName)?.slotName ?? roleLabel(role),
+        pose,
+        ...fitted,
+        zIndex: variants[0]?.zIndex ?? defaultZIndexForRole(role),
+      }),
+    );
+  };
+
+  return (
+    <div className="border-t border-border p-2">
+      <div className="mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Variants - brow poses
+      </div>
+      <div className="space-y-1">
+        {BROW_POSES.map(({ pose, label, description }) => {
+          const variant = variants.find((p) => (p.pose ?? "neutral") === pose);
+          return (
+            <StateVariantSlot
+              key={pose}
+              label={label}
+              description={description}
+              variant={variant}
+              selected={variant?.id === selectedId}
+              onSelect={() => variant && onSelect(variant.id)}
+              onToggleVisible={() => variant && onUpdate(variant.id, { visible: !variant.visible })}
+              onUpload={(f) => upload(pose, label, f)}
+              onRemove={() => variant && onRemove(variant.id)}
             />
           );
         })}
@@ -655,9 +861,77 @@ function BodyDirectionVariants({
   );
 }
 
+function MouthVariants({
+  variants,
+  selectedId,
+  onSelect,
+  onAdd,
+  onUpdate,
+  onRemove,
+  canvasWidth,
+  canvasHeight,
+}: {
+  variants: CharacterPart[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onAdd: (p: CharacterPart) => void;
+  onUpdate: (id: string, patch: Partial<CharacterPart>) => void;
+  onRemove: (id: string) => void;
+  canvasWidth: number;
+  canvasHeight: number;
+}) {
+  const upload = async (viseme: MouthViseme, file: File) => {
+    const asset = await importMediaFile(file, { scope: "character-part" });
+    const fitted = fitAssetToCanvas(asset.width, asset.height, canvasWidth, canvasHeight);
+    const existing = variants.find((p) => p.viseme === viseme);
+    if (existing) {
+      onUpdate(existing.id, { mediaId: asset.id, ...fitted });
+      return;
+    }
+    const reusableSlotId = variants.find((p) => p.slotId)?.slotId ?? defaultSlotIdForRole("mouth");
+    onAdd(
+      makePart("mouth", asset.id, {
+        name: `Mouth ${viseme}`,
+        slotId: reusableSlotId,
+        slotName: variants.find((p) => p.slotName)?.slotName ?? roleLabel("mouth"),
+        viseme,
+        ...fitted,
+        zIndex: variants[0]?.zIndex ?? defaultZIndexForRole("mouth"),
+      }),
+    );
+  };
+
+  return (
+    <div className="border-t border-border p-2">
+      <div className="mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Variants - mouth shapes
+      </div>
+      <div className="space-y-1">
+        {MOUTH_VISEMES.map((viseme) => {
+          const variant = variants.find((p) => p.viseme === viseme);
+          return (
+            <MouthVariantSlot
+              key={viseme}
+              viseme={viseme}
+              variant={variant}
+              selected={variant?.id === selectedId}
+              onSelect={() => variant && onSelect(variant.id)}
+              onToggleVisible={() => variant && onUpdate(variant.id, { visible: !variant.visible })}
+              onUpload={(f) => upload(viseme, f)}
+              onRemove={() => variant && onRemove(variant.id)}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function variantLabel(p: CharacterPart): string {
   if (p.viseme) return `mouth ${p.viseme}`;
   if (p.eyeState) return `eye ${p.eyeState}`;
+  if (p.role === "brow" || p.role === "browL" || p.role === "browR")
+    return `brow ${p.pose ?? "neutral"}`;
   if (p.pose) return p.pose;
   return p.name;
 }
@@ -1479,6 +1753,186 @@ function BodyDirectionSlot({
       </button>
       {variant && (
         <button onClick={onRemove} className="rounded px-1 text-[10px] text-destructive">
+          ✕
+        </button>
+      )}
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) onUpload(f);
+          if (inputRef.current) inputRef.current.value = "";
+        }}
+      />
+    </div>
+  );
+}
+
+function MouthVariantSlot({
+  viseme,
+  variant,
+  selected,
+  onSelect,
+  onToggleVisible,
+  onUpload,
+  onRemove,
+}: {
+  viseme: MouthViseme;
+  variant?: CharacterPart;
+  selected: boolean;
+  onSelect: () => void;
+  onToggleVisible: () => void;
+  onUpload: (f: File) => void;
+  onRemove: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const url = useMediaUrl(variant?.mediaId);
+  return (
+    <div
+      onClick={variant ? onSelect : undefined}
+      className={`flex items-center gap-2 rounded border p-1.5 ${
+        selected ? "border-primary bg-primary/15" : "border-border bg-panel-2"
+      } ${variant ? "cursor-pointer hover:bg-panel" : ""}`}
+      title={MOUTH_VISEME_DESCRIPTIONS[viseme]}
+    >
+      <div className="h-10 w-10 shrink-0 overflow-hidden rounded bg-input">
+        {url ? (
+          <img src={url} alt={viseme} className="h-full w-full object-contain" />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-[9px] text-muted-foreground">
+            —
+          </div>
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-[11px] text-foreground">{viseme}</div>
+        <div className="truncate text-[10px] text-muted-foreground">
+          {MOUTH_VISEME_DESCRIPTIONS[viseme]}
+        </div>
+      </div>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          inputRef.current?.click();
+        }}
+        className="rounded bg-primary/30 px-2 py-0.5 text-[10px] hover:bg-primary/50"
+      >
+        {variant ? "Replace" : "Upload"}
+      </button>
+      {variant && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleVisible();
+          }}
+          className="rounded p-1 text-muted-foreground hover:text-foreground"
+          title={variant.visible ? "Hide" : "Show"}
+          aria-label={variant.visible ? "Hide part" : "Show part"}
+        >
+          {variant.visible ? <Eye size={14} /> : <EyeOff size={14} />}
+        </button>
+      )}
+      {variant && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+          className="rounded px-1 text-[10px] text-destructive"
+        >
+          ✕
+        </button>
+      )}
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) onUpload(f);
+          if (inputRef.current) inputRef.current.value = "";
+        }}
+      />
+    </div>
+  );
+}
+
+function StateVariantSlot({
+  label,
+  description,
+  variant,
+  selected,
+  onSelect,
+  onToggleVisible,
+  onUpload,
+  onRemove,
+}: {
+  label: string;
+  description: string;
+  variant?: CharacterPart;
+  selected: boolean;
+  onSelect: () => void;
+  onToggleVisible: () => void;
+  onUpload: (f: File) => void;
+  onRemove: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const url = useMediaUrl(variant?.mediaId);
+  return (
+    <div
+      onClick={variant ? onSelect : undefined}
+      className={`flex items-center gap-2 rounded border p-1.5 ${
+        selected ? "border-primary bg-primary/15" : "border-border bg-panel-2"
+      } ${variant ? "cursor-pointer hover:bg-panel" : ""}`}
+      title={description}
+    >
+      <div className="h-10 w-10 shrink-0 overflow-hidden rounded bg-input">
+        {url ? (
+          <img src={url} alt={label} className="h-full w-full object-contain" />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-[9px] text-muted-foreground">
+            -
+          </div>
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-[11px] text-foreground">{label}</div>
+        <div className="truncate text-[10px] text-muted-foreground">{description}</div>
+      </div>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          inputRef.current?.click();
+        }}
+        className="rounded bg-primary/30 px-2 py-0.5 text-[10px] hover:bg-primary/50"
+      >
+        {variant ? "Replace" : "Upload"}
+      </button>
+      {variant && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleVisible();
+          }}
+          className="rounded p-1 text-muted-foreground hover:text-foreground"
+          title={variant.visible ? "Hide" : "Show"}
+          aria-label={variant.visible ? "Hide part" : "Show part"}
+        >
+          {variant.visible ? <Eye size={14} /> : <EyeOff size={14} />}
+        </button>
+      )}
+      {variant && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+          className="rounded px-1 text-[10px] text-destructive"
+        >
           ✕
         </button>
       )}

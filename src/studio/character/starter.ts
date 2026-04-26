@@ -7,9 +7,6 @@ const CANVAS_W = 600;
 const CANVAS_H = 900;
 
 export async function ensureStarterCharacterSeeded() {
-  const existing = await db.characters.get(STARTER_ID);
-  if (existing) return existing;
-
   const partFile = (name: string, body: string) =>
     new File(
       [
@@ -27,7 +24,8 @@ export async function ensureStarterCharacterSeeded() {
     head,
     eyesOpen,
     eyesClosed,
-    brows,
+    browsNeutral,
+    browsRaised,
     mouthRest,
     mouthAi,
     mouthE,
@@ -68,9 +66,14 @@ export async function ensureStarterCharacterSeeded() {
        <path d="M320 253c18 14 39 14 57 0" fill="none" stroke="#242735" stroke-width="8" stroke-linecap="round"/>`,
     ),
     importPart(
-      "starter-brows",
+      "starter-brows-neutral",
       `<path d="M219 216c23-13 45-14 66-4" fill="none" stroke="#393341" stroke-width="10" stroke-linecap="round"/>
        <path d="M315 212c22-10 45-9 66 4" fill="none" stroke="#393341" stroke-width="10" stroke-linecap="round"/>`,
+    ),
+    importPart(
+      "starter-brows-raised",
+      `<path d="M219 196c23-13 45-14 66-4" fill="none" stroke="#393341" stroke-width="10" stroke-linecap="round"/>
+       <path d="M315 192c22-10 45-9 66 4" fill="none" stroke="#393341" stroke-width="10" stroke-linecap="round"/>`,
     ),
     importPart(
       "starter-mouth-rest",
@@ -139,7 +142,18 @@ export async function ensureStarterCharacterSeeded() {
         eyeState: "closed",
         zIndex: 40,
       }),
-      makePart("brow", brows.id, { ...fullCanvas, name: "Brows neutral", zIndex: 45 }),
+      makePart("brow", browsNeutral.id, {
+        ...fullCanvas,
+        name: "Brows neutral",
+        pose: "neutral",
+        zIndex: 45,
+      }),
+      makePart("brow", browsRaised.id, {
+        ...fullCanvas,
+        name: "Brows raised",
+        pose: "raised",
+        zIndex: 45,
+      }),
       mouthPart(mouthRest.id, "rest"),
       mouthPart(mouthAi.id, "AI"),
       mouthPart(mouthE.id, "E"),
@@ -152,6 +166,23 @@ export async function ensureStarterCharacterSeeded() {
     createdAt: now,
     updatedAt: now,
   };
+
+  const existing = await db.characters.get(STARTER_ID);
+  if (existing) {
+    const hasOpenEyes = existing.parts.some(
+      (part) => part.role === "eye" && part.eyeState === "open",
+    );
+    const hasClosedEyes = existing.parts.some(
+      (part) => part.role === "eye" && part.eyeState === "closed",
+    );
+    const hasNeutralBrows = existing.parts.some(
+      (part) => part.role === "brow" && (part.pose ?? "neutral") === "neutral",
+    );
+    const hasRaisedBrows = existing.parts.some(
+      (part) => part.role === "brow" && part.pose === "raised",
+    );
+    if (hasOpenEyes && hasClosedEyes && hasNeutralBrows && hasRaisedBrows) return existing;
+  }
 
   await db.characters.put(character);
   return character;

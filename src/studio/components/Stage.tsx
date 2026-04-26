@@ -395,6 +395,24 @@ interface FallbackMouthPlacement extends FallbackMouthAnchor {
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
+function hashString(value: string) {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
+function autoBlinkClosedAt(clip: CharacterClip, tInClip: number) {
+  if (clip.autoBlink === false || tInClip < 0) return false;
+  const hash = hashString(clip.id);
+  const cycle = 3.2 + (hash % 140) / 100;
+  const offset = (((hash >>> 8) % 100) / 100) * cycle;
+  const blinkDuration = 0.14;
+  const phase = (tInClip + offset) % cycle;
+  return phase >= cycle - blinkDuration;
+}
+
 function fallbackMouthPlacement(character: CharacterPreset): FallbackMouthPlacement {
   if (character.fallbackMouth) return character.fallbackMouth;
 
@@ -601,7 +619,17 @@ function CharacterRig({
           const poseSwap =
             poseSwapFor(composed, role, slot.id) ?? clip.poses[slot.id] ?? clip.poses[role];
           const eyeState = role.startsWith("eye")
-            ? (poseSwap ?? clip.poses[slot.id] ?? clip.poses[role] ?? clip.poses["eye"] ?? "open")
+            ? (() => {
+                const resolved =
+                  poseSwap ??
+                  clip.poses[slot.id] ??
+                  clip.poses[role] ??
+                  clip.poses["eye"] ??
+                  "open";
+                return resolved === "open" && autoBlinkClosedAt(clip, tInClip)
+                  ? "closed"
+                  : resolved;
+              })()
             : undefined;
           const part =
             role === "mouth" && viseme

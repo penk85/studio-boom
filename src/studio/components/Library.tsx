@@ -111,6 +111,7 @@ function CharactersTab() {
       opacity: 1,
       zIndex: project.clips.length,
       poses: {},
+      autoBlink: true,
     };
     addClip(clip);
   };
