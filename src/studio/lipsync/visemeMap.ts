@@ -13,6 +13,8 @@ export interface VisemeKey {
 }
 
 const REST_GAP = 0.12; // silence > 120ms between chars => insert rest
+const MIN_VISEME_HOLD = 0.06; // minimum 60ms hold before switching
+const AUDIO_LEAD_MS = 30; // mouth moves this many ms before sound
 
 function letterToViseme(ch: string, lastVowel: MouthViseme | null): MouthViseme | null {
   const c = ch.toLowerCase();
@@ -34,6 +36,7 @@ function letterToViseme(ch: string, lastVowel: MouthViseme | null): MouthViseme 
 /**
  * Convert ElevenLabs character timestamps into a sparse viseme track.
  * Adjacent identical visemes are collapsed. Silence gaps insert "rest".
+ * Short visemes (< MIN_VISEME_DURATION) are merged into neighbors.
  */
 export function alignmentToVisemes(a: ElevenLabsAlignment): VisemeKey[] {
   const out: VisemeKey[] = [{ t: 0, v: "rest" }];
@@ -69,13 +72,35 @@ function pushKey(arr: VisemeKey[], k: VisemeKey) {
   arr.push(k);
 }
 
-/** Active viseme at time `t` (relative to clip start). */
+/** Active viseme at time `t` (relative to clip start), with minimum hold enforcement. */
 export function visemeAt(keys: VisemeKey[] | undefined, t: number): MouthViseme {
   if (!keys || keys.length === 0) return "rest";
-  let v: MouthViseme = "rest";
-  for (const k of keys) {
-    if (k.t <= t) v = k.v;
-    else break;
+
+  // Apply audio lead time: look up viseme slightly ahead
+  const leadSec = AUDIO_LEAD_MS / 1000;
+  const tAdjusted = t + leadSec;
+
+  // Find current and next keyframes
+  let currentIdx = -1;
+  for (let i = 0; i < keys.length; i++) {
+    if (keys[i].t <= tAdjusted) {
+      currentIdx = i;
+    } else {
+      break;
+    }
   }
-  return v;
+
+  if (currentIdx < 0) return "rest";
+  if (currentIdx >= keys.length - 1) return keys[currentIdx].v;
+
+  const current = keys[currentIdx];
+  const next = keys[currentIdx + 1];
+  const timeUntilNext = next.t - tAdjusted;
+
+  // If next viseme is too close (< MIN_VISEME_HOLD), extend current viseme
+  if (timeUntilNext < MIN_VISEME_HOLD) {
+    return current.v;
+  }
+
+  return current.v;
 }

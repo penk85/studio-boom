@@ -868,6 +868,24 @@ function PartLayer({
           >
             <RotateCw size={14} />
           </button>
+          <button
+            type="button"
+            onPointerDown={(e) => { e.stopPropagation(); onChange({ zIndex: part.zIndex + 1 }); }}
+            className="absolute left-0 top-0 flex h-5 w-5 -translate-x-2 -translate-y-6 items-center justify-center rounded border border-primary bg-background text-primary shadow-[var(--shadow-panel)]"
+            title="Bring forward (]"
+            aria-label="Bring forward"
+          >
+            <ArrowUp size={12} />
+          </button>
+          <button
+            type="button"
+            onPointerDown={(e) => { e.stopPropagation(); onChange({ zIndex: part.zIndex - 1 }); }}
+            className="absolute left-1/2 top-0 flex h-5 w-5 -translate-x-1/2 -translate-y-6 items-center justify-center rounded border border-primary bg-background text-primary shadow-[var(--shadow-panel)]"
+            title="Send backward (["
+            aria-label="Send backward"
+          >
+            <ArrowDown size={12} />
+          </button>
           <div
             className="pointer-events-none absolute -ml-1.5 -mt-1.5 h-3 w-3 rounded-full border-2 border-primary bg-background"
             style={{ left: `${part.anchorX * 100}%`, top: `${part.anchorY * 100}%` }}

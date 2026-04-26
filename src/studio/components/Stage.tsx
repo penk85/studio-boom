@@ -512,6 +512,7 @@ function CharacterRig({
               scale={d.scale}
               rotation={d.rotation}
               opacity={d.opacity ?? 1}
+              transitionMs={role === "mouth" ? 30 : 0}
             />
           );
         })}
@@ -524,6 +525,7 @@ function CharacterRig({
             scale={fallbackMouthDelta.scale}
             rotation={fallbackMouthDelta.rotation}
             opacity={fallbackMouthDelta.opacity ?? 1}
+            transitionMs={30}
           />
         )}
       </div>
@@ -539,6 +541,7 @@ function DefaultMouthShape({
   scale,
   rotation,
   opacity,
+  transitionMs = 80,
 }: {
   viseme: MouthViseme;
   placement: FallbackMouthPlacement;
@@ -547,6 +550,7 @@ function DefaultMouthShape({
   scale: number;
   rotation: number;
   opacity: number;
+  transitionMs?: number;
 }) {
   return (
     <svg
@@ -562,6 +566,7 @@ function DefaultMouthShape({
         transform: `rotate(${placement.rotation + rotation}deg) scale(${scale})`,
         transformOrigin: `${placement.anchorX * 100}% ${placement.anchorY * 100}%`,
         pointerEvents: "none",
+        transition: transitionMs > 0 ? `opacity ${transitionMs}ms ease-in-out` : undefined,
       }}
       aria-hidden
     >
@@ -638,6 +643,7 @@ function PartImage({
   scale,
   rotation,
   opacity,
+  transitionMs = 80,
 }: {
   part: import("../types").CharacterPart;
   overrideMediaId?: string;
@@ -646,6 +652,7 @@ function PartImage({
   scale: number;
   rotation: number;
   opacity: number;
+  transitionMs?: number;
 }) {
   const url = useMediaUrl(overrideMediaId ?? part.mediaId);
   if (!url) return null;
@@ -665,6 +672,7 @@ function PartImage({
         transform: `rotate(${part.rotation + rotation}deg) scale(${scale})`,
         transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
         pointerEvents: "none",
+        transition: transitionMs > 0 ? `opacity ${transitionMs}ms ease-in-out` : undefined,
       }}
     />
   );
