@@ -12,11 +12,33 @@ import type {
 } from "./types";
 
 const DEFAULT_TRACKS: Track[] = [
-  { id: uid(), name: "Background", kind: "background" },
-  { id: uid(), name: "Characters", kind: "character" },
-  { id: uid(), name: "Overlay", kind: "overlay" },
-  { id: uid(), name: "Audio", kind: "audio" },
+  { id: uid(), name: "Background", kind: "background", lanes: 1 },
+  { id: uid(), name: "Characters", kind: "character", lanes: 1 },
+  { id: uid(), name: "Overlay", kind: "overlay", lanes: 1 },
+  { id: uid(), name: "Audio", kind: "audio", lanes: 1 },
 ];
+
+/** Find the lowest free lane in a track at the given time range, or return a new lane index. */
+export function pickFreeLane(
+  clips: AnyClip[],
+  trackIndex: number,
+  start: number,
+  duration: number,
+  maxLanes: number,
+): number {
+  const end = start + duration;
+  for (let lane = 0; lane < Math.max(1, maxLanes); lane++) {
+    const conflict = clips.some((c) => {
+      if (c.trackIndex !== trackIndex) return false;
+      if ((c.laneIndex ?? 0) !== lane) return false;
+      const cEnd = c.start + c.duration;
+      return c.start < end && cEnd > start;
+    });
+    if (!conflict) return lane;
+  }
+  // No free lane within current count → return next lane (caller will grow track).
+  return maxLanes;
+}
 
 export function createBlankProject(name = "Untitled Movie"): Project {
   const now = Date.now();
