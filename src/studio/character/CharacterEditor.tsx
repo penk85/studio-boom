@@ -341,10 +341,11 @@ function RoleGroup({
             </span>
             <button
               onClick={(e) => { e.stopPropagation(); onUpdate(p.id, { visible: !p.visible }); }}
-              className="rounded px-1 text-[10px]"
+              className="rounded p-1 text-muted-foreground hover:text-foreground"
               title={p.visible ? "Hide" : "Show"}
+              aria-label={p.visible ? "Hide part" : "Show part"}
             >
-              {p.visible ? "👁" : "—"}
+              {p.visible ? <Eye size={14} /> : <EyeOff size={14} />}
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); onRemove(p.id); }}
