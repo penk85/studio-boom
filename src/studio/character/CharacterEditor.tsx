@@ -268,6 +268,7 @@ function ManifestEditor({ manifest, onChange }: { manifest: PartManifest; onChan
 
 function PartsList({
   parts, selectedId, onSelect, onAdd, onUpdate, onRemove, manifest,
+  headVariants, onHeadVariantsChange,
 }: {
   parts: CharacterPart[];
   selectedId: string | null;
