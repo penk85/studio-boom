@@ -228,6 +228,16 @@ export const useStudio = create<StudioState>((set, get) => ({
     get().addClip(clip);
   },
 
+  addLane(trackIndex) {
+    const p = get().project;
+    if (!p) return;
+    const tracks = p.tracks.map((t, i) =>
+      i === trackIndex ? { ...t, lanes: (t.lanes ?? 1) + 1 } : t,
+    );
+    set({ project: { ...p, tracks, updatedAt: Date.now() } });
+    scheduleSave(get);
+  },
+
   setProjectMeta(patch) {
     const p = get().project;
     if (!p) return;
