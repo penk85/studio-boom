@@ -50,10 +50,11 @@ export async function ensureStarterCharacterSeeded() {
     importPart(
       "starter-head",
       `<ellipse cx="300" cy="246" rx="128" ry="142" fill="#f5c2a3"/>
-       <path d="M183 226c14-90 74-144 162-133 74 9 116 55 123 126-48-27-97-36-148-25-55 12-92 9-137 32Z" fill="#393341"/>
+       <path d="M174 236c3-83 55-140 126-140 72 0 124 52 128 136-37-23-76-31-118-24-48 8-88 22-136 28Z" fill="#393341"/>
+       <path d="M199 225c31-39 77-59 139-58-27 18-55 30-85 36-21 4-39 11-54 22Z" fill="#2f2a36"/>
        <circle cx="177" cy="255" r="25" fill="#f5c2a3"/>
        <circle cx="423" cy="255" r="25" fill="#f5c2a3"/>
-       <path d="M285 278c-8 30-13 55-3 68 8 10 25 9 36 3" fill="none" stroke="#d58d76" stroke-width="8" stroke-linecap="round"/>`,
+       <path d="M292 287c-5 18-8 33-2 42 5 7 17 6 25 2" fill="none" stroke="#d58d76" stroke-width="6" stroke-linecap="round"/>`,
     ),
     importPart(
       "starter-eyes-open",
@@ -74,36 +75,36 @@ export async function ensureStarterCharacterSeeded() {
     ),
     importPart(
       "starter-mouth-rest",
-      `<path d="M270 337c20 9 41 9 62 0" fill="none" stroke="#733f43" stroke-width="8" stroke-linecap="round"/>`,
+      `<path d="M270 363c20 9 41 9 62 0" fill="none" stroke="#733f43" stroke-width="8" stroke-linecap="round"/>`,
     ),
     importPart(
       "starter-mouth-a",
-      `<ellipse cx="300" cy="338" rx="31" ry="38" fill="#733f43"/><ellipse cx="300" cy="355" rx="18" ry="12" fill="#e87f89"/>`,
+      `<ellipse cx="300" cy="362" rx="29" ry="31" fill="#733f43"/><ellipse cx="300" cy="376" rx="17" ry="10" fill="#e87f89"/>`,
     ),
     importPart(
       "starter-mouth-e",
-      `<path d="M264 332c24 23 51 23 75 0 0 32-75 32-75 0Z" fill="#733f43"/><rect x="278" y="334" width="44" height="9" rx="3" fill="#fff"/>`,
+      `<path d="M264 358c24 23 51 23 75 0 0 30-75 30-75 0Z" fill="#733f43"/><rect x="278" y="360" width="44" height="9" rx="3" fill="#fff"/>`,
     ),
     importPart(
       "starter-mouth-i",
-      `<rect x="271" y="330" width="58" height="16" rx="8" fill="#733f43"/>`,
+      `<rect x="271" y="356" width="58" height="16" rx="8" fill="#733f43"/>`,
     ),
-    importPart("starter-mouth-o", `<ellipse cx="300" cy="338" rx="23" ry="30" fill="#733f43"/>`),
+    importPart("starter-mouth-o", `<ellipse cx="300" cy="362" rx="22" ry="26" fill="#733f43"/>`),
     importPart(
       "starter-mouth-u",
-      `<path d="M276 329c15 24 33 24 48 0 10 34-58 34-48 0Z" fill="#733f43"/>`,
+      `<path d="M276 355c15 24 33 24 48 0 10 30-58 30-48 0Z" fill="#733f43"/>`,
     ),
     importPart(
       "starter-mouth-mbp",
-      `<path d="M263 335c25-12 49-12 74 0-24 13-50 13-74 0Z" fill="#733f43"/>`,
+      `<path d="M263 361c25-12 49-12 74 0-24 13-50 13-74 0Z" fill="#733f43"/>`,
     ),
     importPart(
       "starter-mouth-fv",
-      `<path d="M268 329c22 18 43 18 64 0 0 22-64 22-64 0Z" fill="#733f43"/><rect x="276" y="329" width="48" height="9" rx="3" fill="#fff"/>`,
+      `<path d="M268 355c22 18 43 18 64 0 0 22-64 22-64 0Z" fill="#733f43"/><rect x="276" y="355" width="48" height="9" rx="3" fill="#fff"/>`,
     ),
     importPart(
       "starter-mouth-l",
-      `<path d="M276 330c16 24 32 24 48 0v26c-16 14-32 14-48 0v-26Z" fill="#733f43"/><path d="M288 350c9-10 16-10 24 0" fill="none" stroke="#e87f89" stroke-width="9" stroke-linecap="round"/>`,
+      `<path d="M276 356c16 24 32 24 48 0v24c-16 14-32 14-48 0v-24Z" fill="#733f43"/><path d="M288 374c9-10 16-10 24 0" fill="none" stroke="#e87f89" stroke-width="9" stroke-linecap="round"/>`,
     ),
   ]);
 
