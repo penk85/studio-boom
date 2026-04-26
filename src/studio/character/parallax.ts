@@ -29,11 +29,13 @@ export function combinedParallax(
   let dy = 0;
   if (cfg.onCamera && inputs.cameraDelta) {
     const o = parallaxOffset(depth, inputs.cameraDelta, cfg.intensity);
-    dx += o.dx; dy += o.dy;
+    dx += o.dx;
+    dy += o.dy;
   }
   if (cfg.onClip && inputs.clipDelta) {
     const o = parallaxOffset(depth, inputs.clipDelta, cfg.intensity);
-    dx += o.dx; dy += o.dy;
+    dx += o.dx;
+    dy += o.dy;
   }
   return { dx, dy };
 }

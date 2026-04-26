@@ -464,6 +464,35 @@ function placementFromMouthPart(
   };
 }
 
+function exactMouthPartForSlot(
+  slot: ReturnType<typeof listCharacterSlots>[number],
+  viseme: MouthViseme,
+  anchor?: FallbackMouthPlacement,
+) {
+  if (slot.role !== "mouth") return undefined;
+  const matches = slot.parts.filter(
+    (part) => part.visible && (part.viseme === viseme || part.pose === viseme),
+  );
+  if (matches.length <= 1) return matches[0];
+  if (!anchor) return matches.sort((a, b) => a.zIndex - b.zIndex)[0];
+
+  const ax = anchor.x + anchor.width / 2;
+  const ay = anchor.y + anchor.height / 2;
+  return matches.slice().sort((a, b) => {
+    const acx = a.x + a.width / 2;
+    const acy = a.y + a.height / 2;
+    const bcx = b.x + b.width / 2;
+    const bcy = b.y + b.height / 2;
+    const ad = Math.hypot(acx - ax, acy - ay);
+    const bd = Math.hypot(bcx - ax, bcy - ay);
+    if (Math.abs(ad - bd) > 1) return ad - bd;
+    const aArea = a.width * a.height;
+    const bArea = b.width * b.height;
+    if (Math.abs(aArea - bArea) > 1) return aArea - bArea;
+    return a.zIndex - b.zIndex;
+  })[0];
+}
+
 function CharacterPlaceholder({
   clip,
   playhead,
@@ -574,19 +603,23 @@ function CharacterRig({
           const eyeState = role.startsWith("eye")
             ? (poseSwap ?? clip.poses[slot.id] ?? clip.poses[role] ?? clip.poses["eye"] ?? "open")
             : undefined;
-          const part = pickActivePartForSlot(slot, {
-            pose: poseSwap,
-            viseme: role === "mouth" ? viseme : undefined,
-            eyeState,
-          });
+          const part =
+            role === "mouth" && viseme
+              ? (exactMouthPartForSlot(slot, viseme, fallbackMouth) ??
+                pickActivePartForSlot(slot, {
+                  pose: poseSwap,
+                  viseme,
+                  eyeState,
+                }))
+              : pickActivePartForSlot(slot, {
+                  pose: poseSwap,
+                  viseme: role === "mouth" ? viseme : undefined,
+                  eyeState,
+                });
           if (!part) return null;
           const nextPart =
             role === "mouth" && nextViseme && visemeBlend > 0
-              ? pickActivePartForSlot(slot, {
-                  pose: poseSwap,
-                  viseme: nextViseme,
-                  eyeState,
-                })
+              ? exactMouthPartForSlot(slot, nextViseme, fallbackMouth)
               : undefined;
           const d = deltaFor(composed, role, slot.id);
           const parallax = combinedParallax(part.depth, character.parallax, {

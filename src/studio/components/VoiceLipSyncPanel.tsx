@@ -2,7 +2,7 @@
 // Generates ElevenLabs TTS + character timestamps and applies as visemes.
 import { useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
-import type { CharacterClip, MouthViseme } from "../types";
+import type { CharacterClip, MediaClip, MouthViseme } from "../types";
 import { useStudio } from "../store";
 import { db } from "../db";
 import { ELEVENLABS_VOICES, ELEVENLABS_MODELS, DEFAULT_VOICE_ID } from "../lipsync/voices";
@@ -10,7 +10,9 @@ import { generateLipSyncForClip } from "../lipsync/elevenlabs";
 import { MOUTH_VISEMES, MOUTH_VISEME_DESCRIPTIONS } from "../lipsync/viseme-schema";
 
 export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
+  const project = useStudio((s) => s.project);
   const update = useStudio((s) => s.updateClip);
+  const removeClip = useStudio((s) => s.removeClip);
   const initial = clip.voiceLine;
   const [text, setText] = useState(initial?.text ?? "");
   const [voiceId, setVoiceId] = useState(initial?.voiceId ?? DEFAULT_VOICE_ID);
@@ -52,6 +54,14 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
   };
 
   const onClear = () => {
+    const speechClips =
+      project?.clips.filter(
+        (c) =>
+          c.kind === "audio" &&
+          ((c as MediaClip).linkedCharacterClipId === clip.id ||
+            (!!clip.lipSyncAudioId && c.mediaId === clip.lipSyncAudioId)),
+      ) ?? [];
+    for (const speechClip of speechClips) removeClip(speechClip.id);
     update(clip.id, {
       visemes: undefined,
       lipSyncAudioId: undefined,

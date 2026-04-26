@@ -10,6 +10,10 @@ export function Inspector() {
   const update = useStudio((s) => s.updateClip);
   const remove = useStudio((s) => s.removeClip);
   const clip = project?.clips.find((c) => c.id === id);
+  const linkedSpeechAudio =
+    clip?.kind === "audio" &&
+    !!clip.linkedCharacterClipId &&
+    !!project?.clips.some((c) => c.id === clip.linkedCharacterClipId);
 
   if (!project) return null;
 
@@ -35,10 +39,20 @@ export function Inspector() {
             </Field>
             <div className="grid grid-cols-2 gap-2">
               <Field label="Start (s)">
-                <NumberInput value={clip.start} step={0.1} onChange={(v) => update(clip.id, { start: Math.max(0, v) })} />
+                <NumberInput
+                  value={clip.start}
+                  step={0.1}
+                  disabled={linkedSpeechAudio}
+                  onChange={(v) => update(clip.id, { start: Math.max(0, v) })}
+                />
               </Field>
               <Field label="Duration (s)">
-                <NumberInput value={clip.duration} step={0.1} onChange={(v) => update(clip.id, { duration: Math.max(0.1, v) })} />
+                <NumberInput
+                  value={clip.duration}
+                  step={0.1}
+                  disabled={linkedSpeechAudio}
+                  onChange={(v) => update(clip.id, { duration: Math.max(0.1, v) })}
+                />
               </Field>
               <Field label="X">
                 <NumberInput value={clip.x} onChange={(v) => update(clip.id, { x: v })} />
@@ -53,11 +67,17 @@ export function Inspector() {
                 <NumberInput value={clip.height} onChange={(v) => update(clip.id, { height: v })} />
               </Field>
               <Field label="Rotation°">
-                <NumberInput value={clip.rotation} onChange={(v) => update(clip.id, { rotation: v })} />
+                <NumberInput
+                  value={clip.rotation}
+                  onChange={(v) => update(clip.id, { rotation: v })}
+                />
               </Field>
               <Field label="Opacity">
                 <input
-                  type="range" min={0} max={1} step={0.05}
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
                   value={clip.opacity}
                   onChange={(e) => update(clip.id, { opacity: Number(e.target.value) })}
                   className="w-full"
@@ -69,18 +89,30 @@ export function Inspector() {
               <Field label="Track">
                 <select
                   value={clip.trackIndex}
+                  disabled={linkedSpeechAudio}
                   onChange={(e) => update(clip.id, { trackIndex: Number(e.target.value) })}
                   className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
                 >
                   {project.tracks.map((t, i) => (
-                    <option key={t.id} value={i}>{t.name}</option>
+                    <option key={t.id} value={i}>
+                      {t.name}
+                    </option>
                   ))}
                 </select>
               </Field>
             </div>
+            {linkedSpeechAudio && (
+              <p className="rounded border border-border bg-panel-2 px-2 py-1 text-[11px] text-muted-foreground">
+                This speech audio is locked to its character. Move the character clip to move the
+                voice line.
+              </p>
+            )}
             <button
-              onClick={() => remove(clip.id)}
-              className="w-full rounded bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground hover:opacity-90"
+              onClick={() => {
+                if (!linkedSpeechAudio) remove(clip.id);
+              }}
+              disabled={linkedSpeechAudio}
+              className="w-full rounded bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Delete clip
             </button>
@@ -95,7 +127,9 @@ export function Inspector() {
       </div>
 
       <div className="border-t border-border p-3 text-xs">
-        <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">Project</div>
+        <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+          Project
+        </div>
         <div className="grid grid-cols-2 gap-2">
           <Field label="Name">
             <input
@@ -111,13 +145,22 @@ export function Inspector() {
             />
           </Field>
           <Field label="Width">
-            <NumberInput value={project.width} onChange={(v) => useStudio.getState().setProjectMeta({ width: v })} />
+            <NumberInput
+              value={project.width}
+              onChange={(v) => useStudio.getState().setProjectMeta({ width: v })}
+            />
           </Field>
           <Field label="Height">
-            <NumberInput value={project.height} onChange={(v) => useStudio.getState().setProjectMeta({ height: v })} />
+            <NumberInput
+              value={project.height}
+              onChange={(v) => useStudio.getState().setProjectMeta({ height: v })}
+            />
           </Field>
           <Field label="FPS">
-            <NumberInput value={project.fps} onChange={(v) => useStudio.getState().setProjectMeta({ fps: v })} />
+            <NumberInput
+              value={project.fps}
+              onChange={(v) => useStudio.getState().setProjectMeta({ fps: v })}
+            />
           </Field>
         </div>
       </div>
@@ -128,20 +171,33 @@ export function Inspector() {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">{label}</span>
+      <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+        {label}
+      </span>
       {children}
     </label>
   );
 }
 
-function NumberInput({ value, onChange, step = 1 }: { value: number; onChange: (v: number) => void; step?: number }) {
+function NumberInput({
+  value,
+  onChange,
+  step = 1,
+  disabled = false,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  step?: number;
+  disabled?: boolean;
+}) {
   return (
     <input
       type="number"
       value={Number.isFinite(value) ? Math.round(value * 100) / 100 : 0}
       step={step}
+      disabled={disabled}
       onChange={(e) => onChange(Number(e.target.value))}
-      className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+      className="w-full rounded border border-border bg-input px-2 py-1 text-foreground disabled:cursor-not-allowed disabled:opacity-60"
     />
   );
 }

@@ -2,14 +2,7 @@
 // Persistence to Dexie happens via explicit save calls (autosave debounced).
 import { create } from "zustand";
 import { db, uid } from "./db";
-import type {
-  AnyClip,
-  CharacterClip,
-  MediaAsset,
-  MediaClip,
-  Project,
-  Track,
-} from "./types";
+import type { AnyClip, CharacterClip, MediaAsset, MediaClip, Project, Track } from "./types";
 
 const DEFAULT_TRACKS: Track[] = [
   { id: uid(), name: "Background", kind: "background", lanes: 1 },
@@ -87,12 +80,25 @@ interface StudioState {
   addLane: (trackIndex: number) => void;
 
   // project meta
-  setProjectMeta: (patch: Partial<Pick<Project, "name" | "width" | "height" | "fps" | "duration">>) => void;
+  setProjectMeta: (
+    patch: Partial<Pick<Project, "name" | "width" | "height" | "fps" | "duration">>,
+  ) => void;
   setZoom: (z: number) => void;
 }
 
 const trackIndexFor = (project: Project, kind: Track["kind"]) =>
-  Math.max(0, project.tracks.findIndex((t) => t.kind === kind));
+  Math.max(
+    0,
+    project.tracks.findIndex((t) => t.kind === kind),
+  );
+
+function isSpeechLinkedToCharacter(clip: AnyClip, character: CharacterClip) {
+  return (
+    clip.kind === "audio" &&
+    ((clip as MediaClip).linkedCharacterClipId === character.id ||
+      (!!character.lipSyncAudioId && clip.mediaId === character.lipSyncAudioId))
+  );
+}
 
 let saveTimer: number | undefined;
 const scheduleSave = (get: () => StudioState) => {
@@ -131,10 +137,16 @@ export const useStudio = create<StudioState>((set, get) => ({
     const max = p?.duration ?? 0;
     set({ playhead: Math.max(0, Math.min(max, t)) });
   },
-  togglePlay() { set((s) => ({ playing: !s.playing })); },
-  setPlaying(p) { set({ playing: p }); },
+  togglePlay() {
+    set((s) => ({ playing: !s.playing }));
+  },
+  setPlaying(p) {
+    set({ playing: p });
+  },
 
-  selectClip(id) { set({ selectedClipId: id }); },
+  selectClip(id) {
+    set({ selectedClipId: id });
+  },
 
   addClip(clip) {
     const p = get().project;
@@ -145,7 +157,13 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (clip.laneIndex === undefined) {
       const track = project.tracks[clip.trackIndex];
       const maxLanes = track?.lanes ?? 1;
-      const lane = pickFreeLane(project.clips, clip.trackIndex, clip.start, clip.duration, maxLanes);
+      const lane = pickFreeLane(
+        project.clips,
+        clip.trackIndex,
+        clip.start,
+        clip.duration,
+        maxLanes,
+      );
       // Grow the track if no existing lane was free.
       if (lane >= maxLanes) {
         const tracks = project.tracks.map((t, i) =>
@@ -164,11 +182,35 @@ export const useStudio = create<StudioState>((set, get) => ({
   updateClip(id, patch) {
     const p = get().project;
     if (!p) return;
+    const existing = p.clips.find((c) => c.id === id);
+    if (existing?.kind === "audio" && (existing as MediaClip).linkedCharacterClipId) {
+      const {
+        start: _start,
+        duration: _duration,
+        trackIndex: _trackIndex,
+        laneIndex: _laneIndex,
+        ...safePatch
+      } = patch as Partial<MediaClip>;
+      patch = safePatch as Partial<AnyClip>;
+    }
+    const startDelta =
+      existing && patch.start !== undefined ? patch.start - existing.start : undefined;
     set({
       project: {
         ...p,
         clips: p.clips.map((c) =>
-          c.id === id ? ({ ...c, ...patch } as AnyClip) : c,
+          c.id === id
+            ? ({ ...c, ...patch } as AnyClip)
+            : existing?.kind === "character" &&
+                startDelta !== undefined &&
+                c.kind === "audio" &&
+                isSpeechLinkedToCharacter(c, existing as CharacterClip)
+              ? ({
+                  ...c,
+                  start: Math.max(0, c.start + startDelta),
+                  linkedCharacterClipId: existing.id,
+                } as AnyClip)
+              : c,
         ),
         updatedAt: Date.now(),
       },
@@ -178,9 +220,18 @@ export const useStudio = create<StudioState>((set, get) => ({
   removeClip(id) {
     const p = get().project;
     if (!p) return;
+    const existing = p.clips.find((c) => c.id === id);
+    const shouldRemove = (clip: AnyClip) =>
+      clip.id === id ||
+      (existing?.kind === "character" &&
+        isSpeechLinkedToCharacter(clip, existing as CharacterClip));
+    const selectedClipId = get().selectedClipId;
+    const selectedWasRemoved = p.clips.some(
+      (clip) => clip.id === selectedClipId && shouldRemove(clip),
+    );
     set({
-      project: { ...p, clips: p.clips.filter((c) => c.id !== id) },
-      selectedClipId: get().selectedClipId === id ? null : get().selectedClipId,
+      project: { ...p, clips: p.clips.filter((c) => !shouldRemove(c)), updatedAt: Date.now() },
+      selectedClipId: selectedWasRemoved ? null : selectedClipId,
     });
     scheduleSave(get);
   },
@@ -203,7 +254,8 @@ export const useStudio = create<StudioState>((set, get) => ({
     const w = isAudio ? 0 : naturalW || p.width;
     const h = isAudio ? 0 : naturalH || p.height;
     // Fit inside stage while preserving aspect for non-full media.
-    let cw = w, ch = h;
+    let cw = w,
+      ch = h;
     if (!isAudio && (cw > p.width || ch > p.height)) {
       const r = Math.min(p.width / cw, p.height / ch);
       cw = Math.round(cw * r);
@@ -244,7 +296,9 @@ export const useStudio = create<StudioState>((set, get) => ({
     set({ project: { ...p, ...patch, updatedAt: Date.now() } });
     scheduleSave(get);
   },
-  setZoom(z) { set({ zoom: Math.max(10, Math.min(400, z)) }); },
+  setZoom(z) {
+    set({ zoom: Math.max(10, Math.min(400, z)) });
+  },
 }));
 
 export type { StudioState };

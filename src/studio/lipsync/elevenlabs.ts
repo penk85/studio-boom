@@ -85,7 +85,9 @@ export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
   const stale = proj.clips.find(
     (c) =>
       c.kind === "audio" &&
-      (c as MediaClip & { sourceCharacterId?: string }).name === `🎙 ${charClip.name}`,
+      ((c as MediaClip).linkedCharacterClipId === charClip.id ||
+        (!!charClip.lipSyncAudioId && c.mediaId === charClip.lipSyncAudioId) ||
+        c.name === `🎙 ${charClip.name}`),
   );
   if (stale) state.removeClip(stale.id);
 
@@ -104,8 +106,10 @@ export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
     rotation: 0,
     opacity: 1,
     zIndex: proj.clips.length,
+    linkedCharacterClipId: charClip.id,
   };
   state.addClip(audioClip);
+  state.selectClip(charClip.id);
 
   await db.projects.put(useStudio.getState().project!);
   return { asset, visemes, audioDuration };

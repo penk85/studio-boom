@@ -1,4 +1,5 @@
 // Timeline — multi-track strip with draggable clips, ruler, playhead.
+import { Lock } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { useStudio } from "../store";
 import type { AnyClip } from "../types";
@@ -51,12 +52,30 @@ export function Timeline() {
   if (!project) return null;
   const totalWidth = Math.max(1200, project.duration * zoom);
 
-  const seekFromEvent = (e: React.MouseEvent) => {
+  const seekFromClientX = (clientX: number) => {
     const el = scrollerRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    const x = e.clientX - rect.left + el.scrollLeft;
+    const x = clientX - rect.left + el.scrollLeft;
     setPlayhead(x / zoom);
+  };
+
+  const beginScrub = (clientX: number) => {
+    setPlaying(false);
+    seekFromClientX(clientX);
+    const move = (ev: PointerEvent) => seekFromClientX(ev.clientX);
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  const onScrubMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    beginScrub(e.clientX);
   };
 
   return (
@@ -71,7 +90,10 @@ export function Timeline() {
           {playing ? "❚❚" : "▶"}
         </button>
         <button
-          onClick={() => { setPlaying(false); setPlayhead(0); }}
+          onClick={() => {
+            setPlaying(false);
+            setPlayhead(0);
+          }}
           className="rounded border border-border px-2 py-1 hover:bg-panel-2"
         >
           ⏮
@@ -82,7 +104,10 @@ export function Timeline() {
         <div className="ml-auto flex items-center gap-2">
           <span className="text-muted-foreground">Zoom</span>
           <input
-            type="range" min={20} max={300} value={zoom}
+            type="range"
+            min={20}
+            max={300}
+            value={zoom}
             onChange={(e) => setZoom(Number(e.target.value))}
             className="w-32 accent-[oklch(0.7_0.18_295)]"
           />
@@ -96,9 +121,13 @@ export function Timeline() {
           {project.tracks.map((t, i) => {
             const lanes = Math.max(1, t.lanes ?? 1);
             const lanePrefix =
-              t.kind === "audio" ? "A" :
-              t.kind === "background" ? "BG" :
-              t.kind === "character" ? "C" : "V";
+              t.kind === "audio"
+                ? "A"
+                : t.kind === "background"
+                  ? "BG"
+                  : t.kind === "character"
+                    ? "C"
+                    : "V";
             return (
               <div
                 key={t.id}
@@ -106,11 +135,17 @@ export function Timeline() {
                 className={`flex flex-col border-b border-border ${i % 2 ? "bg-track-alt" : "bg-track"}`}
               >
                 <div className="flex items-center gap-2 px-3 pt-1 text-xs">
-                  <span className={`h-2 w-2 rounded-full ${
-                    t.kind === "background" ? "bg-clip-bg" :
-                    t.kind === "character" ? "bg-clip-character" :
-                    t.kind === "audio" ? "bg-clip-audio" : "bg-clip"
-                  }`} />
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      t.kind === "background"
+                        ? "bg-clip-bg"
+                        : t.kind === "character"
+                          ? "bg-clip-character"
+                          : t.kind === "audio"
+                            ? "bg-clip-audio"
+                            : "bg-clip"
+                    }`}
+                  />
                   <span className="flex-1 truncate text-foreground">{t.name}</span>
                   <button
                     onClick={() => addLane(i)}
@@ -127,7 +162,8 @@ export function Timeline() {
                       style={{ height: TRACK_HEIGHT - (lane === 0 ? 18 : 0) }}
                       className="flex items-center px-3 text-[10px] text-muted-foreground"
                     >
-                      {lanePrefix}{lane + 1}
+                      {lanePrefix}
+                      {lane + 1}
                     </div>
                   ))}
                 </div>
@@ -140,7 +176,7 @@ export function Timeline() {
           <div style={{ width: totalWidth, position: "relative" }}>
             {/* Ruler */}
             <div
-              onMouseDown={seekFromEvent}
+              onMouseDown={onScrubMouseDown}
               className="sticky top-0 z-10 cursor-ew-resize border-b border-border bg-panel-2"
               style={{ height: RULER_HEIGHT }}
             >
@@ -154,16 +190,17 @@ export function Timeline() {
                 <div
                   key={t.id}
                   style={{ height: TRACK_HEIGHT * lanes }}
-                  onMouseDown={(e) => { if (e.target === e.currentTarget) seekFromEvent(e); }}
+                  onMouseDown={(e) => {
+                    if (e.target === e.currentTarget) onScrubMouseDown(e);
+                  }}
                   className={`relative border-b border-border ${i % 2 ? "bg-track-alt" : "bg-track"}`}
                 >
                   {/* Grid */}
                   <div
                     aria-hidden
-                    className="absolute inset-0 opacity-30"
+                    className="pointer-events-none absolute inset-0 opacity-30"
                     style={{
-                      backgroundImage:
-                        `linear-gradient(to right, var(--color-grid-line) 1px, transparent 1px)`,
+                      backgroundImage: `linear-gradient(to right, var(--color-grid-line) 1px, transparent 1px)`,
                       backgroundSize: `${zoom}px 100%`,
                     }}
                   />
@@ -172,7 +209,7 @@ export function Timeline() {
                     <div
                       key={lane}
                       aria-hidden
-                      className="absolute left-0 right-0 border-b border-border/50"
+                      className="pointer-events-none absolute left-0 right-0 border-b border-border/50"
                       style={{ top: TRACK_HEIGHT * (lane + 1) }}
                     />
                   ))}
@@ -235,7 +272,14 @@ function Ruler({ duration, zoom }: { duration: number; zoom: number }) {
 }
 
 function ClipBlock({
-  clip, zoom, selected, onSelect, onChange, onDelete, duration, lanes,
+  clip,
+  zoom,
+  selected,
+  onSelect,
+  onChange,
+  onDelete,
+  duration,
+  lanes,
 }: {
   clip: AnyClip;
   zoom: number;
@@ -248,18 +292,25 @@ function ClipBlock({
   onDelete: () => void;
 }) {
   const color =
-    clip.kind === "audio" ? "bg-clip-audio" :
-    clip.kind === "character" ? "bg-clip-character" :
-    clip.kind === "video" ? "bg-clip" :
-    "bg-clip-bg";
+    clip.kind === "audio"
+      ? "bg-clip-audio"
+      : clip.kind === "character"
+        ? "bg-clip-character"
+        : clip.kind === "video"
+          ? "bg-clip"
+          : "bg-clip-bg";
 
   const lane = clip.laneIndex ?? 0;
+  const linkedAudio =
+    clip.kind === "audio" && "linkedCharacterClipId" in clip && !!clip.linkedCharacterClipId;
 
   const onMouseDown = (e: React.MouseEvent) => {
     e.stopPropagation();
     onSelect();
     if (e.button !== 0) return;
-    const sx = e.clientX, sy = e.clientY;
+    if (linkedAudio) return;
+    const sx = e.clientX,
+      sy = e.clientY;
     const ostart = clip.start;
     const olane = lane;
     const move = (ev: MouseEvent) => {
@@ -280,7 +331,9 @@ function ClipBlock({
 
   const onResizeRight = (e: React.MouseEvent) => {
     e.stopPropagation();
-    const sx = e.clientX, od = clip.duration;
+    if (linkedAudio) return;
+    const sx = e.clientX,
+      od = clip.duration;
     const move = (ev: MouseEvent) => {
       const nd = Math.max(0.1, Math.min(duration - clip.start, od + (ev.clientX - sx) / zoom));
       onChange({ duration: nd });
@@ -295,7 +348,10 @@ function ClipBlock({
 
   const onResizeLeft = (e: React.MouseEvent) => {
     e.stopPropagation();
-    const sx = e.clientX, ostart = clip.start, od = clip.duration;
+    if (linkedAudio) return;
+    const sx = e.clientX,
+      ostart = clip.start,
+      od = clip.duration;
     const move = (ev: MouseEvent) => {
       const dx = (ev.clientX - sx) / zoom;
       const ns = Math.max(0, Math.min(ostart + od - 0.1, ostart + dx));
@@ -313,9 +369,12 @@ function ClipBlock({
   return (
     <div
       onMouseDown={onMouseDown}
-      onKeyDown={(e) => { if (e.key === "Delete" || e.key === "Backspace") onDelete(); }}
+      onKeyDown={(e) => {
+        if (linkedAudio) return;
+        if (e.key === "Delete" || e.key === "Backspace") onDelete();
+      }}
       tabIndex={0}
-      className={`group absolute cursor-grab overflow-hidden rounded ${color} ${selected ? "ring-2 ring-primary" : "ring-1 ring-black/30"}`}
+      className={`group absolute overflow-hidden rounded ${linkedAudio ? "cursor-not-allowed opacity-90" : "cursor-grab"} ${color} ${selected ? "ring-2 ring-primary" : "ring-1 ring-black/30"}`}
       style={{
         left: clip.start * zoom,
         width: Math.max(8, clip.duration * zoom),
@@ -324,11 +383,22 @@ function ClipBlock({
       }}
       title={clip.name}
     >
-      <div className="flex h-full items-center px-2 text-[11px] font-medium text-foreground/95 mix-blend-luminosity">
+      <div className="flex h-full items-center gap-1 px-2 text-[11px] font-medium text-foreground/95 mix-blend-luminosity">
+        {linkedAudio && <Lock size={11} className="shrink-0" aria-label="Linked speech audio" />}
         <span className="truncate">{clip.name}</span>
       </div>
-      <div onMouseDown={onResizeLeft} className="absolute left-0 top-0 h-full w-1.5 cursor-ew-resize bg-black/30 opacity-0 group-hover:opacity-100" />
-      <div onMouseDown={onResizeRight} className="absolute right-0 top-0 h-full w-1.5 cursor-ew-resize bg-black/30 opacity-0 group-hover:opacity-100" />
+      {!linkedAudio && (
+        <>
+          <div
+            onMouseDown={onResizeLeft}
+            className="absolute left-0 top-0 h-full w-1.5 cursor-ew-resize bg-black/30 opacity-0 group-hover:opacity-100"
+          />
+          <div
+            onMouseDown={onResizeRight}
+            className="absolute right-0 top-0 h-full w-1.5 cursor-ew-resize bg-black/30 opacity-0 group-hover:opacity-100"
+          />
+        </>
+      )}
     </div>
   );
 }

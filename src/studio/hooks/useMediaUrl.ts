@@ -6,9 +6,16 @@ export function useMediaUrl(id?: string | null): string | null {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
-    if (!id) { setUrl(null); return; }
-    getMediaUrl(id).then((u) => { if (alive) setUrl(u); });
-    return () => { alive = false; };
+    if (!id) {
+      setUrl(null);
+      return;
+    }
+    getMediaUrl(id).then((u) => {
+      if (alive) setUrl(u);
+    });
+    return () => {
+      alive = false;
+    };
   }, [id]);
   return url;
 }

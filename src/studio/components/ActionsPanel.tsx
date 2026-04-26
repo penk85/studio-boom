@@ -10,7 +10,9 @@ export function ActionsPanel({ clip }: { clip: CharacterClip }) {
   const update = useStudio((s) => s.updateClip);
   const [picking, setPicking] = useState(false);
 
-  useEffect(() => { void ensurePresetsSeeded(); }, []);
+  useEffect(() => {
+    void ensurePresetsSeeded();
+  }, []);
   const presets = useLiveQuery(() => db.movements.toArray(), []) ?? [];
   const presetMap = new Map(presets.map((p) => [p.id, p] as const));
 
@@ -40,7 +42,9 @@ export function ActionsPanel({ clip }: { clip: CharacterClip }) {
   return (
     <div className="rounded border border-border bg-panel-2 p-2">
       <div className="mb-2 flex items-center justify-between">
-        <span className="font-semibold uppercase tracking-wider text-muted-foreground">Actions</span>
+        <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+          Actions
+        </span>
         <button
           onClick={() => setPicking((v) => !v)}
           className="rounded bg-primary/30 px-2 py-0.5 text-[10px] text-foreground hover:bg-primary/50"
@@ -63,7 +67,9 @@ export function ActionsPanel({ clip }: { clip: CharacterClip }) {
               </div>
             </button>
           ))}
-          {presets.length === 0 && <div className="p-2 text-[11px] text-muted-foreground">No presets.</div>}
+          {presets.length === 0 && (
+            <div className="p-2 text-[11px] text-muted-foreground">No presets.</div>
+          )}
         </div>
       )}
 
@@ -73,15 +79,21 @@ export function ActionsPanel({ clip }: { clip: CharacterClip }) {
           return (
             <li key={a.id} className="rounded border border-border bg-panel p-2">
               <div className="mb-1 flex items-center gap-2">
-                <span className="flex-1 truncate text-foreground">{preset?.name ?? "Unknown preset"}</span>
+                <span className="flex-1 truncate text-foreground">
+                  {preset?.name ?? "Unknown preset"}
+                </span>
                 <span className="text-[10px] text-muted-foreground">{preset?.category}</span>
-                <button onClick={() => removeAction(a.id)} className="text-[10px] text-destructive">✕</button>
+                <button onClick={() => removeAction(a.id)} className="text-[10px] text-destructive">
+                  ✕
+                </button>
               </div>
               <div className="grid grid-cols-3 gap-1 text-[10px]">
                 <label>
                   <span className="block text-muted-foreground">Offset</span>
                   <input
-                    type="number" step={0.1} value={a.offset}
+                    type="number"
+                    step={0.1}
+                    value={a.offset}
                     onChange={(e) => updateAction(a.id, { offset: Number(e.target.value) })}
                     className="w-full rounded border border-border bg-input px-1"
                   />
@@ -89,7 +101,8 @@ export function ActionsPanel({ clip }: { clip: CharacterClip }) {
                 <label>
                   <span className="block text-muted-foreground">Duration</span>
                   <input
-                    type="number" step={0.1}
+                    type="number"
+                    step={0.1}
                     value={a.duration ?? preset?.duration ?? 1}
                     onChange={(e) => updateAction(a.id, { duration: Number(e.target.value) })}
                     className="w-full rounded border border-border bg-input px-1"
@@ -98,7 +111,11 @@ export function ActionsPanel({ clip }: { clip: CharacterClip }) {
                 <label>
                   <span className="block text-muted-foreground">Intensity</span>
                   <input
-                    type="range" min={0} max={1} step={0.05} value={a.intensity}
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={a.intensity}
                     onChange={(e) => updateAction(a.id, { intensity: Number(e.target.value) })}
                     className="w-full"
                   />

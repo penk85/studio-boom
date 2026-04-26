@@ -3,22 +3,25 @@
 1. **Stage selection keeps deselecting** — clicks bubble to the wrapper's `onClick={() => selectClip(null)}` and clear the selection right after you make it. Fix: only clear when the click is on the true empty background AND no drag occurred.
 2. **Every body part row in the character editor shows an eye icon** — the visibility toggle on each part row in the parts list uses the `👁` emoji as its glyph, so every uploaded part looks like an eye. Fix: replace with `Eye` / `EyeOff` lucide icons.
 3. **Character editor — parts on the canvas are all freely grabbable.** New rule: **the canvas is non-interactive; selection happens only from the left parts list.** Only the part selected in the list can be moved/resized.
-4. **Head Variants is a top-level panel** — nest variants *inside* their parent part group (Head, Body, Eye, Brow, Mouth) in the parts list.
+4. **Head Variants is a top-level panel** — nest variants _inside_ their parent part group (Head, Body, Eye, Brow, Mouth) in the parts list.
 5. **Timeline overlap** — multiple clips on the same track stack visually. Add **sub-tracks (lanes)** per top-level track so each clip gets its own lane.
 
 ## How it will work
 
 ### Stage selection stickiness (`Stage.tsx`)
+
 - Track a `didDrag` ref set on pointer-move during a clip drag.
 - Wrapper `onClick` clears selection only when `e.target === e.currentTarget` AND `!didDrag`.
 - Stop propagation properly on clip clicks so the wrapper handler never sees them.
 
 ### Replace eye-emoji visibility toggle (`CharacterEditor.tsx`)
+
 - Import `Eye` and `EyeOff` from `lucide-react`.
 - In the parts list row (line ~346), replace `{p.visible ? "👁" : "—"}` with the corresponding lucide icon at `size={14}`.
 - This removes the "every part looks like an eye" effect — now it's a small clear visibility toggle.
 
 ### Character editor — list-driven selection
+
 - **Canvas parts are display-only.** Remove `onPointerDown` selection from `PartLayer`. The canvas surface itself doesn't change selection on click either.
 - **Drag/resize only on the actively selected part.** When `selected === true`, the part renders its move/resize handles and accepts pointer drag. When not selected, it has `pointer-events: none` so clicks pass through (and do nothing).
 - **Selection is exclusively from the left "Parts" list.** Clicking a row selects that part; clicking another row switches.
@@ -33,6 +36,7 @@
 - Right inspector still shows transform/anchor/depth for the currently-selected part.
 
 ### Sub-tracks (lanes) on the main timeline
+
 - Extend `Track` with `lanes: number` (default 1) and `BaseClip` with `laneIndex: number` (default 0).
 - Render each track as N stacked lanes of `TRACK_HEIGHT`. Total track height = `lanes * TRACK_HEIGHT`.
 - Track header shows lane labels (V1/V2 for video/overlay/character, A1/A2 for audio) and a "+ Lane" button.

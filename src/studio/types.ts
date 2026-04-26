@@ -277,6 +277,8 @@ export interface BaseClip {
 export interface MediaClip extends BaseClip {
   kind: "image" | "video" | "audio";
   mediaId: ID;
+  /** Auto-generated speech audio linked to a character clip, if any. */
+  linkedCharacterClipId?: ID;
 }
 
 export interface AppliedAction {

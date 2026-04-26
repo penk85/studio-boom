@@ -31,78 +31,150 @@ function preset(
 
 const STARTERS: ActionPreset[] = [
   // Expressions ------------------------------------------------------------
-  preset("Surprised", "expression", 0.6, [
-    {
-      partRole: "mouth",
-      poseSwap: "O",
-      lockMouth: true,
-      keyframes: [
-        { t: 0, scale: 1, ease: "easeOut" },
-        { t: 0.3, scale: 1.5, ease: "easeOut" },
-        { t: 1, scale: 1.4 },
-      ],
-    },
+  preset(
+    "Surprised",
+    "expression",
+    0.6,
+    [
+      {
+        partRole: "mouth",
+        poseSwap: "O",
+        lockMouth: true,
+        keyframes: [
+          { t: 0, scale: 1, ease: "easeOut" },
+          { t: 0.3, scale: 1.5, ease: "easeOut" },
+          { t: 1, scale: 1.4 },
+        ],
+      },
+      {
+        partRole: "brow",
+        keyframes: [
+          { t: 0, dy: 0 },
+          { t: 0.3, dy: -18, ease: "easeOut" },
+          { t: 1, dy: -16 },
+        ],
+      },
+      {
+        partRole: "eye",
+        keyframes: [
+          { t: 0, scale: 1 },
+          { t: 0.3, scale: 1.2 },
+          { t: 1, scale: 1.15 },
+        ],
+      },
+    ],
+    { description: "Wide eyes, raised brows, round mouth." },
+  ),
+
+  preset(
+    "Happy",
+    "expression",
+    0.5,
+    [
+      {
+        partRole: "mouth",
+        lockMouth: true,
+        keyframes: [
+          { t: 0, scale: 1 },
+          { t: 1, scale: 1.2, dy: 2 },
+        ],
+      },
+      {
+        partRole: "eye",
+        keyframes: [
+          { t: 0, scale: 1 },
+          { t: 1, scale: 0.85, dy: 2 },
+        ],
+      },
+    ],
+    { description: "Smile + happy squint." },
+  ),
+
+  preset("Sad", "expression", 0.6, [
     {
       partRole: "brow",
       keyframes: [
-        { t: 0, dy: 0 },
-        { t: 0.3, dy: -18, ease: "easeOut" },
-        { t: 1, dy: -16 },
+        { t: 0, dy: 0, rotation: 0 },
+        { t: 1, dy: -4, rotation: -8 },
       ],
     },
     {
-      partRole: "eye",
+      partRole: "mouth",
+      lockMouth: true,
       keyframes: [
-        { t: 0, scale: 1 },
-        { t: 0.3, scale: 1.2 },
-        { t: 1, scale: 1.15 },
+        { t: 0, dy: 0, scale: 1 },
+        { t: 1, dy: 6, scale: 0.85 },
       ],
     },
-  ], { description: "Wide eyes, raised brows, round mouth." }),
+    {
+      partRole: "head",
+      keyframes: [
+        { t: 0, rotation: 0, dy: 0 },
+        { t: 1, rotation: -3, dy: 4 },
+      ],
+    },
+  ]),
 
-  preset("Happy", "expression", 0.5, [
+  preset("Angry", "expression", 0.45, [
+    {
+      partRole: "brow",
+      keyframes: [
+        { t: 0, dy: 0, rotation: 0 },
+        { t: 1, dy: -6, rotation: 12 },
+      ],
+    },
     {
       partRole: "mouth",
       lockMouth: true,
       keyframes: [
         { t: 0, scale: 1 },
-        { t: 1, scale: 1.2, dy: 2 },
+        { t: 1, scale: 0.9, dy: -2 },
       ],
     },
     {
       partRole: "eye",
-      keyframes: [{ t: 0, scale: 1 }, { t: 1, scale: 0.85, dy: 2 }],
+      keyframes: [
+        { t: 0, scale: 1 },
+        { t: 1, scale: 0.85 },
+      ],
     },
-  ], { description: "Smile + happy squint." }),
-
-  preset("Sad", "expression", 0.6, [
-    { partRole: "brow", keyframes: [{ t: 0, dy: 0, rotation: 0 }, { t: 1, dy: -4, rotation: -8 }] },
-    { partRole: "mouth", lockMouth: true, keyframes: [{ t: 0, dy: 0, scale: 1 }, { t: 1, dy: 6, scale: 0.85 }] },
-    { partRole: "head", keyframes: [{ t: 0, rotation: 0, dy: 0 }, { t: 1, rotation: -3, dy: 4 }] },
-  ]),
-
-  preset("Angry", "expression", 0.45, [
-    { partRole: "brow", keyframes: [{ t: 0, dy: 0, rotation: 0 }, { t: 1, dy: -6, rotation: 12 }] },
-    { partRole: "mouth", lockMouth: true, keyframes: [{ t: 0, scale: 1 }, { t: 1, scale: 0.9, dy: -2 }] },
-    { partRole: "eye", keyframes: [{ t: 0, scale: 1 }, { t: 1, scale: 0.85 }] },
   ]),
 
   preset("Confused", "expression", 0.7, [
-    { partRole: "brow", keyframes: [{ t: 0, rotation: 0 }, { t: 1, rotation: -10, dy: -4 }] },
-    { partRole: "head", keyframes: [{ t: 0, rotation: 0 }, { t: 0.5, rotation: 6 }, { t: 1, rotation: 4 }] },
-  ]),
-
-  preset("Blink", "expression", 0.18, [
     {
-      partRole: "eye",
-      poseSwap: "closed",
+      partRole: "brow",
       keyframes: [
-        { t: 0, scale: 1 },
-        { t: 0.5, scale: 0.05 },
-        { t: 1, scale: 1 },
+        { t: 0, rotation: 0 },
+        { t: 1, rotation: -10, dy: -4 },
       ],
     },
-  ], { description: "Quick blink." }),
+    {
+      partRole: "head",
+      keyframes: [
+        { t: 0, rotation: 0 },
+        { t: 0.5, rotation: 6 },
+        { t: 1, rotation: 4 },
+      ],
+    },
+  ]),
+
+  preset(
+    "Blink",
+    "expression",
+    0.18,
+    [
+      {
+        partRole: "eye",
+        poseSwap: "closed",
+        keyframes: [
+          { t: 0, scale: 1 },
+          { t: 0.5, scale: 0.05 },
+          { t: 1, scale: 1 },
+        ],
+      },
+    ],
+    { description: "Quick blink." },
+  ),
 
   // Gestures ---------------------------------------------------------------
   preset("Wave", "gesture", 1.2, [
@@ -145,9 +217,30 @@ const STARTERS: ActionPreset[] = [
   ]),
 
   preset("Shrug", "gesture", 0.9, [
-    { partRole: "armL", keyframes: [{ t: 0, dy: 0, rotation: 0 }, { t: 0.5, dy: -10, rotation: -10 }, { t: 1, dy: 0, rotation: 0 }] },
-    { partRole: "armR", keyframes: [{ t: 0, dy: 0, rotation: 0 }, { t: 0.5, dy: -10, rotation: 10 }, { t: 1, dy: 0, rotation: 0 }] },
-    { partRole: "head", keyframes: [{ t: 0, dy: 0 }, { t: 0.5, dy: 4 }, { t: 1, dy: 0 }] },
+    {
+      partRole: "armL",
+      keyframes: [
+        { t: 0, dy: 0, rotation: 0 },
+        { t: 0.5, dy: -10, rotation: -10 },
+        { t: 1, dy: 0, rotation: 0 },
+      ],
+    },
+    {
+      partRole: "armR",
+      keyframes: [
+        { t: 0, dy: 0, rotation: 0 },
+        { t: 0.5, dy: -10, rotation: 10 },
+        { t: 1, dy: 0, rotation: 0 },
+      ],
+    },
+    {
+      partRole: "head",
+      keyframes: [
+        { t: 0, dy: 0 },
+        { t: 0.5, dy: 4 },
+        { t: 1, dy: 0 },
+      ],
+    },
   ]),
 
   preset("Point", "gesture", 0.8, [
@@ -162,16 +255,66 @@ const STARTERS: ActionPreset[] = [
   ]),
 
   // Full-body --------------------------------------------------------------
-  preset("Idle bob", "full-body", 2, [
-    { partRole: "body", keyframes: [{ t: 0, dy: 0 }, { t: 0.5, dy: -4 }, { t: 1, dy: 0 }] },
-    { partRole: "head", keyframes: [{ t: 0, dy: 0 }, { t: 0.5, dy: -3 }, { t: 1, dy: 0 }] },
-  ], { loop: true, description: "Subtle breathing." }),
+  preset(
+    "Idle bob",
+    "full-body",
+    2,
+    [
+      {
+        partRole: "body",
+        keyframes: [
+          { t: 0, dy: 0 },
+          { t: 0.5, dy: -4 },
+          { t: 1, dy: 0 },
+        ],
+      },
+      {
+        partRole: "head",
+        keyframes: [
+          { t: 0, dy: 0 },
+          { t: 0.5, dy: -3 },
+          { t: 1, dy: 0 },
+        ],
+      },
+    ],
+    { loop: true, description: "Subtle breathing." },
+  ),
 
   preset("Jump", "full-body", 0.7, [
-    { partRole: "body", keyframes: [{ t: 0, dy: 0, scale: 1 }, { t: 0.2, dy: 8, scale: 0.92 }, { t: 0.5, dy: -60, scale: 1.05 }, { t: 0.8, dy: 8, scale: 0.92 }, { t: 1, dy: 0, scale: 1 }] },
-    { partRole: "head", keyframes: [{ t: 0, dy: 0 }, { t: 0.5, dy: -60 }, { t: 1, dy: 0 }] },
-    { partRole: "armL", keyframes: [{ t: 0, rotation: 0 }, { t: 0.5, rotation: 30 }, { t: 1, rotation: 0 }] },
-    { partRole: "armR", keyframes: [{ t: 0, rotation: 0 }, { t: 0.5, rotation: -30 }, { t: 1, rotation: 0 }] },
+    {
+      partRole: "body",
+      keyframes: [
+        { t: 0, dy: 0, scale: 1 },
+        { t: 0.2, dy: 8, scale: 0.92 },
+        { t: 0.5, dy: -60, scale: 1.05 },
+        { t: 0.8, dy: 8, scale: 0.92 },
+        { t: 1, dy: 0, scale: 1 },
+      ],
+    },
+    {
+      partRole: "head",
+      keyframes: [
+        { t: 0, dy: 0 },
+        { t: 0.5, dy: -60 },
+        { t: 1, dy: 0 },
+      ],
+    },
+    {
+      partRole: "armL",
+      keyframes: [
+        { t: 0, rotation: 0 },
+        { t: 0.5, rotation: 30 },
+        { t: 1, rotation: 0 },
+      ],
+    },
+    {
+      partRole: "armR",
+      keyframes: [
+        { t: 0, rotation: 0 },
+        { t: 0.5, rotation: -30 },
+        { t: 1, rotation: 0 },
+      ],
+    },
   ]),
 
   // Camera -----------------------------------------------------------------
@@ -186,7 +329,13 @@ const STARTERS: ActionPreset[] = [
   ]),
 
   preset("Pan left", "camera", 3, [
-    { partRole: "__camera", keyframes: [{ t: 0, dx: 0 }, { t: 1, dx: -120, ease: "easeInOut" }] },
+    {
+      partRole: "__camera",
+      keyframes: [
+        { t: 0, dx: 0 },
+        { t: 1, dx: -120, ease: "easeInOut" },
+      ],
+    },
   ]),
 
   preset("Camera shake", "camera", 0.6, [
@@ -204,21 +353,75 @@ const STARTERS: ActionPreset[] = [
   ]),
 
   // Head Turns -------------------------------------------------------------
-  preset("Look left", "headTurn", 0.5, [
-    { partRole: "head", keyframes: [{ t: 0, dx: 0 }, { t: 1, dx: -4, ease: "easeInOut" }] },
-  ], { headTurn: { from: "front", to: "3qL", ease: "easeInOut" }, description: "Quick head turn to the left." }),
+  preset(
+    "Look left",
+    "headTurn",
+    0.5,
+    [
+      {
+        partRole: "head",
+        keyframes: [
+          { t: 0, dx: 0 },
+          { t: 1, dx: -4, ease: "easeInOut" },
+        ],
+      },
+    ],
+    {
+      headTurn: { from: "front", to: "3qL", ease: "easeInOut" },
+      description: "Quick head turn to the left.",
+    },
+  ),
 
-  preset("Look right", "headTurn", 0.5, [
-    { partRole: "head", keyframes: [{ t: 0, dx: 0 }, { t: 1, dx: 4, ease: "easeInOut" }] },
-  ], { headTurn: { from: "front", to: "3qR", ease: "easeInOut" }, description: "Quick head turn to the right." }),
+  preset(
+    "Look right",
+    "headTurn",
+    0.5,
+    [
+      {
+        partRole: "head",
+        keyframes: [
+          { t: 0, dx: 0 },
+          { t: 1, dx: 4, ease: "easeInOut" },
+        ],
+      },
+    ],
+    {
+      headTurn: { from: "front", to: "3qR", ease: "easeInOut" },
+      description: "Quick head turn to the right.",
+    },
+  ),
 
-  preset("Glance over shoulder", "headTurn", 0.7, [
-    { partRole: "head", keyframes: [{ t: 0, dx: 0 }, { t: 1, dx: 6, ease: "easeInOut" }] },
-  ], { headTurn: { from: "front", to: "sideR", ease: "easeInOut" } }),
+  preset(
+    "Glance over shoulder",
+    "headTurn",
+    0.7,
+    [
+      {
+        partRole: "head",
+        keyframes: [
+          { t: 0, dx: 0 },
+          { t: 1, dx: 6, ease: "easeInOut" },
+        ],
+      },
+    ],
+    { headTurn: { from: "front", to: "sideR", ease: "easeInOut" } },
+  ),
 
-  preset("Look up", "headTurn", 0.5, [
-    { partRole: "head", keyframes: [{ t: 0, dy: 0, rotation: 0 }, { t: 1, dy: -6, rotation: -4 }] },
-  ], { description: "Tilt head upward." }),
+  preset(
+    "Look up",
+    "headTurn",
+    0.5,
+    [
+      {
+        partRole: "head",
+        keyframes: [
+          { t: 0, dy: 0, rotation: 0 },
+          { t: 1, dy: -6, rotation: -4 },
+        ],
+      },
+    ],
+    { description: "Tilt head upward." },
+  ),
 ];
 
 let seedPromise: Promise<void> | null = null;
@@ -240,10 +443,7 @@ export function ensurePresetsSeeded(): Promise<void> {
 }
 
 /** Create a fresh user-defined preset (not built-in). */
-export function createUserPreset(
-  name: string,
-  category: ActionPreset["category"],
-): ActionPreset {
+export function createUserPreset(name: string, category: ActionPreset["category"]): ActionPreset {
   const t = Date.now();
   return {
     id: uid(),
