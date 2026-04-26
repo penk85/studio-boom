@@ -54,7 +54,7 @@ export type MouthViseme =
   | "FV"
   | "L";
 
-export type EyeState = "open" | "half" | "closed";
+export type EyeState = "open" | "half" | "closed" | "wink";
 
 export interface CharacterPart {
   id: ID;
