@@ -235,13 +235,14 @@ function Ruler({ duration, zoom }: { duration: number; zoom: number }) {
 }
 
 function ClipBlock({
-  clip, zoom, selected, onSelect, onChange, onDelete, duration,
+  clip, zoom, selected, onSelect, onChange, onDelete, duration, lanes,
 }: {
   clip: AnyClip;
   zoom: number;
   selected: boolean;
   tracks: number;
   duration: number;
+  lanes: number;
   onSelect: () => void;
   onChange: (p: Partial<AnyClip>) => void;
   onDelete: () => void;
@@ -252,15 +253,22 @@ function ClipBlock({
     clip.kind === "video" ? "bg-clip" :
     "bg-clip-bg";
 
+  const lane = clip.laneIndex ?? 0;
+
   const onMouseDown = (e: React.MouseEvent) => {
     e.stopPropagation();
     onSelect();
     if (e.button !== 0) return;
-    const sx = e.clientX;
+    const sx = e.clientX, sy = e.clientY;
     const ostart = clip.start;
+    const olane = lane;
     const move = (ev: MouseEvent) => {
       const ns = Math.max(0, Math.min(duration - clip.duration, ostart + (ev.clientX - sx) / zoom));
-      onChange({ start: ns });
+      // Snap vertical drag to nearest lane within the track.
+      const dy = ev.clientY - sy;
+      const laneDelta = Math.round(dy / TRACK_HEIGHT);
+      const newLane = Math.max(0, Math.min(lanes - 1, olane + laneDelta));
+      onChange({ start: ns, laneIndex: newLane });
     };
     const up = () => {
       window.removeEventListener("mousemove", move);
@@ -307,8 +315,13 @@ function ClipBlock({
       onMouseDown={onMouseDown}
       onKeyDown={(e) => { if (e.key === "Delete" || e.key === "Backspace") onDelete(); }}
       tabIndex={0}
-      className={`group absolute top-1 bottom-1 cursor-grab overflow-hidden rounded ${color} ${selected ? "ring-2 ring-primary" : "ring-1 ring-black/30"}`}
-      style={{ left: clip.start * zoom, width: Math.max(8, clip.duration * zoom) }}
+      className={`group absolute cursor-grab overflow-hidden rounded ${color} ${selected ? "ring-2 ring-primary" : "ring-1 ring-black/30"}`}
+      style={{
+        left: clip.start * zoom,
+        width: Math.max(8, clip.duration * zoom),
+        top: lane * TRACK_HEIGHT + 4,
+        height: TRACK_HEIGHT - 8,
+      }}
       title={clip.name}
     >
       <div className="flex h-full items-center px-2 text-[11px] font-medium text-foreground/95 mix-blend-luminosity">
