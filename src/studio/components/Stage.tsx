@@ -179,6 +179,7 @@ function ClipLayer({
   return (
     <div
       onPointerDown={onPointerDown}
+      onClick={(e) => e.stopPropagation()}
       className={`absolute select-none ${selected ? "outline-2 outline-primary" : "outline-1 outline-transparent hover:outline-accent/60"} outline outline-offset-0`}
       style={{
         left: clip.x + charCamera.dx,
