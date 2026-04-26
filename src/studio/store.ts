@@ -83,6 +83,9 @@ interface StudioState {
 
   addMediaToTimeline: (asset: MediaAsset, trackIndex?: number) => void;
 
+  // track lanes
+  addLane: (trackIndex: number) => void;
+
   // project meta
   setProjectMeta: (patch: Partial<Pick<Project, "name" | "width" | "height" | "fps" | "duration">>) => void;
   setZoom: (z: number) => void;
