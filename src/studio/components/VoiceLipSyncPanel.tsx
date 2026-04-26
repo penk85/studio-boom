@@ -94,6 +94,12 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
               );
             })}
           </div>
+          {availableMouthShapes.size === 0 && (
+            <p className="mt-2 text-[10px] leading-relaxed text-muted-foreground">
+              No custom mouth shapes yet. Playback will use default generated shapes near the
+              character&apos;s mouth.
+            </p>
+          )}
         </div>
       )}
 

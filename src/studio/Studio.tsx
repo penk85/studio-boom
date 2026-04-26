@@ -20,6 +20,32 @@ export function Studio() {
     })();
   }, []);
 
+  useEffect(() => {
+    const isTypingTarget = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName.toLowerCase();
+      return (
+        target.isContentEditable ||
+        tag === "input" ||
+        tag === "textarea" ||
+        tag === "select" ||
+        tag === "button" ||
+        Boolean(target.closest("input, textarea, select, button, [contenteditable='true']"))
+      );
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.code !== "Space" || event.repeat || event.metaKey || event.ctrlKey || event.altKey)
+        return;
+      if (isTypingTarget(event.target)) return;
+      event.preventDefault();
+      useStudio.getState().togglePlay();
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   if (!project) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-background text-muted-foreground">

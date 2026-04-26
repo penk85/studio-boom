@@ -4,7 +4,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { useStudio } from "../store";
 import { db } from "../db";
-import type { AnyClip, CharacterClip, CharacterPreset, MediaClip } from "../types";
+import type {
+  AnyClip,
+  CharacterClip,
+  CharacterPart,
+  CharacterPreset,
+  MediaClip,
+  MouthViseme,
+} from "../types";
 import { clipActiveAt } from "../timeline-utils";
 import { useMediaUrl } from "../hooks/useMediaUrl";
 import { visemeAt } from "../lipsync/visemeMap";
@@ -305,6 +312,88 @@ const VISEME_GLYPH: Record<string, string> = {
   L: "L",
 };
 
+interface FallbackMouthPlacement {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  anchorX: number;
+  anchorY: number;
+  zIndex: number;
+  depth: number;
+  slotId?: string;
+}
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+function fallbackMouthPlacement(character: CharacterPreset): FallbackMouthPlacement {
+  const mouthParts = character.parts
+    .filter((p) => p.role === "mouth" && p.visible)
+    .sort((a, b) => a.zIndex - b.zIndex);
+  const mouthAnchor = mouthParts.find((p) => p.viseme === "rest") ?? mouthParts[0];
+  if (mouthAnchor) return placementFromMouthPart(character, mouthAnchor);
+
+  const head = character.parts.find((p) => p.role === "head" && p.visible);
+  const headLooksLikeFullCanvas =
+    !!head &&
+    head.width > character.canvasWidth * 0.72 &&
+    head.height > character.canvasHeight * 0.72;
+  const centerX = head ? head.x + head.width * 0.5 : character.canvasWidth * 0.5;
+  const centerY = head
+    ? headLooksLikeFullCanvas
+      ? character.canvasHeight * 0.4
+      : head.y + head.height * 0.7
+    : character.canvasHeight * 0.42;
+  const width = clamp(
+    (head?.width ?? character.canvasWidth) * 0.18,
+    54,
+    character.canvasWidth * 0.2,
+  );
+  const height = clamp(width * 0.42, 22, character.canvasHeight * 0.08);
+
+  return {
+    x: centerX - width / 2,
+    y: centerY - height / 2,
+    width,
+    height,
+    rotation: head?.rotation ?? 0,
+    anchorX: 0.5,
+    anchorY: 0.5,
+    zIndex: 50,
+    depth: 0,
+  };
+}
+
+function placementFromMouthPart(
+  character: CharacterPreset,
+  part: CharacterPart,
+): FallbackMouthPlacement {
+  const looksLikeFullCanvas =
+    part.width > character.canvasWidth * 0.72 && part.height > character.canvasHeight * 0.72;
+  const centerX = part.x + part.width * 0.5;
+  const centerY = looksLikeFullCanvas ? part.y + part.height * 0.4 : part.y + part.height * 0.5;
+  const width = looksLikeFullCanvas
+    ? clamp(character.canvasWidth * 0.14, 54, 120)
+    : clamp(part.width, 44, character.canvasWidth * 0.22);
+  const height = looksLikeFullCanvas
+    ? clamp(width * 0.42, 22, 58)
+    : clamp(part.height, 18, character.canvasHeight * 0.09);
+
+  return {
+    x: centerX - width / 2,
+    y: centerY - height / 2,
+    width,
+    height,
+    rotation: part.rotation,
+    anchorX: part.anchorX,
+    anchorY: part.anchorY,
+    zIndex: Math.max(part.zIndex, 50),
+    depth: part.depth,
+    slotId: part.slotId,
+  };
+}
+
 function CharacterPlaceholder({ clip, playhead }: { clip: CharacterClip; playhead: number }) {
   const v = visemeAt(clip.visemes, playhead - clip.start);
   return (
@@ -354,6 +443,29 @@ function CharacterRig({
 
   // Slots render one active variant each, while the whole rig remains one clip.
   const slots = useMemo(() => listCharacterSlots(character.parts), [character.parts]);
+  const fallbackMouth = useMemo(() => fallbackMouthPlacement(character), [character]);
+  const visibleMouthVisemes = useMemo(
+    () =>
+      new Set(
+        character.parts
+          .filter((p) => p.role === "mouth" && p.visible && p.viseme)
+          .map((p) => p.viseme as MouthViseme),
+      ),
+    [character.parts],
+  );
+  const shouldUseFallbackMouth = Boolean(
+    clip.visemes?.length && viseme && !composed.mouthLocked && !visibleMouthVisemes.has(viseme),
+  );
+  const fallbackMouthDelta = shouldUseFallbackMouth
+    ? deltaFor(composed, "mouth", fallbackMouth.slotId)
+    : null;
+  const fallbackMouthParallax = shouldUseFallbackMouth
+    ? combinedParallax(fallbackMouth.depth, character.parallax, { clipDelta })
+    : { dx: 0, dy: 0 };
+  const fallbackMouthFaceOffset =
+    shouldUseFallbackMouth && headVariant
+      ? { dx: headVariant.featureOffsetX ?? 0, dy: headVariant.featureOffsetY ?? 0 }
+      : { dx: 0, dy: 0 };
 
   return (
     <div className="absolute inset-0 overflow-hidden">
@@ -367,6 +479,7 @@ function CharacterRig({
       >
         {slots.map((slot) => {
           const role = slot.role;
+          if (role === "mouth" && shouldUseFallbackMouth) return null;
           const poseSwap =
             poseSwapFor(composed, role, slot.id) ?? clip.poses[slot.id] ?? clip.poses[role];
           const part = pickActivePartForSlot(slot, {
@@ -408,9 +521,119 @@ function CharacterRig({
             />
           );
         })}
+        {shouldUseFallbackMouth && viseme && fallbackMouthDelta && (
+          <DefaultMouthShape
+            viseme={viseme}
+            placement={fallbackMouth}
+            dx={fallbackMouthDelta.dx + fallbackMouthParallax.dx + fallbackMouthFaceOffset.dx}
+            dy={fallbackMouthDelta.dy + fallbackMouthParallax.dy + fallbackMouthFaceOffset.dy}
+            scale={fallbackMouthDelta.scale}
+            rotation={fallbackMouthDelta.rotation}
+            opacity={fallbackMouthDelta.opacity ?? 1}
+          />
+        )}
       </div>
     </div>
   );
+}
+
+function DefaultMouthShape({
+  viseme,
+  placement,
+  dx,
+  dy,
+  scale,
+  rotation,
+  opacity,
+}: {
+  viseme: MouthViseme;
+  placement: FallbackMouthPlacement;
+  dx: number;
+  dy: number;
+  scale: number;
+  rotation: number;
+  opacity: number;
+}) {
+  return (
+    <svg
+      viewBox="0 0 100 60"
+      className="absolute overflow-visible"
+      style={{
+        left: placement.x + dx,
+        top: placement.y + dy,
+        width: placement.width,
+        height: placement.height,
+        zIndex: placement.zIndex,
+        opacity,
+        transform: `rotate(${placement.rotation + rotation}deg) scale(${scale})`,
+        transformOrigin: `${placement.anchorX * 100}% ${placement.anchorY * 100}%`,
+        pointerEvents: "none",
+      }}
+      aria-hidden
+    >
+      {renderDefaultMouthViseme(viseme)}
+    </svg>
+  );
+}
+
+function renderDefaultMouthViseme(viseme: MouthViseme) {
+  const mouth = "#733f43";
+  const tongue = "#e87f89";
+  switch (viseme) {
+    case "A":
+      return (
+        <>
+          <ellipse cx="50" cy="30" rx="23" ry="27" fill={mouth} />
+          <ellipse cx="50" cy="42" rx="14" ry="8" fill={tongue} />
+        </>
+      );
+    case "E":
+      return (
+        <>
+          <path d="M18 22c20 18 44 18 64 0 1 27-65 27-64 0Z" fill={mouth} />
+          <rect x="31" y="25" width="38" height="8" rx="3" fill="#fff" />
+        </>
+      );
+    case "I":
+      return <rect x="22" y="24" width="56" height="15" rx="8" fill={mouth} />;
+    case "O":
+      return <ellipse cx="50" cy="30" rx="18" ry="24" fill={mouth} />;
+    case "U":
+      return <path d="M30 21c12 23 28 23 40 0 9 30-49 30-40 0Z" fill={mouth} />;
+    case "MBP":
+      return <path d="M16 31c22-11 46-11 68 0-22 12-46 12-68 0Z" fill={mouth} />;
+    case "FV":
+      return (
+        <>
+          <path d="M22 22c19 17 37 17 56 0 0 22-56 22-56 0Z" fill={mouth} />
+          <rect x="29" y="22" width="42" height="8" rx="3" fill="#fff" />
+        </>
+      );
+    case "L":
+      return (
+        <>
+          <path d="M30 21c13 22 27 22 40 0v25c-13 12-27 12-40 0V21Z" fill={mouth} />
+          <path
+            d="M40 40c7-8 13-8 20 0"
+            fill="none"
+            stroke={tongue}
+            strokeWidth="8"
+            strokeLinecap="round"
+          />
+        </>
+      );
+    case "rest":
+    default:
+      return (
+        <path
+          d="M22 31c18 8 38 8 56 0"
+          fill="none"
+          stroke={mouth}
+          strokeWidth="8"
+          strokeLinecap="round"
+        />
+      );
+  }
 }
 
 function PartImage({
