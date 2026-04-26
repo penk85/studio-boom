@@ -276,6 +276,8 @@ function PartsList({
   onUpdate: (id: string, patch: Partial<CharacterPart>) => void;
   onRemove: (id: string) => void;
   manifest: PartManifest;
+  headVariants: HeadVariant[];
+  onHeadVariantsChange: (v: HeadVariant[]) => void;
 }) {
   const grouped = useMemo(() => groupParts(parts), [parts]);
   const visibleRoles: PartRole[] = ALL_ROLES.filter((r) => {
@@ -302,6 +304,8 @@ function PartsList({
           onAdd={onAdd}
           onUpdate={onUpdate}
           onRemove={onRemove}
+          headVariants={role === "head" ? headVariants : undefined}
+          onHeadVariantsChange={role === "head" ? onHeadVariantsChange : undefined}
         />
       ))}
     </div>
@@ -310,6 +314,7 @@ function PartsList({
 
 function RoleGroup({
   role, variants, selectedId, onSelect, onAdd, onUpdate, onRemove,
+  headVariants, onHeadVariantsChange,
 }: {
   role: PartRole;
   variants: CharacterPart[];
@@ -318,6 +323,8 @@ function RoleGroup({
   onAdd: (p: CharacterPart) => void;
   onUpdate: (id: string, patch: Partial<CharacterPart>) => void;
   onRemove: (id: string) => void;
+  headVariants?: HeadVariant[];
+  onHeadVariantsChange?: (v: HeadVariant[]) => void;
 }) {
   return (
     <div className="rounded border border-border bg-panel-2">
