@@ -20,6 +20,7 @@ export function Timeline() {
   const selectClip = useStudio((s) => s.selectClip);
   const updateClip = useStudio((s) => s.updateClip);
   const removeClip = useStudio((s) => s.removeClip);
+  const addLane = useStudio((s) => s.addLane);
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const lastTickRef = useRef<number>(0);
@@ -90,22 +91,49 @@ export function Timeline() {
 
       {/* Track headers + tracks */}
       <div className="flex min-h-0 flex-1">
-        <div className="w-36 shrink-0 border-r border-border bg-panel-2">
+        <div className="w-40 shrink-0 border-r border-border bg-panel-2">
           <div style={{ height: RULER_HEIGHT }} className="border-b border-border" />
-          {project.tracks.map((t, i) => (
-            <div
-              key={t.id}
-              style={{ height: TRACK_HEIGHT }}
-              className={`flex items-center gap-2 border-b border-border px-3 text-xs ${i % 2 ? "bg-track-alt" : "bg-track"}`}
-            >
-              <span className={`h-2 w-2 rounded-full ${
-                t.kind === "background" ? "bg-clip-bg" :
-                t.kind === "character" ? "bg-clip-character" :
-                t.kind === "audio" ? "bg-clip-audio" : "bg-clip"
-              }`} />
-              <span className="truncate text-foreground">{t.name}</span>
-            </div>
-          ))}
+          {project.tracks.map((t, i) => {
+            const lanes = Math.max(1, t.lanes ?? 1);
+            const lanePrefix =
+              t.kind === "audio" ? "A" :
+              t.kind === "background" ? "BG" :
+              t.kind === "character" ? "C" : "V";
+            return (
+              <div
+                key={t.id}
+                style={{ height: TRACK_HEIGHT * lanes }}
+                className={`flex flex-col border-b border-border ${i % 2 ? "bg-track-alt" : "bg-track"}`}
+              >
+                <div className="flex items-center gap-2 px-3 pt-1 text-xs">
+                  <span className={`h-2 w-2 rounded-full ${
+                    t.kind === "background" ? "bg-clip-bg" :
+                    t.kind === "character" ? "bg-clip-character" :
+                    t.kind === "audio" ? "bg-clip-audio" : "bg-clip"
+                  }`} />
+                  <span className="flex-1 truncate text-foreground">{t.name}</span>
+                  <button
+                    onClick={() => addLane(i)}
+                    title="Add a sub-track lane"
+                    className="rounded border border-border px-1.5 text-[10px] leading-tight text-muted-foreground hover:bg-panel hover:text-foreground"
+                  >
+                    +
+                  </button>
+                </div>
+                <div className="flex flex-1 flex-col">
+                  {Array.from({ length: lanes }).map((_, lane) => (
+                    <div
+                      key={lane}
+                      style={{ height: TRACK_HEIGHT - (lane === 0 ? 18 : 0) }}
+                      className="flex items-center px-3 text-[10px] text-muted-foreground"
+                    >
+                      {lanePrefix}{lane + 1}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
         </div>
 
         <div ref={scrollerRef} className="relative min-h-0 flex-1 overflow-auto">
@@ -120,40 +148,53 @@ export function Timeline() {
             </div>
 
             {/* Tracks */}
-            {project.tracks.map((t, i) => (
-              <div
-                key={t.id}
-                style={{ height: TRACK_HEIGHT }}
-                onMouseDown={(e) => { if (e.target === e.currentTarget) seekFromEvent(e); }}
-                className={`relative border-b border-border ${i % 2 ? "bg-track-alt" : "bg-track"}`}
-              >
-                {/* Grid */}
+            {project.tracks.map((t, i) => {
+              const lanes = Math.max(1, t.lanes ?? 1);
+              return (
                 <div
-                  aria-hidden
-                  className="absolute inset-0 opacity-30"
-                  style={{
-                    backgroundImage:
-                      `linear-gradient(to right, var(--color-grid-line) 1px, transparent 1px)`,
-                    backgroundSize: `${zoom}px 100%`,
-                  }}
-                />
-                {project.clips
-                  .filter((c) => c.trackIndex === i)
-                  .map((c) => (
-                    <ClipBlock
-                      key={c.id}
-                      clip={c}
-                      zoom={zoom}
-                      selected={c.id === selectedId}
-                      tracks={project.tracks.length}
-                      duration={project.duration}
-                      onSelect={() => selectClip(c.id)}
-                      onChange={(p) => updateClip(c.id, p)}
-                      onDelete={() => removeClip(c.id)}
+                  key={t.id}
+                  style={{ height: TRACK_HEIGHT * lanes }}
+                  onMouseDown={(e) => { if (e.target === e.currentTarget) seekFromEvent(e); }}
+                  className={`relative border-b border-border ${i % 2 ? "bg-track-alt" : "bg-track"}`}
+                >
+                  {/* Grid */}
+                  <div
+                    aria-hidden
+                    className="absolute inset-0 opacity-30"
+                    style={{
+                      backgroundImage:
+                        `linear-gradient(to right, var(--color-grid-line) 1px, transparent 1px)`,
+                      backgroundSize: `${zoom}px 100%`,
+                    }}
+                  />
+                  {/* Lane separators */}
+                  {Array.from({ length: lanes - 1 }).map((_, lane) => (
+                    <div
+                      key={lane}
+                      aria-hidden
+                      className="absolute left-0 right-0 border-b border-border/50"
+                      style={{ top: TRACK_HEIGHT * (lane + 1) }}
                     />
                   ))}
-              </div>
-            ))}
+                  {project.clips
+                    .filter((c) => c.trackIndex === i)
+                    .map((c) => (
+                      <ClipBlock
+                        key={c.id}
+                        clip={c}
+                        zoom={zoom}
+                        selected={c.id === selectedId}
+                        tracks={project.tracks.length}
+                        duration={project.duration}
+                        lanes={lanes}
+                        onSelect={() => selectClip(c.id)}
+                        onChange={(p) => updateClip(c.id, p)}
+                        onDelete={() => removeClip(c.id)}
+                      />
+                    ))}
+                </div>
+              );
+            })}
 
             {/* Playhead */}
             <div
@@ -194,13 +235,14 @@ function Ruler({ duration, zoom }: { duration: number; zoom: number }) {
 }
 
 function ClipBlock({
-  clip, zoom, selected, onSelect, onChange, onDelete, duration,
+  clip, zoom, selected, onSelect, onChange, onDelete, duration, lanes,
 }: {
   clip: AnyClip;
   zoom: number;
   selected: boolean;
   tracks: number;
   duration: number;
+  lanes: number;
   onSelect: () => void;
   onChange: (p: Partial<AnyClip>) => void;
   onDelete: () => void;
@@ -211,15 +253,22 @@ function ClipBlock({
     clip.kind === "video" ? "bg-clip" :
     "bg-clip-bg";
 
+  const lane = clip.laneIndex ?? 0;
+
   const onMouseDown = (e: React.MouseEvent) => {
     e.stopPropagation();
     onSelect();
     if (e.button !== 0) return;
-    const sx = e.clientX;
+    const sx = e.clientX, sy = e.clientY;
     const ostart = clip.start;
+    const olane = lane;
     const move = (ev: MouseEvent) => {
       const ns = Math.max(0, Math.min(duration - clip.duration, ostart + (ev.clientX - sx) / zoom));
-      onChange({ start: ns });
+      // Snap vertical drag to nearest lane within the track.
+      const dy = ev.clientY - sy;
+      const laneDelta = Math.round(dy / TRACK_HEIGHT);
+      const newLane = Math.max(0, Math.min(lanes - 1, olane + laneDelta));
+      onChange({ start: ns, laneIndex: newLane });
     };
     const up = () => {
       window.removeEventListener("mousemove", move);
@@ -266,8 +315,13 @@ function ClipBlock({
       onMouseDown={onMouseDown}
       onKeyDown={(e) => { if (e.key === "Delete" || e.key === "Backspace") onDelete(); }}
       tabIndex={0}
-      className={`group absolute top-1 bottom-1 cursor-grab overflow-hidden rounded ${color} ${selected ? "ring-2 ring-primary" : "ring-1 ring-black/30"}`}
-      style={{ left: clip.start * zoom, width: Math.max(8, clip.duration * zoom) }}
+      className={`group absolute cursor-grab overflow-hidden rounded ${color} ${selected ? "ring-2 ring-primary" : "ring-1 ring-black/30"}`}
+      style={{
+        left: clip.start * zoom,
+        width: Math.max(8, clip.duration * zoom),
+        top: lane * TRACK_HEIGHT + 4,
+        height: TRACK_HEIGHT - 8,
+      }}
       title={clip.name}
     >
       <div className="flex h-full items-center px-2 text-[11px] font-medium text-foreground/95 mix-blend-luminosity">

@@ -54,7 +54,7 @@ export type MouthViseme =
   | "FV"
   | "L";
 
-export type EyeState = "open" | "half" | "closed";
+export type EyeState = "open" | "half" | "closed" | "wink";
 
 export interface CharacterPart {
   id: ID;
@@ -241,6 +241,8 @@ export interface BaseClip {
   id: ID;
   name: string;
   trackIndex: number;
+  /** Sub-track lane within the parent track (0-based). Default 0. */
+  laneIndex?: number;
   start: number; // seconds on the project timeline
   duration: number;
   // Stage transform (ignored for pure audio):
@@ -297,6 +299,8 @@ export interface Track {
   id: ID;
   name: string;
   kind: TrackKind;
+  /** Number of sub-track lanes (default 1). */
+  lanes?: number;
   muted?: boolean;
   locked?: boolean;
 }

@@ -1,6 +1,7 @@
 // CharacterEditor — full-screen editor for a CharacterPreset.
 // Three panes: parts list (left), live canvas (center), part inspector (right).
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Eye, EyeOff } from "lucide-react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db, importMediaFile } from "../db";
@@ -31,7 +32,15 @@ const ALL_ROLES: PartRole[] = [
 ];
 
 const VISEMES: MouthViseme[] = ["rest", "A", "E", "I", "O", "U", "MBP", "FV", "L"];
-const EYE_STATES: EyeState[] = ["open", "half", "closed"];
+const EYE_STATES: EyeState[] = ["open", "half", "closed", "wink"];
+
+const HEAD_DIRECTIONS: { dir: HeadDirection; label: string }[] = [
+  { dir: "front", label: "Front" },
+  { dir: "3qL", label: "¾ Left" },
+  { dir: "3qR", label: "¾ Right" },
+  { dir: "sideL", label: "Side Left" },
+  { dir: "sideR", label: "Side Right" },
+];
 
 interface Props {
   characterId: string;
@@ -149,6 +158,8 @@ export function CharacterEditor({ characterId }: Props) {
             onUpdate={updatePart}
             onRemove={removePart}
             manifest={doc.manifest}
+            headVariants={doc.headVariants ?? []}
+            onHeadVariantsChange={(v) => update({ headVariants: v })}
           />
         </aside>
 
@@ -220,10 +231,7 @@ export function CharacterEditor({ characterId }: Props) {
             onChange={(p) => update({ parallax: p })}
           />
 
-          <HeadVariantsEditor
-            doc={doc}
-            onChange={(vars) => update({ headVariants: vars })}
-          />
+          {/* Head Variants moved into the Head part group on the left. */}
         </aside>
       </div>
 
@@ -268,6 +276,7 @@ function ManifestEditor({ manifest, onChange }: { manifest: PartManifest; onChan
 
 function PartsList({
   parts, selectedId, onSelect, onAdd, onUpdate, onRemove, manifest,
+  headVariants, onHeadVariantsChange,
 }: {
   parts: CharacterPart[];
   selectedId: string | null;
@@ -276,6 +285,8 @@ function PartsList({
   onUpdate: (id: string, patch: Partial<CharacterPart>) => void;
   onRemove: (id: string) => void;
   manifest: PartManifest;
+  headVariants: HeadVariant[];
+  onHeadVariantsChange: (v: HeadVariant[]) => void;
 }) {
   const grouped = useMemo(() => groupParts(parts), [parts]);
   const visibleRoles: PartRole[] = ALL_ROLES.filter((r) => {
@@ -302,6 +313,8 @@ function PartsList({
           onAdd={onAdd}
           onUpdate={onUpdate}
           onRemove={onRemove}
+          headVariants={role === "head" ? headVariants : undefined}
+          onHeadVariantsChange={role === "head" ? onHeadVariantsChange : undefined}
         />
       ))}
     </div>
@@ -310,6 +323,7 @@ function PartsList({
 
 function RoleGroup({
   role, variants, selectedId, onSelect, onAdd, onUpdate, onRemove,
+  headVariants, onHeadVariantsChange,
 }: {
   role: PartRole;
   variants: CharacterPart[];
@@ -318,6 +332,8 @@ function RoleGroup({
   onAdd: (p: CharacterPart) => void;
   onUpdate: (id: string, patch: Partial<CharacterPart>) => void;
   onRemove: (id: string) => void;
+  headVariants?: HeadVariant[];
+  onHeadVariantsChange?: (v: HeadVariant[]) => void;
 }) {
   return (
     <div className="rounded border border-border bg-panel-2">
@@ -340,10 +356,11 @@ function RoleGroup({
             </span>
             <button
               onClick={(e) => { e.stopPropagation(); onUpdate(p.id, { visible: !p.visible }); }}
-              className="rounded px-1 text-[10px]"
+              className="rounded p-1 text-muted-foreground hover:text-foreground"
               title={p.visible ? "Hide" : "Show"}
+              aria-label={p.visible ? "Hide part" : "Show part"}
             >
-              {p.visible ? "👁" : "—"}
+              {p.visible ? <Eye size={14} /> : <EyeOff size={14} />}
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); onRemove(p.id); }}
@@ -355,6 +372,46 @@ function RoleGroup({
           </li>
         ))}
       </ul>
+      {role === "head" && headVariants && onHeadVariantsChange && (
+        <HeadTurnVariants variants={headVariants} onChange={onHeadVariantsChange} />
+      )}
+    </div>
+  );
+}
+
+/** Nested head-turn variants (front, ¾, side directions) shown inside the Head group. */
+function HeadTurnVariants({
+  variants, onChange,
+}: { variants: HeadVariant[]; onChange: (v: HeadVariant[]) => void }) {
+  const upload = async (dir: HeadDirection, file: File) => {
+    const asset = await importMediaFile(file);
+    const next = variants.filter((v) => v.direction !== dir);
+    next.push({ direction: dir, mediaId: asset.id });
+    onChange(next);
+  };
+  const remove = (dir: HeadDirection) =>
+    onChange(variants.filter((v) => v.direction !== dir));
+
+  return (
+    <div className="border-t border-border p-2">
+      <div className="mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Variants — turn directions
+      </div>
+      <div className="space-y-1">
+        {HEAD_DIRECTIONS.map(({ dir, label }) => {
+          const v = variants.find((x) => x.direction === dir);
+          return (
+            <HeadVariantSlot
+              key={dir}
+              dir={dir}
+              label={label}
+              variant={v}
+              onUpload={(f) => upload(dir, f)}
+              onRemove={() => remove(dir)}
+            />
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -414,7 +471,7 @@ function UploadVariantButton({
 }
 
 function PartLayer({
-  part, selected, scale, onionSkin, onSelect, onChange,
+  part, selected, scale, onionSkin, onChange,
 }: {
   part: CharacterPart;
   selected: boolean;
@@ -426,8 +483,8 @@ function PartLayer({
   const url = useMediaUrl(part.mediaId);
 
   const onPointerDown = (e: React.PointerEvent) => {
+    if (!selected) return; // Canvas is locked unless this part is the active one.
     e.stopPropagation();
-    onSelect();
     if (e.button !== 0) return;
     const sx = e.clientX, sy = e.clientY;
     const ox = part.x, oy = part.y;
@@ -473,7 +530,7 @@ function PartLayer({
   return (
     <div
       onPointerDown={onPointerDown}
-      className={`absolute select-none ${selected ? "outline-2 outline-primary" : "outline-1 outline-transparent hover:outline-accent/60"} outline outline-offset-0`}
+      className={`absolute select-none ${selected ? "outline-2 outline-primary" : "outline-1 outline-transparent"} outline outline-offset-0`}
       style={{
         left: part.x,
         top: part.y,
@@ -483,7 +540,9 @@ function PartLayer({
         transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
         zIndex: part.zIndex,
         opacity: skin,
-        cursor: "move",
+        // Locked unless this is the currently selected part — selection is list-only.
+        pointerEvents: selected ? "auto" : "none",
+        cursor: selected ? "move" : "default",
       }}
     >
       {url && <img src={url} alt={part.name} draggable={false} className="h-full w-full object-contain" />}
@@ -625,41 +684,8 @@ function ParallaxEditor({ cfg, onChange }: { cfg: ParallaxConfig; onChange: (c: 
   );
 }
 
-const HEAD_DIRECTIONS: { dir: HeadDirection; label: string }[] = [
-  { dir: "front", label: "Front" },
-  { dir: "3qL", label: "¾ Left" },
-  { dir: "3qR", label: "¾ Right" },
-  { dir: "sideL", label: "Side Left" },
-  { dir: "sideR", label: "Side Right" },
-];
-
-function HeadVariantsEditor({
-  doc, onChange,
-}: { doc: CharacterPreset; onChange: (vars: HeadVariant[]) => void }) {
-  const variants = doc.headVariants ?? [];
-  const upload = async (dir: HeadDirection, file: File) => {
-    const asset = await importMediaFile(file);
-    const next = variants.filter((v) => v.direction !== dir);
-    next.push({ direction: dir, mediaId: asset.id });
-    onChange(next);
-  };
-  const remove = (dir: HeadDirection) => onChange(variants.filter((v) => v.direction !== dir));
-
-  return (
-    <div className="mt-6 border-t border-border pt-3">
-      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">Head Variants</div>
-      <div className="mb-2 text-[10px] text-muted-foreground">
-        Upload alternate head images for head-turn presets. Front falls back to the regular head part.
-      </div>
-      <div className="space-y-1.5">
-        {HEAD_DIRECTIONS.map(({ dir, label }) => {
-          const v = variants.find((x) => x.direction === dir);
-          return <HeadVariantSlot key={dir} dir={dir} label={label} variant={v} onUpload={(f) => upload(dir, f)} onRemove={() => remove(dir)} />;
-        })}
-      </div>
-    </div>
-  );
-}
+// HeadVariantsEditor removed — head-turn variants are now nested inside the
+// Head part group via <HeadTurnVariants /> in PartsList.
 
 function HeadVariantSlot({
   label, variant, onUpload, onRemove,

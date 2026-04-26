@@ -12,11 +12,33 @@ import type {
 } from "./types";
 
 const DEFAULT_TRACKS: Track[] = [
-  { id: uid(), name: "Background", kind: "background" },
-  { id: uid(), name: "Characters", kind: "character" },
-  { id: uid(), name: "Overlay", kind: "overlay" },
-  { id: uid(), name: "Audio", kind: "audio" },
+  { id: uid(), name: "Background", kind: "background", lanes: 1 },
+  { id: uid(), name: "Characters", kind: "character", lanes: 1 },
+  { id: uid(), name: "Overlay", kind: "overlay", lanes: 1 },
+  { id: uid(), name: "Audio", kind: "audio", lanes: 1 },
 ];
+
+/** Find the lowest free lane in a track at the given time range, or return a new lane index. */
+export function pickFreeLane(
+  clips: AnyClip[],
+  trackIndex: number,
+  start: number,
+  duration: number,
+  maxLanes: number,
+): number {
+  const end = start + duration;
+  for (let lane = 0; lane < Math.max(1, maxLanes); lane++) {
+    const conflict = clips.some((c) => {
+      if (c.trackIndex !== trackIndex) return false;
+      if ((c.laneIndex ?? 0) !== lane) return false;
+      const cEnd = c.start + c.duration;
+      return c.start < end && cEnd > start;
+    });
+    if (!conflict) return lane;
+  }
+  // No free lane within current count → return next lane (caller will grow track).
+  return maxLanes;
+}
 
 export function createBlankProject(name = "Untitled Movie"): Project {
   const now = Date.now();
@@ -60,6 +82,9 @@ interface StudioState {
   removeClip: (id: string) => void;
 
   addMediaToTimeline: (asset: MediaAsset, trackIndex?: number) => void;
+
+  // track lanes
+  addLane: (trackIndex: number) => void;
 
   // project meta
   setProjectMeta: (patch: Partial<Pick<Project, "name" | "width" | "height" | "fps" | "duration">>) => void;
@@ -114,9 +139,25 @@ export const useStudio = create<StudioState>((set, get) => ({
   addClip(clip) {
     const p = get().project;
     if (!p) return;
+    let project = p;
+    let nextClip = clip;
+    // Auto-assign laneIndex if not already set on the clip.
+    if (clip.laneIndex === undefined) {
+      const track = project.tracks[clip.trackIndex];
+      const maxLanes = track?.lanes ?? 1;
+      const lane = pickFreeLane(project.clips, clip.trackIndex, clip.start, clip.duration, maxLanes);
+      // Grow the track if no existing lane was free.
+      if (lane >= maxLanes) {
+        const tracks = project.tracks.map((t, i) =>
+          i === clip.trackIndex ? { ...t, lanes: lane + 1 } : t,
+        );
+        project = { ...project, tracks };
+      }
+      nextClip = { ...clip, laneIndex: lane };
+    }
     set({
-      project: { ...p, clips: [...p.clips, clip], updatedAt: Date.now() },
-      selectedClipId: clip.id,
+      project: { ...project, clips: [...project.clips, nextClip], updatedAt: Date.now() },
+      selectedClipId: nextClip.id,
     });
     scheduleSave(get);
   },
@@ -185,6 +226,16 @@ export const useStudio = create<StudioState>((set, get) => ({
       zIndex: p.clips.length,
     };
     get().addClip(clip);
+  },
+
+  addLane(trackIndex) {
+    const p = get().project;
+    if (!p) return;
+    const tracks = p.tracks.map((t, i) =>
+      i === trackIndex ? { ...t, lanes: (t.lanes ?? 1) + 1 } : t,
+    );
+    set({ project: { ...p, tracks, updatedAt: Date.now() } });
+    scheduleSave(get);
   },
 
   setProjectMeta(patch) {

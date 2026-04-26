@@ -62,7 +62,10 @@ export function Stage() {
     <div
       ref={wrapRef}
       className="relative flex h-full w-full items-center justify-center bg-stage-bg p-4"
-      onClick={() => selectClip(null)}
+      onClick={(e) => {
+        // Only deselect when the click is on the empty stage background itself.
+        if (e.target === e.currentTarget) selectClip(null);
+      }}
     >
       <div
         className="relative shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] outline outline-1 outline-border"
@@ -176,6 +179,7 @@ function ClipLayer({
   return (
     <div
       onPointerDown={onPointerDown}
+      onClick={(e) => e.stopPropagation()}
       className={`absolute select-none ${selected ? "outline-2 outline-primary" : "outline-1 outline-transparent hover:outline-accent/60"} outline outline-offset-0`}
       style={{
         left: clip.x + charCamera.dx,
