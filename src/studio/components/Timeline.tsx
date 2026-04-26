@@ -20,6 +20,7 @@ export function Timeline() {
   const selectClip = useStudio((s) => s.selectClip);
   const updateClip = useStudio((s) => s.updateClip);
   const removeClip = useStudio((s) => s.removeClip);
+  const addLane = useStudio((s) => s.addLane);
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const lastTickRef = useRef<number>(0);
