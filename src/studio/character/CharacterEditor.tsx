@@ -150,6 +150,8 @@ export function CharacterEditor({ characterId }: Props) {
             onUpdate={updatePart}
             onRemove={removePart}
             manifest={doc.manifest}
+            headVariants={doc.headVariants ?? []}
+            onHeadVariantsChange={(v) => update({ headVariants: v })}
           />
         </aside>
 
