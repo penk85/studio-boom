@@ -2,9 +2,9 @@
 // Generates ElevenLabs TTS + character timestamps and applies as visemes.
 import { useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
-import type { CharacterClip, MediaClip, MouthViseme } from "../types";
+import type { CharacterClip, MediaClip, MouthViseme, SavedVoice } from "../types";
 import { useStudio } from "../store";
-import { db, deleteMediaIfUnused } from "../db";
+import { db, deleteMediaIfUnused, getSavedVoices, saveVoice, deleteSavedVoice } from "../db";
 import { ELEVENLABS_VOICES, ELEVENLABS_MODELS, DEFAULT_VOICE_ID } from "../lipsync/voices";
 import { generateLipSyncForClip } from "../lipsync/elevenlabs";
 import { MOUTH_VISEMES, MOUTH_VISEME_DESCRIPTIONS } from "../lipsync/viseme-schema";
@@ -18,12 +18,14 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
   const [text, setText] = useState(initial?.text ?? "");
   const [voiceId, setVoiceId] = useState(initial?.voiceId ?? DEFAULT_VOICE_ID);
   const [customId, setCustomId] = useState("");
+  const [customName, setCustomName] = useState("");
   const [modelId, setModelId] = useState(initial?.modelId ?? "eleven_multilingual_v2");
   const [stability, setStability] = useState(initial?.stability ?? 0.5);
   const [similarity, setSimilarity] = useState(initial?.similarityBoost ?? 0.75);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const character = useLiveQuery(() => db.characters.get(clip.characterId), [clip.characterId]);
+  const savedVoices = useLiveQuery(() => getSavedVoices(), []) ?? [];
 
   const visemeCount = clip.visemes?.length ?? 0;
   const availableMouthShapes = useMemo(() => {
@@ -168,16 +170,84 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
         </label>
       </div>
 
+      {savedVoices.length > 0 && (
+        <label className="block">
+          <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+            Saved Voices
+          </span>
+          <select
+            value={customId && savedVoices.some(v => v.voiceId === customId) ? customId : ""}
+            onChange={(e) => {
+              const selected = savedVoices.find(v => v.voiceId === e.target.value);
+              if (selected) {
+                setCustomId(selected.voiceId);
+                setCustomName(selected.name);
+              }
+            }}
+            className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+          >
+            <option value="">Select a saved voice...</option>
+            {savedVoices.map((v) => (
+              <option key={v.id} value={v.voiceId}>
+                {v.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+
       <label className="block">
         <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
           Custom voice ID (optional)
         </span>
-        <input
-          value={customId}
-          onChange={(e) => setCustomId(e.target.value)}
-          placeholder="paste any ElevenLabs voice_id"
-          className="w-full rounded border border-border bg-input px-2 py-1 font-mono text-foreground"
-        />
+        <div className="flex gap-2">
+          <input
+            value={customId}
+            onChange={(e) => setCustomId(e.target.value)}
+            placeholder="paste any ElevenLabs voice_id"
+            className="flex-1 rounded border border-border bg-input px-2 py-1 font-mono text-foreground"
+          />
+          {customId.trim() && (
+            <button
+              onClick={async () => {
+                if (!customId.trim()) return;
+                const name = customName.trim() || `Voice ${customId.slice(0, 8)}`;
+                await saveVoice(customId.trim(), name);
+                setCustomName("");
+              }}
+              className="rounded bg-primary px-2 py-1 text-xs text-primary-foreground hover:opacity-90"
+              title="Save this voice for later"
+            >
+              Save
+            </button>
+          )}
+        </div>
+        {customId.trim() && (
+          <div className="mt-1 flex gap-2">
+            <input
+              value={customName}
+              onChange={(e) => setCustomName(e.target.value)}
+              placeholder="Voice name (optional)"
+              className="flex-1 rounded border border-border bg-input px-2 py-1 text-[10px] text-foreground"
+            />
+            {savedVoices.some(v => v.voiceId === customId.trim()) && (
+              <button
+                onClick={async () => {
+                  const existing = savedVoices.find(v => v.voiceId === customId.trim());
+                  if (existing) {
+                    await deleteSavedVoice(existing.id);
+                    setCustomId("");
+                    setCustomName("");
+                  }
+                }}
+                className="rounded border border-destructive px-2 py-1 text-[10px] text-destructive hover:bg-destructive/20"
+                title="Remove from saved voices"
+              >
+                Remove
+              </button>
+            )}
+          </div>
+        )}
       </label>
 
       <div className="grid grid-cols-2 gap-2">

@@ -4,6 +4,14 @@
 
 export type ID = string;
 
+/** Saved ElevenLabs voice for reuse */
+export interface SavedVoice {
+  id: ID;
+  voiceId: string;
+  name: string;
+  createdAt: number;
+}
+
 /** Unit of media stored in IndexedDB. The Blob lives in `mediaBlobs` table. */
 export interface MediaAsset {
   id: ID;

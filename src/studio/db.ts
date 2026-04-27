@@ -1,7 +1,7 @@
 // Dexie database — local-first storage for projects, characters,
 // movement presets, and media blobs. Everything stays in the browser.
 import Dexie, { type Table } from "dexie";
-import type { ActionPreset, CharacterPreset, MediaAsset, MediaBlobRow, Project } from "./types";
+import type { ActionPreset, CharacterPreset, MediaAsset, MediaBlobRow, Project, SavedVoice } from "./types";
 import { legacyVisemeToStandard } from "./lipsync/viseme-schema";
 
 class StudioDB extends Dexie {
@@ -12,6 +12,7 @@ class StudioDB extends Dexie {
   movements!: Table<ActionPreset, string>;
   media!: Table<MediaAsset, string>;
   mediaBlobs!: Table<MediaBlobRow, string>;
+  savedVoices!: Table<SavedVoice, string>;
 
   constructor() {
     super("hyperframes-studio");
@@ -161,6 +162,15 @@ class StudioDB extends Dexie {
           await projectTable.put({ ...project, clips, updatedAt: Date.now() });
         }
       });
+    // v6: add savedVoices table for custom ElevenLabs voices.
+    this.version(6).stores({
+      projects: "id, name, updatedAt",
+      characters: "id, name, updatedAt",
+      movements: "id, name, category, createdAt",
+      media: "id, name, kind, createdAt",
+      mediaBlobs: "id",
+      savedVoices: "id, voiceId, name, createdAt",
+    });
   }
 }
 
@@ -455,4 +465,26 @@ function roleLabelForSlot(role: CharacterPreset["parts"][number]["role"]) {
     case "extra":
       return "Extra";
   }
+}
+
+/** Save a custom ElevenLabs voice for reuse */
+export async function saveVoice(voiceId: string, name: string): Promise<SavedVoice> {
+  const voice: SavedVoice = {
+    id: uid(),
+    voiceId,
+    name: name.trim() || voiceId,
+    createdAt: Date.now(),
+  };
+  await db.savedVoices.add(voice);
+  return voice;
+}
+
+/** Get all saved voices, most recent first */
+export async function getSavedVoices(): Promise<SavedVoice[]> {
+  return db.savedVoices.orderBy("createdAt").reverse().toArray();
+}
+
+/** Delete a saved voice */
+export async function deleteSavedVoice(id: string) {
+  await db.savedVoices.delete(id);
 }
