@@ -27,7 +27,7 @@ export async function ensureStarterCharacterSeeded() {
     browsNeutral,
     browsRaised,
     mouthRest,
-    mouthAi,
+    mouthA,
     mouthE,
     mouthO,
     mouthU,
@@ -80,7 +80,7 @@ export async function ensureStarterCharacterSeeded() {
       `<path d="M270 363c20 9 41 9 62 0" fill="none" stroke="#733f43" stroke-width="8" stroke-linecap="round"/>`,
     ),
     importPart(
-      "starter-mouth-ai",
+      "starter-mouth-a",
       `<ellipse cx="300" cy="362" rx="29" ry="31" fill="#733f43"/><ellipse cx="300" cy="376" rx="17" ry="10" fill="#e87f89"/>`,
     ),
     importPart(
@@ -142,20 +142,20 @@ export async function ensureStarterCharacterSeeded() {
         eyeState: "closed",
         zIndex: 40,
       }),
-      makePart("brow", browsNeutral.id, {
+      makePart("eyebrow", browsNeutral.id, {
         ...fullCanvas,
         name: "Brows neutral",
         pose: "neutral",
         zIndex: 45,
       }),
-      makePart("brow", browsRaised.id, {
+      makePart("eyebrow", browsRaised.id, {
         ...fullCanvas,
         name: "Brows raised",
         pose: "raised",
         zIndex: 45,
       }),
       mouthPart(mouthRest.id, "rest"),
-      mouthPart(mouthAi.id, "AI"),
+      mouthPart(mouthA.id, "A"),
       mouthPart(mouthE.id, "E"),
       mouthPart(mouthO.id, "O"),
       mouthPart(mouthU.id, "U"),
@@ -176,10 +176,10 @@ export async function ensureStarterCharacterSeeded() {
       (part) => part.role === "eye" && part.eyeState === "closed",
     );
     const hasNeutralBrows = existing.parts.some(
-      (part) => part.role === "brow" && (part.pose ?? "neutral") === "neutral",
+      (part) => part.role === "eyebrow" && (part.pose ?? "neutral") === "neutral",
     );
     const hasRaisedBrows = existing.parts.some(
-      (part) => part.role === "brow" && part.pose === "raised",
+      (part) => part.role === "eyebrow" && part.pose === "raised",
     );
     if (hasOpenEyes && hasClosedEyes && hasNeutralBrows && hasRaisedBrows) return existing;
   }

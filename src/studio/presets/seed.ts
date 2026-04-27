@@ -47,7 +47,7 @@ const STARTERS: ActionPreset[] = [
         ],
       },
       {
-        partRole: "brow",
+        partRole: "eyebrow",
         keyframes: [
           { t: 0, dy: 0 },
           { t: 0.3, dy: -18, ease: "easeOut" },
@@ -92,7 +92,7 @@ const STARTERS: ActionPreset[] = [
 
   preset("Sad", "expression", 0.6, [
     {
-      partRole: "brow",
+      partRole: "eyebrow",
       keyframes: [
         { t: 0, dy: 0, rotation: 0 },
         { t: 1, dy: -4, rotation: -8 },
@@ -117,7 +117,7 @@ const STARTERS: ActionPreset[] = [
 
   preset("Angry", "expression", 0.45, [
     {
-      partRole: "brow",
+      partRole: "eyebrow",
       keyframes: [
         { t: 0, dy: 0, rotation: 0 },
         { t: 1, dy: -6, rotation: 12 },
@@ -142,7 +142,7 @@ const STARTERS: ActionPreset[] = [
 
   preset("Confused", "expression", 0.7, [
     {
-      partRole: "brow",
+      partRole: "eyebrow",
       keyframes: [
         { t: 0, rotation: 0 },
         { t: 1, rotation: -10, dy: -4 },
@@ -179,7 +179,7 @@ const STARTERS: ActionPreset[] = [
   // Gestures ---------------------------------------------------------------
   preset("Wave", "gesture", 1.2, [
     {
-      partRole: "armR",
+      partRole: "arm",
       keyframes: [
         { t: 0, rotation: 0 },
         { t: 0.2, rotation: -60, ease: "easeOut" },
@@ -218,7 +218,7 @@ const STARTERS: ActionPreset[] = [
 
   preset("Shrug", "gesture", 0.9, [
     {
-      partRole: "armL",
+      partRole: "arm",
       keyframes: [
         { t: 0, dy: 0, rotation: 0 },
         { t: 0.5, dy: -10, rotation: -10 },
@@ -226,7 +226,7 @@ const STARTERS: ActionPreset[] = [
       ],
     },
     {
-      partRole: "armR",
+      partRole: "arm",
       keyframes: [
         { t: 0, dy: 0, rotation: 0 },
         { t: 0.5, dy: -10, rotation: 10 },
@@ -245,7 +245,7 @@ const STARTERS: ActionPreset[] = [
 
   preset("Point", "gesture", 0.8, [
     {
-      partRole: "armR",
+      partRole: "arm",
       keyframes: [
         { t: 0, rotation: 0 },
         { t: 0.4, rotation: -75, ease: "easeOut" },
@@ -300,7 +300,7 @@ const STARTERS: ActionPreset[] = [
       ],
     },
     {
-      partRole: "armL",
+      partRole: "arm",
       keyframes: [
         { t: 0, rotation: 0 },
         { t: 0.5, rotation: 30 },
@@ -308,7 +308,7 @@ const STARTERS: ActionPreset[] = [
       ],
     },
     {
-      partRole: "armR",
+      partRole: "arm",
       keyframes: [
         { t: 0, rotation: 0 },
         { t: 0.5, rotation: -30 },

@@ -176,9 +176,9 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
             Saved Voices
           </span>
           <select
-            value={customId && savedVoices.some(v => v.voiceId === customId) ? customId : ""}
+            value={customId && savedVoices.some((v) => v.voiceId === customId) ? customId : ""}
             onChange={(e) => {
-              const selected = savedVoices.find(v => v.voiceId === e.target.value);
+              const selected = savedVoices.find((v) => v.voiceId === e.target.value);
               if (selected) {
                 setCustomId(selected.voiceId);
                 setCustomName(selected.name);
@@ -230,10 +230,10 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
               placeholder="Voice name (optional)"
               className="flex-1 rounded border border-border bg-input px-2 py-1 text-[10px] text-foreground"
             />
-            {savedVoices.some(v => v.voiceId === customId.trim()) && (
+            {savedVoices.some((v) => v.voiceId === customId.trim()) && (
               <button
                 onClick={async () => {
-                  const existing = savedVoices.find(v => v.voiceId === customId.trim());
+                  const existing = savedVoices.find((v) => v.voiceId === customId.trim());
                   if (existing) {
                     await deleteSavedVoice(existing.id);
                     setCustomId("");

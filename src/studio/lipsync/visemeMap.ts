@@ -36,7 +36,7 @@ function letterToViseme(ch: string, lastVowel: MouthViseme | null): MouthViseme 
     case "a":
     case "h":
     case "j":
-      return "AI";
+      return "A";
     case "e":
     case "i":
     case "y":
@@ -51,11 +51,12 @@ function letterToViseme(ch: string, lastVowel: MouthViseme | null): MouthViseme 
     case "t":
       return "E";
     case "o":
-    case "q":
       return "O";
     case "u":
-    case "w":
       return "U";
+    case "w":
+    case "q":
+      return "WQ";
     case "l":
       return "L";
     default:
@@ -86,7 +87,7 @@ export function alignmentToVisemes(a: ElevenLabsAlignment): VisemeKey[] {
 
     const v = letterToViseme(ch, lastVowel);
     if (v) {
-      if (v === "AI" || v === "E" || v === "O" || v === "U") lastVowel = v;
+      if (v === "A" || v === "E" || v === "O" || v === "U" || v === "WQ") lastVowel = v;
       pushKey(out, { t: start, v });
     }
     prevEnd = end;

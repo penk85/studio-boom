@@ -5,7 +5,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { db, uid } from "../db";
 import { useMediaUrl } from "../hooks/useMediaUrl";
-import { listCharacterSlots, pickActivePartForSlot } from "../character/character-utils";
+import {
+  listCharacterSlots,
+  pickActivePartForSlot,
+  roleEnabledByManifest,
+} from "../character/character-utils";
 import type {
   ActionCategory,
   ActionPreset,
@@ -52,7 +56,13 @@ export function PresetRecorder({
   const [overrides, setOverrides] = useState<Map<string, RecorderPartState>>(new Map());
   const [scale, setScale] = useState(0.5);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const slots = useMemo(() => listCharacterSlots(character.parts), [character.parts]);
+  const slots = useMemo(
+    () =>
+      listCharacterSlots(character.parts).filter((slot) =>
+        roleEnabledByManifest(slot.role, character.manifest),
+      ),
+    [character.parts, character.manifest],
+  );
 
   // Fit
   useEffect(() => {
@@ -218,7 +228,7 @@ export function PresetRecorder({
                 {slots.map((slot) => {
                   const part = pickActivePartForSlot(slot, {
                     viseme: slot.role === "mouth" ? "rest" : undefined,
-                    eyeState: slot.role.startsWith("eye") ? "open" : undefined,
+                    eyeState: slot.role === "eye" ? "open" : undefined,
                   });
                   if (!part) return null;
                   return (

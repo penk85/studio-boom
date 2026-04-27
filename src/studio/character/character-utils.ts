@@ -7,8 +7,11 @@ import {
   type CharacterPart,
   type CharacterPreset,
   type FallbackMouthAnchor,
+  type MouthViseme,
+  type PartManifest,
   type PartRole,
 } from "../types";
+import { legacyVisemeToStandard } from "../lipsync/viseme-schema";
 
 export function defaultFallbackMouthAnchor(
   canvasWidth: number,
@@ -59,7 +62,7 @@ export async function saveCharacter(c: CharacterPreset) {
 }
 
 export function defaultSlotIdForRole(role: PartRole, partId?: string): string {
-  return role === "extra" && partId ? `extra:${partId}` : `role:${role}`;
+  return role === "custom" && partId ? `custom:${partId}` : `role:${role}`;
 }
 
 export function getPartSlotId(part: CharacterPart): ID {
@@ -67,18 +70,132 @@ export function getPartSlotId(part: CharacterPart): ID {
 }
 
 export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
+  const restMouth = c.parts.find(
+    (p) => normalizePartRole(p.role as string) === "mouth" && legacyVisemeToStandard(p.viseme),
+  );
   return {
     ...c,
+    manifest: normalizePartManifest(c.manifest),
     fallbackMouth: c.fallbackMouth ?? defaultFallbackMouthAnchor(c.canvasWidth, c.canvasHeight),
     parts: c.parts.map((part) => {
-      const slotId = getPartSlotId(part);
+      const role = normalizePartRole(part.role as string);
+      const slotId =
+        part.slotId ?? defaultSlotIdForRole(role, role === "custom" ? part.id : undefined);
+      const pivot = part.pivot ?? {
+        x: Math.round(part.x + part.width * (part.anchorX ?? 0.5)),
+        y: Math.round(part.y + part.height * (part.anchorY ?? 0.5)),
+      };
+      const viseme = legacyVisemeToStandard(part.viseme) ?? part.viseme;
       return {
         ...part,
+        role,
         slotId,
-        slotName: part.slotName ?? roleLabel(part.role),
+        slotName: part.slotName ?? roleLabel(role),
+        viseme,
+        pivot,
+        movement: part.movement ?? defaultMovementForRole(role, viseme),
+        morph:
+          role === "mouth" && part.morph
+            ? {
+                ...part.morph,
+                compatibleWithRest:
+                  part.morph.compatibleWithRest ??
+                  (!!restMouth?.morph?.commandCount &&
+                    restMouth.morph.commandCount === part.morph.commandCount),
+              }
+            : part.morph,
       };
     }),
   };
+}
+
+export function normalizePartManifest(manifest: Partial<PartManifest> | undefined): PartManifest {
+  return {
+    ...DEFAULT_PART_MANIFEST,
+    ...(manifest ?? {}),
+  };
+}
+
+export function roleEnabledByManifest(role: PartRole, manifest: Partial<PartManifest> | undefined) {
+  const normalized = normalizePartManifest(manifest);
+  switch (role) {
+    case "head":
+      return normalized.hasHead;
+    case "body":
+      return normalized.hasBody;
+    case "arm":
+      return normalized.hasArms;
+    case "hand":
+      return normalized.hasHands;
+    case "leg":
+      return normalized.hasLegs;
+    case "foot":
+      return normalized.hasFeet;
+    case "eye":
+      return normalized.hasEyes;
+    case "eyebrow":
+      return normalized.hasBrows;
+    case "mouth":
+      return normalized.hasMouth;
+    case "hair":
+      return normalized.hasHair;
+    case "accessory":
+      return normalized.hasAccessories;
+    case "static":
+    case "custom":
+      return true;
+  }
+}
+
+export function normalizePartRole(role: string | undefined): PartRole {
+  switch (role) {
+    case "head":
+    case "body":
+    case "eye":
+    case "eyebrow":
+    case "mouth":
+    case "arm":
+    case "hand":
+    case "leg":
+    case "foot":
+    case "hair":
+    case "accessory":
+    case "static":
+    case "custom":
+      return role;
+    case "eyeL":
+    case "eyeR":
+      return "eye";
+    case "brow":
+    case "browL":
+    case "browR":
+      return "eyebrow";
+    case "armL":
+    case "armR":
+      return "arm";
+    case "legL":
+    case "legR":
+      return "leg";
+    case "footL":
+    case "footR":
+      return "foot";
+    case "extra":
+      return "custom";
+    default:
+      return "custom";
+  }
+}
+
+export function defaultMovementForRole(role: PartRole, viseme?: MouthViseme | string) {
+  if (role === "mouth" || viseme) return "lipSync";
+  if (role === "eye") return "blink";
+  if (role === "eyebrow") return "raise";
+  if (role === "arm") return "rotate";
+  if (role === "leg") return "rotate";
+  if (role === "foot") return "rotate";
+  if (role === "head") return "rotate";
+  if (role === "hair") return "bounce";
+  return "none";
 }
 
 export function makePart(
@@ -86,16 +203,17 @@ export function makePart(
   mediaId: string,
   opts: Partial<CharacterPart> = {},
 ): CharacterPart {
-  const id = uid();
+  const id = opts.id ?? uid();
   return {
     id,
-    slotId: opts.slotId ?? defaultSlotIdForRole(role, role === "extra" ? id : undefined),
+    slotId: opts.slotId ?? defaultSlotIdForRole(role, role === "custom" ? id : undefined),
     slotName: opts.slotName ?? roleLabel(role),
     role,
     name: opts.name ?? roleLabel(role),
     pose: opts.pose,
     viseme: opts.viseme,
     eyeState: opts.eyeState,
+    side: opts.side,
     mediaId,
     x: opts.x ?? 100,
     y: opts.y ?? 100,
@@ -104,6 +222,11 @@ export function makePart(
     rotation: opts.rotation ?? 0,
     anchorX: opts.anchorX ?? 0.5,
     anchorY: opts.anchorY ?? 0.5,
+    pivot: opts.pivot,
+    parentId: opts.parentId,
+    bounds: opts.bounds,
+    movement: opts.movement ?? defaultMovementForRole(role, opts.viseme),
+    morph: opts.morph,
     zIndex: opts.zIndex ?? 0,
     depth: opts.depth ?? 0,
     visible: opts.visible ?? true,
@@ -116,30 +239,28 @@ export function roleLabel(role: PartRole): string {
       return "Head";
     case "body":
       return "Body";
-    case "armL":
-      return "Left Arm";
-    case "armR":
-      return "Right Arm";
-    case "legL":
-      return "Left Leg";
-    case "legR":
-      return "Right Leg";
     case "eye":
-      return "Eyes";
-    case "eyeL":
-      return "Left Eye";
-    case "eyeR":
-      return "Right Eye";
-    case "brow":
-      return "Brows";
-    case "browL":
-      return "Left Brow";
-    case "browR":
-      return "Right Brow";
+      return "Eye";
+    case "eyebrow":
+      return "Eyebrow";
     case "mouth":
       return "Mouth";
-    case "extra":
-      return "Extra";
+    case "arm":
+      return "Arm";
+    case "hand":
+      return "Hand";
+    case "leg":
+      return "Leg";
+    case "foot":
+      return "Foot";
+    case "hair":
+      return "Hair";
+    case "accessory":
+      return "Accessory";
+    case "static":
+      return "Static";
+    case "custom":
+      return "Custom";
   }
 }
 
@@ -203,10 +324,7 @@ export function pickActivePart(
     const rest = candidates.find((p) => p.viseme === "rest");
     if (rest) return rest;
   }
-  if (
-    (role === "eye" || role === "eyeL" || role === "eyeR") &&
-    (selectors.eyeState || selectors.pose)
-  ) {
+  if (role === "eye" && (selectors.eyeState || selectors.pose)) {
     const target = selectors.eyeState ?? selectors.pose;
     const m = candidates.find((p) => p.eyeState === target || p.pose === target);
     if (m) return m;

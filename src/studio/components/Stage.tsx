@@ -1,6 +1,6 @@
 // Stage — the visual preview area. Renders all currently-active clips
 // using DOM layers (img / video / audio). Selection + drag/resize handles.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type SVGAttributes } from "react";
 import { ArrowDown, ArrowUp, RotateCw } from "lucide-react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { useStudio } from "../store";
@@ -19,7 +19,11 @@ import { useMediaUrl } from "../hooks/useMediaUrl";
 import { visemeAt, visemeStateAt } from "../lipsync/visemeMap";
 import { ensurePresetsSeeded } from "../presets/seed";
 import { composeActionsAt, deltaFor, poseSwapFor } from "../presets/apply";
-import { listCharacterSlots, pickActivePartForSlot } from "../character/character-utils";
+import {
+  listCharacterSlots,
+  pickActivePartForSlot,
+  roleEnabledByManifest,
+} from "../character/character-utils";
 import { combinedParallax } from "../character/parallax";
 
 export function Stage() {
@@ -380,17 +384,28 @@ function AudioLayer({
 
 const VISEME_GLYPH: Record<string, string> = {
   rest: "-",
-  AI: "A",
+  A: "A",
   E: "E",
   O: "O",
   U: "U",
   MBP: "M",
   FV: "F",
   L: "L",
+  WQ: "W",
+  Smile: ":)",
 };
 
 interface FallbackMouthPlacement extends FallbackMouthAnchor {
   slotId?: string;
+}
+
+interface PartMotion {
+  dx: number;
+  dy: number;
+  scale: number;
+  scaleY?: number;
+  rotation: number;
+  opacity?: number;
 }
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
@@ -511,6 +526,103 @@ function exactMouthPartForSlot(
   })[0];
 }
 
+function hasEyeVariant(slot: ReturnType<typeof listCharacterSlots>[number], eyeState: string) {
+  return slot.parts.some(
+    (part) => part.visible && (part.eyeState === eyeState || part.pose === eyeState),
+  );
+}
+
+function isFaceAttachedRole(role: CharacterPart["role"]) {
+  return role === "eye" || role === "eyebrow" || role === "mouth";
+}
+
+function findSlotForPart(slots: ReturnType<typeof listCharacterSlots>, partId: string | undefined) {
+  if (!partId) return undefined;
+  return slots.find((slot) => slot.parts.some((part) => part.id === partId));
+}
+
+function partPivot(part: CharacterPart) {
+  return (
+    part.pivot ?? {
+      x: part.x + part.width * part.anchorX,
+      y: part.y + part.height * part.anchorY,
+    }
+  );
+}
+
+function transformPointAroundPivot(
+  point: { x: number; y: number },
+  pivot: { x: number; y: number },
+  motion: PartMotion,
+) {
+  const radians = (motion.rotation * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  const relX = (point.x - pivot.x) * motion.scale;
+  const relY = (point.y - pivot.y) * motion.scale;
+  return {
+    x: pivot.x + motion.dx + relX * cos - relY * sin,
+    y: pivot.y + motion.dy + relX * sin + relY * cos,
+  };
+}
+
+function inheritedMotionForPart({
+  part,
+  role,
+  slots,
+  composed,
+}: {
+  part: CharacterPart;
+  role: CharacterPart["role"];
+  slots: ReturnType<typeof listCharacterSlots>;
+  composed: ReturnType<typeof composeActionsAt>;
+}): PartMotion {
+  const parentSlot =
+    findSlotForPart(slots, part.parentId) ??
+    (isFaceAttachedRole(role) ? slots.find((slot) => slot.role === "head") : undefined);
+  if (!parentSlot) return { dx: 0, dy: 0, scale: 1, rotation: 0 };
+  const parentPart = pickActivePartForSlot(parentSlot, {
+    pose: undefined,
+    viseme: parentSlot.role === "mouth" ? "rest" : undefined,
+    eyeState: parentSlot.role === "eye" ? "open" : undefined,
+  });
+  if (!parentPart) return { dx: 0, dy: 0, scale: 1, rotation: 0 };
+  const parentDelta = deltaFor(composed, parentSlot.role, parentSlot.id);
+  const childPivot = partPivot(part);
+  const transformedPivot = transformPointAroundPivot(
+    childPivot,
+    partPivot(parentPart),
+    parentDelta,
+  );
+  return {
+    dx: transformedPivot.x - childPivot.x,
+    dy: transformedPivot.y - childPivot.y,
+    scale: parentDelta.scale,
+    rotation: parentDelta.rotation,
+    opacity: parentDelta.opacity,
+  };
+}
+
+function motionForEye(
+  part: CharacterPart,
+  slot: ReturnType<typeof listCharacterSlots>[number],
+  d: PartMotion,
+  requestedEyeState: string | undefined,
+) {
+  const usingRealClosedState = part.eyeState === "closed" || part.pose === "closed";
+  const slotHasClosedState = hasEyeVariant(slot, "closed");
+  if (usingRealClosedState && slotHasClosedState && d.scale < 0.35) {
+    return { ...d, scale: 1 };
+  }
+  if (!slotHasClosedState && d.scale < 0.35) {
+    return { ...d, scale: 1, scaleY: Math.max(0.08, d.scale) };
+  }
+  if (!slotHasClosedState && requestedEyeState === "closed" && part.eyeState !== "closed") {
+    return { ...d, scale: 1, scaleY: 0.12 };
+  }
+  return d;
+}
+
 function CharacterPlaceholder({
   clip,
   playhead,
@@ -578,20 +690,18 @@ function CharacterRig({
   const clipDelta = { dx: composed.camera.dx, dy: composed.camera.dy };
 
   // Slots render one active variant each, while the whole rig remains one clip.
-  const slots = useMemo(() => listCharacterSlots(character.parts), [character.parts]);
-  const fallbackMouth = useMemo(() => fallbackMouthPlacement(character), [character]);
-  const visibleMouthVisemes = useMemo(
+  const slots = useMemo(
     () =>
-      new Set(
-        character.parts
-          .filter((p) => p.role === "mouth" && p.visible && p.viseme)
-          .map((p) => p.viseme as MouthViseme),
+      listCharacterSlots(character.parts).filter((slot) =>
+        roleEnabledByManifest(slot.role, character.manifest),
       ),
-    [character.parts],
+    [character.parts, character.manifest],
   );
-  const shouldUseFallbackMouth = Boolean(
-    clip.visemes?.length && viseme && !composed.mouthLocked && !visibleMouthVisemes.has(viseme),
-  );
+  const fallbackMouth = useMemo(() => fallbackMouthPlacement(character), [character]);
+  // Do not synthesize generated mouth art when a viseme is missing. Missing
+  // shapes fall back through the user's own mouth slot variants (rest first),
+  // or render nothing when no mouth SVG exists.
+  const shouldUseFallbackMouth = false;
   const fallbackMouthDelta = shouldUseFallbackMouth
     ? deltaFor(composed, "mouth", fallbackMouth.slotId)
     : null;
@@ -602,6 +712,28 @@ function CharacterRig({
     shouldUseFallbackMouth && headVariant
       ? { dx: headVariant.featureOffsetX ?? 0, dy: headVariant.featureOffsetY ?? 0 }
       : { dx: 0, dy: 0 };
+  const headSlot = slots.find((slot) => slot.role === "head");
+  const fallbackMouthInherited = (() => {
+    if (!shouldUseFallbackMouth || !headSlot) return { dx: 0, dy: 0, scale: 1, rotation: 0 };
+    const headPart = pickActivePartForSlot(headSlot, { pose: undefined });
+    if (!headPart) return { dx: 0, dy: 0, scale: 1, rotation: 0 };
+    const headDelta = deltaFor(composed, "head", headSlot.id);
+    const fallbackPivot = {
+      x: fallbackMouth.x + fallbackMouth.width * fallbackMouth.anchorX,
+      y: fallbackMouth.y + fallbackMouth.height * fallbackMouth.anchorY,
+    };
+    const transformedPivot = transformPointAroundPivot(
+      fallbackPivot,
+      partPivot(headPart),
+      headDelta,
+    );
+    return {
+      dx: transformedPivot.x - fallbackPivot.x,
+      dy: transformedPivot.y - fallbackPivot.y,
+      scale: headDelta.scale,
+      rotation: headDelta.rotation,
+    };
+  })();
 
   return (
     <div className="absolute inset-0 overflow-hidden">
@@ -618,19 +750,20 @@ function CharacterRig({
           if (role === "mouth" && shouldUseFallbackMouth) return null;
           const poseSwap =
             poseSwapFor(composed, role, slot.id) ?? clip.poses[slot.id] ?? clip.poses[role];
-          const eyeState = role.startsWith("eye")
-            ? (() => {
-                const resolved =
-                  poseSwap ??
-                  clip.poses[slot.id] ??
-                  clip.poses[role] ??
-                  clip.poses["eye"] ??
-                  "open";
-                return resolved === "open" && autoBlinkClosedAt(clip, tInClip)
-                  ? "closed"
-                  : resolved;
-              })()
-            : undefined;
+          const eyeState =
+            role === "eye"
+              ? (() => {
+                  const resolved =
+                    poseSwap ??
+                    clip.poses[slot.id] ??
+                    clip.poses[role] ??
+                    clip.poses["eye"] ??
+                    "open";
+                  return resolved === "open" && autoBlinkClosedAt(clip, tInClip)
+                    ? "closed"
+                    : resolved;
+                })()
+              : undefined;
           const part =
             role === "mouth" && viseme
               ? (exactMouthPartForSlot(slot, viseme, fallbackMouth) ??
@@ -649,7 +782,9 @@ function CharacterRig({
             role === "mouth" && nextViseme && visemeBlend > 0
               ? exactMouthPartForSlot(slot, nextViseme, fallbackMouth)
               : undefined;
-          const d = deltaFor(composed, role, slot.id);
+          const baseDelta = deltaFor(composed, role, slot.id);
+          const d = role === "eye" ? motionForEye(part, slot, baseDelta, eyeState) : baseDelta;
+          const inherited = inheritedMotionForPart({ part, role, slots, composed });
           const parallax = combinedParallax(part.depth, character.parallax, {
             clipDelta,
           });
@@ -657,38 +792,26 @@ function CharacterRig({
           const overrideMediaId = role === "head" && headVariant ? headVariant.mediaId : undefined;
           // Apply per-direction face feature offset to face features.
           const faceOffset =
-            headVariant &&
-            (role === "eye" ||
-              role === "eyeL" ||
-              role === "eyeR" ||
-              role === "brow" ||
-              role === "browL" ||
-              role === "browR" ||
-              role === "mouth")
+            headVariant && (role === "eye" || role === "eyebrow" || role === "mouth")
               ? { dx: headVariant.featureOffsetX ?? 0, dy: headVariant.featureOffsetY ?? 0 }
               : { dx: 0, dy: 0 };
           const sharedProps = {
-            dx: d.dx + parallax.dx + faceOffset.dx,
-            dy: d.dy + parallax.dy + faceOffset.dy,
-            scale: d.scale,
-            rotation: d.rotation,
+            dx: inherited.dx + d.dx + parallax.dx + faceOffset.dx,
+            dy: inherited.dy + d.dy + parallax.dy + faceOffset.dy,
+            scale: inherited.scale * d.scale,
+            scaleY: d.scaleY,
+            rotation: inherited.rotation + d.rotation,
           };
           if (role === "mouth" && nextPart && nextPart.id !== part.id) {
             return (
-              <div key={slot.id}>
-                <PartImage
-                  part={part}
-                  opacity={(d.opacity ?? 1) * (1 - visemeBlend)}
-                  transitionMs={0}
-                  {...sharedProps}
-                />
-                <PartImage
-                  part={nextPart}
-                  opacity={(d.opacity ?? 1) * visemeBlend}
-                  transitionMs={0}
-                  {...sharedProps}
-                />
-              </div>
+              <MorphingMouthPart
+                key={slot.id}
+                part={part}
+                nextPart={nextPart}
+                blend={visemeBlend}
+                opacity={d.opacity ?? 1}
+                {...sharedProps}
+              />
             );
           }
           return (
@@ -710,20 +833,40 @@ function CharacterRig({
               <DefaultMouthShape
                 viseme={viseme}
                 placement={fallbackMouth}
-                dx={fallbackMouthDelta.dx + fallbackMouthParallax.dx + fallbackMouthFaceOffset.dx}
-                dy={fallbackMouthDelta.dy + fallbackMouthParallax.dy + fallbackMouthFaceOffset.dy}
-                scale={fallbackMouthDelta.scale}
-                rotation={fallbackMouthDelta.rotation}
+                dx={
+                  fallbackMouthInherited.dx +
+                  fallbackMouthDelta.dx +
+                  fallbackMouthParallax.dx +
+                  fallbackMouthFaceOffset.dx
+                }
+                dy={
+                  fallbackMouthInherited.dy +
+                  fallbackMouthDelta.dy +
+                  fallbackMouthParallax.dy +
+                  fallbackMouthFaceOffset.dy
+                }
+                scale={fallbackMouthInherited.scale * fallbackMouthDelta.scale}
+                rotation={fallbackMouthInherited.rotation + fallbackMouthDelta.rotation}
                 opacity={(fallbackMouthDelta.opacity ?? 1) * (1 - visemeBlend)}
                 transitionMs={0}
               />
               <DefaultMouthShape
                 viseme={nextViseme}
                 placement={fallbackMouth}
-                dx={fallbackMouthDelta.dx + fallbackMouthParallax.dx + fallbackMouthFaceOffset.dx}
-                dy={fallbackMouthDelta.dy + fallbackMouthParallax.dy + fallbackMouthFaceOffset.dy}
-                scale={fallbackMouthDelta.scale}
-                rotation={fallbackMouthDelta.rotation}
+                dx={
+                  fallbackMouthInherited.dx +
+                  fallbackMouthDelta.dx +
+                  fallbackMouthParallax.dx +
+                  fallbackMouthFaceOffset.dx
+                }
+                dy={
+                  fallbackMouthInherited.dy +
+                  fallbackMouthDelta.dy +
+                  fallbackMouthParallax.dy +
+                  fallbackMouthFaceOffset.dy
+                }
+                scale={fallbackMouthInherited.scale * fallbackMouthDelta.scale}
+                rotation={fallbackMouthInherited.rotation + fallbackMouthDelta.rotation}
                 opacity={(fallbackMouthDelta.opacity ?? 1) * visemeBlend}
                 transitionMs={0}
               />
@@ -732,10 +875,20 @@ function CharacterRig({
             <DefaultMouthShape
               viseme={viseme}
               placement={fallbackMouth}
-              dx={fallbackMouthDelta.dx + fallbackMouthParallax.dx + fallbackMouthFaceOffset.dx}
-              dy={fallbackMouthDelta.dy + fallbackMouthParallax.dy + fallbackMouthFaceOffset.dy}
-              scale={fallbackMouthDelta.scale}
-              rotation={fallbackMouthDelta.rotation}
+              dx={
+                fallbackMouthInherited.dx +
+                fallbackMouthDelta.dx +
+                fallbackMouthParallax.dx +
+                fallbackMouthFaceOffset.dx
+              }
+              dy={
+                fallbackMouthInherited.dy +
+                fallbackMouthDelta.dy +
+                fallbackMouthParallax.dy +
+                fallbackMouthFaceOffset.dy
+              }
+              scale={fallbackMouthInherited.scale * fallbackMouthDelta.scale}
+              rotation={fallbackMouthInherited.rotation + fallbackMouthDelta.rotation}
               opacity={fallbackMouthDelta.opacity ?? 1}
               transitionMs={30}
             />
@@ -751,6 +904,7 @@ function DefaultMouthShape({
   dx,
   dy,
   scale,
+  scaleY,
   rotation,
   opacity,
   transitionMs = 80,
@@ -760,6 +914,7 @@ function DefaultMouthShape({
   dx: number;
   dy: number;
   scale: number;
+  scaleY?: number;
   rotation: number;
   opacity: number;
   transitionMs?: number;
@@ -775,7 +930,7 @@ function DefaultMouthShape({
         height: placement.height,
         zIndex: placement.zIndex,
         opacity,
-        transform: `rotate(${placement.rotation + rotation}deg) scale(${scale})`,
+        transform: `rotate(${placement.rotation + rotation}deg) scale(${scale}, ${scaleY ?? scale})`,
         transformOrigin: `${placement.anchorX * 100}% ${placement.anchorY * 100}%`,
         pointerEvents: "none",
         transition: transitionMs > 0 ? `opacity ${transitionMs}ms ease-in-out` : undefined,
@@ -791,7 +946,7 @@ function renderDefaultMouthViseme(viseme: MouthViseme) {
   const mouth = "#733f43";
   const tongue = "#e87f89";
   switch (viseme) {
-    case "AI":
+    case "A":
       return (
         <>
           <ellipse cx="50" cy="30" rx="23" ry="27" fill={mouth} />
@@ -809,6 +964,8 @@ function renderDefaultMouthViseme(viseme: MouthViseme) {
       return <ellipse cx="50" cy="30" rx="18" ry="24" fill={mouth} />;
     case "U":
       return <path d="M30 21c12 23 28 23 40 0 9 30-49 30-40 0Z" fill={mouth} />;
+    case "WQ":
+      return <ellipse cx="50" cy="30" rx="12" ry="19" fill={mouth} />;
     case "MBP":
       return <path d="M16 31c22-11 46-11 68 0-22 12-46 12-68 0Z" fill={mouth} />;
     case "FV":
@@ -831,6 +988,16 @@ function renderDefaultMouthViseme(viseme: MouthViseme) {
           />
         </>
       );
+    case "Smile":
+      return (
+        <path
+          d="M20 24c16 22 44 22 60 0"
+          fill="none"
+          stroke={mouth}
+          strokeWidth="8"
+          strokeLinecap="round"
+        />
+      );
     case "rest":
     default:
       return (
@@ -845,12 +1012,195 @@ function renderDefaultMouthViseme(viseme: MouthViseme) {
   }
 }
 
+interface SvgPathSpec {
+  d: string;
+  viewBox?: string;
+  fill?: string;
+  stroke?: string;
+  strokeWidth?: string;
+  strokeLinecap?: string;
+  strokeLinejoin?: string;
+}
+
+function useSvgPathSpec(part: CharacterPart): SvgPathSpec | null {
+  const url = useMediaUrl(part.mediaId);
+  const [fetched, setFetched] = useState<SvgPathSpec | null>(null);
+  const morph = part.morph;
+
+  useEffect(() => {
+    let alive = true;
+    setFetched(null);
+    if (morph?.primaryPath || !url) return;
+    fetch(url)
+      .then((res) => res.text())
+      .then((text) => {
+        if (alive) setFetched(extractSvgPathSpec(text));
+      })
+      .catch(() => {
+        if (alive) setFetched(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [morph?.primaryPath, url]);
+
+  if (morph?.primaryPath) {
+    return {
+      d: morph.primaryPath,
+      viewBox: morph.viewBox,
+      fill: morph.fill,
+      stroke: morph.stroke,
+      strokeWidth: morph.strokeWidth,
+      strokeLinecap: morph.strokeLinecap,
+      strokeLinejoin: morph.strokeLinejoin,
+    };
+  }
+  return fetched;
+}
+
+function extractSvgPathSpec(text: string): SvgPathSpec | null {
+  const svgMatch = text.match(/<svg\b([^>]*)>/i);
+  const pathMatch = text.match(/<path\b([^>]*)>/i);
+  if (!pathMatch) return null;
+  const svgAttrs = parseSvgAttrs(svgMatch?.[1] ?? "");
+  const pathAttrs = parseSvgAttrs(pathMatch[1]);
+  if (!pathAttrs.d) return null;
+  return {
+    d: pathAttrs.d,
+    viewBox: svgAttrs.viewBox,
+    fill: pathAttrs.fill,
+    stroke: pathAttrs.stroke,
+    strokeWidth: pathAttrs["stroke-width"],
+    strokeLinecap: pathAttrs["stroke-linecap"],
+    strokeLinejoin: pathAttrs["stroke-linejoin"],
+  };
+}
+
+function parseSvgAttrs(input: string) {
+  const attrs: Record<string, string> = {};
+  for (const match of input.matchAll(/([:\w-]+)=["']([^"']*)["']/g)) {
+    attrs[match[1]] = match[2];
+  }
+  return attrs;
+}
+
+type PathToken =
+  | { kind: "command"; value: string }
+  | { kind: "number"; value: number; raw: string };
+
+function tokenizePath(d: string): PathToken[] {
+  const tokens: PathToken[] = [];
+  const re = /[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+\.?)(?:e[-+]?\d+)?/g;
+  for (const match of d.matchAll(re)) {
+    const raw = match[0];
+    if (/^[a-zA-Z]$/.test(raw)) tokens.push({ kind: "command", value: raw });
+    else tokens.push({ kind: "number", value: Number(raw), raw });
+  }
+  return tokens;
+}
+
+function interpolatedPath(from: string, to: string, blend: number): string | null {
+  const a = tokenizePath(from);
+  const b = tokenizePath(to);
+  if (a.length !== b.length) return null;
+  const out: string[] = [];
+  for (let i = 0; i < a.length; i++) {
+    const left = a[i];
+    const right = b[i];
+    if (left.kind !== right.kind) return null;
+    if (left.kind === "command") {
+      if (left.value !== right.value) return null;
+      out.push(left.value);
+    } else {
+      const value = left.value + (right.value - left.value) * blend;
+      out.push(formatPathNumber(value));
+    }
+  }
+  return out.join(" ");
+}
+
+function formatPathNumber(value: number) {
+  return Number(value.toFixed(3)).toString();
+}
+
+function MorphingMouthPart({
+  part,
+  nextPart,
+  blend,
+  dx,
+  dy,
+  scale,
+  scaleY,
+  rotation,
+  opacity,
+}: {
+  part: CharacterPart;
+  nextPart: CharacterPart;
+  blend: number;
+  dx: number;
+  dy: number;
+  scale: number;
+  scaleY?: number;
+  rotation: number;
+  opacity: number;
+}) {
+  const currentSpec = useSvgPathSpec(part);
+  const nextSpec = useSvgPathSpec(nextPart);
+  const d = currentSpec && nextSpec ? interpolatedPath(currentSpec.d, nextSpec.d, blend) : null;
+
+  if (!d || !currentSpec) {
+    return (
+      <PartImage
+        part={part}
+        dx={dx}
+        dy={dy}
+        scale={scale}
+        scaleY={scaleY}
+        rotation={rotation}
+        opacity={opacity}
+        transitionMs={0}
+      />
+    );
+  }
+
+  return (
+    <svg
+      viewBox={currentSpec.viewBox ?? `0 0 ${part.width} ${part.height}`}
+      className="absolute overflow-visible"
+      style={{
+        left: part.x + dx,
+        top: part.y + dy,
+        width: part.width,
+        height: part.height,
+        zIndex: part.zIndex,
+        opacity,
+        transform: `rotate(${part.rotation + rotation}deg) scale(${scale}, ${scaleY ?? scale})`,
+        transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
+        pointerEvents: "none",
+      }}
+      aria-hidden
+    >
+      <path
+        d={d}
+        fill={currentSpec.fill ?? (currentSpec.stroke ? "none" : "#733f43")}
+        stroke={currentSpec.stroke}
+        strokeWidth={currentSpec.strokeWidth}
+        strokeLinecap={currentSpec.strokeLinecap as SVGAttributes<SVGPathElement>["strokeLinecap"]}
+        strokeLinejoin={
+          currentSpec.strokeLinejoin as SVGAttributes<SVGPathElement>["strokeLinejoin"]
+        }
+      />
+    </svg>
+  );
+}
+
 function PartImage({
   part,
   overrideMediaId,
   dx,
   dy,
   scale,
+  scaleY,
   rotation,
   opacity,
   transitionMs = 80,
@@ -860,11 +1210,43 @@ function PartImage({
   dx: number;
   dy: number;
   scale: number;
+  scaleY?: number;
   rotation: number;
   opacity: number;
   transitionMs?: number;
 }) {
   const url = useMediaUrl(overrideMediaId ?? part.mediaId);
+  const svgSpec = useSvgPathSpec(part);
+  if (part.role === "mouth" && svgSpec) {
+    return (
+      <svg
+        viewBox={svgSpec.viewBox ?? `0 0 ${part.width} ${part.height}`}
+        className="absolute overflow-visible"
+        style={{
+          left: part.x + dx,
+          top: part.y + dy,
+          width: part.width,
+          height: part.height,
+          zIndex: part.zIndex,
+          opacity,
+          transform: `rotate(${part.rotation + rotation}deg) scale(${scale}, ${scaleY ?? scale})`,
+          transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
+          pointerEvents: "none",
+          transition: transitionMs > 0 ? `opacity ${transitionMs}ms ease-in-out` : undefined,
+        }}
+        aria-hidden
+      >
+        <path
+          d={svgSpec.d}
+          fill={svgSpec.fill ?? (svgSpec.stroke ? "none" : "#733f43")}
+          stroke={svgSpec.stroke}
+          strokeWidth={svgSpec.strokeWidth}
+          strokeLinecap={svgSpec.strokeLinecap as SVGAttributes<SVGPathElement>["strokeLinecap"]}
+          strokeLinejoin={svgSpec.strokeLinejoin as SVGAttributes<SVGPathElement>["strokeLinejoin"]}
+        />
+      </svg>
+    );
+  }
   if (!url) return null;
   return (
     <img
@@ -879,7 +1261,7 @@ function PartImage({
         height: part.height,
         zIndex: part.zIndex,
         opacity,
-        transform: `rotate(${part.rotation + rotation}deg) scale(${scale})`,
+        transform: `rotate(${part.rotation + rotation}deg) scale(${scale}, ${scaleY ?? scale})`,
         transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
         pointerEvents: "none",
         transition: transitionMs > 0 ? `opacity ${transitionMs}ms ease-in-out` : undefined,

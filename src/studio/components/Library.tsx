@@ -10,6 +10,7 @@ import {
   createBlankCharacter,
   listCharacterSlots,
   pickActivePartForSlot,
+  roleEnabledByManifest,
 } from "../character/character-utils";
 import { ensureStarterCharacterSeeded } from "../character/starter";
 import { ensurePresetsSeeded } from "../presets/seed";
@@ -207,7 +208,13 @@ function CharactersTab() {
 }
 
 function CharacterThumbnail({ character }: { character: CharacterPreset }) {
-  const slots = useMemo(() => listCharacterSlots(character.parts), [character.parts]);
+  const slots = useMemo(
+    () =>
+      listCharacterSlots(character.parts).filter((slot) =>
+        roleEnabledByManifest(slot.role, character.manifest),
+      ),
+    [character.parts, character.manifest],
+  );
   const previewParts = useMemo(
     () =>
       slots
@@ -215,7 +222,7 @@ function CharacterThumbnail({ character }: { character: CharacterPreset }) {
           pickActivePartForSlot(slot, {
             pose: slot.role === "head" || slot.role === "body" ? "front" : undefined,
             viseme: slot.role === "mouth" ? "rest" : undefined,
-            eyeState: slot.role.startsWith("eye") ? "open" : undefined,
+            eyeState: slot.role === "eye" ? "open" : undefined,
           }),
         )
         .filter((part): part is CharacterPart => Boolean(part))

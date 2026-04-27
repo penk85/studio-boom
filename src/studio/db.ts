@@ -1,7 +1,14 @@
 // Dexie database — local-first storage for projects, characters,
 // movement presets, and media blobs. Everything stays in the browser.
 import Dexie, { type Table } from "dexie";
-import type { ActionPreset, CharacterPreset, MediaAsset, MediaBlobRow, Project, SavedVoice } from "./types";
+import type {
+  ActionPreset,
+  CharacterPreset,
+  MediaAsset,
+  MediaBlobRow,
+  Project,
+  SavedVoice,
+} from "./types";
 import { legacyVisemeToStandard } from "./lipsync/viseme-schema";
 
 class StudioDB extends Dexie {
@@ -62,7 +69,7 @@ class StudioDB extends Dexie {
               ...row,
               category: "custom",
               loop: false,
-              tracks: [{ partRole: "extra", keyframes: norm }],
+              tracks: [{ partRole: "custom", keyframes: norm }],
               keyframes: undefined,
               updatedAt: row.createdAt ?? Date.now(),
             });
@@ -171,6 +178,67 @@ class StudioDB extends Dexie {
       mediaBlobs: "id",
       savedVoices: "id, voiceId, name, createdAt",
     });
+    // v7: SVG character builder schema. Normalize old role names and mouth visemes.
+    this.version(7)
+      .stores({
+        projects: "id, name, updatedAt",
+        characters: "id, name, updatedAt",
+        movements: "id, name, category, createdAt",
+        media: "id, name, kind, createdAt",
+        mediaBlobs: "id",
+        savedVoices: "id, voiceId, name, createdAt",
+      })
+      .upgrade(async (tx) => {
+        const characterTable = tx.table<CharacterPreset>("characters");
+        const characters = await characterTable.toArray();
+        for (const character of characters) {
+          const parts = character.parts.map((part) => {
+            const role = normalizeLegacyRole(part.role as string);
+            const pivot = part.pivot ?? {
+              x: Math.round(part.x + part.width * (part.anchorX ?? 0.5)),
+              y: Math.round(part.y + part.height * (part.anchorY ?? 0.5)),
+            };
+            const side =
+              part.side ??
+              ((part.role as string).endsWith("L")
+                ? "left"
+                : (part.role as string).endsWith("R")
+                  ? "right"
+                  : undefined);
+            return {
+              ...part,
+              role,
+              side,
+              slotId:
+                part.slotId && !part.slotId.startsWith("role:extra")
+                  ? part.slotId
+                  : slotIdForPart(role, part.id),
+              slotName: part.slotName ?? roleLabelForSlot(role),
+              viseme: legacyVisemeToStandard(part.viseme) ?? part.viseme,
+              pivot,
+            };
+          });
+          await characterTable.put({
+            ...character,
+            manifest: {
+              hasHead: true,
+              hasBody: true,
+              hasArms: true,
+              hasHands: true,
+              hasLegs: true,
+              hasFeet: true,
+              hasEyes: true,
+              hasBrows: true,
+              hasMouth: true,
+              hasHair: true,
+              hasAccessories: true,
+              ...(character.manifest ?? {}),
+            },
+            parts,
+            updatedAt: Date.now(),
+          });
+        }
+      });
   }
 }
 
@@ -245,6 +313,12 @@ export async function importMediaFile(
   file: File,
   opts: { scope?: MediaAsset["scope"] } = {},
 ): Promise<MediaAsset> {
+  if (opts.scope === "character-part") {
+    const looksSvg = file.type === "image/svg+xml" || file.name.toLowerCase().endsWith(".svg");
+    if (!looksSvg) {
+      throw new Error("Character parts must be SVG files.");
+    }
+  }
   const kind: MediaAsset["kind"] = file.type.startsWith("image/")
     ? "image"
     : file.type.startsWith("audio/")
@@ -431,7 +505,7 @@ export async function garbageCollectUnusedInternalMedia(
 }
 
 function slotIdForPart(role: CharacterPreset["parts"][number]["role"], partId: string) {
-  return role === "extra" ? `extra:${partId}` : `role:${role}`;
+  return role === "custom" ? `custom:${partId}` : `role:${role}`;
 }
 
 function roleLabelForSlot(role: CharacterPreset["parts"][number]["role"]) {
@@ -440,30 +514,67 @@ function roleLabelForSlot(role: CharacterPreset["parts"][number]["role"]) {
       return "Head";
     case "body":
       return "Body";
-    case "armL":
-      return "Left Arm";
-    case "armR":
-      return "Right Arm";
-    case "legL":
-      return "Left Leg";
-    case "legR":
-      return "Right Leg";
     case "eye":
-      return "Eyes";
-    case "eyeL":
-      return "Left Eye";
-    case "eyeR":
-      return "Right Eye";
-    case "brow":
-      return "Brows";
-    case "browL":
-      return "Left Brow";
-    case "browR":
-      return "Right Brow";
+      return "Eye";
+    case "eyebrow":
+      return "Eyebrow";
     case "mouth":
       return "Mouth";
+    case "arm":
+      return "Arm";
+    case "hand":
+      return "Hand";
+    case "leg":
+      return "Leg";
+    case "foot":
+      return "Foot";
+    case "hair":
+      return "Hair";
+    case "accessory":
+      return "Accessory";
+    case "static":
+      return "Static";
+    case "custom":
+      return "Custom";
+  }
+}
+
+function normalizeLegacyRole(role: string): CharacterPreset["parts"][number]["role"] {
+  switch (role) {
+    case "head":
+    case "body":
+    case "eye":
+    case "eyebrow":
+    case "mouth":
+    case "arm":
+    case "hand":
+    case "leg":
+    case "foot":
+    case "hair":
+    case "accessory":
+    case "static":
+    case "custom":
+      return role;
+    case "eyeL":
+    case "eyeR":
+      return "eye";
+    case "brow":
+    case "browL":
+    case "browR":
+      return "eyebrow";
+    case "armL":
+    case "armR":
+      return "arm";
+    case "legL":
+    case "legR":
+      return "leg";
+    case "footL":
+    case "footR":
+      return "foot";
     case "extra":
-      return "Extra";
+      return "custom";
+    default:
+      return "custom";
   }
 }
 

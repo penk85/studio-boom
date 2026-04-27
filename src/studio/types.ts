@@ -40,22 +40,48 @@ export interface MediaBlobRow {
 export type PartRole =
   | "head"
   | "body"
-  | "armL"
-  | "armR"
-  | "legL"
-  | "legR"
   | "eye"
-  | "eyeL"
-  | "eyeR"
-  | "brow"
-  | "browL"
-  | "browR"
+  | "eyebrow"
   | "mouth"
-  | "extra";
+  | "arm"
+  | "hand"
+  | "leg"
+  | "foot"
+  | "hair"
+  | "accessory"
+  | "static"
+  | "custom";
 
-export type MouthViseme = "rest" | "MBP" | "FV" | "AI" | "E" | "O" | "U" | "L";
+export type MouthViseme = "rest" | "A" | "E" | "O" | "U" | "MBP" | "FV" | "L" | "WQ" | "Smile";
 
 export type EyeState = "open" | "half" | "closed" | "wink";
+
+export type MovementPresetKind = "none" | "blink" | "rotate" | "raise" | "lipSync" | "bounce";
+
+export type BoundsType = "rect" | "ellipse";
+
+export interface CharacterPartBounds {
+  type: BoundsType;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface SvgMorphMetadata {
+  /** First path from the uploaded SVG, saved for future path interpolation. */
+  primaryPath?: string;
+  viewBox?: string;
+  fill?: string;
+  stroke?: string;
+  strokeWidth?: string;
+  strokeLinecap?: string;
+  strokeLinejoin?: string;
+  /** Number of path commands in primaryPath. Useful to diagnose morph readiness. */
+  commandCount?: number;
+  /** True when this mouth has the same command count as the rest mouth. */
+  compatibleWithRest?: boolean;
+}
 
 export interface CharacterPart {
   id: ID;
@@ -72,6 +98,8 @@ export interface CharacterPart {
   viseme?: MouthViseme;
   /** For eye parts, the eye state. */
   eyeState?: EyeState;
+  /** Optional side inferred from filename, e.g. left_eye.svg. */
+  side?: "left" | "right" | "center" | "front" | "back";
   mediaId: ID;
   // Transform on the character canvas:
   x: number;
@@ -81,6 +109,14 @@ export interface CharacterPart {
   rotation: number; // degrees
   anchorX: number;
   anchorY: number; // 0..1 within the part (used as transform origin)
+  /** Absolute canvas pivot. Mirrors anchorX/Y for old presets, easier for users to drag. */
+  pivot?: { x: number; y: number };
+  /** Parent part id for future movement inheritance. */
+  parentId?: ID;
+  /** Soft motion bounds for future animation and preview tests. */
+  bounds?: CharacterPartBounds;
+  movement?: MovementPresetKind;
+  morph?: SvgMorphMetadata;
   zIndex: number;
   /** Parallax depth (-1 back .. 0 neutral .. +1 front). */
   depth: number;
@@ -92,20 +128,28 @@ export interface PartManifest {
   hasHead: boolean;
   hasBody: boolean;
   hasArms: boolean;
+  hasHands: boolean;
   hasLegs: boolean;
+  hasFeet: boolean;
   hasEyes: boolean;
   hasBrows: boolean;
   hasMouth: boolean;
+  hasHair: boolean;
+  hasAccessories: boolean;
 }
 
 export const DEFAULT_PART_MANIFEST: PartManifest = {
   hasHead: true,
   hasBody: true,
   hasArms: true,
+  hasHands: true,
   hasLegs: true,
+  hasFeet: true,
   hasEyes: true,
   hasBrows: true,
   hasMouth: true,
+  hasHair: true,
+  hasAccessories: true,
 };
 
 /** Direction of a head variant for head-turn animations. */

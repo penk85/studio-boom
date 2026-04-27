@@ -1,75 +1,116 @@
-// CharacterEditor — full-screen editor for a CharacterPreset.
-// Three panes: parts list (left), live canvas (center), part inspector (right).
-import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Eye, EyeOff, RotateCw } from "lucide-react";
+import { useEffect, useRef, useState, type SVGAttributes } from "react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Copy,
+  Download,
+  Eye,
+  EyeOff,
+  MousePointer2,
+  Palette,
+  PenTool,
+  RotateCw,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { db, importMediaFile } from "../db";
+import { db, importMediaFile, uid } from "../db";
 import { useMediaUrl } from "../hooks/useMediaUrl";
 import {
   createBlankCharacter,
-  defaultFallbackMouthAnchor,
-  defaultSlotIdForRole,
-  groupParts,
+  defaultMovementForRole,
   makePart,
   normalizeCharacterSlots,
+  normalizePartManifest,
+  roleEnabledByManifest,
   roleLabel,
   saveCharacter,
 } from "./character-utils";
 import { MOUTH_VISEMES, MOUTH_VISEME_DESCRIPTIONS } from "../lipsync/viseme-schema";
 import type {
   CharacterPart,
+  CharacterPartBounds,
   CharacterPreset,
   EyeState,
-  FallbackMouthAnchor,
-  HeadDirection,
-  HeadVariant,
+  ID,
   MouthViseme,
-  ParallaxConfig,
+  MovementPresetKind,
   PartManifest,
   PartRole,
 } from "../types";
-import { PresetRecorder } from "../presets/PresetRecorder";
-
-const ROLE_SECTIONS: { title: string; roles: PartRole[] }[] = [
-  { title: "Head", roles: ["head"] },
-  { title: "Body", roles: ["body"] },
-  { title: "Face", roles: ["eye", "eyeL", "eyeR", "brow", "browL", "browR", "mouth"] },
-  { title: "Limbs", roles: ["armL", "armR", "legL", "legR"] },
-  { title: "Extras", roles: ["extra"] },
-];
-
-const EYE_STATES: EyeState[] = ["open", "closed"];
-
-const BROW_POSES = [
-  { pose: "neutral", label: "Neutral", description: "Default relaxed brows." },
-  { pose: "raised", label: "Raised", description: "Lifted brows for surprise or curiosity." },
-] as const;
-
-const HEAD_DIRECTIONS: { dir: HeadDirection; label: string }[] = [
-  { dir: "front", label: "Front" },
-  { dir: "3qL", label: "¾ Left" },
-  { dir: "3qR", label: "¾ Right" },
-  { dir: "sideL", label: "Side Left" },
-  { dir: "sideR", label: "Side Right" },
-];
-
-const BODY_DIRECTIONS = HEAD_DIRECTIONS;
 
 interface Props {
   characterId: string;
 }
 
+const CANVAS_PRESETS = [
+  { label: "Portrait", width: 600, height: 900 },
+  { label: "Square", width: 1000, height: 1000 },
+  { label: "Landscape", width: 1280, height: 720 },
+  { label: "Custom", width: 900, height: 900 },
+];
+
+const SLOT_DEFS: Array<{ label: string; role: PartRole; side?: CharacterPart["side"] }> = [
+  { label: "Head", role: "head" },
+  { label: "Body", role: "body" },
+  { label: "Left Eye", role: "eye", side: "left" },
+  { label: "Right Eye", role: "eye", side: "right" },
+  { label: "Left Eyebrow", role: "eyebrow", side: "left" },
+  { label: "Right Eyebrow", role: "eyebrow", side: "right" },
+  { label: "Left Arm", role: "arm", side: "left" },
+  { label: "Right Arm", role: "arm", side: "right" },
+  { label: "Left Hand", role: "hand", side: "left" },
+  { label: "Right Hand", role: "hand", side: "right" },
+  { label: "Left Leg", role: "leg", side: "left" },
+  { label: "Right Leg", role: "leg", side: "right" },
+  { label: "Left Foot", role: "foot", side: "left" },
+  { label: "Right Foot", role: "foot", side: "right" },
+  { label: "Hair Back", role: "hair", side: "back" },
+  { label: "Hair Front", role: "hair", side: "front" },
+  { label: "Accessory", role: "accessory" },
+];
+
+const ROLE_OPTIONS: PartRole[] = [
+  "head",
+  "body",
+  "eye",
+  "eyebrow",
+  "mouth",
+  "arm",
+  "hand",
+  "leg",
+  "foot",
+  "hair",
+  "accessory",
+  "static",
+  "custom",
+];
+
+const MOVEMENT_OPTIONS: Array<{ value: MovementPresetKind; label: string }> = [
+  { value: "none", label: "None" },
+  { value: "blink", label: "Blink" },
+  { value: "rotate", label: "Rotate" },
+  { value: "raise", label: "Raise" },
+  { value: "lipSync", label: "Lip Sync" },
+  { value: "bounce", label: "Bounce" },
+];
+
+const SAMPLE_WORDS = ["Hello", "Shalom", "Mommy", "Welcome"];
+const EYE_STATES: EyeState[] = ["open", "half", "closed", "wink"];
+
+type EditorMode = "select" | "pivot" | "bounds-rect" | "bounds-ellipse" | "mouth-shape";
+
 export function CharacterEditor({ characterId }: Props) {
   const navigate = useNavigate();
   const [doc, setDoc] = useState<CharacterPreset | null>(null);
-  const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
-  const [onionSkin, setOnionSkin] = useState(true);
+  const [selectedPartId, setSelectedPartId] = useState<ID | null>(null);
   const [scale, setScale] = useState(0.7);
-  const [recorderOpen, setRecorderOpen] = useState(false);
-  const [showFallbackMouth, setShowFallbackMouth] = useState(false);
+  const [mode, setMode] = useState<EditorMode>("select");
+  const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [, setPreviewTick] = useState(0);
+  const [status, setStatus] = useState<string | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
 
-  // Load or create
   useEffect(() => {
     (async () => {
       let row = await db.characters.get(characterId);
@@ -82,61 +123,34 @@ export function CharacterEditor({ characterId }: Props) {
     })();
   }, [characterId]);
 
-  // Fit to container
   useEffect(() => {
     if (!doc) return;
-    const el = wrapRef.current;
-    if (!el) return;
+    const t = window.setTimeout(() => void saveCharacter(doc), 450);
+    return () => window.clearTimeout(t);
+  }, [doc]);
+
+  useEffect(() => {
+    if (!doc || !wrapRef.current) return;
     const ro = new ResizeObserver(() => {
+      const el = wrapRef.current;
+      if (!el) return;
       const w = el.clientWidth - 64;
       const h = el.clientHeight - 64;
-      setScale(Math.max(0.1, Math.min(w / doc.canvasWidth, h / doc.canvasHeight, 1.5)));
+      setScale(Math.max(0.12, Math.min(w / doc.canvasWidth, h / doc.canvasHeight, 1.4)));
     });
-    ro.observe(el);
+    ro.observe(wrapRef.current);
     return () => ro.disconnect();
   }, [doc]);
 
-  // Debounced save
   useEffect(() => {
-    if (!doc) return;
-    const t = setTimeout(() => {
-      void saveCharacter(doc);
-    }, 400);
-    return () => clearTimeout(t);
-  }, [doc]);
-
-  // Keyboard shortcuts for layer ordering
-  useEffect(() => {
-    if (!selectedPartId) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      if (e.key === "]") {
-        setDoc((d) =>
-          d
-            ? {
-                ...d,
-                parts: d.parts.map((p) =>
-                  p.id === selectedPartId ? { ...p, zIndex: p.zIndex + 1 } : p,
-                ),
-              }
-            : d,
-        );
-      } else if (e.key === "[") {
-        setDoc((d) =>
-          d
-            ? {
-                ...d,
-                parts: d.parts.map((p) =>
-                  p.id === selectedPartId ? { ...p, zIndex: Math.max(0, p.zIndex - 1) } : p,
-                ),
-              }
-            : d,
-        );
-      }
+    if (!preview) return;
+    const t = window.setTimeout(() => setPreview(null), preview.durationMs);
+    const interval = window.setInterval(() => setPreviewTick((n) => n + 1), 50);
+    return () => {
+      window.clearTimeout(t);
+      window.clearInterval(interval);
     };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [selectedPartId]);
+  }, [preview]);
 
   if (!doc) {
     return (
@@ -146,62 +160,127 @@ export function CharacterEditor({ characterId }: Props) {
     );
   }
 
-  const update = (patch: Partial<CharacterPreset>) => setDoc((d) => (d ? { ...d, ...patch } : d));
+  const updateDoc = (patch: Partial<CharacterPreset>) =>
+    setDoc((d) => (d ? { ...d, ...patch, updatedAt: Date.now() } : d));
 
-  const updatePart = (id: string, patch: Partial<CharacterPart>) =>
-    setDoc((d) =>
-      d ? { ...d, parts: d.parts.map((p) => (p.id === id ? { ...p, ...patch } : p)) } : d,
-    );
-
-  const updateFallbackMouth = (patch: Partial<FallbackMouthAnchor>) =>
+  const updatePart = (id: ID, patch: Partial<CharacterPart>) =>
     setDoc((d) =>
       d
         ? {
             ...d,
-            fallbackMouth: {
-              ...(d.fallbackMouth ?? defaultFallbackMouthAnchor(d.canvasWidth, d.canvasHeight)),
-              ...patch,
-            },
+            parts: d.parts.map((p) =>
+              p.id === id ? normalizePartPatch({ ...p, ...patch }, patch) : p,
+            ),
+            updatedAt: Date.now(),
           }
         : d,
     );
 
-  const removePart = (id: string) =>
-    setDoc((d) => (d ? { ...d, parts: d.parts.filter((p) => p.id !== id) } : d));
-
   const addPart = (part: CharacterPart) => {
-    setDoc((d) => (d ? { ...d, parts: [...d.parts, part] } : d));
+    setDoc((d) => (d ? { ...d, parts: [...d.parts, part], updatedAt: Date.now() } : d));
     setSelectedPartId(part.id);
   };
 
+  const removePart = (id: ID) => {
+    setDoc((d) =>
+      d
+        ? {
+            ...d,
+            parts: d.parts
+              .filter((p) => p.id !== id)
+              .map((p) => (p.parentId === id ? { ...p, parentId: undefined } : p)),
+            updatedAt: Date.now(),
+          }
+        : d,
+    );
+    if (selectedPartId === id) setSelectedPartId(null);
+  };
+
+  const duplicatePart = (part: CharacterPart) => {
+    const nextId = uid();
+    addPart({
+      ...part,
+      id: nextId,
+      slotId: part.role === "custom" ? `custom:${nextId}` : `${part.slotId}:copy:${nextId}`,
+      name: `${part.name} copy`,
+      x: part.x + 24,
+      y: part.y + 24,
+      zIndex: maxZ(doc.parts) + 1,
+      parentId: undefined,
+    });
+  };
+
+  const importSvg = async (file: File, options: ImportOptions = {}) => {
+    try {
+      const asset = await importMediaFile(file, { scope: "character-part" });
+      const role = options.role ?? detectRole(file.name);
+      const side = options.side ?? detectSide(file.name);
+      const viseme = options.viseme ?? (role === "mouth" ? detectViseme(file.name) : undefined);
+      const eyeState = options.eyeState ?? (role === "eye" ? detectEyeState(file.name) : undefined);
+      const fitted = fitAsset(asset.width, asset.height, doc.canvasWidth, doc.canvasHeight);
+      const morph = role === "mouth" ? await readSvgMorphMetadata(file, doc.parts) : undefined;
+      const id = uid();
+      const label = options.label ?? asset.name;
+      const part = makePart(role, asset.id, {
+        id,
+        name: label,
+        slotId: options.slotId ?? slotIdForImport(role, label, viseme, id, side),
+        slotName: label,
+        side,
+        viseme,
+        eyeState,
+        ...fitted,
+        ...options.placement,
+        zIndex: options.zIndex ?? maxZ(doc.parts) + 1,
+        movement: defaultMovementForRole(role, viseme),
+        morph,
+      });
+      addPart(part);
+      setStatus(`${file.name} added`);
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : "Could not import SVG.");
+    }
+  };
+
   const selectedPart = doc.parts.find((p) => p.id === selectedPartId) ?? null;
+  const orderedParts = doc.parts.slice().sort((a, b) => a.zIndex - b.zIndex);
+  const exportData = JSON.stringify(normalizeCharacterSlots(doc), null, 2);
+  const manifest = normalizePartManifest(doc.manifest);
+  const mouthEditingPart =
+    mode === "mouth-shape" && selectedPart?.role === "mouth" ? selectedPart : null;
+  const previewParentPart =
+    preview?.targetRole === "head"
+      ? orderedParts.find((part) => part.id === preview.targetPartId)
+      : undefined;
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <header className="flex items-center gap-3 border-b border-border bg-panel px-4 py-2">
         <Link to="/" className="rounded border border-border px-2 py-1 text-xs hover:bg-panel-2">
-          ← Back to Studio
+          ← Studio
         </Link>
         <input
           value={doc.name}
-          onChange={(e) => update({ name: e.target.value })}
-          className="rounded border border-transparent bg-transparent px-2 py-1 text-sm font-semibold hover:border-border focus:border-primary focus:outline-none"
+          onChange={(e) => updateDoc({ name: e.target.value })}
+          className="min-w-0 rounded border border-transparent bg-transparent px-2 py-1 text-sm font-semibold hover:border-border focus:border-primary focus:outline-none"
         />
-        <div className="ml-auto flex items-center gap-3 text-xs text-muted-foreground">
-          <label className="flex items-center gap-1">
-            <input
-              type="checkbox"
-              checked={onionSkin}
-              onChange={(e) => setOnionSkin(e.target.checked)}
-            />
-            Onion skin
-          </label>
+        <div className="ml-auto flex items-center gap-2">
+          {CANVAS_PRESETS.map((preset) => (
+            <button
+              key={preset.label}
+              onClick={() => updateDoc({ canvasWidth: preset.width, canvasHeight: preset.height })}
+              className="rounded border border-border px-2 py-1 text-xs hover:bg-panel-2"
+            >
+              {preset.label}
+            </button>
+          ))}
           <button
-            onClick={() => setRecorderOpen(true)}
-            className="rounded border border-border px-2 py-1 text-xs hover:bg-panel-2"
-            title="Record a new action preset by posing the character"
+            onClick={() => navigator.clipboard?.writeText(exportData)}
+            className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-panel-2"
+            title="Copy structured character data"
           >
-            + Record preset
+            <Download size={13} />
+            Export
           </button>
           <button
             onClick={async () => {
@@ -217,34 +296,45 @@ export function CharacterEditor({ characterId }: Props) {
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <aside className="w-64 shrink-0 overflow-auto border-r border-border bg-panel p-3 text-xs">
-          <ManifestEditor manifest={doc.manifest} onChange={(m) => update({ manifest: m })} />
-          <PartsList
+        <aside className="w-72 shrink-0 overflow-auto border-r border-border bg-panel p-3 text-xs">
+          <StructureEditor
+            manifest={manifest}
+            onChange={(nextManifest) => updateDoc({ manifest: nextManifest })}
+          />
+          <UploadSlots
+            onImport={importSvg}
             parts={doc.parts}
+            manifest={manifest}
+            selectedId={selectedPartId}
+            onEditPart={(id) => {
+              setSelectedPartId(id);
+              setMode("mouth-shape");
+            }}
+            onSelectPart={setSelectedPartId}
+          />
+          <LayerList
+            parts={orderedParts}
             selectedId={selectedPartId}
             onSelect={setSelectedPartId}
-            onAdd={addPart}
-            onUpdate={updatePart}
+            onChange={updatePart}
             onRemove={removePart}
-            manifest={doc.manifest}
-            headVariants={doc.headVariants ?? []}
-            onHeadVariantsChange={(v) => update({ headVariants: v })}
-            canvasWidth={doc.canvasWidth}
-            canvasHeight={doc.canvasHeight}
           />
         </aside>
 
         <main
           ref={wrapRef}
           className="relative flex min-w-0 flex-1 items-center justify-center bg-stage-bg p-8"
+          onDrop={(e) => {
+            e.preventDefault();
+            Array.from(e.dataTransfer.files)
+              .filter((file) => file.name.toLowerCase().endsWith(".svg"))
+              .forEach((file) => void importSvg(file));
+          }}
+          onDragOver={(e) => e.preventDefault()}
         >
           <div
-            className="relative shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] outline outline-1 outline-border"
-            style={{
-              width: doc.canvasWidth * scale,
-              height: doc.canvasHeight * scale,
-              background: "oklch(0.12 0.015 270)",
-            }}
+            className="relative bg-[oklch(0.11_0.01_260)] shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] outline outline-1 outline-border"
+            style={{ width: doc.canvasWidth * scale, height: doc.canvasHeight * scale }}
           >
             <div
               className="absolute left-0 top-0 origin-top-left"
@@ -254,133 +344,116 @@ export function CharacterEditor({ characterId }: Props) {
                 transform: `scale(${scale})`,
               }}
             >
-              {doc.parts
-                .slice()
-                .sort((a, b) => a.zIndex - b.zIndex)
-                .map((p) => (
+              {orderedParts
+                .filter((part) => roleEnabledByManifest(part.role, manifest))
+                .map((part) => (
                   <PartLayer
-                    key={p.id}
-                    part={p}
-                    selected={p.id === selectedPartId}
+                    key={part.id}
+                    part={part}
+                    selected={part.id === selectedPartId}
                     scale={scale}
-                    onionSkin={onionSkin}
-                    onSelect={() => setSelectedPartId(p.id)}
-                    onChange={(patch) => updatePart(p.id, patch)}
+                    mode={mode}
+                    preview={preview}
+                    previewParentPart={previewParentPart}
+                    onSelect={() => setSelectedPartId(part.id)}
+                    onChange={(patch) => updatePart(part.id, patch)}
+                    onModeDone={() => setMode("select")}
                   />
                 ))}
-              {showFallbackMouth && (
-                <FallbackMouthMarker
-                  anchor={
-                    doc.fallbackMouth ??
-                    defaultFallbackMouthAnchor(doc.canvasWidth, doc.canvasHeight)
-                  }
-                  scale={scale}
-                  onChange={updateFallbackMouth}
-                />
-              )}
             </div>
           </div>
-          {selectedPart && (
-            <div className="pointer-events-none absolute left-3 top-3 rounded border border-border bg-panel/90 px-2.5 py-1.5 text-xs shadow-[var(--shadow-panel)]">
-              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                Active layer
-              </div>
-              <div className="font-medium text-foreground">
-                {roleLabel(selectedPart.role)} · {variantLabel(selectedPart)}
-              </div>
-            </div>
-          )}
           <div className="pointer-events-none absolute bottom-2 right-3 rounded bg-panel/80 px-2 py-1 text-[10px] text-muted-foreground">
             {doc.canvasWidth}×{doc.canvasHeight} · {Math.round(scale * 100)}%
           </div>
-        </main>
-
-        <aside className="w-72 shrink-0 overflow-auto border-l border-border bg-panel p-3 text-xs">
-          {selectedPart ? (
-            <PartInspector
-              part={selectedPart}
-              onChange={(patch) => updatePart(selectedPart.id, patch)}
-              onRemove={() => {
-                removePart(selectedPart.id);
-                setSelectedPartId(null);
-              }}
-            />
-          ) : (
-            <div className="text-muted-foreground">
-              Select a part to edit transform, anchor, depth, and z-index. Drag-reorder parts on the
-              left to change z-index.
+          {status && (
+            <div className="absolute left-4 top-4 rounded border border-border bg-panel/95 px-3 py-2 text-xs shadow-[var(--shadow-panel)]">
+              {status}
             </div>
           )}
-          <div className="mt-6 border-t border-border pt-3">
-            <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-              Canvas
+          {mouthEditingPart && (
+            <div className="absolute left-4 bottom-4 max-w-xs rounded border border-primary/50 bg-panel/95 px-3 py-2 text-xs shadow-[var(--shadow-panel)]">
+              <div className="font-medium text-foreground">
+                Editing mouth: {mouthEditingPart.viseme ?? "rest"}
+              </div>
+              <div className="mt-1 text-muted-foreground">
+                Drag the dots on the canvas to reshape the mouth. Blue dots are anchors. Light dots
+                are curve controls.
+              </div>
+              <button
+                type="button"
+                onClick={() => setMode("select")}
+                className="mt-2 rounded border border-border px-2 py-1 text-[11px] hover:bg-panel-2"
+              >
+                Done editing
+              </button>
             </div>
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Width">
-                <NumberInput
-                  value={doc.canvasWidth}
-                  onChange={(v) => update({ canvasWidth: Math.max(64, v) })}
-                />
-              </Field>
-              <Field label="Height">
-                <NumberInput
-                  value={doc.canvasHeight}
-                  onChange={(v) => update({ canvasHeight: Math.max(64, v) })}
-                />
-              </Field>
-            </div>
-          </div>
+          )}
+        </main>
 
-          <FallbackMouthEditor
-            anchor={
-              doc.fallbackMouth ?? defaultFallbackMouthAnchor(doc.canvasWidth, doc.canvasHeight)
-            }
-            visible={showFallbackMouth}
-            onVisibleChange={setShowFallbackMouth}
-            onChange={updateFallbackMouth}
+        <aside className="w-80 shrink-0 overflow-auto border-l border-border bg-panel p-3 text-xs">
+          <Inspector
+            doc={doc}
+            part={selectedPart}
+            mode={mode}
+            onModeChange={setMode}
+            onChange={updatePart}
+            onRemove={removePart}
+            onDuplicate={duplicatePart}
+            onPreview={setPreview}
+            onCanvasChange={(patch) => updateDoc(patch)}
           />
-
-          <ParallaxEditor cfg={doc.parallax} onChange={(p) => update({ parallax: p })} />
-
-          {/* Head Variants moved into the Head part group on the left. */}
         </aside>
       </div>
-
-      {recorderOpen && <PresetRecorder character={doc} onClose={() => setRecorderOpen(false)} />}
     </div>
   );
 }
 
-function ManifestEditor({
+interface ImportOptions {
+  role?: PartRole;
+  side?: CharacterPart["side"];
+  viseme?: MouthViseme;
+  eyeState?: EyeState;
+  label?: string;
+  slotId?: string;
+  placement?: Partial<Pick<CharacterPart, "x" | "y" | "width" | "height" | "rotation" | "pivot">>;
+  zIndex?: number;
+}
+
+const STRUCTURE_OPTIONS: Array<{ key: keyof PartManifest; label: string }> = [
+  { key: "hasHead", label: "Head" },
+  { key: "hasBody", label: "Body" },
+  { key: "hasArms", label: "Arms" },
+  { key: "hasHands", label: "Hands" },
+  { key: "hasLegs", label: "Legs" },
+  { key: "hasFeet", label: "Feet" },
+  { key: "hasEyes", label: "Eyes" },
+  { key: "hasBrows", label: "Eyebrows" },
+  { key: "hasMouth", label: "Mouth" },
+  { key: "hasHair", label: "Hair" },
+  { key: "hasAccessories", label: "Accessories" },
+];
+
+function StructureEditor({
   manifest,
   onChange,
 }: {
   manifest: PartManifest;
-  onChange: (m: PartManifest) => void;
+  onChange: (manifest: PartManifest) => void;
 }) {
-  const items: { key: keyof PartManifest; label: string }[] = [
-    { key: "hasHead", label: "Head" },
-    { key: "hasBody", label: "Body" },
-    { key: "hasArms", label: "Arms" },
-    { key: "hasLegs", label: "Legs" },
-    { key: "hasEyes", label: "Eyes" },
-    { key: "hasBrows", label: "Brows" },
-    { key: "hasMouth", label: "Mouth" },
-  ];
   return (
     <div className="mb-3 rounded border border-border bg-panel-2 p-2">
       <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-        Has parts
+        Character Structure
       </div>
       <div className="grid grid-cols-2 gap-1">
-        {items.map((it) => (
-          <label key={it.key} className="flex items-center gap-1.5 text-[11px]">
+        {STRUCTURE_OPTIONS.map((item) => (
+          <label key={item.key} className="flex items-center gap-1.5 text-[11px]">
             <input
               type="checkbox"
-              checked={manifest[it.key]}
-              onChange={(e) => onChange({ ...manifest, [it.key]: e.target.checked })}
+              checked={manifest[item.key]}
+              onChange={(e) => onChange({ ...manifest, [item.key]: e.target.checked })}
             />
-            {it.label}
+            {item.label}
           </label>
         ))}
       </div>
@@ -388,659 +461,135 @@ function ManifestEditor({
   );
 }
 
-function PartsList({
+function UploadSlots({
+  onImport,
   parts,
-  selectedId,
-  onSelect,
-  onAdd,
-  onUpdate,
-  onRemove,
   manifest,
-  headVariants,
-  onHeadVariantsChange,
-  canvasWidth,
-  canvasHeight,
+  selectedId,
+  onEditPart,
+  onSelectPart,
 }: {
+  onImport: (file: File, options?: ImportOptions) => void;
   parts: CharacterPart[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
-  onAdd: (p: CharacterPart) => void;
-  onUpdate: (id: string, patch: Partial<CharacterPart>) => void;
-  onRemove: (id: string) => void;
   manifest: PartManifest;
-  headVariants: HeadVariant[];
-  onHeadVariantsChange: (v: HeadVariant[]) => void;
-  canvasWidth: number;
-  canvasHeight: number;
+  selectedId: ID | null;
+  onEditPart: (id: ID) => void;
+  onSelectPart: (id: ID) => void;
 }) {
-  const grouped = useMemo(() => groupParts(parts), [parts]);
-  const isRoleVisible = (r: PartRole) => {
-    if (r === "head") return manifest.hasHead;
-    if (r === "body") return manifest.hasBody;
-    if (r === "armL" || r === "armR") return manifest.hasArms;
-    if (r === "legL" || r === "legR") return manifest.hasLegs;
-    if (r === "eye" || r === "eyeL" || r === "eyeR") return manifest.hasEyes;
-    if (r === "brow" || r === "browL" || r === "browR") return manifest.hasBrows;
-    if (r === "mouth") return manifest.hasMouth;
-    return true;
-  };
-
   return (
-    <div className="space-y-2">
-      <div className="font-semibold uppercase tracking-wider text-muted-foreground">Parts</div>
-      {ROLE_SECTIONS.map((section) => {
-        const roles = section.roles.filter(isRoleVisible);
-        if (roles.length === 0) return null;
-        return (
-          <div key={section.title} className="space-y-1.5">
-            <div className="px-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-              {section.title}
-            </div>
-            {roles.map((role) => (
-              <RoleGroup
-                key={role}
-                role={role}
-                variants={grouped.get(role) ?? []}
-                selectedId={selectedId}
-                onSelect={onSelect}
-                onAdd={onAdd}
-                onUpdate={onUpdate}
-                onRemove={onRemove}
-                headVariants={role === "head" ? headVariants : undefined}
-                onHeadVariantsChange={role === "head" ? onHeadVariantsChange : undefined}
-                canvasWidth={canvasWidth}
-                canvasHeight={canvasHeight}
-              />
-            ))}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function RoleGroup({
-  role,
-  variants,
-  selectedId,
-  onSelect,
-  onAdd,
-  onUpdate,
-  onRemove,
-  headVariants,
-  onHeadVariantsChange,
-  canvasWidth,
-  canvasHeight,
-}: {
-  role: PartRole;
-  variants: CharacterPart[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
-  onAdd: (p: CharacterPart) => void;
-  onUpdate: (id: string, patch: Partial<CharacterPart>) => void;
-  onRemove: (id: string) => void;
-  headVariants?: HeadVariant[];
-  onHeadVariantsChange?: (v: HeadVariant[]) => void;
-  canvasWidth: number;
-  canvasHeight: number;
-}) {
-  const active = variants.some((p) => p.id === selectedId);
-  const usesFixedSlots =
-    role === "mouth" ||
-    role === "eye" ||
-    role === "eyeL" ||
-    role === "eyeR" ||
-    role === "brow" ||
-    role === "browL" ||
-    role === "browR";
-  const countLabel =
-    role === "mouth"
-      ? `${variants.length}/${MOUTH_VISEMES.length}`
-      : role === "eye" || role === "eyeL" || role === "eyeR"
-        ? `${variants.length}/${EYE_STATES.length}`
-        : role === "brow" || role === "browL" || role === "browR"
-          ? `${variants.length}/${BROW_POSES.length}`
-          : `${variants.length}`;
-  return (
-    <div
-      className={`rounded border bg-panel-2 ${
-        active ? "border-primary shadow-[0_0_0_1px_var(--color-primary)]" : "border-border"
-      }`}
-    >
-      <div className="flex items-center gap-2 px-2 py-1.5">
-        <span className="font-medium text-foreground">{roleLabel(role)}</span>
-        <span className="text-[10px] text-muted-foreground">({countLabel})</span>
-        {active && (
-          <span className="rounded bg-primary/20 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-foreground">
-            Active
-          </span>
-        )}
-        {!usesFixedSlots && (
-          <UploadVariantButton
-            role={role}
-            onAdd={onAdd}
-            existing={variants}
-            canvasWidth={canvasWidth}
-            canvasHeight={canvasHeight}
+    <div className="space-y-3">
+      <div>
+        <div className="font-semibold uppercase tracking-wider text-muted-foreground">
+          SVG Parts
+        </div>
+        <div className="mt-1 text-[11px] text-muted-foreground">
+          Drop SVGs on the canvas or upload into a slot.
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {SLOT_DEFS.filter(
+          (slot) => slot.role !== "eye" && roleEnabledByManifest(slot.role, manifest),
+        ).map((slot) => (
+          <SlotUpload
+            key={`${slot.label}-${slot.role}`}
+            label={slot.label}
+            filled={parts.some((p) => p.slotName === slot.label)}
+            onUpload={(file) =>
+              onImport(file, {
+                role: slot.role,
+                side: slot.side,
+                label: slot.label,
+                slotId: `slot:${slug(slot.label)}`,
+              })
+            }
           />
-        )}
+        ))}
+        <SlotUpload
+          label="+ Custom"
+          filled={false}
+          onUpload={(file) =>
+            onImport(file, { role: "custom", label: file.name.replace(/\.svg$/i, "") })
+          }
+        />
       </div>
-      {!usesFixedSlots && (
-        <ul>
-          {variants.map((p) => (
-            <li
-              key={p.id}
-              onClick={() => onSelect(p.id)}
-              title={variantHoverText(p)}
-              className={`flex cursor-pointer items-center gap-2 border-t border-border px-2 py-1 text-[11px] ${
-                p.id === selectedId
-                  ? "bg-primary/20 text-foreground"
-                  : "text-muted-foreground hover:bg-panel"
-              }`}
-            >
-              <span className="flex-1 truncate">{variantLabel(p)}</span>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onUpdate(p.id, { visible: !p.visible });
-                }}
-                className="rounded p-1 text-muted-foreground hover:text-foreground"
-                title={p.visible ? "Hide" : "Show"}
-                aria-label={p.visible ? "Hide part" : "Show part"}
-              >
-                {p.visible ? <Eye size={14} /> : <EyeOff size={14} />}
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRemove(p.id);
-                }}
-                className="rounded px-1 text-[10px] text-destructive"
-                title="Remove"
-              >
-                ✕
-              </button>
-            </li>
-          ))}
-        </ul>
+      {manifest.hasEyes && (
+        <div className="rounded border border-border bg-panel-2 p-2">
+          <div className="mb-1 font-semibold uppercase tracking-wider text-muted-foreground">
+            Eye States
+          </div>
+          <div className="grid grid-cols-2 gap-1.5">
+            {(["left", "right"] as const).flatMap((side) =>
+              EYE_STATES.map((eyeState) => {
+                const label = `${side === "left" ? "Left" : "Right"} ${eyeState}`;
+                return (
+                  <SlotUpload
+                    key={`${side}-${eyeState}`}
+                    compact
+                    label={label}
+                    filled={parts.some(
+                      (p) => p.role === "eye" && p.side === side && p.eyeState === eyeState,
+                    )}
+                    onUpload={(file) =>
+                      onImport(file, {
+                        role: "eye",
+                        side,
+                        eyeState,
+                        label,
+                        slotId: `slot:${side}-eye`,
+                        zIndex: 50,
+                      })
+                    }
+                  />
+                );
+              }),
+            )}
+          </div>
+        </div>
       )}
-      {role === "head" && headVariants && onHeadVariantsChange && (
-        <HeadTurnVariants variants={headVariants} onChange={onHeadVariantsChange} />
-      )}
-      {role === "mouth" && (
-        <MouthVariants
-          variants={variants}
+      {manifest.hasMouth && (
+        <MouthShapeSetup
+          parts={parts}
+          onImport={onImport}
           selectedId={selectedId}
-          onSelect={onSelect}
-          onAdd={onAdd}
-          onUpdate={onUpdate}
-          onRemove={onRemove}
-          canvasWidth={canvasWidth}
-          canvasHeight={canvasHeight}
-        />
-      )}
-      {(role === "eye" || role === "eyeL" || role === "eyeR") && (
-        <EyeVariants
-          role={role}
-          variants={variants}
-          selectedId={selectedId}
-          onSelect={onSelect}
-          onAdd={onAdd}
-          onUpdate={onUpdate}
-          onRemove={onRemove}
-          canvasWidth={canvasWidth}
-          canvasHeight={canvasHeight}
-        />
-      )}
-      {(role === "brow" || role === "browL" || role === "browR") && (
-        <BrowVariants
-          role={role}
-          variants={variants}
-          selectedId={selectedId}
-          onSelect={onSelect}
-          onAdd={onAdd}
-          onUpdate={onUpdate}
-          onRemove={onRemove}
-          canvasWidth={canvasWidth}
-          canvasHeight={canvasHeight}
-        />
-      )}
-      {role === "body" && (
-        <BodyDirectionVariants
-          variants={variants}
-          onAdd={onAdd}
-          onUpdate={onUpdate}
-          onRemove={onRemove}
-          canvasWidth={canvasWidth}
-          canvasHeight={canvasHeight}
+          onEditPart={onEditPart}
+          onSelectPart={onSelectPart}
         />
       )}
     </div>
   );
 }
 
-/** Nested head-turn variants (front, ¾, side directions) shown inside the Head group. */
-function HeadTurnVariants({
-  variants,
-  onChange,
+function SlotUpload({
+  label,
+  filled,
+  compact,
+  onUpload,
 }: {
-  variants: HeadVariant[];
-  onChange: (v: HeadVariant[]) => void;
-}) {
-  const upload = async (dir: HeadDirection, file: File) => {
-    const asset = await importMediaFile(file, { scope: "character-part" });
-    const next = variants.filter((v) => v.direction !== dir);
-    next.push({ direction: dir, mediaId: asset.id });
-    onChange(next);
-  };
-  const remove = (dir: HeadDirection) => onChange(variants.filter((v) => v.direction !== dir));
-
-  return (
-    <div className="border-t border-border p-2">
-      <div className="mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-        Variants — turn directions
-      </div>
-      <div className="space-y-1">
-        {HEAD_DIRECTIONS.map(({ dir, label }) => {
-          const v = variants.find((x) => x.direction === dir);
-          return (
-            <HeadVariantSlot
-              key={dir}
-              dir={dir}
-              label={label}
-              variant={v}
-              onUpload={(f) => upload(dir, f)}
-              onRemove={() => remove(dir)}
-            />
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function EyeVariants({
-  role,
-  variants,
-  selectedId,
-  onSelect,
-  onAdd,
-  onUpdate,
-  onRemove,
-  canvasWidth,
-  canvasHeight,
-}: {
-  role: PartRole;
-  variants: CharacterPart[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
-  onAdd: (p: CharacterPart) => void;
-  onUpdate: (id: string, patch: Partial<CharacterPart>) => void;
-  onRemove: (id: string) => void;
-  canvasWidth: number;
-  canvasHeight: number;
-}) {
-  const upload = async (eyeState: EyeState, file: File) => {
-    const asset = await importMediaFile(file, { scope: "character-part" });
-    const fitted = fitAssetToCanvas(asset.width, asset.height, canvasWidth, canvasHeight);
-    const existing = variants.find((p) => p.eyeState === eyeState);
-    if (existing) {
-      onUpdate(existing.id, { mediaId: asset.id, ...fitted });
-      return;
-    }
-    const reusableSlotId = variants.find((p) => p.slotId)?.slotId ?? defaultSlotIdForRole(role);
-    onAdd(
-      makePart(role, asset.id, {
-        name: `${roleLabel(role)} ${eyeState}`,
-        slotId: reusableSlotId,
-        slotName: variants.find((p) => p.slotName)?.slotName ?? roleLabel(role),
-        eyeState,
-        ...fitted,
-        zIndex: variants[0]?.zIndex ?? defaultZIndexForRole(role),
-      }),
-    );
-  };
-
-  return (
-    <div className="border-t border-border p-2">
-      <div className="mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-        Variants - eye states
-      </div>
-      <div className="space-y-1">
-        {EYE_STATES.map((eyeState) => {
-          const variant = variants.find((p) => p.eyeState === eyeState);
-          return (
-            <StateVariantSlot
-              key={eyeState}
-              label={eyeState}
-              description={`Eye state: ${eyeState}.`}
-              variant={variant}
-              selected={variant?.id === selectedId}
-              onSelect={() => variant && onSelect(variant.id)}
-              onToggleVisible={() => variant && onUpdate(variant.id, { visible: !variant.visible })}
-              onUpload={(f) => upload(eyeState, f)}
-              onRemove={() => variant && onRemove(variant.id)}
-            />
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function BrowVariants({
-  role,
-  variants,
-  selectedId,
-  onSelect,
-  onAdd,
-  onUpdate,
-  onRemove,
-  canvasWidth,
-  canvasHeight,
-}: {
-  role: PartRole;
-  variants: CharacterPart[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
-  onAdd: (p: CharacterPart) => void;
-  onUpdate: (id: string, patch: Partial<CharacterPart>) => void;
-  onRemove: (id: string) => void;
-  canvasWidth: number;
-  canvasHeight: number;
-}) {
-  const upload = async (pose: string, label: string, file: File) => {
-    const asset = await importMediaFile(file, { scope: "character-part" });
-    const fitted = fitAssetToCanvas(asset.width, asset.height, canvasWidth, canvasHeight);
-    const existing = variants.find((p) => (p.pose ?? "neutral") === pose);
-    if (existing) {
-      onUpdate(existing.id, {
-        mediaId: asset.id,
-        pose,
-        name: `${roleLabel(role)} ${label}`,
-        ...fitted,
-      });
-      return;
-    }
-    const reusableSlotId = variants.find((p) => p.slotId)?.slotId ?? defaultSlotIdForRole(role);
-    onAdd(
-      makePart(role, asset.id, {
-        name: `${roleLabel(role)} ${label}`,
-        slotId: reusableSlotId,
-        slotName: variants.find((p) => p.slotName)?.slotName ?? roleLabel(role),
-        pose,
-        ...fitted,
-        zIndex: variants[0]?.zIndex ?? defaultZIndexForRole(role),
-      }),
-    );
-  };
-
-  return (
-    <div className="border-t border-border p-2">
-      <div className="mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-        Variants - brow poses
-      </div>
-      <div className="space-y-1">
-        {BROW_POSES.map(({ pose, label, description }) => {
-          const variant = variants.find((p) => (p.pose ?? "neutral") === pose);
-          return (
-            <StateVariantSlot
-              key={pose}
-              label={label}
-              description={description}
-              variant={variant}
-              selected={variant?.id === selectedId}
-              onSelect={() => variant && onSelect(variant.id)}
-              onToggleVisible={() => variant && onUpdate(variant.id, { visible: !variant.visible })}
-              onUpload={(f) => upload(pose, label, f)}
-              onRemove={() => variant && onRemove(variant.id)}
-            />
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function BodyDirectionVariants({
-  variants,
-  onAdd,
-  onUpdate,
-  onRemove,
-  canvasWidth,
-  canvasHeight,
-}: {
-  variants: CharacterPart[];
-  onAdd: (p: CharacterPart) => void;
-  onUpdate: (id: string, patch: Partial<CharacterPart>) => void;
-  onRemove: (id: string) => void;
-  canvasWidth: number;
-  canvasHeight: number;
-}) {
-  const upload = async (dir: HeadDirection, file: File) => {
-    const asset = await importMediaFile(file, { scope: "character-part" });
-    const fitted = fitAssetToCanvas(asset.width, asset.height, canvasWidth, canvasHeight);
-    const existing = variants.find((p) => p.pose === dir);
-    if (existing) {
-      onUpdate(existing.id, { mediaId: asset.id, ...fitted });
-      return;
-    }
-    const reusableSlotId = variants.find((p) => p.slotId)?.slotId ?? defaultSlotIdForRole("body");
-    onAdd(
-      makePart("body", asset.id, {
-        name: `Body ${dir}`,
-        slotId: reusableSlotId,
-        slotName: variants.find((p) => p.slotName)?.slotName ?? roleLabel("body"),
-        pose: dir,
-        ...fitted,
-        zIndex: variants[0]?.zIndex ?? defaultZIndexForRole("body"),
-      }),
-    );
-  };
-
-  return (
-    <div className="border-t border-border p-2">
-      <div className="mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-        Variants — body directions
-      </div>
-      <div className="space-y-1">
-        {BODY_DIRECTIONS.map(({ dir, label }) => {
-          const variant = variants.find((p) => p.pose === dir);
-          return (
-            <BodyDirectionSlot
-              key={dir}
-              label={label}
-              variant={variant}
-              onUpload={(f) => upload(dir, f)}
-              onRemove={() => variant && onRemove(variant.id)}
-            />
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function MouthVariants({
-  variants,
-  selectedId,
-  onSelect,
-  onAdd,
-  onUpdate,
-  onRemove,
-  canvasWidth,
-  canvasHeight,
-}: {
-  variants: CharacterPart[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
-  onAdd: (p: CharacterPart) => void;
-  onUpdate: (id: string, patch: Partial<CharacterPart>) => void;
-  onRemove: (id: string) => void;
-  canvasWidth: number;
-  canvasHeight: number;
-}) {
-  const upload = async (viseme: MouthViseme, file: File) => {
-    const asset = await importMediaFile(file, { scope: "character-part" });
-    const fitted = fitAssetToCanvas(asset.width, asset.height, canvasWidth, canvasHeight);
-    const existing = variants.find((p) => p.viseme === viseme);
-    if (existing) {
-      onUpdate(existing.id, { mediaId: asset.id, ...fitted });
-      return;
-    }
-    const reusableSlotId = variants.find((p) => p.slotId)?.slotId ?? defaultSlotIdForRole("mouth");
-    onAdd(
-      makePart("mouth", asset.id, {
-        name: `Mouth ${viseme}`,
-        slotId: reusableSlotId,
-        slotName: variants.find((p) => p.slotName)?.slotName ?? roleLabel("mouth"),
-        viseme,
-        ...fitted,
-        zIndex: variants[0]?.zIndex ?? defaultZIndexForRole("mouth"),
-      }),
-    );
-  };
-
-  return (
-    <div className="border-t border-border p-2">
-      <div className="mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
-        Variants - mouth shapes
-      </div>
-      <div className="space-y-1">
-        {MOUTH_VISEMES.map((viseme) => {
-          const variant = variants.find((p) => p.viseme === viseme);
-          return (
-            <MouthVariantSlot
-              key={viseme}
-              viseme={viseme}
-              variant={variant}
-              selected={variant?.id === selectedId}
-              onSelect={() => variant && onSelect(variant.id)}
-              onToggleVisible={() => variant && onUpdate(variant.id, { visible: !variant.visible })}
-              onUpload={(f) => upload(viseme, f)}
-              onRemove={() => variant && onRemove(variant.id)}
-            />
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function variantLabel(p: CharacterPart): string {
-  if (p.viseme) return `mouth ${p.viseme}`;
-  if (p.eyeState) return `eye ${p.eyeState}`;
-  if (p.role === "brow" || p.role === "browL" || p.role === "browR")
-    return `brow ${p.pose ?? "neutral"}`;
-  if (p.pose) return p.pose;
-  return p.name;
-}
-
-function variantHoverText(part: CharacterPart): string | undefined {
-  if (part.role === "mouth" && part.viseme) {
-    return `${variantLabel(part)}: ${MOUTH_VISEME_DESCRIPTIONS[part.viseme]}`;
-  }
-  return undefined;
-}
-
-function defaultZIndexForRole(role: PartRole): number {
-  switch (role) {
-    case "legL":
-    case "legR":
-      return 5;
-    case "body":
-      return 10;
-    case "armL":
-    case "armR":
-      return 20;
-    case "head":
-      return 30;
-    case "eye":
-    case "eyeL":
-    case "eyeR":
-    case "brow":
-    case "browL":
-    case "browR":
-    case "mouth":
-      return 40;
-    case "extra":
-      return 50;
-  }
-}
-
-function fitAssetToCanvas(
-  assetWidth: number | undefined,
-  assetHeight: number | undefined,
-  canvasWidth: number,
-  canvasHeight: number,
-) {
-  const sourceWidth = assetWidth && assetWidth > 0 ? assetWidth : 200;
-  const sourceHeight = assetHeight && assetHeight > 0 ? assetHeight : 200;
-  const ratio = Math.min(1, canvasWidth / sourceWidth, canvasHeight / sourceHeight);
-  const width = Math.max(8, Math.round(sourceWidth * ratio));
-  const height = Math.max(8, Math.round(sourceHeight * ratio));
-  return {
-    width,
-    height,
-    x: Math.round((canvasWidth - width) / 2),
-    y: Math.round((canvasHeight - height) / 2),
-  };
-}
-
-function UploadVariantButton({
-  role,
-  onAdd,
-  existing,
-  canvasWidth,
-  canvasHeight,
-}: {
-  role: PartRole;
-  onAdd: (p: CharacterPart) => void;
-  existing: CharacterPart[];
-  canvasWidth: number;
-  canvasHeight: number;
+  label: string;
+  filled: boolean;
+  compact?: boolean;
+  onUpload: (file: File) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   return (
     <>
       <button
         onClick={() => inputRef.current?.click()}
-        className="ml-auto rounded bg-primary/30 px-2 py-0.5 text-[10px] hover:bg-primary/50"
-        title="Upload image"
+        className={`flex items-center justify-between gap-2 rounded border px-2 text-left hover:bg-panel ${
+          compact ? "py-1" : "py-2"
+        } ${filled ? "border-primary/60 bg-primary/10" : "border-border bg-panel-2"}`}
       >
-        + add
+        <span className="truncate">{label}</span>
+        <Upload size={13} className="shrink-0 text-muted-foreground" />
       </button>
       <input
         ref={inputRef}
-        type="file"
-        accept="image/*"
         className="hidden"
-        onChange={async (e) => {
-          const f = e.target.files?.[0];
-          if (!f) return;
-          const asset = await importMediaFile(f, { scope: "character-part" });
-          const fitted = fitAssetToCanvas(asset.width, asset.height, canvasWidth, canvasHeight);
-          const reusableSlotId = existing.find((p) => p.slotId)?.slotId;
-          const part = makePart(role, asset.id, {
-            name: asset.name,
-            slotId: role === "extra" ? undefined : (reusableSlotId ?? defaultSlotIdForRole(role)),
-            slotName: existing.find((p) => p.slotName)?.slotName ?? roleLabel(role),
-            x: fitted.x,
-            y: fitted.y,
-            width: fitted.width,
-            height: fitted.height,
-            zIndex: existing[0]?.zIndex ?? defaultZIndexForRole(role),
-          });
-          // Auto-tag mouth viseme / eye state by guessing the next missing one.
-          if (role === "mouth") {
-            const used = new Set(existing.map((p) => p.viseme));
-            part.viseme = MOUTH_VISEMES.find((v) => !used.has(v)) ?? "rest";
-          }
-          if (role === "eye") {
-            const used = new Set(existing.map((p) => p.eyeState));
-            part.eyeState = EYE_STATES.find((s) => !used.has(s)) ?? "open";
-          }
-          onAdd(part);
+        type="file"
+        accept=".svg,image/svg+xml"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) onUpload(file);
           if (inputRef.current) inputRef.current.value = "";
         }}
       />
@@ -1048,35 +597,765 @@ function UploadVariantButton({
   );
 }
 
+function MouthShapeSetup({
+  parts,
+  onImport,
+  selectedId,
+  onEditPart,
+  onSelectPart,
+}: {
+  parts: CharacterPart[];
+  onImport: (file: File, options?: ImportOptions) => void;
+  selectedId: ID | null;
+  onEditPart: (id: ID) => void;
+  onSelectPart: (id: ID) => void;
+}) {
+  const rest = parts.find((p) => p.role === "mouth" && p.viseme === "rest");
+  const restReady = Boolean(rest?.morph?.primaryPath);
+  const importFromRest = (viseme: MouthViseme, source: CharacterPart) => {
+    const file = createMouthVariantFile(source, viseme);
+    if (!file) return;
+    onImport(file, {
+      role: "mouth",
+      viseme,
+      label: `Mouth ${viseme}`,
+      slotId: "role:mouth",
+      zIndex: source.zIndex,
+      placement: {
+        x: source.x,
+        y: source.y,
+        width: source.width,
+        height: source.height,
+        rotation: source.rotation,
+        pivot: source.pivot,
+      },
+    });
+  };
+  const createGenericRest = () => {
+    const file = createGenericRestMouthFile();
+    onImport(file, {
+      role: "mouth",
+      viseme: "rest",
+      label: "Mouth rest",
+      slotId: "role:mouth",
+      zIndex: 60,
+      placement: {
+        x: 240,
+        y: 320,
+        width: 120,
+        height: 72,
+        rotation: 0,
+        pivot: { x: 300, y: 356 },
+      },
+    });
+  };
+  const createAllFromRest = () => {
+    if (!rest) return;
+    for (const viseme of MOUTH_VISEMES) {
+      if (viseme === "rest") continue;
+      const part = parts.find((p) => p.role === "mouth" && p.viseme === viseme);
+      if (part) continue;
+      importFromRest(viseme, rest);
+    }
+  };
+
+  return (
+    <div className="rounded border border-border bg-panel-2 p-2">
+      <div className="mb-1 font-semibold uppercase tracking-wider text-muted-foreground">
+        Mouth Shapes
+      </div>
+      <div className="mb-2 rounded border border-border bg-panel px-2 py-2 text-[10px] text-muted-foreground">
+        1. Make or upload `Rest`.
+        <br />
+        2. Generate the other shapes from `Rest`.
+        <br />
+        3. Click `Edit on canvas` on any shape to drag points and fix it.
+      </div>
+      <div className="mb-2 grid grid-cols-1 gap-1.5">
+        {!rest ? (
+          <div className="rounded border border-border bg-background px-2 py-1.5 text-[10px] text-muted-foreground">
+            Start here: create a basic Rest mouth, or upload your own Rest SVG.
+          </div>
+        ) : restReady ? (
+          <div className="rounded border border-border bg-background px-2 py-1.5 text-[10px] text-muted-foreground">
+            Rest is ready. Generate shapes, then open one on the canvas and drag the points until it
+            looks right.
+          </div>
+        ) : (
+          <div className="rounded border border-border bg-background px-2 py-1.5 text-[10px] text-muted-foreground">
+            Rest is here, but it needs a simpler main SVG path before the point editor can work
+            well.
+          </div>
+        )}
+      </div>
+      <div className="mb-2 rounded border border-border bg-background px-2 py-1.5 text-[10px] text-muted-foreground">
+        {restReady
+          ? "Rest is ready. Create or rebuild shapes from Rest to keep morphing smooth."
+          : rest
+            ? "Rest exists, but it needs a readable SVG path before morph generation can start."
+            : "Upload Rest first. After that, each missing mouth shape can be generated from Rest."}
+      </div>
+      {!rest && (
+        <div className="mb-2 flex gap-2">
+          <button
+            type="button"
+            onClick={createGenericRest}
+            className="flex-1 rounded border border-border bg-panel px-2 py-1 text-[11px] hover:bg-background"
+          >
+            Autogenerate Rest
+          </button>
+          <div className="flex-1 rounded border border-border bg-background px-2 py-1 text-[10px] text-muted-foreground">
+            Starts with a simple morph-friendly mouth you can refine by uploading or rebuilding
+            shapes.
+          </div>
+        </div>
+      )}
+      {restReady && (
+        <button
+          type="button"
+          onClick={createAllFromRest}
+          className="mb-2 w-full rounded border border-border bg-panel px-2 py-1.5 text-[11px] hover:bg-background"
+        >
+          Generate All from Rest
+        </button>
+      )}
+      <div className="grid grid-cols-2 gap-1.5">
+        {MOUTH_VISEMES.map((viseme) => {
+          const part = parts.find((p) => p.role === "mouth" && p.viseme === viseme);
+          const canCreate = Boolean(restReady && viseme !== "rest");
+          const canRegenerate = Boolean(canCreate && rest && part && viseme !== "rest");
+          const status =
+            viseme === "rest"
+              ? restReady
+                ? "template ready"
+                : rest
+                  ? "needs clean path"
+                  : "upload required"
+              : part
+                ? part.morph?.compatibleWithRest === false
+                  ? "swap only"
+                  : "morph ready"
+                : restReady
+                  ? "missing"
+                  : "waiting for Rest";
+          return (
+            <div
+              key={viseme}
+              className={`space-y-1 rounded border px-1.5 py-1.5 ${
+                part?.id === selectedId ? "border-primary bg-primary/10" : "border-border bg-panel"
+              }`}
+            >
+              <SlotUpload
+                compact
+                label={viseme}
+                filled={Boolean(part)}
+                onUpload={(file) =>
+                  onImport(file, {
+                    role: "mouth",
+                    viseme,
+                    label: `Mouth ${viseme}`,
+                    slotId: "role:mouth",
+                    zIndex: 60,
+                  })
+                }
+              />
+              <div className="px-1 text-[9px] uppercase tracking-wider text-muted-foreground">
+                {status}
+              </div>
+              {part && (
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    onClick={() => onSelectPart(part.id)}
+                    className="flex-1 rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-background"
+                  >
+                    Select
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onEditPart(part.id)}
+                    className="flex-1 rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-background"
+                  >
+                    Edit on canvas
+                  </button>
+                </div>
+              )}
+              {viseme !== "rest" && (
+                <button
+                  type="button"
+                  disabled={!canCreate || !rest}
+                  onClick={() => rest && importFromRest(viseme, rest)}
+                  className="w-full rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-panel hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+                  title={
+                    restReady
+                      ? "Generate this shape from Rest"
+                      : rest
+                        ? "Rest needs a simple SVG path first"
+                        : "Upload Rest first"
+                  }
+                >
+                  {part ? "Rebuild from Rest" : "Create from Rest"}
+                </button>
+              )}
+              {canRegenerate && part?.morph?.compatibleWithRest === false && (
+                <div className="px-1 text-[9px] text-muted-foreground">
+                  Upload keeps your custom look. Rebuild re-aligns it for morphing.
+                </div>
+              )}
+              {viseme === "rest" && !restReady && (
+                <div className="px-1 text-[9px] text-muted-foreground">
+                  Best result: upload a simple SVG with a main mouth path.
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function LayerList({
+  parts,
+  selectedId,
+  onSelect,
+  onChange,
+  onRemove,
+}: {
+  parts: CharacterPart[];
+  selectedId: ID | null;
+  onSelect: (id: ID) => void;
+  onChange: (id: ID, patch: Partial<CharacterPart>) => void;
+  onRemove: (id: ID) => void;
+}) {
+  return (
+    <div className="mt-4">
+      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+        Layers
+      </div>
+      <ul className="space-y-1">
+        {parts
+          .slice()
+          .reverse()
+          .map((part) => (
+            <li
+              key={part.id}
+              onClick={() => onSelect(part.id)}
+              className={`flex cursor-pointer items-center gap-2 rounded border px-2 py-1.5 ${
+                part.id === selectedId
+                  ? "border-primary bg-primary/15"
+                  : "border-border bg-panel-2 hover:bg-panel"
+              }`}
+            >
+              <span className="min-w-0 flex-1 truncate">
+                {part.slotName ?? part.name}
+                <span className="ml-1 text-[10px] text-muted-foreground">
+                  {roleLabel(part.role)}
+                </span>
+              </span>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onChange(part.id, { visible: !part.visible });
+                }}
+                className="rounded p-1 text-muted-foreground hover:text-foreground"
+                title={part.visible ? "Hide" : "Show"}
+              >
+                {part.visible ? <Eye size={14} /> : <EyeOff size={14} />}
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onChange(part.id, { zIndex: part.zIndex + 1 });
+                }}
+                className="rounded p-1 text-muted-foreground hover:text-foreground"
+                title="Bring forward"
+              >
+                <ArrowUp size={14} />
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onChange(part.id, { zIndex: part.zIndex - 1 });
+                }}
+                className="rounded p-1 text-muted-foreground hover:text-foreground"
+                title="Send backward"
+              >
+                <ArrowDown size={14} />
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRemove(part.id);
+                }}
+                className="rounded p-1 text-destructive"
+                title="Delete"
+              >
+                <Trash2 size={14} />
+              </button>
+            </li>
+          ))}
+      </ul>
+    </div>
+  );
+}
+
+function Inspector({
+  doc,
+  part,
+  mode,
+  onModeChange,
+  onChange,
+  onRemove,
+  onDuplicate,
+  onPreview,
+  onCanvasChange,
+}: {
+  doc: CharacterPreset;
+  part: CharacterPart | null;
+  mode: EditorMode;
+  onModeChange: (mode: EditorMode) => void;
+  onChange: (id: ID, patch: Partial<CharacterPart>) => void;
+  onRemove: (id: ID) => void;
+  onDuplicate: (part: CharacterPart) => void;
+  onPreview: (preview: PreviewState) => void;
+  onCanvasChange: (patch: Partial<CharacterPreset>) => void;
+}) {
+  if (!part) {
+    return (
+      <div className="space-y-4">
+        <CanvasControls doc={doc} onChange={onCanvasChange} />
+        <div className="rounded border border-dashed border-border p-3 text-center text-muted-foreground">
+          Select a part on the canvas or in the layer list.
+        </div>
+      </div>
+    );
+  }
+
+  const parentOptions = doc.parts.filter((p) => p.id !== part.id);
+  const previewButtons = previewLabels(part);
+
+  return (
+    <div className="space-y-4">
+      <CanvasControls doc={doc} onChange={onCanvasChange} />
+      <section className="rounded border border-border bg-panel-2 p-3">
+        <div className="mb-3 flex items-center gap-2">
+          <input
+            value={part.name}
+            onChange={(e) => onChange(part.id, { name: e.target.value, slotName: e.target.value })}
+            className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 font-medium"
+          />
+          <button
+            onClick={() => onDuplicate(part)}
+            className="rounded border border-border p-1.5"
+            title="Duplicate"
+          >
+            <Copy size={14} />
+          </button>
+          <button
+            onClick={() => onRemove(part.id)}
+            className="rounded border border-border p-1.5 text-destructive"
+            title="Delete"
+          >
+            <Trash2 size={14} />
+          </button>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="Role">
+            <select
+              value={part.role}
+              onChange={(e) =>
+                onChange(part.id, {
+                  role: e.target.value as PartRole,
+                  movement: defaultMovementForRole(e.target.value as PartRole, part.viseme),
+                })
+              }
+              className="w-full rounded border border-border bg-background px-2 py-1"
+            >
+              {ROLE_OPTIONS.map((role) => (
+                <option key={role} value={role}>
+                  {roleLabel(role)}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Movement">
+            <select
+              value={part.movement ?? "none"}
+              onChange={(e) =>
+                onChange(part.id, { movement: e.target.value as MovementPresetKind })
+              }
+              className="w-full rounded border border-border bg-background px-2 py-1"
+            >
+              {MOVEMENT_OPTIONS.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {part.role === "mouth" && (
+            <Field label="Mouth">
+              <select
+                value={part.viseme ?? "rest"}
+                onChange={(e) => onChange(part.id, { viseme: e.target.value as MouthViseme })}
+                className="w-full rounded border border-border bg-background px-2 py-1"
+                title={MOUTH_VISEME_DESCRIPTIONS[part.viseme ?? "rest"]}
+              >
+                {MOUTH_VISEMES.map((viseme) => (
+                  <option key={viseme} value={viseme}>
+                    {viseme}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+          <Field label="Attach To">
+            <select
+              value={part.parentId ?? ""}
+              onChange={(e) => onChange(part.id, { parentId: e.target.value || undefined })}
+              className="w-full rounded border border-border bg-background px-2 py-1"
+            >
+              <option value="">None</option>
+              {parentOptions.map((candidate) => (
+                <option key={candidate.id} value={candidate.id}>
+                  {candidate.slotName ?? candidate.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+      </section>
+
+      <section className="rounded border border-border bg-panel-2 p-3">
+        <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+          Transform
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <NumberField label="X" value={part.x} onChange={(x) => onChange(part.id, { x })} />
+          <NumberField label="Y" value={part.y} onChange={(y) => onChange(part.id, { y })} />
+          <NumberField
+            label="Width"
+            value={part.width}
+            onChange={(width) => onChange(part.id, { width })}
+          />
+          <NumberField
+            label="Height"
+            value={part.height}
+            onChange={(height) => onChange(part.id, { height })}
+          />
+          <NumberField
+            label="Rotate"
+            value={part.rotation}
+            onChange={(rotation) => onChange(part.id, { rotation })}
+          />
+          <NumberField
+            label="Layer"
+            value={part.zIndex}
+            onChange={(zIndex) => onChange(part.id, { zIndex })}
+          />
+        </div>
+      </section>
+
+      <section className="rounded border border-border bg-panel-2 p-3">
+        <div className="mb-2 flex items-center justify-between">
+          <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+            Rig Helpers
+          </span>
+          <button
+            onClick={() => onModeChange(mode === "select" ? "pivot" : "select")}
+            className={`flex items-center gap-1 rounded border px-2 py-1 ${
+              mode === "pivot" ? "border-primary bg-primary/15" : "border-border"
+            }`}
+          >
+            <MousePointer2 size={13} />
+            Set Pivot
+          </button>
+        </div>
+        <div className="mb-3 grid grid-cols-2 gap-2">
+          <NumberField
+            label="Pivot X"
+            value={Math.round(part.pivot?.x ?? part.x + part.width / 2)}
+            onChange={(x) =>
+              onChange(part.id, { pivot: { x, y: part.pivot?.y ?? part.y + part.height / 2 } })
+            }
+          />
+          <NumberField
+            label="Pivot Y"
+            value={Math.round(part.pivot?.y ?? part.y + part.height / 2)}
+            onChange={(y) =>
+              onChange(part.id, { pivot: { x: part.pivot?.x ?? part.x + part.width / 2, y } })
+            }
+          />
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={() => onModeChange(mode === "bounds-rect" ? "select" : "bounds-rect")}
+            className={`flex-1 rounded border px-2 py-1 ${mode === "bounds-rect" ? "border-primary bg-primary/15" : "border-border"}`}
+          >
+            Rect Area
+          </button>
+          <button
+            onClick={() => onModeChange(mode === "bounds-ellipse" ? "select" : "bounds-ellipse")}
+            className={`flex-1 rounded border px-2 py-1 ${mode === "bounds-ellipse" ? "border-primary bg-primary/15" : "border-border"}`}
+          >
+            Ellipse Area
+          </button>
+        </div>
+        {part.bounds && (
+          <button
+            onClick={() => onChange(part.id, { bounds: undefined })}
+            className="mt-2 text-[11px] text-destructive"
+          >
+            Clear allowed area
+          </button>
+        )}
+      </section>
+
+      {part.role === "mouth" && (
+        <section className="rounded border border-border bg-panel-2 p-3">
+          <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+            Mouth Shape
+          </div>
+          <div className="mb-3 rounded border border-border bg-background px-2 py-1.5 text-[10px] text-muted-foreground">
+            Use the button below to edit this mouth directly on the canvas. Then tweak fill and
+            stroke here if needed.
+          </div>
+          <div className="mb-3 flex gap-2">
+            <button
+              type="button"
+              onClick={() => onModeChange(mode === "mouth-shape" ? "select" : "mouth-shape")}
+              className={`flex-1 rounded border px-2 py-1 ${
+                mode === "mouth-shape" ? "border-primary bg-primary/15" : "border-border"
+              }`}
+            >
+              <span className="inline-flex items-center gap-1">
+                <PenTool size={13} />
+                {mode === "mouth-shape" ? "Done Editing" : "Edit on Canvas"}
+              </span>
+            </button>
+          </div>
+          <div className="mb-3 grid grid-cols-2 gap-2">
+            <Field label="Fill Color">
+              <label className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1">
+                <Palette size={13} className="text-muted-foreground" />
+                <input
+                  type="color"
+                  value={normalizeColorForInput(part.morph?.fill ?? "#733f43")}
+                  onChange={(e) =>
+                    onChange(part.id, {
+                      morph: { ...part.morph, fill: e.target.value },
+                    })
+                  }
+                  className="h-6 w-full bg-transparent"
+                />
+              </label>
+            </Field>
+            <Field label="Stroke Color">
+              <label className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1">
+                <Palette size={13} className="text-muted-foreground" />
+                <input
+                  type="color"
+                  value={normalizeColorForInput(part.morph?.stroke ?? "#733f43")}
+                  onChange={(e) =>
+                    onChange(part.id, {
+                      morph: { ...part.morph, stroke: e.target.value },
+                    })
+                  }
+                  className="h-6 w-full bg-transparent"
+                />
+              </label>
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {SAMPLE_WORDS.map((word) => (
+              <button
+                key={word}
+                onClick={() =>
+                  onPreview({
+                    kind: "talk",
+                    targetPartId: part.id,
+                    targetSlotId: part.slotId,
+                    targetRole: part.role,
+                    startedAt: Date.now(),
+                    durationMs: 1300,
+                    visemes: wordToVisemes(word),
+                  })
+                }
+                className="rounded border border-border px-2 py-1 hover:bg-panel"
+              >
+                {word}
+              </button>
+            ))}
+          </div>
+          {part.morph && (
+            <div className="mt-2 rounded bg-background px-2 py-1 text-[11px] text-muted-foreground">
+              Morph path: {part.morph.commandCount ?? 0} commands
+              {part.morph.compatibleWithRest === false ? " · different from Rest" : ""}
+            </div>
+          )}
+        </section>
+      )}
+
+      {previewButtons.length > 0 && (
+        <section className="rounded border border-border bg-panel-2 p-3">
+          <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+            Preview
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {previewButtons.map((item) => (
+              <button
+                key={item.kind}
+                onClick={() =>
+                  onPreview({
+                    kind: item.kind,
+                    targetPartId: part.id,
+                    targetSlotId: part.slotId,
+                    targetRole: part.role,
+                    startedAt: Date.now(),
+                    durationMs: 1200,
+                  })
+                }
+                className="rounded border border-border px-2 py-1 hover:bg-panel"
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function CanvasControls({
+  doc,
+  onChange,
+}: {
+  doc: CharacterPreset;
+  onChange: (patch: Partial<CharacterPreset>) => void;
+}) {
+  return (
+    <section className="rounded border border-border bg-panel-2 p-3">
+      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+        Canvas
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <NumberField
+          label="Width"
+          value={doc.canvasWidth}
+          onChange={(canvasWidth) => onChange({ canvasWidth })}
+        />
+        <NumberField
+          label="Height"
+          value={doc.canvasHeight}
+          onChange={(canvasHeight) => onChange({ canvasHeight })}
+        />
+      </div>
+    </section>
+  );
+}
+
 function PartLayer({
   part,
   selected,
   scale,
-  onionSkin,
+  mode,
+  preview,
+  previewParentPart,
+  onSelect,
   onChange,
+  onModeDone,
 }: {
   part: CharacterPart;
   selected: boolean;
   scale: number;
-  onionSkin: boolean;
+  mode: EditorMode;
+  preview: PreviewState | null;
+  previewParentPart?: CharacterPart;
   onSelect: () => void;
   onChange: (patch: Partial<CharacterPart>) => void;
+  onModeDone: () => void;
 }) {
   const url = useMediaUrl(part.mediaId);
   const layerRef = useRef<HTMLDivElement>(null);
+  const editableMouth =
+    part.role === "mouth" && part.morph?.primaryPath
+      ? buildEditableMouthPath(part.morph.primaryPath, part.morph.viewBox)
+      : null;
+  const previewingTalk = preview?.kind === "talk";
+  const previewingBlink = preview?.kind === "blink" && preview.targetSlotId === part.slotId;
+  if (
+    part.role === "eye" &&
+    part.eyeState &&
+    part.eyeState !== "open" &&
+    !selected &&
+    !previewingBlink
+  ) {
+    return null;
+  }
+  if (
+    part.role === "mouth" &&
+    part.viseme &&
+    part.viseme !== "rest" &&
+    !selected &&
+    !previewingTalk
+  ) {
+    return null;
+  }
+  if (!part.visible && !selected) return null;
 
-  const onPointerDown = (e: React.PointerEvent) => {
-    if (!selected) return; // Canvas is locked unless this part is the active one.
+  const previewTransform = previewDelta(part, preview, previewParentPart);
+  const opacity = part.visible ? previewTransform.opacity : 0.28;
+  const pivot = part.pivot ?? { x: part.x + part.width / 2, y: part.y + part.height / 2 };
+
+  const startDrag = (e: React.PointerEvent) => {
     e.stopPropagation();
+    onSelect();
     if (e.button !== 0) return;
-    const sx = e.clientX,
-      sy = e.clientY;
-    const ox = part.x,
-      oy = part.y;
-    const move = (ev: PointerEvent) => {
+    if (mode === "pivot") {
+      const rect = layerRef.current?.getBoundingClientRect();
+      const localX = rect ? (e.clientX - rect.left) / scale : part.width / 2;
+      const localY = rect ? (e.clientY - rect.top) / scale : part.height / 2;
       onChange({
-        x: Math.round(ox + (ev.clientX - sx) / scale),
-        y: Math.round(oy + (ev.clientY - sy) / scale),
+        pivot: {
+          x: Math.round(localX + part.x),
+          y: Math.round(localY + part.y),
+        },
+      });
+      onModeDone();
+      return;
+    }
+    if (mode === "mouth-shape" && part.role === "mouth") {
+      onSelect();
+      return;
+    }
+    if (mode.startsWith("bounds")) {
+      onChange({
+        bounds: {
+          type: mode === "bounds-ellipse" ? "ellipse" : "rect",
+          x: Math.round(part.x - part.width * 0.08),
+          y: Math.round(part.y - part.height * 0.08),
+          width: Math.round(part.width * 1.16),
+          height: Math.round(part.height * 1.16),
+        },
+      });
+      onModeDone();
+      return;
+    }
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const ox = part.x;
+    const oy = part.y;
+    const originalPivot = pivot;
+    const move = (ev: PointerEvent) => {
+      const dx = Math.round((ev.clientX - sx) / scale);
+      const dy = Math.round((ev.clientY - sy) / scale);
+      onChange({
+        x: ox + dx,
+        y: oy + dy,
+        pivot: { x: originalPivot.x + dx, y: originalPivot.y + dy },
       });
     };
     const up = () => {
@@ -1087,28 +1366,24 @@ function PartLayer({
     window.addEventListener("pointerup", up);
   };
 
-  const onResize = (corner: ResizeCorner) => (e: React.PointerEvent) => {
+  const resize = (corner: ResizeCorner) => (e: React.PointerEvent) => {
     e.stopPropagation();
-    const sx = e.clientX,
-      sy = e.clientY;
-    const ow = part.width,
-      oh = part.height;
-    const ox = part.x,
-      oy = part.y;
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const ow = part.width;
+    const oh = part.height;
+    const ox = part.x;
+    const oy = part.y;
     const move = (ev: PointerEvent) => {
-      const dw = (ev.clientX - sx) / scale;
-      const dh = (ev.clientY - sy) / scale;
-      let width = corner.includes("e") ? ow + dw : ow - dw;
-      let height = corner.includes("s") ? oh + dh : oh - dh;
-      width = Math.max(8, width);
-      height = Math.max(8, height);
-      const x = corner.includes("w") ? ox + (ow - width) : ox;
-      const y = corner.includes("n") ? oy + (oh - height) : oy;
+      const dx = (ev.clientX - sx) / scale;
+      const dy = (ev.clientY - sy) / scale;
+      const width = Math.max(8, corner.includes("e") ? ow + dx : ow - dx);
+      const height = Math.max(8, corner.includes("s") ? oh + dy : oh - dy);
       onChange({
-        x: Math.round(x),
-        y: Math.round(y),
         width: Math.round(width),
         height: Math.round(height),
+        x: Math.round(corner.includes("w") ? ox + (ow - width) : ox),
+        y: Math.round(corner.includes("n") ? oy + (oh - height) : oy),
       });
     };
     const up = () => {
@@ -1119,19 +1394,18 @@ function PartLayer({
     window.addEventListener("pointerup", up);
   };
 
-  const onRotate = (e: React.PointerEvent) => {
+  const rotate = (e: React.PointerEvent) => {
     e.stopPropagation();
     const el = layerRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
-    const startAngle = Math.atan2(e.clientY - cy, e.clientX - cx);
-    const startRotation = part.rotation;
+    const start = Math.atan2(e.clientY - cy, e.clientX - cx);
+    const base = part.rotation;
     const move = (ev: PointerEvent) => {
-      const angle = Math.atan2(ev.clientY - cy, ev.clientX - cx);
-      const delta = ((angle - startAngle) * 180) / Math.PI;
-      onChange({ rotation: Math.round(startRotation + delta) });
+      const now = Math.atan2(ev.clientY - cy, ev.clientX - cx);
+      onChange({ rotation: Math.round(base + ((now - start) * 180) / Math.PI) });
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
@@ -1141,80 +1415,111 @@ function PartLayer({
     window.addEventListener("pointerup", up);
   };
 
-  if (!part.visible && !selected) return null;
-  const opacity = part.visible ? 1 : 0.3;
-  const skin =
-    !selected && onionSkin && (part.pose || part.viseme || part.eyeState) ? 0.4 : opacity;
+  return (
+    <>
+      {part.bounds && <BoundsOverlay bounds={part.bounds} zIndex={part.zIndex - 1} />}
+      <div
+        ref={layerRef}
+        onPointerDown={startDrag}
+        className={`absolute select-none outline outline-offset-0 ${
+          selected
+            ? "outline-2 outline-primary"
+            : "outline-1 outline-transparent hover:outline-accent/70"
+        }`}
+        style={{
+          left: part.x + previewTransform.dx,
+          top: part.y + previewTransform.dy,
+          width: part.width,
+          height: part.height,
+          zIndex: part.zIndex,
+          opacity,
+          cursor: mode === "select" ? "move" : "crosshair",
+          transform: `rotate(${part.rotation + previewTransform.rotation}deg) scale(${previewTransform.scale}, ${previewTransform.scaleY ?? previewTransform.scale})`,
+          transformOrigin: `${((pivot.x - part.x) / part.width) * 100}% ${((pivot.y - part.y) / part.height) * 100}%`,
+        }}
+      >
+        {url &&
+          (editableMouth ? (
+            <svg
+              viewBox={editableMouth.viewBox}
+              className="h-full w-full overflow-visible"
+              aria-hidden
+            >
+              <path
+                d={editableMouth.path}
+                fill={part.morph?.fill ?? "#733f43"}
+                stroke={part.morph?.stroke}
+                strokeWidth={part.morph?.strokeWidth}
+                strokeLinecap={
+                  part.morph?.strokeLinecap as SVGAttributes<SVGPathElement>["strokeLinecap"]
+                }
+                strokeLinejoin={
+                  part.morph?.strokeLinejoin as SVGAttributes<SVGPathElement>["strokeLinejoin"]
+                }
+              />
+            </svg>
+          ) : (
+            <img
+              src={url}
+              alt={part.name}
+              draggable={false}
+              className="h-full w-full object-contain"
+            />
+          ))}
+        {selected && mode === "mouth-shape" && editableMouth && (
+          <MouthPointHandles
+            editable={editableMouth}
+            part={part}
+            scale={scale}
+            onChange={(path) =>
+              onChange({
+                morph: {
+                  ...part.morph,
+                  primaryPath: path,
+                  commandCount: (path.match(/[a-z]/gi) ?? []).length,
+                  compatibleWithRest: part.morph?.compatibleWithRest,
+                },
+              })
+            }
+          />
+        )}
+        {selected && (
+          <>
+            <ResizeHandle corner="nw" onResize={resize} />
+            <ResizeHandle corner="ne" onResize={resize} />
+            <ResizeHandle corner="sw" onResize={resize} />
+            <ResizeHandle corner="se" onResize={resize} />
+            <button
+              onPointerDown={rotate}
+              className="absolute left-1/2 top-0 flex h-6 w-6 -translate-x-1/2 -translate-y-9 items-center justify-center rounded-full border border-primary bg-background text-primary"
+              title="Rotate"
+            >
+              <RotateCw size={14} />
+            </button>
+            <div
+              className="pointer-events-none absolute h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-primary bg-background"
+              style={{ left: pivot.x - part.x, top: pivot.y - part.y }}
+            />
+          </>
+        )}
+      </div>
+    </>
+  );
+}
 
+function BoundsOverlay({ bounds, zIndex }: { bounds: CharacterPartBounds; zIndex: number }) {
   return (
     <div
-      ref={layerRef}
-      onPointerDown={onPointerDown}
-      className={`absolute select-none ${selected ? "outline-2 outline-primary" : "outline-1 outline-transparent"} outline outline-offset-0`}
+      className="pointer-events-none absolute border border-dashed border-primary/70 bg-primary/10"
       style={{
-        left: part.x,
-        top: part.y,
-        width: part.width,
-        height: part.height,
-        transform: `rotate(${part.rotation}deg)`,
-        transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
-        zIndex: part.zIndex,
-        opacity: skin,
-        // Locked unless this is the currently selected part — selection is list-only.
-        pointerEvents: selected ? "auto" : "none",
-        cursor: selected ? "move" : "default",
+        left: bounds.x,
+        top: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+        borderRadius: bounds.type === "ellipse" ? "9999px" : 4,
+        zIndex,
       }}
-    >
-      {url && (
-        <img src={url} alt={part.name} draggable={false} className="h-full w-full object-contain" />
-      )}
-      {selected && (
-        <>
-          <ResizeHandle corner="nw" onResize={onResize} />
-          <ResizeHandle corner="ne" onResize={onResize} />
-          <ResizeHandle corner="sw" onResize={onResize} />
-          <ResizeHandle corner="se" onResize={onResize} />
-          <button
-            type="button"
-            onPointerDown={onRotate}
-            className="absolute left-1/2 top-0 flex h-6 w-6 -translate-x-1/2 -translate-y-9 items-center justify-center rounded-full border border-primary bg-background text-primary shadow-[var(--shadow-panel)]"
-            title="Rotate"
-            aria-label="Rotate part"
-          >
-            <RotateCw size={14} />
-          </button>
-          <button
-            type="button"
-            onPointerDown={(e) => {
-              e.stopPropagation();
-              onChange({ zIndex: part.zIndex + 1 });
-            }}
-            className="absolute left-0 top-0 flex h-5 w-5 -translate-x-2 -translate-y-6 items-center justify-center rounded border border-primary bg-background text-primary shadow-[var(--shadow-panel)]"
-            title="Bring forward (]"
-            aria-label="Bring forward"
-          >
-            <ArrowUp size={12} />
-          </button>
-          <button
-            type="button"
-            onPointerDown={(e) => {
-              e.stopPropagation();
-              onChange({ zIndex: part.zIndex - 1 });
-            }}
-            className="absolute left-1/2 top-0 flex h-5 w-5 -translate-x-1/2 -translate-y-6 items-center justify-center rounded border border-primary bg-background text-primary shadow-[var(--shadow-panel)]"
-            title="Send backward (["
-            aria-label="Send backward"
-          >
-            <ArrowDown size={12} />
-          </button>
-          <div
-            className="pointer-events-none absolute -ml-1.5 -mt-1.5 h-3 w-3 rounded-full border-2 border-primary bg-background"
-            style={{ left: `${part.anchorX * 100}%`, top: `${part.anchorY * 100}%` }}
-            title="Anchor / pivot"
-          />
-        </>
-      )}
-    </div>
+    />
   );
 }
 
@@ -1230,7 +1535,6 @@ function ResizeHandle({
   const vertical = corner.includes("n") ? "-top-1.5" : "-bottom-1.5";
   const horizontal = corner.includes("w") ? "-left-1.5" : "-right-1.5";
   const cursor = corner === "nw" || corner === "se" ? "cursor-nwse-resize" : "cursor-nesw-resize";
-
   return (
     <div
       onPointerDown={onResize(corner)}
@@ -1239,359 +1543,80 @@ function ResizeHandle({
   );
 }
 
-function FallbackMouthMarker({
-  anchor,
+interface EditableMouthPoint {
+  id: string;
+  x: number;
+  y: number;
+  commandIndex: number;
+  valueIndex: number;
+  role: "anchor" | "control";
+}
+
+interface EditableMouthPath {
+  path: string;
+  viewBox: string;
+  points: EditableMouthPoint[];
+}
+
+function MouthPointHandles({
+  editable,
+  part,
   scale,
   onChange,
 }: {
-  anchor: FallbackMouthAnchor;
-  scale: number;
-  onChange: (patch: Partial<FallbackMouthAnchor>) => void;
-}) {
-  const markerRef = useRef<HTMLDivElement>(null);
-
-  const onPointerDown = (e: React.PointerEvent) => {
-    e.stopPropagation();
-    if (e.button !== 0) return;
-    const sx = e.clientX;
-    const sy = e.clientY;
-    const ox = anchor.x;
-    const oy = anchor.y;
-    const move = (ev: PointerEvent) => {
-      onChange({
-        x: Math.round(ox + (ev.clientX - sx) / scale),
-        y: Math.round(oy + (ev.clientY - sy) / scale),
-      });
-    };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  };
-
-  const onResize = (corner: ResizeCorner) => (e: React.PointerEvent) => {
-    e.stopPropagation();
-    const sx = e.clientX;
-    const sy = e.clientY;
-    const ow = anchor.width;
-    const oh = anchor.height;
-    const ox = anchor.x;
-    const oy = anchor.y;
-    const move = (ev: PointerEvent) => {
-      const dw = (ev.clientX - sx) / scale;
-      const dh = (ev.clientY - sy) / scale;
-      let width = corner.includes("e") ? ow + dw : ow - dw;
-      let height = corner.includes("s") ? oh + dh : oh - dh;
-      width = Math.max(12, width);
-      height = Math.max(8, height);
-      const x = corner.includes("w") ? ox + (ow - width) : ox;
-      const y = corner.includes("n") ? oy + (oh - height) : oy;
-      onChange({
-        x: Math.round(x),
-        y: Math.round(y),
-        width: Math.round(width),
-        height: Math.round(height),
-      });
-    };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  };
-
-  const onRotate = (e: React.PointerEvent) => {
-    e.stopPropagation();
-    const el = markerRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    const startAngle = Math.atan2(e.clientY - cy, e.clientX - cx);
-    const startRotation = anchor.rotation;
-    const move = (ev: PointerEvent) => {
-      const angle = Math.atan2(ev.clientY - cy, ev.clientX - cx);
-      const delta = ((angle - startAngle) * 180) / Math.PI;
-      onChange({ rotation: Math.round(startRotation + delta) });
-    };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  };
-
-  return (
-    <div
-      ref={markerRef}
-      onPointerDown={onPointerDown}
-      className="absolute select-none outline outline-2 outline-dashed outline-amber-300"
-      style={{
-        left: anchor.x,
-        top: anchor.y,
-        width: anchor.width,
-        height: anchor.height,
-        transform: `rotate(${anchor.rotation}deg)`,
-        transformOrigin: `${anchor.anchorX * 100}% ${anchor.anchorY * 100}%`,
-        zIndex: 10000,
-        cursor: "move",
-      }}
-    >
-      <svg viewBox="0 0 100 60" className="h-full w-full overflow-visible">
-        <path
-          d="M22 31c18 8 38 8 56 0"
-          fill="none"
-          stroke="#fbbf24"
-          strokeWidth="8"
-          strokeLinecap="round"
-        />
-      </svg>
-      <div className="pointer-events-none absolute -top-7 left-0 rounded bg-amber-300 px-1.5 py-0.5 text-[10px] font-medium text-black">
-        fallback mouth
-      </div>
-      <ResizeHandle corner="nw" onResize={onResize} />
-      <ResizeHandle corner="ne" onResize={onResize} />
-      <ResizeHandle corner="sw" onResize={onResize} />
-      <ResizeHandle corner="se" onResize={onResize} />
-      <button
-        type="button"
-        onPointerDown={onRotate}
-        className="absolute left-1/2 top-0 flex h-6 w-6 -translate-x-1/2 -translate-y-9 items-center justify-center rounded-full border border-amber-300 bg-background text-amber-300 shadow-[var(--shadow-panel)]"
-        title="Rotate fallback mouth"
-        aria-label="Rotate fallback mouth"
-      >
-        <RotateCw size={14} />
-      </button>
-    </div>
-  );
-}
-
-function FallbackMouthEditor({
-  anchor,
-  visible,
-  onVisibleChange,
-  onChange,
-}: {
-  anchor: FallbackMouthAnchor;
-  visible: boolean;
-  onVisibleChange: (visible: boolean) => void;
-  onChange: (patch: Partial<FallbackMouthAnchor>) => void;
-}) {
-  return (
-    <div className="mt-6 border-t border-border pt-3">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="font-semibold uppercase tracking-wider text-muted-foreground">
-          Fallback mouth
-        </div>
-        <label className="flex items-center gap-1 text-[10px] text-muted-foreground">
-          <input
-            type="checkbox"
-            checked={visible}
-            onChange={(e) => onVisibleChange(e.target.checked)}
-          />
-          Show marker
-        </label>
-      </div>
-      <p className="mb-2 text-[11px] leading-relaxed text-muted-foreground">
-        Used by lip sync when this character has no custom mouth image for the active viseme. Turn
-        on the marker, then drag it onto the character&apos;s mouth area.
-      </p>
-      <div className="grid grid-cols-2 gap-2">
-        <Field label="X">
-          <NumberInput value={anchor.x} onChange={(v) => onChange({ x: v })} />
-        </Field>
-        <Field label="Y">
-          <NumberInput value={anchor.y} onChange={(v) => onChange({ y: v })} />
-        </Field>
-        <Field label="Width">
-          <NumberInput
-            value={anchor.width}
-            onChange={(v) => onChange({ width: Math.max(12, v) })}
-          />
-        </Field>
-        <Field label="Height">
-          <NumberInput
-            value={anchor.height}
-            onChange={(v) => onChange({ height: Math.max(8, v) })}
-          />
-        </Field>
-        <Field label="Rotation°">
-          <NumberInput value={anchor.rotation} onChange={(v) => onChange({ rotation: v })} />
-        </Field>
-        <Field label="Layer">
-          <NumberInput value={anchor.zIndex} onChange={(v) => onChange({ zIndex: v })} />
-        </Field>
-      </div>
-    </div>
-  );
-}
-
-function PartInspector({
-  part,
-  onChange,
-  onRemove,
-}: {
+  editable: EditableMouthPath;
   part: CharacterPart;
-  onChange: (patch: Partial<CharacterPart>) => void;
-  onRemove: () => void;
+  scale: number;
+  onChange: (path: string) => void;
 }) {
+  const box = parseViewBox(editable.viewBox);
+  const toLocal = (point: { x: number; y: number }) => ({
+    x: ((point.x - box.x) / Math.max(1, box.width)) * part.width,
+    y: ((point.y - box.y) / Math.max(1, box.height)) * part.height,
+  });
+
   return (
-    <div className="space-y-3">
-      <Field label="Name">
-        <input
-          value={part.name}
-          onChange={(e) => onChange({ name: e.target.value })}
-          className="w-full rounded border border-border bg-input px-2 py-1"
-        />
-      </Field>
-      <Field label="Slot name">
-        <input
-          value={part.slotName ?? roleLabel(part.role)}
-          onChange={(e) => onChange({ slotName: e.target.value || undefined })}
-          className="w-full rounded border border-border bg-input px-2 py-1"
-        />
-      </Field>
-      {part.role === "mouth" && (
-        <>
-          <Field label="Viseme">
-            <select
-              value={part.viseme ?? "rest"}
-              onChange={(e) => onChange({ viseme: e.target.value as MouthViseme })}
-              className="w-full rounded border border-border bg-input px-2 py-1"
-            >
-              {MOUTH_VISEMES.map((v) => (
-                <option key={v} value={v}>
-                  {v}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
-            {MOUTH_VISEME_DESCRIPTIONS[part.viseme ?? "rest"]}
-          </p>
-        </>
-      )}
-      {(part.role === "eye" || part.role === "eyeL" || part.role === "eyeR") && (
-        <Field label="Eye state">
-          <select
-            value={part.eyeState ?? "open"}
-            onChange={(e) => onChange({ eyeState: e.target.value as EyeState })}
-            className="w-full rounded border border-border bg-input px-2 py-1"
-          >
-            {EYE_STATES.map((v) => (
-              <option key={v} value={v}>
-                {v}
-              </option>
-            ))}
-          </select>
-        </Field>
-      )}
-      <Field label="Pose / variant tag">
-        <input
-          value={part.pose ?? ""}
-          onChange={(e) => onChange({ pose: e.target.value || undefined })}
-          placeholder="e.g. idle / walk / raised"
-          className="w-full rounded border border-border bg-input px-2 py-1"
-        />
-      </Field>
-      <div className="grid grid-cols-2 gap-2">
-        <Field label="X">
-          <NumberInput value={part.x} onChange={(v) => onChange({ x: v })} />
-        </Field>
-        <Field label="Y">
-          <NumberInput value={part.y} onChange={(v) => onChange({ y: v })} />
-        </Field>
-        <Field label="Width">
-          <NumberInput value={part.width} onChange={(v) => onChange({ width: Math.max(8, v) })} />
-        </Field>
-        <Field label="Height">
-          <NumberInput value={part.height} onChange={(v) => onChange({ height: Math.max(8, v) })} />
-        </Field>
-        <Field label="Rotation°">
-          <NumberInput value={part.rotation} onChange={(v) => onChange({ rotation: v })} />
-        </Field>
-        <Field label="Layer">
-          <div className="flex gap-1">
-            <button
-              type="button"
-              onClick={() => onChange({ zIndex: part.zIndex - 1 })}
-              className="flex h-7 w-7 items-center justify-center rounded border border-border bg-input hover:bg-panel-2"
-              title="Move behind"
-              aria-label="Move layer behind"
-            >
-              <ArrowDown size={14} />
-            </button>
-            <NumberInput value={part.zIndex} onChange={(v) => onChange({ zIndex: v })} />
-            <button
-              type="button"
-              onClick={() => onChange({ zIndex: part.zIndex + 1 })}
-              className="flex h-7 w-7 items-center justify-center rounded border border-border bg-input hover:bg-panel-2"
-              title="Move in front"
-              aria-label="Move layer in front"
-            >
-              <ArrowUp size={14} />
-            </button>
-          </div>
-        </Field>
-        <Field label="Anchor X (0-1)">
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.05}
-            value={part.anchorX}
-            onChange={(e) => onChange({ anchorX: Number(e.target.value) })}
-            className="w-full"
+    <>
+      {editable.points.map((point) => {
+        const local = toLocal(point);
+        return (
+          <div
+            key={point.id}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              const sx = e.clientX;
+              const sy = e.clientY;
+              const move = (ev: PointerEvent) => {
+                const dx = (ev.clientX - sx) / scale;
+                const dy = (ev.clientY - sy) / scale;
+                const nextX = point.x + (dx / Math.max(1, part.width)) * box.width;
+                const nextY = point.y + (dy / Math.max(1, part.height)) * box.height;
+                const nextPath = updateEditableMouthPoint(editable.path, point, nextX, nextY);
+                onChange(nextPath);
+              };
+              const up = () => {
+                window.removeEventListener("pointermove", move);
+                window.removeEventListener("pointerup", up);
+              };
+              window.addEventListener("pointermove", move);
+              window.addEventListener("pointerup", up);
+            }}
+            className={`absolute h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full border ${
+              point.role === "anchor" ? "border-primary bg-primary" : "border-background bg-accent"
+            }`}
+            style={{ left: local.x, top: local.y }}
+            title={point.role === "anchor" ? "Anchor point" : "Control point"}
           />
-        </Field>
-        <Field label="Anchor Y (0-1)">
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.05}
-            value={part.anchorY}
-            onChange={(e) => onChange({ anchorY: Number(e.target.value) })}
-            className="w-full"
-          />
-        </Field>
-        <Field label={`Depth (${part.depth.toFixed(2)})`}>
-          <input
-            type="range"
-            min={-1}
-            max={1}
-            step={0.05}
-            value={part.depth}
-            onChange={(e) => onChange({ depth: Number(e.target.value) })}
-            className="w-full"
-          />
-        </Field>
-        <Field label="Visible">
-          <input
-            type="checkbox"
-            checked={part.visible}
-            onChange={(e) => onChange({ visible: e.target.checked })}
-          />
-        </Field>
-      </div>
-      <button
-        onClick={onRemove}
-        className="w-full rounded bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground hover:opacity-90"
-      >
-        Remove part
-      </button>
-    </div>
+        );
+      })}
+    </>
   );
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+      <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
         {label}
       </span>
       {children}
@@ -1599,354 +1624,1040 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function NumberInput({
+function NumberField({
+  label,
   value,
   onChange,
-  step = 1,
 }: {
+  label: string;
   value: number;
-  onChange: (v: number) => void;
-  step?: number;
+  onChange: (value: number) => void;
 }) {
   return (
-    <input
-      type="number"
-      value={Number.isFinite(value) ? Math.round(value * 100) / 100 : 0}
-      step={step}
-      onChange={(e) => onChange(Number(e.target.value))}
-      className="w-full rounded border border-border bg-input px-2 py-1"
-    />
-  );
-}
-
-// ParallaxEditor — per-character parallax controls.
-function ParallaxEditor({
-  cfg,
-  onChange,
-}: {
-  cfg: ParallaxConfig;
-  onChange: (c: ParallaxConfig) => void;
-}) {
-  return (
-    <div className="mt-6 border-t border-border pt-3">
-      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-        Parallax
-      </div>
-      <div className="space-y-1.5">
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={cfg.onCamera}
-            onChange={(e) => onChange({ ...cfg, onCamera: e.target.checked })}
-          />
-          On camera moves
-        </label>
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={cfg.onClip}
-            onChange={(e) => onChange({ ...cfg, onClip: e.target.checked })}
-          />
-          On character movement
-        </label>
-        <Field label={`Intensity (${cfg.intensity.toFixed(2)})`}>
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.05}
-            value={cfg.intensity}
-            onChange={(e) => onChange({ ...cfg, intensity: Number(e.target.value) })}
-            className="w-full"
-          />
-        </Field>
-      </div>
-    </div>
-  );
-}
-
-// HeadVariantsEditor removed — head-turn variants are now nested inside the
-// Head part group via <HeadTurnVariants /> in PartsList.
-
-function HeadVariantSlot({
-  label,
-  variant,
-  onUpload,
-  onRemove,
-}: {
-  dir: HeadDirection;
-  label: string;
-  variant?: HeadVariant;
-  onUpload: (f: File) => void;
-  onRemove: () => void;
-}) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const url = useMediaUrl(variant?.mediaId);
-  return (
-    <div className="flex items-center gap-2 rounded border border-border bg-panel-2 p-1.5">
-      <div className="h-10 w-10 shrink-0 overflow-hidden rounded bg-input">
-        {url ? (
-          <img src={url} alt={label} className="h-full w-full object-contain" />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center text-[9px] text-muted-foreground">
-            —
-          </div>
-        )}
-      </div>
-      <span className="flex-1 text-[11px]">{label}</span>
-      <button
-        onClick={() => inputRef.current?.click()}
-        className="rounded bg-primary/30 px-2 py-0.5 text-[10px] hover:bg-primary/50"
-      >
-        {variant ? "Replace" : "Upload"}
-      </button>
-      {variant && (
-        <button onClick={onRemove} className="rounded px-1 text-[10px] text-destructive">
-          ✕
-        </button>
-      )}
+    <Field label={label}>
       <input
-        ref={inputRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) onUpload(f);
-          if (inputRef.current) inputRef.current.value = "";
-        }}
+        type="number"
+        value={Number.isFinite(value) ? value : 0}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full rounded border border-border bg-background px-2 py-1"
       />
-    </div>
+    </Field>
   );
 }
 
-function BodyDirectionSlot({
-  label,
-  variant,
-  onUpload,
-  onRemove,
-}: {
-  label: string;
-  variant?: CharacterPart;
-  onUpload: (f: File) => void;
-  onRemove: () => void;
-}) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const url = useMediaUrl(variant?.mediaId);
+interface PreviewState {
+  kind: "blink" | "talk" | "wave" | "kick" | "nod" | "bounce" | "raise";
+  targetPartId: string;
+  targetSlotId: string;
+  targetRole: PartRole;
+  startedAt: number;
+  durationMs: number;
+  visemes?: MouthViseme[];
+}
+
+function previewLabels(part: CharacterPart): Array<{ kind: PreviewState["kind"]; label: string }> {
+  const out: Array<{ kind: PreviewState["kind"]; label: string }> = [];
+  if (part.role === "eye" || (part.role === "custom" && part.movement === "blink"))
+    out.push({ kind: "blink", label: "Test Blink" });
+  if (part.role === "mouth" || (part.role === "custom" && part.movement === "lipSync"))
+    out.push({ kind: "talk", label: "Test Talk" });
+  if (part.role === "arm") out.push({ kind: "wave", label: "Test Wave" });
+  if (part.role === "leg" || part.role === "foot") out.push({ kind: "kick", label: "Test Kick" });
+  if (part.role === "custom" && part.movement === "rotate")
+    out.push({ kind: "wave", label: "Test Wave" });
+  if (part.role === "head") out.push({ kind: "nod", label: "Test Nod" });
+  if (part.role === "hair" || (part.role === "custom" && part.movement === "bounce"))
+    out.push({ kind: "bounce", label: "Test Bounce" });
+  if (part.role === "eyebrow" || (part.role === "custom" && part.movement === "raise"))
+    out.push({ kind: "raise", label: "Test Raise" });
+  return out;
+}
+
+function editorPartPivot(part: CharacterPart) {
   return (
-    <div className="flex items-center gap-2 rounded border border-border bg-panel-2 p-1.5">
-      <div className="h-10 w-10 shrink-0 overflow-hidden rounded bg-input">
-        {url ? (
-          <img src={url} alt={label} className="h-full w-full object-contain" />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center text-[9px] text-muted-foreground">
-            —
-          </div>
-        )}
-      </div>
-      <span className="flex-1 text-[11px]">{label}</span>
-      <button
-        onClick={() => inputRef.current?.click()}
-        className="rounded bg-primary/30 px-2 py-0.5 text-[10px] hover:bg-primary/50"
-      >
-        {variant ? "Replace" : "Upload"}
-      </button>
-      {variant && (
-        <button onClick={onRemove} className="rounded px-1 text-[10px] text-destructive">
-          ✕
-        </button>
-      )}
-      <input
-        ref={inputRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) onUpload(f);
-          if (inputRef.current) inputRef.current.value = "";
-        }}
-      />
-    </div>
+    part.pivot ?? {
+      x: part.x + part.width * part.anchorX,
+      y: part.y + part.height * part.anchorY,
+    }
   );
 }
 
-function MouthVariantSlot({
-  viseme,
-  variant,
-  selected,
-  onSelect,
-  onToggleVisible,
-  onUpload,
-  onRemove,
-}: {
-  viseme: MouthViseme;
-  variant?: CharacterPart;
-  selected: boolean;
-  onSelect: () => void;
-  onToggleVisible: () => void;
-  onUpload: (f: File) => void;
-  onRemove: () => void;
-}) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const url = useMediaUrl(variant?.mediaId);
+function editorTransformPointAroundPivot(
+  point: { x: number; y: number },
+  pivot: { x: number; y: number },
+  motion: { dx: number; dy: number; scale: number; rotation: number },
+) {
+  const radians = (motion.rotation * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  const relX = (point.x - pivot.x) * motion.scale;
+  const relY = (point.y - pivot.y) * motion.scale;
+  return {
+    x: pivot.x + motion.dx + relX * cos - relY * sin,
+    y: pivot.y + motion.dy + relX * sin + relY * cos,
+  };
+}
+
+function previewDelta(
+  part: CharacterPart,
+  preview: PreviewState | null,
+  previewParentPart?: CharacterPart,
+) {
+  if (!preview) return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: 1, opacity: 1 };
+  const targetsPart = part.id === preview.targetPartId || part.slotId === preview.targetSlotId;
+  const elapsed = Date.now() - preview.startedAt;
+  const t = Math.min(1, elapsed / preview.durationMs);
+  const wave = Math.sin(t * Math.PI * 2);
+  if (
+    !targetsPart &&
+    preview.kind === "nod" &&
+    preview.targetRole === "head" &&
+    previewParentPart &&
+    (part.role === "eye" ||
+      part.role === "eyebrow" ||
+      part.role === "mouth" ||
+      part.role === "hair")
+  ) {
+    const motion = { dx: 0, dy: Math.round(Math.abs(wave) * 8), rotation: wave * 3, scale: 1 };
+    const childPivot = editorPartPivot(part);
+    const transformedPivot = editorTransformPointAroundPivot(
+      childPivot,
+      editorPartPivot(previewParentPart),
+      motion,
+    );
+    return {
+      dx: transformedPivot.x - childPivot.x,
+      dy: transformedPivot.y - childPivot.y,
+      rotation: motion.rotation,
+      scale: 1,
+      scaleY: 1,
+      opacity: 1,
+    };
+  }
+  if (!targetsPart) return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: 1, opacity: 1 };
+  if (preview.kind === "blink" && part.role === "eye") {
+    const closedMoment = t > 0.35 && t < 0.55;
+    if (part.eyeState) {
+      const shouldShow =
+        (closedMoment && part.eyeState === "closed") || (!closedMoment && part.eyeState === "open");
+      return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: 1, opacity: shouldShow ? 1 : 0 };
+    }
+    return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: closedMoment ? 0.12 : 1, opacity: 1 };
+  }
+  if (preview.kind === "wave" && part.role === "arm") {
+    return { dx: 0, dy: 0, rotation: wave * 18, scale: 1, opacity: 1 };
+  }
+  if (preview.kind === "kick" && (part.role === "leg" || part.role === "foot")) {
+    return {
+      dx: Math.round(Math.abs(wave) * 10),
+      dy: 0,
+      rotation: wave * 12,
+      scale: 1,
+      opacity: 1,
+    };
+  }
+  if (preview.kind === "nod" && part.role === "head") {
+    return { dx: 0, dy: Math.round(Math.abs(wave) * 8), rotation: wave * 3, scale: 1, opacity: 1 };
+  }
+  if (preview.kind === "bounce" && part.role === "hair") {
+    return { dx: 0, dy: Math.round(wave * 6), rotation: wave * 2, scale: 1, opacity: 1 };
+  }
+  if (preview.kind === "raise" && part.role === "eyebrow") {
+    return { dx: 0, dy: Math.round(-Math.abs(wave) * 12), rotation: 0, scale: 1, opacity: 1 };
+  }
+  if (preview.kind === "talk" && part.role === "mouth") {
+    const visemes = preview.visemes ?? ["rest", "A", "E", "O", "MBP"];
+    const idx = Math.floor(t * visemes.length * 1.8) % visemes.length;
+    const active = visemes[idx];
+    return {
+      dx: 0,
+      dy: 0,
+      rotation: 0,
+      scale: 1,
+      opacity: !part.viseme || part.viseme === active ? 1 : 0,
+    };
+  }
+  return { dx: 0, dy: 0, rotation: 0, scale: 1, opacity: 1 };
+}
+
+function wordToVisemes(word: string): MouthViseme[] {
+  const map: Record<string, MouthViseme> = {
+    a: "A",
+    e: "E",
+    i: "E",
+    o: "O",
+    u: "U",
+    m: "MBP",
+    b: "MBP",
+    p: "MBP",
+    f: "FV",
+    v: "FV",
+    l: "L",
+    w: "WQ",
+    q: "WQ",
+  };
+  return [
+    "rest",
+    ...word
+      .toLowerCase()
+      .split("")
+      .map((ch) => map[ch] ?? "E"),
+    "rest",
+  ];
+}
+
+function fitAsset(width = 0, height = 0, canvasWidth: number, canvasHeight: number) {
+  const sourceWidth = width > 0 ? width : 240;
+  const sourceHeight = height > 0 ? height : 240;
+  const ratio = Math.min(1, (canvasWidth * 0.7) / sourceWidth, (canvasHeight * 0.7) / sourceHeight);
+  const w = Math.max(16, Math.round(sourceWidth * ratio));
+  const h = Math.max(16, Math.round(sourceHeight * ratio));
+  return {
+    x: Math.round((canvasWidth - w) / 2),
+    y: Math.round((canvasHeight - h) / 2),
+    width: w,
+    height: h,
+  };
+}
+
+function detectRole(filename: string): PartRole {
+  const name = filename.toLowerCase();
+  if (name.includes("head")) return "head";
+  if (name.includes("body") || name.includes("torso")) return "body";
+  if (name.includes("eye") && !name.includes("brow")) return "eye";
+  if (name.includes("brow") || name.includes("eyebrow")) return "eyebrow";
+  if (name.includes("mouth") || name.includes("viseme") || name.includes("lip")) return "mouth";
+  if (name.includes("hand")) return "hand";
+  if (name.includes("arm")) return "arm";
+  if (name.includes("foot") || name.includes("feet")) return "foot";
+  if (name.includes("leg")) return "leg";
+  if (name.includes("hair")) return "hair";
+  if (name.includes("hat") || name.includes("glasses") || name.includes("accessory"))
+    return "accessory";
+  return "custom";
+}
+
+function detectSide(filename: string): CharacterPart["side"] {
+  const name = filename.toLowerCase();
+  if (/(^|[_\-\s])left|_l\b|-l\b/.test(name)) return "left";
+  if (/(^|[_\-\s])right|_r\b|-r\b/.test(name)) return "right";
+  if (name.includes("front")) return "front";
+  if (name.includes("back")) return "back";
+  return undefined;
+}
+
+function detectViseme(filename: string): MouthViseme | undefined {
+  const name = filename.toLowerCase();
+  const found = MOUTH_VISEMES.find((v) => name.includes(v.toLowerCase()));
+  if (found) return found;
+  if (name.includes("rest")) return "rest";
+  if (name.includes("smile")) return "Smile";
+  return undefined;
+}
+
+function detectEyeState(filename: string): EyeState | undefined {
+  const name = filename.toLowerCase();
+  if (name.includes("closed") || name.includes("blink")) return "closed";
+  if (name.includes("half")) return "half";
+  if (name.includes("wink")) return "wink";
+  if (name.includes("open")) return "open";
+  return "open";
+}
+
+async function readSvgMorphMetadata(file: File, parts: CharacterPart[]) {
+  const text = await file.text();
+  const svgMatch = text.match(/<svg\b([^>]*)>/i);
+  const pathMatch = text.match(/<path\b([^>]*)>/i);
+  const svgAttrs = parseSvgAttributes(svgMatch?.[1] ?? "");
+  const pathAttrs = parseSvgAttributes(pathMatch?.[1] ?? "");
+  const viewBox = svgAttrs.viewBox ?? inferViewBoxFromSvgAttrs(svgAttrs);
+  const primaryPath =
+    pathAttrs.d || extractSupportedShapePath(text, viewBox) || createGenericRestMouthPath(viewBox);
+  const commandCount = primaryPath ? (primaryPath.match(/[a-z]/gi) ?? []).length : 0;
+  const rest = parts.find((p) => p.role === "mouth" && p.viseme === "rest");
+  return {
+    primaryPath,
+    viewBox,
+    fill: pathAttrs.fill ?? extractSupportedShapeStyles(text).fill,
+    stroke: pathAttrs.stroke ?? extractSupportedShapeStyles(text).stroke,
+    strokeWidth: pathAttrs["stroke-width"] ?? extractSupportedShapeStyles(text).strokeWidth,
+    strokeLinecap: pathAttrs["stroke-linecap"] ?? extractSupportedShapeStyles(text).strokeLinecap,
+    strokeLinejoin:
+      pathAttrs["stroke-linejoin"] ?? extractSupportedShapeStyles(text).strokeLinejoin,
+    commandCount,
+    compatibleWithRest: rest?.morph?.commandCount
+      ? rest.morph.commandCount === commandCount
+      : undefined,
+  };
+}
+
+function parseSvgAttributes(input: string) {
+  const attrs: Record<string, string> = {};
+  for (const match of input.matchAll(/([:\w-]+)=["']([^"']*)["']/g)) {
+    attrs[match[1]] = match[2];
+  }
+  return attrs;
+}
+
+function inferViewBoxFromSvgAttrs(attrs: Record<string, string>) {
+  const width = parseSvgLength(attrs.width, 100);
+  const height = parseSvgLength(attrs.height, 60);
+  return `0 0 ${fmt(width)} ${fmt(height)}`;
+}
+
+function parseSvgLength(value: string | undefined, fallback: number) {
+  if (!value) return fallback;
+  const match = value.match(/[-+]?(?:\d*\.\d+|\d+\.?)/);
+  return match ? Number(match[0]) : fallback;
+}
+
+function extractSupportedShapeStyles(text: string) {
+  const tagMatch = text.match(/<(ellipse|circle|rect|polygon|polyline|line)\b([^>]*)>/i);
+  const attrs = parseSvgAttributes(tagMatch?.[2] ?? "");
+  return {
+    fill: attrs.fill,
+    stroke: attrs.stroke,
+    strokeWidth: attrs["stroke-width"],
+    strokeLinecap: attrs["stroke-linecap"],
+    strokeLinejoin: attrs["stroke-linejoin"],
+  };
+}
+
+function extractSupportedShapePath(text: string, viewBox: string) {
+  const ellipseMatch = text.match(/<ellipse\b([^>]*)>/i);
+  if (ellipseMatch) {
+    const attrs = parseSvgAttributes(ellipseMatch[1]);
+    return ellipseToPath(
+      parseSvgLength(attrs.cx, 50),
+      parseSvgLength(attrs.cy, 30),
+      parseSvgLength(attrs.rx, 34),
+      parseSvgLength(attrs.ry, 12),
+    );
+  }
+
+  const circleMatch = text.match(/<circle\b([^>]*)>/i);
+  if (circleMatch) {
+    const attrs = parseSvgAttributes(circleMatch[1]);
+    const r = parseSvgLength(attrs.r, 12);
+    return ellipseToPath(parseSvgLength(attrs.cx, 50), parseSvgLength(attrs.cy, 30), r, r);
+  }
+
+  const rectMatch = text.match(/<rect\b([^>]*)>/i);
+  if (rectMatch) {
+    const attrs = parseSvgAttributes(rectMatch[1]);
+    return rectToPath(
+      parseSvgLength(attrs.x, 12),
+      parseSvgLength(attrs.y, 18),
+      parseSvgLength(attrs.width, 76),
+      parseSvgLength(attrs.height, 24),
+      parseSvgLength(attrs.rx, 0),
+      parseSvgLength(attrs.ry, parseSvgLength(attrs.rx, 0)),
+    );
+  }
+
+  const polygonMatch = text.match(/<polygon\b([^>]*)>/i);
+  if (polygonMatch) {
+    const attrs = parseSvgAttributes(polygonMatch[1]);
+    return pointsElementToPath(attrs.points, true);
+  }
+
+  const polylineMatch = text.match(/<polyline\b([^>]*)>/i);
+  if (polylineMatch) {
+    const attrs = parseSvgAttributes(polylineMatch[1]);
+    return pointsElementToPath(attrs.points, false);
+  }
+
+  const lineMatch = text.match(/<line\b([^>]*)>/i);
+  if (lineMatch) {
+    const attrs = parseSvgAttributes(lineMatch[1]);
+    return lineToMouthPath(
+      parseSvgLength(attrs.x1, 18),
+      parseSvgLength(attrs.y1, 30),
+      parseSvgLength(attrs.x2, 82),
+      parseSvgLength(attrs.y2, 30),
+      viewBox,
+    );
+  }
+
+  return null;
+}
+
+function ellipseToPath(cx: number, cy: number, rx: number, ry: number) {
+  return [
+    `M ${fmt(cx - rx)} ${fmt(cy)}`,
+    `A ${fmt(rx)} ${fmt(ry)} 0 1 0 ${fmt(cx + rx)} ${fmt(cy)}`,
+    `A ${fmt(rx)} ${fmt(ry)} 0 1 0 ${fmt(cx - rx)} ${fmt(cy)}`,
+    "Z",
+  ].join(" ");
+}
+
+function rectToPath(x: number, y: number, width: number, height: number, rx: number, ry: number) {
+  const safeRx = clamp(rx, 0, width / 2);
+  const safeRy = clamp(ry, 0, height / 2);
+  if (safeRx <= 0 && safeRy <= 0) {
+    return [
+      `M ${fmt(x)} ${fmt(y)}`,
+      `L ${fmt(x + width)} ${fmt(y)}`,
+      `L ${fmt(x + width)} ${fmt(y + height)}`,
+      `L ${fmt(x)} ${fmt(y + height)}`,
+      "Z",
+    ].join(" ");
+  }
+
+  return [
+    `M ${fmt(x + safeRx)} ${fmt(y)}`,
+    `L ${fmt(x + width - safeRx)} ${fmt(y)}`,
+    `A ${fmt(safeRx)} ${fmt(safeRy)} 0 0 1 ${fmt(x + width)} ${fmt(y + safeRy)}`,
+    `L ${fmt(x + width)} ${fmt(y + height - safeRy)}`,
+    `A ${fmt(safeRx)} ${fmt(safeRy)} 0 0 1 ${fmt(x + width - safeRx)} ${fmt(y + height)}`,
+    `L ${fmt(x + safeRx)} ${fmt(y + height)}`,
+    `A ${fmt(safeRx)} ${fmt(safeRy)} 0 0 1 ${fmt(x)} ${fmt(y + height - safeRy)}`,
+    `L ${fmt(x)} ${fmt(y + safeRy)}`,
+    `A ${fmt(safeRx)} ${fmt(safeRy)} 0 0 1 ${fmt(x + safeRx)} ${fmt(y)}`,
+    "Z",
+  ].join(" ");
+}
+
+function pointsElementToPath(points: string | undefined, closed: boolean) {
+  if (!points) return null;
+  const nums = points.match(/[-+]?(?:\d*\.\d+|\d+\.?)/g)?.map(Number) ?? [];
+  if (nums.length < 4) return null;
+  const pairs: Array<{ x: number; y: number }> = [];
+  for (let i = 0; i + 1 < nums.length; i += 2) {
+    pairs.push({ x: nums[i], y: nums[i + 1] });
+  }
+  if (pairs.length < 2) return null;
+  return [
+    `M ${fmt(pairs[0].x)} ${fmt(pairs[0].y)}`,
+    ...pairs.slice(1).map((pair) => `L ${fmt(pair.x)} ${fmt(pair.y)}`),
+    closed ? "Z" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function lineToMouthPath(x1: number, y1: number, x2: number, y2: number, viewBox: string) {
+  const box = parseViewBox(viewBox);
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const length = Math.max(1, Math.hypot(dx, dy));
+  const nx = -dy / length;
+  const ny = dx / length;
+  const thickness = Math.max(3, Math.min(box.height * 0.18, 8));
+  const ox = nx * thickness;
+  const oy = ny * thickness;
+  return [
+    `M ${fmt(x1 + ox)} ${fmt(y1 + oy)}`,
+    `L ${fmt(x2 + ox)} ${fmt(y2 + oy)}`,
+    `L ${fmt(x2 - ox)} ${fmt(y2 - oy)}`,
+    `L ${fmt(x1 - ox)} ${fmt(y1 - oy)}`,
+    "Z",
+  ].join(" ");
+}
+
+function createGenericRestMouthPath(viewBox: string) {
+  const box = parseViewBox(viewBox);
+  const left = box.x + box.width * 0.16;
+  const right = box.x + box.width * 0.84;
+  const cx = box.x + box.width / 2;
+  const top = box.y + box.height * 0.36;
+  const bottom = box.y + box.height * 0.64;
+  const upperControlY = box.y + box.height * 0.24;
+  const lowerControlY = box.y + box.height * 0.76;
+  const innerLeft = box.x + box.width * 0.38;
+  const innerRight = box.x + box.width * 0.62;
+  return [
+    `M ${fmt(left)} ${fmt((top + bottom) / 2)}`,
+    `C ${fmt(box.x + box.width * 0.26)} ${fmt(upperControlY)} ${fmt(innerLeft)} ${fmt(top)} ${fmt(cx)} ${fmt(top)}`,
+    `C ${fmt(innerRight)} ${fmt(top)} ${fmt(box.x + box.width * 0.74)} ${fmt(upperControlY)} ${fmt(right)} ${fmt((top + bottom) / 2)}`,
+    `C ${fmt(box.x + box.width * 0.74)} ${fmt(lowerControlY)} ${fmt(innerRight)} ${fmt(bottom)} ${fmt(cx)} ${fmt(bottom)}`,
+    `C ${fmt(innerLeft)} ${fmt(bottom)} ${fmt(box.x + box.width * 0.26)} ${fmt(lowerControlY)} ${fmt(left)} ${fmt((top + bottom) / 2)}`,
+    "Z",
+  ].join(" ");
+}
+
+function buildEditableMouthPath(path: string, viewBox = "0 0 100 60"): EditableMouthPath {
+  const commands = absolutizePathCommands(path);
+  const points: EditableMouthPoint[] = [];
+  commands.forEach((command, commandIndex) => {
+    const pairs = pointIndicesForCommand(command.cmd);
+    pairs.forEach(([xIndex, yIndex], pairIndex) => {
+      points.push({
+        id: `${commandIndex}:${xIndex}`,
+        x: command.values[xIndex],
+        y: command.values[yIndex],
+        commandIndex,
+        valueIndex: xIndex,
+        role:
+          pairIndex === pairs.length - 1 &&
+          (command.cmd === "M" ||
+            command.cmd === "L" ||
+            command.cmd === "T" ||
+            command.cmd === "S" ||
+            command.cmd === "Q" ||
+            command.cmd === "C" ||
+            command.cmd === "A")
+            ? "anchor"
+            : "control",
+      });
+    });
+  });
+  return {
+    path: serializePathCommands(commands),
+    viewBox,
+    points,
+  };
+}
+
+function updateEditableMouthPoint(
+  path: string,
+  point: EditableMouthPoint,
+  nextX: number,
+  nextY: number,
+) {
+  const commands = parseSvgPath(path).map((command) => ({
+    ...command,
+    values: [...command.values],
+  }));
+  const command = commands[point.commandIndex];
+  if (!command) return path;
+  command.values[point.valueIndex] = nextX;
+  command.values[point.valueIndex + 1] = nextY;
+  return serializePathCommands(commands);
+}
+
+function normalizeColorForInput(value: string) {
+  return /^#[0-9a-f]{6}$/i.test(value) ? value : "#733f43";
+}
+
+interface MouthMorphProfile {
+  width: number;
+  openness: number;
+  pucker: number;
+  cornerLift: number;
+  cornerPull: number;
+  upperLift: number;
+  lowerDrop: number;
+  bite: number;
+  asymmetry?: number;
+}
+
+const MOUTH_MORPH_PRESETS: Record<MouthViseme, MouthMorphProfile> = {
+  rest: {
+    width: 0,
+    openness: 0,
+    pucker: 0,
+    cornerLift: 0,
+    cornerPull: 0,
+    upperLift: 0,
+    lowerDrop: 0,
+    bite: 0,
+  },
+  A: {
+    width: -0.06,
+    openness: 0.42,
+    pucker: -0.04,
+    cornerLift: -0.02,
+    cornerPull: -0.04,
+    upperLift: 0.08,
+    lowerDrop: 0.28,
+    bite: 0,
+  },
+  E: {
+    width: 0.24,
+    openness: 0.08,
+    pucker: -0.18,
+    cornerLift: 0.06,
+    cornerPull: 0.12,
+    upperLift: 0.02,
+    lowerDrop: 0.03,
+    bite: 0.02,
+  },
+  O: {
+    width: -0.14,
+    openness: 0.22,
+    pucker: 0.24,
+    cornerLift: -0.01,
+    cornerPull: -0.08,
+    upperLift: 0.04,
+    lowerDrop: 0.12,
+    bite: 0,
+  },
+  U: {
+    width: -0.22,
+    openness: 0.12,
+    pucker: 0.36,
+    cornerLift: 0,
+    cornerPull: -0.12,
+    upperLift: 0.02,
+    lowerDrop: 0.04,
+    bite: 0,
+  },
+  MBP: {
+    width: 0.05,
+    openness: -0.18,
+    pucker: -0.04,
+    cornerLift: 0.01,
+    cornerPull: 0.02,
+    upperLift: -0.02,
+    lowerDrop: -0.08,
+    bite: 0,
+  },
+  FV: {
+    width: 0.1,
+    openness: 0.03,
+    pucker: -0.08,
+    cornerLift: 0.01,
+    cornerPull: 0.04,
+    upperLift: -0.06,
+    lowerDrop: 0.1,
+    bite: 0.1,
+  },
+  L: {
+    width: -0.04,
+    openness: 0.18,
+    pucker: -0.02,
+    cornerLift: 0.02,
+    cornerPull: -0.02,
+    upperLift: 0.02,
+    lowerDrop: 0.18,
+    bite: 0,
+    asymmetry: 0.08,
+  },
+  WQ: {
+    width: -0.26,
+    openness: 0.06,
+    pucker: 0.44,
+    cornerLift: 0,
+    cornerPull: -0.16,
+    upperLift: 0.01,
+    lowerDrop: 0.03,
+    bite: 0,
+  },
+  Smile: {
+    width: 0.28,
+    openness: 0.02,
+    pucker: -0.12,
+    cornerLift: 0.16,
+    cornerPull: 0.18,
+    upperLift: -0.02,
+    lowerDrop: -0.02,
+    bite: 0,
+  },
+};
+
+function createMouthVariantFile(rest: CharacterPart, viseme: MouthViseme) {
+  const path = rest.morph?.primaryPath;
+  if (!path) return null;
+  const viewBox = rest.morph?.viewBox ?? `0 0 ${rest.width} ${rest.height}`;
+  const nextPath = transformMouthPath(path, viewBox, MOUTH_MORPH_PRESETS[viseme]);
+  if (!nextPath) return null;
+  const fill = rest.morph?.fill ? ` fill="${escapeSvgAttr(rest.morph.fill)}"` : "";
+  const stroke = rest.morph?.stroke ? ` stroke="${escapeSvgAttr(rest.morph.stroke)}"` : "";
+  const strokeWidth = rest.morph?.strokeWidth
+    ? ` stroke-width="${escapeSvgAttr(rest.morph.strokeWidth)}"`
+    : "";
+  const strokeLinecap = rest.morph?.strokeLinecap
+    ? ` stroke-linecap="${escapeSvgAttr(rest.morph.strokeLinecap)}"`
+    : "";
+  const strokeLinejoin = rest.morph?.strokeLinejoin
+    ? ` stroke-linejoin="${escapeSvgAttr(rest.morph.strokeLinejoin)}"`
+    : "";
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${escapeSvgAttr(
+    viewBox,
+  )}"><path d="${escapeSvgAttr(nextPath)}"${fill}${stroke}${strokeWidth}${strokeLinecap}${strokeLinejoin}/></svg>`;
+  return new File([svg], `mouth_${viseme}.svg`, { type: "image/svg+xml" });
+}
+
+function createGenericRestMouthFile() {
+  const viewBox = "0 0 100 60";
+  const path = createGenericRestMouthPath(viewBox);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}"><path d="${path}" fill="#733f43"/></svg>`;
+  return new File([svg], "mouth_rest.svg", { type: "image/svg+xml" });
+}
+
+function transformMouthPath(path: string, viewBox: string, preset: MouthMorphProfile) {
+  try {
+    return absolutizeAndMorphPath(path, parseViewBox(viewBox), preset);
+  } catch {
+    return null;
+  }
+}
+
+function parseViewBox(viewBox: string) {
+  const [x = 0, y = 0, width = 100, height = 60] = viewBox.trim().split(/\s+/).map(Number);
+  return { x, y, width, height };
+}
+
+function escapeSvgAttr(value: string) {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+type PathCommand = { cmd: string; values: number[] };
+
+const PATH_PARAM_COUNT: Record<string, number> = {
+  M: 2,
+  L: 2,
+  H: 1,
+  V: 1,
+  C: 6,
+  S: 4,
+  Q: 4,
+  T: 2,
+  A: 7,
+  Z: 0,
+};
+
+function tokenizeSvgPath(path: string) {
+  return path.match(/[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+\.?)(?:e[-+]?\d+)?/g) ?? [];
+}
+
+function parseSvgPath(path: string): PathCommand[] {
+  const tokens = tokenizeSvgPath(path);
+  const commands: PathCommand[] = [];
+  let i = 0;
+  let currentCmd = "";
+  while (i < tokens.length) {
+    if (/^[a-zA-Z]$/.test(tokens[i])) {
+      currentCmd = tokens[i];
+      i += 1;
+    }
+    if (!currentCmd) break;
+    const upper = currentCmd.toUpperCase();
+    const paramCount = PATH_PARAM_COUNT[upper];
+    if (paramCount === 0) {
+      commands.push({ cmd: upper, values: [] });
+      currentCmd = "";
+      continue;
+    }
+    if (i + paramCount > tokens.length) break;
+    const values = tokens.slice(i, i + paramCount).map(Number);
+    commands.push({ cmd: currentCmd, values });
+    i += paramCount;
+    if (upper === "M") currentCmd = currentCmd === "M" ? "L" : "l";
+  }
+  return commands;
+}
+
+function absolutizePathCommands(path: string): PathCommand[] {
+  const commands = parseSvgPath(path);
+  const out: PathCommand[] = [];
+  const state = { x: 0, y: 0, subpathX: 0, subpathY: 0 };
+  for (const command of commands) {
+    const upper = command.cmd.toUpperCase();
+    const relative = command.cmd !== upper;
+    switch (upper) {
+      case "M":
+      case "L":
+      case "T": {
+        const point = resolvePoint(command.values[0], command.values[1], relative, state);
+        out.push({ cmd: upper, values: [point.x, point.y] });
+        state.x = point.x;
+        state.y = point.y;
+        if (upper === "M") {
+          state.subpathX = point.x;
+          state.subpathY = point.y;
+        }
+        break;
+      }
+      case "H": {
+        const point = resolvePoint(command.values[0], 0, relative, state, true, false);
+        out.push({ cmd: "L", values: [point.x, state.y] });
+        state.x = point.x;
+        break;
+      }
+      case "V": {
+        const point = resolvePoint(0, command.values[0], relative, state, false, true);
+        out.push({ cmd: "L", values: [state.x, point.y] });
+        state.y = point.y;
+        break;
+      }
+      case "C": {
+        const p1 = resolvePoint(command.values[0], command.values[1], relative, state);
+        const p2 = resolvePoint(command.values[2], command.values[3], relative, state);
+        const p = resolvePoint(command.values[4], command.values[5], relative, state);
+        out.push({ cmd: "C", values: [p1.x, p1.y, p2.x, p2.y, p.x, p.y] });
+        state.x = p.x;
+        state.y = p.y;
+        break;
+      }
+      case "S":
+      case "Q": {
+        const p1 = resolvePoint(command.values[0], command.values[1], relative, state);
+        const p = resolvePoint(command.values[2], command.values[3], relative, state);
+        out.push({ cmd: upper, values: [p1.x, p1.y, p.x, p.y] });
+        state.x = p.x;
+        state.y = p.y;
+        break;
+      }
+      case "A": {
+        const p = resolvePoint(command.values[5], command.values[6], relative, state);
+        out.push({
+          cmd: "A",
+          values: [
+            command.values[0],
+            command.values[1],
+            command.values[2],
+            command.values[3],
+            command.values[4],
+            p.x,
+            p.y,
+          ],
+        });
+        state.x = p.x;
+        state.y = p.y;
+        break;
+      }
+      case "Z":
+        out.push({ cmd: "Z", values: [] });
+        state.x = state.subpathX;
+        state.y = state.subpathY;
+        break;
+    }
+  }
+  return out;
+}
+
+function pointIndicesForCommand(cmd: string): Array<[number, number]> {
+  switch (cmd) {
+    case "M":
+    case "L":
+    case "T":
+      return [[0, 1]];
+    case "Q":
+    case "S":
+      return [
+        [0, 1],
+        [2, 3],
+      ];
+    case "C":
+      return [
+        [0, 1],
+        [2, 3],
+        [4, 5],
+      ];
+    case "A":
+      return [[5, 6]];
+    default:
+      return [];
+  }
+}
+
+function serializePathCommands(commands: PathCommand[]) {
+  return commands
+    .map((command) =>
+      command.values.length > 0
+        ? `${command.cmd} ${command.values.map((value) => fmt(value)).join(" ")}`
+        : command.cmd,
+    )
+    .join(" ");
+}
+
+function absolutizeAndMorphPath(
+  path: string,
+  box: ReturnType<typeof parseViewBox>,
+  preset: MouthMorphProfile,
+) {
+  const commands = parseSvgPath(path);
+  const out: string[] = [];
+  const state = {
+    x: box.x + box.width / 2,
+    y: box.y + box.height / 2,
+    subpathX: box.x + box.width / 2,
+    subpathY: box.y + box.height / 2,
+  };
+
+  for (const command of commands) {
+    const upper = command.cmd.toUpperCase();
+    const relative = command.cmd !== upper;
+    switch (upper) {
+      case "M":
+      case "L":
+      case "T": {
+        const point = resolvePoint(command.values[0], command.values[1], relative, state);
+        const morphed = morphPoint(point.x, point.y, box, preset);
+        out.push(`${upper} ${fmt(morphed.x)} ${fmt(morphed.y)}`);
+        state.x = point.x;
+        state.y = point.y;
+        if (upper === "M") {
+          state.subpathX = point.x;
+          state.subpathY = point.y;
+        }
+        break;
+      }
+      case "H": {
+        const point = resolvePoint(command.values[0], 0, relative, state, true, false);
+        const morphed = morphPoint(point.x, state.y, box, preset);
+        out.push(`L ${fmt(morphed.x)} ${fmt(morphed.y)}`);
+        state.x = point.x;
+        break;
+      }
+      case "V": {
+        const point = resolvePoint(0, command.values[0], relative, state, false, true);
+        const morphed = morphPoint(state.x, point.y, box, preset);
+        out.push(`L ${fmt(morphed.x)} ${fmt(morphed.y)}`);
+        state.y = point.y;
+        break;
+      }
+      case "C": {
+        const p1 = resolvePoint(command.values[0], command.values[1], relative, state);
+        const p2 = resolvePoint(command.values[2], command.values[3], relative, state);
+        const p = resolvePoint(command.values[4], command.values[5], relative, state);
+        const m1 = morphPoint(p1.x, p1.y, box, preset);
+        const m2 = morphPoint(p2.x, p2.y, box, preset);
+        const mp = morphPoint(p.x, p.y, box, preset);
+        out.push(`C ${fmt(m1.x)} ${fmt(m1.y)} ${fmt(m2.x)} ${fmt(m2.y)} ${fmt(mp.x)} ${fmt(mp.y)}`);
+        state.x = p.x;
+        state.y = p.y;
+        break;
+      }
+      case "S":
+      case "Q": {
+        const p1 = resolvePoint(command.values[0], command.values[1], relative, state);
+        const p = resolvePoint(command.values[2], command.values[3], relative, state);
+        const m1 = morphPoint(p1.x, p1.y, box, preset);
+        const mp = morphPoint(p.x, p.y, box, preset);
+        out.push(`${upper} ${fmt(m1.x)} ${fmt(m1.y)} ${fmt(mp.x)} ${fmt(mp.y)}`);
+        state.x = p.x;
+        state.y = p.y;
+        break;
+      }
+      case "A": {
+        const rx = command.values[0];
+        const ry = command.values[1];
+        const rotation = command.values[2];
+        const largeArcFlag = command.values[3];
+        const sweepFlag = command.values[4];
+        const p = resolvePoint(command.values[5], command.values[6], relative, state);
+        const mp = morphPoint(p.x, p.y, box, preset);
+        const centerScale = 1 + preset.pucker * 0.35 - preset.width * 0.15;
+        const openScale = 1 + preset.openness * 0.4;
+        out.push(
+          `A ${fmt(Math.max(0.01, rx * centerScale))} ${fmt(Math.max(0.01, ry * openScale))} ${fmt(rotation)} ${largeArcFlag} ${sweepFlag} ${fmt(mp.x)} ${fmt(mp.y)}`,
+        );
+        state.x = p.x;
+        state.y = p.y;
+        break;
+      }
+      case "Z":
+        out.push("Z");
+        state.x = state.subpathX;
+        state.y = state.subpathY;
+        break;
+    }
+  }
+
+  return out.join(" ");
+}
+
+function resolvePoint(
+  x: number,
+  y: number,
+  relative: boolean,
+  state: { x: number; y: number },
+  xOnly = false,
+  yOnly = false,
+) {
+  return {
+    x: xOnly ? (relative ? state.x + x : x) : relative ? state.x + x : x,
+    y: yOnly ? (relative ? state.y + y : y) : relative ? state.y + y : y,
+  };
+}
+
+function morphPoint(
+  x: number,
+  y: number,
+  box: ReturnType<typeof parseViewBox>,
+  preset: MouthMorphProfile,
+) {
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+  const halfW = Math.max(1, box.width / 2);
+  const halfH = Math.max(1, box.height / 2);
+  const nx = clamp((x - cx) / halfW, -1.2, 1.2);
+  const ny = clamp((y - cy) / halfH, -1.2, 1.2);
+  const absX = Math.abs(nx);
+  const cornerWeight = smoothstep(0.42, 0.98, absX);
+  const centerWeight = 1 - smoothstep(0.08, 0.78, absX);
+  const upperWeight = smoothstep(-0.95, -0.05, -ny);
+  const lowerWeight = smoothstep(-0.95, -0.05, ny);
+  const lipLineWeight = 1 - Math.min(1, Math.abs(ny));
+  const signX = nx === 0 ? 0 : Math.sign(nx);
+  const asymmetry = preset.asymmetry ?? 0;
+
+  const horizontal =
+    nx * preset.width * centerWeight * 0.65 +
+    signX * preset.cornerPull * cornerWeight +
+    nx * preset.pucker * (0.55 + centerWeight * 0.35);
+  const vertical =
+    -preset.cornerLift * cornerWeight +
+    -preset.upperLift * upperWeight +
+    preset.lowerDrop * lowerWeight +
+    preset.openness * (lowerWeight - upperWeight) * (0.55 + centerWeight * 0.45) -
+    preset.bite * upperWeight * centerWeight * 0.8 +
+    preset.bite * lowerWeight * lipLineWeight * 0.15 +
+    asymmetry * nx * centerWeight * 0.35;
+
+  return {
+    x: x + horizontal * halfW,
+    y: y + vertical * halfH,
+  };
+}
+
+function smoothstep(edge0: number, edge1: number, x: number) {
+  const t = clamp((x - edge0) / Math.max(0.0001, edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+function fmt(value: number) {
+  return Number(value.toFixed(3)).toString();
+}
+
+function slotIdForImport(
+  role: PartRole,
+  label: string,
+  viseme: MouthViseme | undefined,
+  id: ID,
+  side: CharacterPart["side"],
+) {
+  if (role === "mouth") return "role:mouth";
+  if (role === "eye" && (side === "left" || side === "right")) return `slot:${side}-eye`;
+  if (role === "custom") return `custom:${id}`;
+  return `slot:${slug(label || role)}${viseme ? `:${viseme}` : ""}`;
+}
+
+function slug(value: string) {
   return (
-    <div
-      onClick={variant ? onSelect : undefined}
-      className={`flex items-center gap-2 rounded border p-1.5 ${
-        selected ? "border-primary bg-primary/15" : "border-border bg-panel-2"
-      } ${variant ? "cursor-pointer hover:bg-panel" : ""}`}
-      title={MOUTH_VISEME_DESCRIPTIONS[viseme]}
-    >
-      <div className="h-10 w-10 shrink-0 overflow-hidden rounded bg-input">
-        {url ? (
-          <img src={url} alt={viseme} className="h-full w-full object-contain" />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center text-[9px] text-muted-foreground">
-            —
-          </div>
-        )}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="text-[11px] text-foreground">{viseme}</div>
-        <div className="truncate text-[10px] text-muted-foreground">
-          {MOUTH_VISEME_DESCRIPTIONS[viseme]}
-        </div>
-      </div>
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          inputRef.current?.click();
-        }}
-        className="rounded bg-primary/30 px-2 py-0.5 text-[10px] hover:bg-primary/50"
-      >
-        {variant ? "Replace" : "Upload"}
-      </button>
-      {variant && (
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleVisible();
-          }}
-          className="rounded p-1 text-muted-foreground hover:text-foreground"
-          title={variant.visible ? "Hide" : "Show"}
-          aria-label={variant.visible ? "Hide part" : "Show part"}
-        >
-          {variant.visible ? <Eye size={14} /> : <EyeOff size={14} />}
-        </button>
-      )}
-      {variant && (
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onRemove();
-          }}
-          className="rounded px-1 text-[10px] text-destructive"
-        >
-          ✕
-        </button>
-      )}
-      <input
-        ref={inputRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) onUpload(f);
-          if (inputRef.current) inputRef.current.value = "";
-        }}
-      />
-    </div>
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "") || "part"
   );
 }
 
-function StateVariantSlot({
-  label,
-  description,
-  variant,
-  selected,
-  onSelect,
-  onToggleVisible,
-  onUpload,
-  onRemove,
-}: {
-  label: string;
-  description: string;
-  variant?: CharacterPart;
-  selected: boolean;
-  onSelect: () => void;
-  onToggleVisible: () => void;
-  onUpload: (f: File) => void;
-  onRemove: () => void;
-}) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const url = useMediaUrl(variant?.mediaId);
-  return (
-    <div
-      onClick={variant ? onSelect : undefined}
-      className={`flex items-center gap-2 rounded border p-1.5 ${
-        selected ? "border-primary bg-primary/15" : "border-border bg-panel-2"
-      } ${variant ? "cursor-pointer hover:bg-panel" : ""}`}
-      title={description}
-    >
-      <div className="h-10 w-10 shrink-0 overflow-hidden rounded bg-input">
-        {url ? (
-          <img src={url} alt={label} className="h-full w-full object-contain" />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center text-[9px] text-muted-foreground">
-            -
-          </div>
-        )}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="text-[11px] text-foreground">{label}</div>
-        <div className="truncate text-[10px] text-muted-foreground">{description}</div>
-      </div>
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          inputRef.current?.click();
-        }}
-        className="rounded bg-primary/30 px-2 py-0.5 text-[10px] hover:bg-primary/50"
-      >
-        {variant ? "Replace" : "Upload"}
-      </button>
-      {variant && (
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleVisible();
-          }}
-          className="rounded p-1 text-muted-foreground hover:text-foreground"
-          title={variant.visible ? "Hide" : "Show"}
-          aria-label={variant.visible ? "Hide part" : "Show part"}
-        >
-          {variant.visible ? <Eye size={14} /> : <EyeOff size={14} />}
-        </button>
-      )}
-      {variant && (
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onRemove();
-          }}
-          className="rounded px-1 text-[10px] text-destructive"
-        >
-          ✕
-        </button>
-      )}
-      <input
-        ref={inputRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) onUpload(f);
-          if (inputRef.current) inputRef.current.value = "";
-        }}
-      />
-    </div>
-  );
+function maxZ(parts: CharacterPart[]) {
+  return parts.reduce((max, part) => Math.max(max, part.zIndex), 0);
+}
+
+function normalizePartPatch(part: CharacterPart, patch: Partial<CharacterPart>): CharacterPart {
+  const pivot =
+    patch.x !== undefined ||
+    patch.y !== undefined ||
+    patch.width !== undefined ||
+    patch.height !== undefined
+      ? (part.pivot ?? { x: part.x + part.width / 2, y: part.y + part.height / 2 })
+      : part.pivot;
+  const anchorX = pivot ? clamp((pivot.x - part.x) / Math.max(1, part.width), 0, 1) : part.anchorX;
+  const anchorY = pivot ? clamp((pivot.y - part.y) / Math.max(1, part.height), 0, 1) : part.anchorY;
+  return {
+    ...part,
+    anchorX,
+    anchorY,
+    pivot,
+    movement: part.movement ?? defaultMovementForRole(part.role, part.viseme),
+  };
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
 }
