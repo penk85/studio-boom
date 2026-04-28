@@ -196,6 +196,50 @@ function emitTweens(tl: gsap.core.Timeline, domId: string, frames: PartFrame[]):
   }
 }
 
+// ─── Viseme smoothing ──────────────────────────────────────────────────────────
+
+// Vowels rank highest so they survive when rapid events get collapsed.
+const VISEME_PRIORITY: Record<MouthViseme, number> = {
+  A: 10, O: 9, U: 8, E: 7, WQ: 6, Smile: 5, L: 4, FV: 3, MBP: 2, rest: 1,
+};
+
+/**
+ * Cap viseme rate at maxPerSec (default 8). Within each time window, the
+ * highest-priority (vowel-preferring) viseme wins. Keeps natural-feeling lip
+ * sync without rapid consonant chatter.
+ */
+function smoothVisemes(
+  raw: { t: number; v: MouthViseme }[],
+  maxPerSec = 8,
+): { t: number; v: MouthViseme }[] {
+  if (raw.length === 0) return [];
+  const minGap = 1 / maxPerSec;
+  const sorted = [...raw].sort((a, b) => a.t - b.t);
+  const out: { t: number; v: MouthViseme }[] = [];
+  let lastT = -Infinity;
+  let i = 0;
+
+  while (i < sorted.length) {
+    // Skip events still inside the dead zone of the last emission.
+    if (sorted[i].t - lastT < minGap) { i++; continue; }
+
+    // Collect all events in this window and pick the highest-priority one.
+    const windowStart = sorted[i].t;
+    let best = sorted[i];
+    let j = i + 1;
+    while (j < sorted.length && sorted[j].t - windowStart < minGap) {
+      if ((VISEME_PRIORITY[sorted[j].v] ?? 0) > (VISEME_PRIORITY[best.v] ?? 0)) {
+        best = sorted[j];
+      }
+      j++;
+    }
+    out.push({ t: windowStart, v: best.v });
+    lastT = windowStart;
+    i = j;
+  }
+  return out;
+}
+
 // ─── Viseme events ─────────────────────────────────────────────────────────────
 
 function addVisemeEvents(
@@ -234,7 +278,8 @@ function addVisemeEvents(
     }
 
     let current = firstVisible;
-    for (const { t, v } of [...(clip.visemes ?? [])].sort((a, b) => a.t - b.t)) {
+    const smoothed = smoothVisemes(clip.visemes ?? []);
+    for (const { t, v } of smoothed) {
       if (t < 0 || t > clip.duration) continue;
       const next = available.has(v) ? v : available.has("rest") ? "rest" : current;
       if (next === current) continue;
@@ -332,7 +377,7 @@ export function buildCharacterTimeline(
 
   addBlinkEvents(tl, clip, slots);
 
-  if (character.mouthRig) {
+  if (character.mouthRig && character.mouthStyle !== "images") {
     addRigVisemeEvents(tl, clip, character);
   } else {
     addVisemeEvents(tl, clip, slots);
@@ -383,9 +428,9 @@ function addRigVisemeEvents(
   const restTransforms = poseToTransforms(mouthRig.poses.rest, rigStyle, curveOpts);
   applyTransforms(restTransforms, 0, 0);
 
-  // Emit tl.to() tweens for each viseme event.
+  // Emit tl.to() tweens for each viseme event (smoothed to ≤10/sec, vowels preferred).
   const BLEND = 0.075;
-  const sortedVisemes = [...(clip.visemes ?? [])].sort((a, b) => a.t - b.t);
+  const sortedVisemes = smoothVisemes(clip.visemes ?? []);
 
   for (const { t, v } of sortedVisemes) {
     if (t < 0 || t > clip.duration) continue;

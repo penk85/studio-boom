@@ -703,7 +703,7 @@ function CharacterRig({
     <div className="absolute inset-0 overflow-hidden">
       <div className="absolute left-0 top-0" style={{ width: "100%", height: "100%" }}>
         {/* Transform-based mouth rig — rendered outside the slot loop */}
-        {character.mouthRig && (
+        {character.mouthRig && character.mouthStyle !== "images" && (
           <MouthRigRenderer
             rig={character.mouthRig}
             clipId={clip.id}
@@ -714,7 +714,7 @@ function CharacterRig({
 
         {slots.map((slot) => {
           // Skip mouth slot when a transform rig handles it.
-          if (slot.role === "mouth" && character.mouthRig) return null;
+          if (slot.role === "mouth" && character.mouthRig && character.mouthStyle !== "images") return null;
 
           if (slot.role === "mouth") {
             return (

@@ -239,6 +239,8 @@ export interface CharacterPreset {
   fallbackMouth?: FallbackMouthAnchor;
   /** Transform-based mouth rig. When present, replaces SVG-file viseme parts for lip sync. */
   mouthRig?: MouthRig;
+  /** Which mouth system to use for lip sync. "rig" = transform rig, "images" = SVG viseme files. */
+  mouthStyle?: "rig" | "images";
   createdAt: number;
   updatedAt: number;
 }

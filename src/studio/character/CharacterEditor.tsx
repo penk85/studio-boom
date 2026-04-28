@@ -9,8 +9,6 @@ import {
   Eye,
   EyeOff,
   MousePointer2,
-  Palette,
-  PenTool,
   RotateCw,
   Trash2,
   Upload,
@@ -109,7 +107,7 @@ const MOVEMENT_OPTIONS: Array<{ value: MovementPresetKind; label: string }> = [
 const SAMPLE_WORDS = ["Hello", "Shalom", "Mommy", "Welcome"];
 const EYE_STATES: EyeState[] = ["open", "half", "closed", "wink"];
 
-type EditorMode = "select" | "pivot" | "bounds-rect" | "bounds-ellipse" | "mouth-shape";
+type EditorMode = "select" | "pivot" | "bounds-rect" | "bounds-ellipse";
 
 export function CharacterEditor({ characterId }: Props) {
   const navigate = useNavigate();
@@ -121,7 +119,12 @@ export function CharacterEditor({ characterId }: Props) {
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [, setPreviewTick] = useState(0);
   const [status, setStatus] = useState<string | null>(null);
+  const [rigPreview, setRigPreview] = useState<{ visemes: MouthViseme[]; startedAt: number; durationMs: number } | null>(null);
+  const [rigAudioViseme, setRigAudioViseme] = useState<MouthViseme>("rest");
+  const [rigAudioPlaying, setRigAudioPlaying] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const rigAudioCtxRef = useRef<AudioContext | null>(null);
+  const rigRafRef = useRef<number | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -163,6 +166,16 @@ export function CharacterEditor({ characterId }: Props) {
       window.clearInterval(interval);
     };
   }, [preview]);
+
+  useEffect(() => {
+    if (!rigPreview) return;
+    const t = window.setTimeout(() => setRigPreview(null), rigPreview.durationMs);
+    const interval = window.setInterval(() => setPreviewTick((n) => n + 1), 50);
+    return () => {
+      window.clearTimeout(t);
+      window.clearInterval(interval);
+    };
+  }, [rigPreview]);
 
   if (!doc) {
     return (
@@ -230,7 +243,6 @@ export function CharacterEditor({ characterId }: Props) {
       const viseme = options.viseme ?? (role === "mouth" ? detectViseme(file.name) : undefined);
       const eyeState = options.eyeState ?? (role === "eye" ? detectEyeState(file.name) : undefined);
       const fitted = fitAsset(asset.width, asset.height, doc.canvasWidth, doc.canvasHeight);
-      const morph = role === "mouth" ? await readSvgMorphMetadata(file, doc.parts) : undefined;
       const id = uid();
       const label = options.label ?? asset.name;
       const part = makePart(role, asset.id, {
@@ -245,7 +257,6 @@ export function CharacterEditor({ characterId }: Props) {
         ...options.placement,
         zIndex: options.zIndex ?? maxZ(doc.parts) + 1,
         movement: defaultMovementForRole(role, viseme),
-        morph,
       });
       addPart(part);
       setStatus(`${file.name} added`);
@@ -263,10 +274,61 @@ export function CharacterEditor({ characterId }: Props) {
     if (!doc.mouthRig) return;
     updateDoc({ mouthRig: { ...doc.mouthRig, placement } });
   };
+
+  const playRigAudio = async (file: File) => {
+    if (rigRafRef.current) cancelAnimationFrame(rigRafRef.current);
+    await rigAudioCtxRef.current?.close();
+    rigAudioCtxRef.current = null;
+    setRigAudioPlaying(false);
+    setRigAudioViseme("rest");
+
+    const arrayBuffer = await file.arrayBuffer();
+    const ctx = new AudioContext();
+    rigAudioCtxRef.current = ctx;
+    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(analyser);
+    analyser.connect(ctx.destination);
+    source.start();
+    setRigAudioPlaying(true);
+
+    const tick = () => {
+      analyser.getByteFrequencyData(data);
+      const mean = data.reduce((s, v) => s + v, 0) / data.length;
+      let v: MouthViseme = "rest";
+      if (mean > 55) v = "A";
+      else if (mean > 38) v = "E";
+      else if (mean > 22) v = "O";
+      else if (mean > 10) v = "MBP";
+      setRigAudioViseme(v);
+      rigRafRef.current = requestAnimationFrame(tick);
+    };
+    rigRafRef.current = requestAnimationFrame(tick);
+
+    source.onended = () => {
+      if (rigRafRef.current) cancelAnimationFrame(rigRafRef.current);
+      setRigAudioPlaying(false);
+      setRigAudioViseme("rest");
+      void ctx.close();
+    };
+  };
+
+  const rigCurrentViseme: MouthViseme = (() => {
+    if (rigAudioPlaying) return rigAudioViseme;
+    if (!rigPreview) return "rest";
+    const elapsed = Date.now() - rigPreview.startedAt;
+    const t = Math.min(1, elapsed / rigPreview.durationMs);
+    const idx = Math.floor(t * rigPreview.visemes.length * 1.1) % rigPreview.visemes.length;
+    return rigPreview.visemes[idx] ?? "rest";
+  })();
   const exportData = JSON.stringify(normalizeCharacterSlots(doc), null, 2);
   const manifest = normalizePartManifest(doc.manifest);
-  const mouthEditingPart =
-    mode === "mouth-shape" && selectedPart?.role === "mouth" ? selectedPart : null;
+  const effectiveMouthMode: "rig" | "images" = doc.mouthStyle ?? (doc.mouthRig ? "rig" : "images");
   const previewParentPart =
     preview?.targetRole === "head"
       ? orderedParts.find((part) => part.id === preview.targetPartId)
@@ -325,18 +387,17 @@ export function CharacterEditor({ characterId }: Props) {
             parts={doc.parts}
             manifest={manifest}
             mouthRig={doc.mouthRig}
+            mouthStyle={doc.mouthStyle}
             onSaveRig={(rig) => updateDoc({ mouthRig: rig })}
-            selectedId={selectedPartId}
-            onEditPart={(id) => { selectPart(id); setMode("mouth-shape"); }}
-            onSelectPart={selectPart}
+            onSetMouthStyle={(style) => updateDoc({ mouthStyle: style })}
           />
           <LayerList
-            parts={orderedParts}
+            parts={orderedParts.filter((p) => !(p.role === "mouth" && effectiveMouthMode === "rig"))}
             selectedId={selectedPartId}
             onSelect={selectPart}
             onChange={updatePart}
             onRemove={removePart}
-            mouthRig={doc.mouthRig}
+            mouthRig={effectiveMouthMode === "rig" ? doc.mouthRig : undefined}
             rigSelected={rigSelected}
             onSelectRig={selectRig}
             onChangeRigZIndex={(z) => doc.mouthRig && updateDoc({ mouthRig: { ...doc.mouthRig, placement: { ...doc.mouthRig.placement, zIndex: z } } })}
@@ -368,6 +429,7 @@ export function CharacterEditor({ characterId }: Props) {
             >
               {orderedParts
                 .filter((part) => roleEnabledByManifest(part.role, manifest))
+                .filter((part) => !(part.role === "mouth" && effectiveMouthMode === "rig"))
                 .map((part) => (
                   <PartLayer
                     key={part.id}
@@ -382,12 +444,13 @@ export function CharacterEditor({ characterId }: Props) {
                     onModeDone={() => setMode("select")}
                   />
                 ))}
-              {doc.mouthRig && (
+              {doc.mouthRig && effectiveMouthMode === "rig" && (
                 <RigPlacementLayer
                   key="mouth-rig"
                   rig={doc.mouthRig}
                   selected={rigSelected}
                   scale={scale}
+                  currentViseme={rigCurrentViseme}
                   onSelect={selectRig}
                   onChange={updateRigPlacement}
                 />
@@ -400,24 +463,6 @@ export function CharacterEditor({ characterId }: Props) {
           {status && (
             <div className="absolute left-4 top-4 rounded border border-border bg-panel/95 px-3 py-2 text-xs shadow-[var(--shadow-panel)]">
               {status}
-            </div>
-          )}
-          {mouthEditingPart && (
-            <div className="absolute left-4 bottom-4 max-w-xs rounded border border-primary/50 bg-panel/95 px-3 py-2 text-xs shadow-[var(--shadow-panel)]">
-              <div className="font-medium text-foreground">
-                Editing mouth: {mouthEditingPart.viseme ?? "rest"}
-              </div>
-              <div className="mt-1 text-muted-foreground">
-                Drag the dots on the canvas to reshape the mouth. Blue dots are anchors. Light dots
-                are curve controls.
-              </div>
-              <button
-                type="button"
-                onClick={() => setMode("select")}
-                className="mt-2 rounded border border-border px-2 py-1 text-[11px] hover:bg-panel-2"
-              >
-                Done editing
-              </button>
             </div>
           )}
         </main>
@@ -435,6 +480,9 @@ export function CharacterEditor({ characterId }: Props) {
             onCanvasChange={(patch) => updateDoc(patch)}
             rigSelected={rigSelected}
             onRigChange={(rig) => updateDoc({ mouthRig: rig })}
+            onRigPreview={(visemes) => setRigPreview({ visemes, startedAt: Date.now(), durationMs: 1400 })}
+            onRigAudioFile={playRigAudio}
+            rigAudioPlaying={rigAudioPlaying}
           />
         </aside>
       </div>
@@ -500,19 +548,17 @@ function UploadSlots({
   parts,
   manifest,
   mouthRig,
+  mouthStyle,
   onSaveRig,
-  selectedId,
-  onEditPart,
-  onSelectPart,
+  onSetMouthStyle,
 }: {
   onImport: (file: File, options?: ImportOptions) => void;
   parts: CharacterPart[];
   manifest: PartManifest;
   mouthRig: MouthRig | undefined;
+  mouthStyle: CharacterPreset["mouthStyle"];
   onSaveRig: (rig: MouthRig) => void;
-  selectedId: ID | null;
-  onEditPart: (id: ID) => void;
-  onSelectPart: (id: ID) => void;
+  onSetMouthStyle: (style: CharacterPreset["mouthStyle"]) => void;
 }) {
   return (
     <div className="space-y-3">
@@ -588,11 +634,10 @@ function UploadSlots({
         <MouthShapeSetup
           parts={parts}
           mouthRig={mouthRig}
+          mouthStyle={mouthStyle}
           onSaveRig={onSaveRig}
+          onSetMouthStyle={onSetMouthStyle}
           onImport={onImport}
-          selectedId={selectedId}
-          onEditPart={onEditPart}
-          onSelectPart={onSelectPart}
         />
       )}
     </div>
@@ -640,55 +685,70 @@ function SlotUpload({
 function MouthShapeSetup({
   parts,
   mouthRig,
+  mouthStyle,
   onSaveRig,
+  onSetMouthStyle,
   onImport,
-  selectedId,
-  onEditPart,
-  onSelectPart,
 }: {
   parts: CharacterPart[];
   mouthRig: MouthRig | undefined;
+  mouthStyle: CharacterPreset["mouthStyle"];
   onSaveRig: (rig: MouthRig) => void;
+  onSetMouthStyle: (style: CharacterPreset["mouthStyle"]) => void;
   onImport: (file: File, options?: ImportOptions) => void;
-  selectedId: ID | null;
-  onEditPart: (id: ID) => void;
-  onSelectPart: (id: ID) => void;
 }) {
   const [designerOpen, setDesignerOpen] = useState(false);
+  // "rig" is the default mode when a rig exists; "images" is the legacy/custom path.
+  const effectiveMode: "rig" | "images" = mouthStyle ?? (mouthRig ? "rig" : "images");
 
   return (
     <div className="rounded border border-border bg-panel-2 p-2">
-      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-        Mouth Shapes
+      <div className="mb-2 flex items-center justify-between">
+        <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+          Mouth Shapes
+        </span>
+        {/* Mode toggle */}
+        <div className="flex rounded border border-border text-[10px]">
+          <button
+            type="button"
+            onClick={() => onSetMouthStyle("rig")}
+            className={`rounded-l px-2 py-0.5 ${effectiveMode === "rig" ? "bg-primary text-primary-foreground" : "hover:bg-panel"}`}
+          >
+            Rig
+          </button>
+          <button
+            type="button"
+            onClick={() => onSetMouthStyle("images")}
+            className={`rounded-r border-l border-border px-2 py-0.5 ${effectiveMode === "images" ? "bg-primary text-primary-foreground" : "hover:bg-panel"}`}
+          >
+            Images
+          </button>
+        </div>
       </div>
-      <button
-        type="button"
-        onClick={() => setDesignerOpen(true)}
-        className="mb-3 w-full rounded border border-primary bg-primary/10 px-2 py-1.5 text-[11px] font-medium text-primary hover:bg-primary/20"
-      >
-        {mouthRig ? `Rig: ${mouthRig.styleId} — Edit…` : "Choose mouth style…"}
-      </button>
-      <MouthCreator
-        isOpen={designerOpen}
-        onClose={() => setDesignerOpen(false)}
-        initialRig={mouthRig}
-        onSave={(rig) => { onSaveRig(rig); setDesignerOpen(false); }}
-      />
-      {!mouthRig && (
-      <div className="grid grid-cols-2 gap-1.5">
-        {MOUTH_VISEMES.map((viseme) => {
-          const part = parts.find((p) => p.role === "mouth" && p.viseme === viseme);
-          const status = part
-            ? part.morph?.compatibleWithRest === false ? "swap only" : "morph ready"
-            : "missing";
-          return (
-            <div
-              key={viseme}
-              className={`space-y-1 rounded border px-1.5 py-1.5 ${
-                part?.id === selectedId ? "border-primary bg-primary/10" : "border-border bg-panel"
-              }`}
-            >
+
+      {effectiveMode === "rig" ? (
+        <>
+          <button
+            type="button"
+            onClick={() => setDesignerOpen(true)}
+            className="mb-2 w-full rounded border border-primary bg-primary/10 px-2 py-1.5 text-[11px] font-medium text-primary hover:bg-primary/20"
+          >
+            {mouthRig ? `Rig: ${mouthRig.styleId} — Edit…` : "Choose mouth style…"}
+          </button>
+          <MouthCreator
+            isOpen={designerOpen}
+            onClose={() => setDesignerOpen(false)}
+            initialRig={mouthRig}
+            onSave={(rig) => { onSaveRig(rig); setDesignerOpen(false); }}
+          />
+        </>
+      ) : (
+        <div className="grid grid-cols-2 gap-1.5">
+          {MOUTH_VISEMES.map((viseme) => {
+            const part = parts.find((p) => p.role === "mouth" && p.viseme === viseme);
+            return (
               <SlotUpload
+                key={viseme}
                 compact
                 label={viseme}
                 filled={Boolean(part)}
@@ -702,31 +762,9 @@ function MouthShapeSetup({
                   })
                 }
               />
-              <div className="px-1 text-[9px] uppercase tracking-wider text-muted-foreground">
-                {status}
-              </div>
-              {part && (
-                <div className="flex gap-1">
-                  <button
-                    type="button"
-                    onClick={() => onSelectPart(part.id)}
-                    className="flex-1 rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-background"
-                  >
-                    Select
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onEditPart(part.id)}
-                    className="flex-1 rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-background"
-                  >
-                    Edit on canvas
-                  </button>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -858,6 +896,9 @@ function Inspector({
   onCanvasChange,
   rigSelected,
   onRigChange,
+  onRigPreview,
+  onRigAudioFile,
+  rigAudioPlaying,
 }: {
   doc: CharacterPreset;
   part: CharacterPart | null;
@@ -870,6 +911,9 @@ function Inspector({
   onCanvasChange: (patch: Partial<CharacterPreset>) => void;
   rigSelected: boolean;
   onRigChange: (rig: MouthRig) => void;
+  onRigPreview: (visemes: MouthViseme[]) => void;
+  onRigAudioFile: (file: File) => void;
+  rigAudioPlaying: boolean;
 }) {
   if (rigSelected && doc.mouthRig) {
     const rig = doc.mouthRig;
@@ -887,6 +931,44 @@ function Inspector({
             <Field label="Height"><input type="number" value={p.height} onChange={(e) => setP({ height: Number(e.target.value) })} className="w-full rounded border border-border bg-background px-2 py-1" /></Field>
             <Field label="Z-index"><input type="number" value={p.zIndex} onChange={(e) => setP({ zIndex: Number(e.target.value) })} className="w-full rounded border border-border bg-background px-2 py-1" /></Field>
           </div>
+        </section>
+        <section className="rounded border border-border bg-panel-2 p-3">
+          <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+            Test Talk
+          </div>
+          <div className="mb-3 grid grid-cols-2 gap-2">
+            {SAMPLE_WORDS.map((word) => (
+              <button
+                key={word}
+                type="button"
+                onClick={() => onRigPreview(wordToVisemes(word))}
+                className="rounded border border-border px-2 py-1 hover:bg-panel"
+              >
+                {word}
+              </button>
+            ))}
+          </div>
+          <div className="mb-1 text-[10px] text-muted-foreground">Or test with audio:</div>
+          <label
+            className={`flex cursor-pointer items-center gap-2 rounded border px-2 py-1.5 text-[11px] ${
+              rigAudioPlaying
+                ? "border-primary bg-primary/10 text-primary"
+                : "border-border hover:bg-panel"
+            }`}
+          >
+            <Upload size={13} />
+            {rigAudioPlaying ? "Playing…" : "Load audio file"}
+            <input
+              type="file"
+              accept="audio/*"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void onRigAudioFile(file);
+                if (e.target) e.target.value = "";
+              }}
+            />
+          </label>
         </section>
       </div>
     );
@@ -1087,57 +1169,7 @@ function Inspector({
       {part.role === "mouth" && (
         <section className="rounded border border-border bg-panel-2 p-3">
           <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-            Mouth Shape
-          </div>
-          <div className="mb-3 rounded border border-border bg-background px-2 py-1.5 text-[10px] text-muted-foreground">
-            Use the button below to edit this mouth directly on the canvas. Then tweak fill and
-            stroke here if needed.
-          </div>
-          <div className="mb-3 flex gap-2">
-            <button
-              type="button"
-              onClick={() => onModeChange(mode === "mouth-shape" ? "select" : "mouth-shape")}
-              className={`flex-1 rounded border px-2 py-1 ${
-                mode === "mouth-shape" ? "border-primary bg-primary/15" : "border-border"
-              }`}
-            >
-              <span className="inline-flex items-center gap-1">
-                <PenTool size={13} />
-                {mode === "mouth-shape" ? "Done Editing" : "Edit on Canvas"}
-              </span>
-            </button>
-          </div>
-          <div className="mb-3 grid grid-cols-2 gap-2">
-            <Field label="Fill Color">
-              <label className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1">
-                <Palette size={13} className="text-muted-foreground" />
-                <input
-                  type="color"
-                  value={normalizeColorForInput(part.morph?.fill ?? "#733f43")}
-                  onChange={(e) =>
-                    onChange(part.id, {
-                      morph: { ...part.morph, fill: e.target.value },
-                    })
-                  }
-                  className="h-6 w-full bg-transparent"
-                />
-              </label>
-            </Field>
-            <Field label="Stroke Color">
-              <label className="flex items-center gap-2 rounded border border-border bg-background px-2 py-1">
-                <Palette size={13} className="text-muted-foreground" />
-                <input
-                  type="color"
-                  value={normalizeColorForInput(part.morph?.stroke ?? "#733f43")}
-                  onChange={(e) =>
-                    onChange(part.id, {
-                      morph: { ...part.morph, stroke: e.target.value },
-                    })
-                  }
-                  className="h-6 w-full bg-transparent"
-                />
-              </label>
-            </Field>
+            Test Talk
           </div>
           <div className="grid grid-cols-2 gap-2">
             {SAMPLE_WORDS.map((word) => (
@@ -1160,12 +1192,6 @@ function Inspector({
               </button>
             ))}
           </div>
-          {part.morph && (
-            <div className="mt-2 rounded bg-background px-2 py-1 text-[11px] text-muted-foreground">
-              Morph path: {part.morph.commandCount ?? 0} commands
-              {part.morph.compatibleWithRest === false ? " · different from Rest" : ""}
-            </div>
-          )}
         </section>
       )}
 
@@ -1232,12 +1258,14 @@ function RigPlacementLayer({
   rig,
   selected,
   scale,
+  currentViseme = "rest",
   onSelect,
   onChange,
 }: {
   rig: MouthRig;
   selected: boolean;
   scale: number;
+  currentViseme?: MouthViseme;
   onSelect: () => void;
   onChange: (placement: MouthRig["placement"]) => void;
 }) {
@@ -1280,7 +1308,7 @@ function RigPlacementLayer({
     >
       <RigPreview
         style={rigStyle}
-        pose={rig.poses.rest}
+        pose={rig.poses[currentViseme] ?? rig.poses.rest}
         colors={rig}
         widthScale={rig.widthScale}
         upperCurve={rig.upperCurve}
@@ -1321,10 +1349,6 @@ function PartLayer({
 }) {
   const url = useMediaUrl(part.mediaId);
   const layerRef = useRef<HTMLDivElement>(null);
-  const editableMouth =
-    part.role === "mouth" && part.morph?.primaryPath
-      ? buildEditableMouthPath(part.morph.primaryPath, part.morph.viewBox)
-      : null;
   const previewingTalk = preview?.kind === "talk";
   const previewingBlink = preview?.kind === "blink" && preview.targetSlotId === part.slotId;
   if (
@@ -1366,10 +1390,6 @@ function PartLayer({
         },
       });
       onModeDone();
-      return;
-    }
-    if (mode === "mouth-shape" && part.role === "mouth") {
-      onSelect();
       return;
     }
     if (mode.startsWith("bounds")) {
@@ -1479,49 +1499,12 @@ function PartLayer({
           transformOrigin: `${((pivot.x - part.x) / part.width) * 100}% ${((pivot.y - part.y) / part.height) * 100}%`,
         }}
       >
-        {url &&
-          (editableMouth ? (
-            <svg
-              viewBox={editableMouth.viewBox}
-              className="h-full w-full overflow-visible"
-              aria-hidden
-            >
-              <path
-                d={editableMouth.path}
-                fill={part.morph?.fill ?? "#733f43"}
-                stroke={part.morph?.stroke}
-                strokeWidth={part.morph?.strokeWidth}
-                strokeLinecap={
-                  part.morph?.strokeLinecap as SVGAttributes<SVGPathElement>["strokeLinecap"]
-                }
-                strokeLinejoin={
-                  part.morph?.strokeLinejoin as SVGAttributes<SVGPathElement>["strokeLinejoin"]
-                }
-              />
-            </svg>
-          ) : (
-            <img
-              src={url}
-              alt={part.name}
-              draggable={false}
-              className="h-full w-full object-contain"
-            />
-          ))}
-        {selected && mode === "mouth-shape" && editableMouth && (
-          <MouthPointHandles
-            editable={editableMouth}
-            part={part}
-            scale={scale}
-            onChange={(path) =>
-              onChange({
-                morph: {
-                  ...part.morph,
-                  primaryPath: path,
-                  commandCount: (path.match(/[a-z]/gi) ?? []).length,
-                  compatibleWithRest: part.morph?.compatibleWithRest,
-                },
-              })
-            }
+        {url && (
+          <img
+            src={url}
+            alt={part.name}
+            draggable={false}
+            className="h-full w-full object-contain"
           />
         )}
         {selected && (
@@ -1808,7 +1791,7 @@ function previewDelta(
   }
   if (preview.kind === "talk" && part.role === "mouth") {
     const visemes = preview.visemes ?? ["rest", "A", "E", "O", "MBP"];
-    const idx = Math.floor(t * visemes.length * 1.8) % visemes.length;
+    const idx = Math.floor(t * visemes.length * 1.1) % visemes.length;
     const active = visemes[idx];
     return {
       dx: 0,
@@ -2167,9 +2150,6 @@ function updateEditableMouthPoint(
   return serializePathCommands(commands);
 }
 
-function normalizeColorForInput(value: string) {
-  return /^#[0-9a-f]{6}$/i.test(value) ? value : "#733f43";
-}
 
 
 

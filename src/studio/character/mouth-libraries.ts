@@ -81,9 +81,10 @@ const natural: RigStyle = {
     "M 18 30 C 30 30 45 30 50 30 C 55 30 70 30 82 30" +
     " C 74 37 60 41 50 41 C 40 41 26 37 18 30 Z",
 
-  // Interior: thin dark ellipse centred at mouth line, expands vertically
+  // Interior: D-arch — steep sides, flat ceiling, gentle lower curve.
+  // Control points sit directly above corners so the top stays flat (arch).
   interiorPath:
-    "M 22 30 C 35 28 65 28 78 30 C 65 32 35 32 22 30 Z",
+    "M 22 30 C 22 28 78 28 78 30 C 65 33 35 33 22 30 Z",
 
   // Teeth: flat strip just inside upper lip
   teethPath:
@@ -111,7 +112,7 @@ const wide: RigStyle = {
     "M 10 30 C 24 30 42 30 50 30 C 58 30 76 30 90 30" +
     " C 80 38 64 43 50 43 C 36 43 20 38 10 30 Z",
   interiorPath:
-    "M 14 30 C 30 27 70 27 86 30 C 70 33 30 33 14 30 Z",
+    "M 14 30 C 14 28 86 28 86 30 C 70 34 30 34 14 30 Z",
   teethPath:
     "M 22 29 C 36 27 64 27 78 29 L 78 33 C 64 35 36 35 22 33 Z",
   tonguePath:
@@ -134,7 +135,7 @@ const petite: RigStyle = {
     "M 24 30 C 34 30 44 30 50 30 C 56 30 66 30 76 30" +
     " C 68 36 58 39 50 39 C 42 39 32 36 24 30 Z",
   interiorPath:
-    "M 28 30 C 38 28 62 28 72 30 C 62 32 38 32 28 30 Z",
+    "M 28 30 C 28 28 72 28 72 30 C 62 33 38 33 28 30 Z",
   teethPath:
     "M 34 29 C 42 28 58 28 66 29 L 66 33 C 58 34 42 34 34 33 Z",
   tonguePath:
@@ -157,8 +158,9 @@ const cartoon: RigStyle = {
   lowerLipPath:
     "M 14 30 C 26 30 42 30 50 30 C 58 30 74 30 86 30" +
     " C 76 39 62 45 50 45 C 38 45 24 39 14 30 Z",
+  // Cartoon gets a more exaggerated arch peak (y=26 vs y=28) for drama.
   interiorPath:
-    "M 18 30 C 32 27 68 27 82 30 C 68 33 32 33 18 30 Z",
+    "M 18 30 C 18 26 82 26 82 30 C 68 35 32 35 18 30 Z",
   teethPath:
     "M 24 28 C 37 26 63 26 76 28 L 76 33 C 63 35 37 35 24 33 Z",
   tonguePath:
@@ -184,7 +186,7 @@ const straight: RigStyle = {
     "M 18 30 C 30 30 45 30 50 30 C 55 30 70 30 82 30" +
     " C 74 37 60 41 50 41 C 40 41 26 37 18 30 Z",
   interiorPath:
-    "M 22 30 C 35 28 65 28 78 30 C 65 32 35 32 22 30 Z",
+    "M 22 30 C 22 28 78 28 78 30 C 65 33 35 33 22 30 Z",
   teethPath:
     "M 30 29 C 40 28 60 28 70 29 L 70 33 C 60 34 40 34 30 33 Z",
   tonguePath:
@@ -208,7 +210,7 @@ const broad: RigStyle = {
     "M 12 30 C 26 30 44 30 50 30 C 56 30 74 30 88 30" +
     " C 78 39 62 44 50 44 C 38 44 22 39 12 30 Z",
   interiorPath:
-    "M 16 30 C 30 27 70 27 84 30 C 70 33 30 33 16 30 Z",
+    "M 16 30 C 16 28 84 28 84 30 C 68 34 32 34 16 30 Z",
   teethPath:
     "M 22 29 C 36 27 64 27 78 29 L 78 33 C 64 35 36 35 22 33 Z",
   tonguePath:
