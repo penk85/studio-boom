@@ -2,8 +2,9 @@
 // Builds a GSAP timeline from project data — no React imports.
 // Used by both Stage.tsx (live preview via tl.seek) and the future export serializer.
 import gsap from "gsap";
-import type { ActionPreset, CharacterClip, CharacterPart, CharacterPreset } from "../types";
+import type { ActionPreset, CharacterClip, CharacterPart, CharacterPreset, MouthViseme } from "../types";
 import type { CharacterSlotRef } from "../character/character-utils";
+import { RIG_STYLES, poseToTransforms } from "../character/mouth-libraries";
 import {
   listCharacterSlots,
   pickActivePartForSlot,
@@ -28,6 +29,11 @@ export function visemeDomId(clipId: string, slotId: string, viseme: string): str
 /** Individual eye state image inside an eye slot container. */
 export function eyeDomId(clipId: string, slotId: string, eyeState: string): string {
   return `${slotDomId(clipId, slotId)}-e-${eyeState}`;
+}
+
+/** DOM id for a transform-based mouth rig component element. */
+export function rigComponentId(clipId: string, component: string): string {
+  return `rig-${clipId}-${component}`;
 }
 
 // ─── Geometry helpers (mirrored from Stage.tsx — keep in sync) ─────────────────
@@ -213,6 +219,13 @@ function addVisemeEvents(
     }
     if (available.size === 0) continue;
 
+    // When all visible viseme parts have morph path data, Stage.tsx renders them
+    // as a single React-interpolated SVG — no per-viseme DOM elements to target.
+    const allHaveMorphPaths = [...available.keys()].every((v) =>
+      slot.parts.some((p) => p.visible && (p.viseme === v || p.pose === v) && p.morph?.primaryPath),
+    );
+    if (allHaveMorphPaths) continue;
+
     const firstVisible = available.has("rest") ? "rest" : ([...available.keys()][0] ?? "rest");
 
     // Initial state.
@@ -318,7 +331,67 @@ export function buildCharacterTimeline(
   }
 
   addBlinkEvents(tl, clip, slots);
-  addVisemeEvents(tl, clip, slots);
+
+  if (character.mouthRig) {
+    addRigVisemeEvents(tl, clip, character);
+  } else {
+    addVisemeEvents(tl, clip, slots);
+  }
 
   return tl;
+}
+
+// ─── Rig viseme events ────────────────────────────────────────────────────────
+
+function addRigVisemeEvents(
+  tl: gsap.core.Timeline,
+  clip: CharacterClip,
+  character: CharacterPreset,
+): void {
+  const { mouthRig } = character;
+  if (!mouthRig) return;
+
+  const rigStyle = RIG_STYLES.find((s) => s.id === mouthRig.styleId) ?? RIG_STYLES[0];
+  const { placement } = mouthRig;
+  // Convert SVG-unit offsets to CSS pixels using the rendered placement size.
+  const pxPerSvgY = placement.height / 60;
+  const pxPerSvgX = placement.width / 100;
+
+  const ids = {
+    upperLip: `#${rigComponentId(clip.id, "upper-lip")}`,
+    lowerLip: `#${rigComponentId(clip.id, "lower-lip")}`,
+    interior: `#${rigComponentId(clip.id, "interior")}`,
+    teeth:    `#${rigComponentId(clip.id, "teeth")}`,
+    tongue:   `#${rigComponentId(clip.id, "tongue")}`,
+  };
+
+  const curveOpts = {
+    upperCurve: mouthRig.upperCurve ?? 0,
+    lowerCurve: mouthRig.lowerCurve ?? 0,
+  };
+
+  const applyTransforms = (transforms: ReturnType<typeof poseToTransforms>, atTime: number, duration: number) => {
+    const { upperLip, lowerLip, interior, teeth, tongue } = transforms;
+    tl.to(ids.upperLip, { y: upperLip.y * pxPerSvgY, scaleX: upperLip.scaleX * mouthRig.widthScale, scaleY: upperLip.scaleY, duration, ease: "power1.out" }, atTime);
+    tl.to(ids.lowerLip, { y: lowerLip.y * pxPerSvgY, scaleX: lowerLip.scaleX * mouthRig.widthScale, scaleY: lowerLip.scaleY, duration, ease: "power1.out" }, atTime);
+    tl.to(ids.interior, { scaleY: interior.scaleY, scaleX: interior.scaleX * mouthRig.widthScale, opacity: interior.opacity, duration, ease: "power1.out" }, atTime);
+    tl.to(ids.teeth,    { opacity: teeth.opacity,  y: teeth.y * pxPerSvgY,  duration: duration * 0.7 }, atTime);
+    tl.to(ids.tongue,   { opacity: tongue.opacity, y: tongue.y * pxPerSvgY, duration: duration * 0.7 }, atTime);
+  };
+
+  // Set initial rest state at t=0.
+  const restTransforms = poseToTransforms(mouthRig.poses.rest, rigStyle, curveOpts);
+  applyTransforms(restTransforms, 0, 0);
+
+  // Emit tl.to() tweens for each viseme event.
+  const BLEND = 0.075;
+  const sortedVisemes = [...(clip.visemes ?? [])].sort((a, b) => a.t - b.t);
+
+  for (const { t, v } of sortedVisemes) {
+    if (t < 0 || t > clip.duration) continue;
+    const pose = mouthRig.poses[v as MouthViseme] ?? mouthRig.poses.rest;
+    const transforms = poseToTransforms(pose, rigStyle, curveOpts);
+    const startAt = Math.max(0, t - BLEND);
+    applyTransforms(transforms, startAt, Math.min(BLEND, t));
+  }
 }

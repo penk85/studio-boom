@@ -1,172 +1,78 @@
-import { useRef, useState, useCallback } from "react";
-import { X, Image as ImageIcon } from "lucide-react";
+import { useState } from "react";
+import { X } from "lucide-react";
 import { MOUTH_VISEMES } from "../lipsync/viseme-schema";
-import { absolutizeAndMorphPath, MOUTH_MORPH_PRESETS, parseViewBox } from "./mouth-morph";
-
-const VIEW_W = 100;
-const VIEW_H = 60;
-const VIEWBOX = `0 0 ${VIEW_W} ${VIEW_H}`;
-const STROKE_W = 2.5;
-
-// Parameters that drive the mouth shape
-interface MouthParams {
-  width: number;        // 0.4 narrow → 1.6 wide
-  topHeight: number;    // 0.0 flat → 1.5 arched upper lip
-  bottomHeight: number; // 0.0 flat → 1.5 drooping lower lip
-  upperArch: number;    // 0.0 smooth → 2.0 peaked
-  lowerArch: number;    // 0.0 smooth → 2.0 full
-}
-
-const DEFAULT_PARAMS: MouthParams = {
-  width: 1.0,
-  topHeight: 0.2,
-  bottomHeight: 0.3,
-  upperArch: 0.3,
-  lowerArch: 0.3,
-};
-
-const MOUTH_STYLES: Array<{ id: string; label: string; params: MouthParams }> = [
-  {
-    id: "natural",
-    label: "Natural",
-    params: { width: 1.0, topHeight: 0.2, bottomHeight: 0.3, upperArch: 0.3, lowerArch: 0.3 },
-  },
-  {
-    id: "wide",
-    label: "Wide",
-    params: { width: 1.45, topHeight: 0.1, bottomHeight: 0.18, upperArch: 0.1, lowerArch: 0.2 },
-  },
-  {
-    id: "round",
-    label: "Round",
-    params: { width: 0.72, topHeight: 0.6, bottomHeight: 0.72, upperArch: 0.9, lowerArch: 1.0 },
-  },
-  {
-    id: "petite",
-    label: "Petite",
-    params: { width: 0.55, topHeight: 0.25, bottomHeight: 0.35, upperArch: 0.5, lowerArch: 0.4 },
-  },
-  {
-    id: "pouty",
-    label: "Pouty",
-    params: { width: 0.9, topHeight: 0.1, bottomHeight: 1.0, upperArch: 0.15, lowerArch: 1.5 },
-  },
-  {
-    id: "cartoon",
-    label: "Cartoon",
-    params: { width: 1.2, topHeight: 0.55, bottomHeight: 0.75, upperArch: 1.4, lowerArch: 1.7 },
-  },
-];
-
-// Two stroke arcs sharing the same corner anchors.
-// At rest the arcs are nearly on top of each other (natural closed mouth).
-// The morph system moves them apart for open-mouth visemes.
-// Structure: M C C  M C C  — compound path, no fill, stroke only.
-function generateMouthPath(p: MouthParams, lipColor: string): string {
-  const cx = VIEW_W / 2;
-  const cy = VIEW_H / 2;
-  const halfW = 30 * p.width;
-  const left = cx - halfW;
-  const right = cx + halfW;
-
-  // Upper lip apex — sits slightly above the corner baseline
-  const upperMid = cy - 7 * p.topHeight;
-  // Control point height drives the cupid's-bow sharpness
-  const upperCtrl = upperMid - 4 * p.upperArch;
-
-  // Lower lip nadir — sits slightly below the corner baseline
-  const lowerMid = cy + 7 * p.bottomHeight;
-  // Control point depth drives lower-lip fullness
-  const lowerCtrl = lowerMid + 5 * p.lowerArch;
-
-  const innerX = halfW * 0.35;
-  const outerX = halfW * 0.3;
-
-  const f = (n: number) => Number(n.toFixed(3)).toString();
-
-  const d = [
-    // Upper lip: left corner → apex → right corner
-    `M ${f(left)} ${f(cy)}`,
-    `C ${f(left + outerX)} ${f(upperCtrl)} ${f(cx - innerX)} ${f(upperMid)} ${f(cx)} ${f(upperMid)}`,
-    `C ${f(cx + innerX)} ${f(upperMid)} ${f(right - outerX)} ${f(upperCtrl)} ${f(right)} ${f(cy)}`,
-    // Lower lip: right corner → nadir → left corner
-    `M ${f(right)} ${f(cy)}`,
-    `C ${f(right - outerX)} ${f(lowerCtrl)} ${f(cx + innerX)} ${f(lowerMid)} ${f(cx)} ${f(lowerMid)}`,
-    `C ${f(cx - innerX)} ${f(lowerMid)} ${f(left + outerX)} ${f(lowerCtrl)} ${f(left)} ${f(cy)}`,
-  ].join(" ");
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${VIEWBOX}"><path d="${d}" fill="none" stroke="${lipColor}" stroke-width="${STROKE_W}" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-}
-
-function morphedPath(restSvg: string, viseme: string): string {
-  const match = restSvg.match(/d="([^"]+)"/);
-  if (!match) return "";
-  try {
-    return absolutizeAndMorphPath(match[1], parseViewBox(VIEWBOX), MOUTH_MORPH_PRESETS[viseme as keyof typeof MOUTH_MORPH_PRESETS]);
-  } catch {
-    return match[1];
-  }
-}
+import type { MouthPose, MouthRig, MouthViseme } from "../types";
+import {
+  createDefaultMouthRig,
+  DEFAULT_INTERIOR_COLOR,
+  DEFAULT_LIP_COLOR,
+  DEFAULT_TEETH_COLOR,
+  DEFAULT_TONGUE_COLOR,
+  MOUTH_VIEWBOX,
+  poseToTransforms,
+  RIG_STYLES,
+  VISEME_POSES,
+  type RigStyle,
+} from "./mouth-libraries";
 
 interface MouthCreatorProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (svg: string, name: string) => void;
+  onSave: (rig: MouthRig) => void;
+  initialRig?: MouthRig;
 }
 
-export function MouthCreator({ isOpen, onClose, onSave }: MouthCreatorProps) {
-  const [params, setParams] = useState<MouthParams>(DEFAULT_PARAMS);
-  const [lipColor, setLipColor] = useState("#C98255");
-  const [referenceImage, setReferenceImage] = useState<string | null>(null);
-  const [imageOpacity, setImageOpacity] = useState(0.25);
-  const [activeStyle, setActiveStyle] = useState("natural");
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const applyStyle = useCallback((style: typeof MOUTH_STYLES[number]) => {
-    setActiveStyle(style.id);
-    setParams(style.params);
-  }, []);
-
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setReferenceImage(URL.createObjectURL(file));
-  };
-
-  const setParam = (key: keyof MouthParams) => (e: React.ChangeEvent<HTMLInputElement>) => {
-    setActiveStyle("");
-    setParams((prev) => ({ ...prev, [key]: Number(e.target.value) }));
-  };
-
-  const handleSave = () => {
-    const svg = generateMouthPath(params, lipColor);
-    onSave(svg, "Mouth rest");
-    onClose();
-  };
+export function MouthCreator({ isOpen, onClose, onSave, initialRig }: MouthCreatorProps) {
+  const [styleId, setStyleId] = useState(initialRig?.styleId ?? RIG_STYLES[0].id);
+  const [widthScale, setWidthScale] = useState(initialRig?.widthScale ?? 1.0);
+  const [upperCurve, setUpperCurve] = useState(initialRig?.upperCurve ?? 0);
+  const [lowerCurve, setLowerCurve] = useState(initialRig?.lowerCurve ?? 0);
+  const [lipColor, setLipColor] = useState(initialRig?.lipColor ?? DEFAULT_LIP_COLOR);
+  const [teethColor, setTeethColor] = useState(initialRig?.teethColor ?? DEFAULT_TEETH_COLOR);
+  const [tongueColor, setTongueColor] = useState(initialRig?.tongueColor ?? DEFAULT_TONGUE_COLOR);
+  const [interiorColor, setInteriorColor] = useState(initialRig?.interiorColor ?? DEFAULT_INTERIOR_COLOR);
+  const [poses, setPoses] = useState<Record<MouthViseme, MouthPose>>(
+    () => initialRig?.poses ? { ...initialRig.poses } : { ...VISEME_POSES },
+  );
+  const [selectedViseme, setSelectedViseme] = useState<MouthViseme | null>(null);
 
   if (!isOpen) return null;
 
-  const restSvg = generateMouthPath(params, lipColor);
-  const restPathD = restSvg.match(/d="([^"]+)"/)?.[1] ?? "";
+  const style = RIG_STYLES.find((s) => s.id === styleId) ?? RIG_STYLES[0];
 
-  const strokeProps = {
-    fill: "none" as const,
-    stroke: lipColor,
-    strokeWidth: STROKE_W,
-    strokeLinecap: "round" as const,
-    strokeLinejoin: "round" as const,
+  const setPoseParam = (viseme: MouthViseme, param: keyof MouthPose, value: number) => {
+    setPoses((prev) => ({ ...prev, [viseme]: { ...prev[viseme], [param]: value } }));
   };
+
+  const handleSave = () => {
+    const rig = createDefaultMouthRig(styleId, initialRig?.placement);
+    rig.widthScale = widthScale;
+    rig.upperCurve = upperCurve;
+    rig.lowerCurve = lowerCurve;
+    rig.lipColor = lipColor;
+    rig.teethColor = teethColor;
+    rig.tongueColor = tongueColor;
+    rig.interiorColor = interiorColor;
+    rig.poses = { ...poses };
+    onSave(rig);
+  };
+
+  const handleReset = (viseme: MouthViseme) => {
+    setPoses((prev) => ({ ...prev, [viseme]: { ...VISEME_POSES[viseme] } }));
+  };
+
+  const colors = { lipColor, teethColor, tongueColor, interiorColor };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="flex max-h-[95vh] w-[780px] flex-col rounded-lg bg-panel shadow-xl">
+      <div className="flex max-h-[95vh] w-[700px] flex-col rounded-lg bg-panel shadow-xl">
 
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <div>
-            <h2 className="text-base font-semibold">Design Rest Mouth</h2>
+            <h2 className="text-base font-semibold">Choose Mouth Style</h2>
             <p className="text-[11px] text-muted-foreground">
-              Pick a style, adjust sliders, then save — all other visemes are generated automatically.
+              Transform-based rig — all 10 visemes animate smoothly via GSAP.
             </p>
           </div>
           <button onClick={onClose} className="rounded p-1 hover:bg-panel-2">
@@ -174,173 +80,81 @@ export function MouthCreator({ isOpen, onClose, onSave }: MouthCreatorProps) {
           </button>
         </div>
 
-        {/* Main area */}
-        <div className="flex flex-1 gap-4 overflow-hidden p-4">
+        {/* Body */}
+        <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-4">
 
-          {/* Left — canvas preview */}
-          <div className="flex flex-col gap-3">
-            {/* Style gallery */}
-            <div>
-              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Start with a style
-              </div>
-              <div className="grid grid-cols-3 gap-1.5">
-                {MOUTH_STYLES.map((style) => (
-                  <button
-                    key={style.id}
-                    onClick={() => applyStyle(style)}
-                    className={`flex flex-col items-center gap-1 rounded border px-2 py-1.5 text-[10px] transition-colors ${
-                      activeStyle === style.id
-                        ? "border-primary bg-primary/15 text-primary"
-                        : "border-border bg-background hover:bg-panel-2"
-                    }`}
-                  >
-                    <svg viewBox={VIEWBOX} className="h-6 w-12" aria-hidden>
-                      <path
-                        d={(() => {
-                          const svg = generateMouthPath(style.params, lipColor);
-                          return svg.match(/d="([^"]+)"/)?.[1] ?? "";
-                        })()}
-                        {...strokeProps}
-                      />
-                    </svg>
-                    {style.label}
-                  </button>
-                ))}
-              </div>
+          {/* Style selector */}
+          <div>
+            <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Style
             </div>
-
-            {/* Canvas */}
-            <div className="relative overflow-hidden rounded border border-border bg-background" style={{ width: 300, height: 180 }}>
-              {referenceImage && (
-                <img
-                  src={referenceImage}
-                  alt="Reference"
-                  className="absolute inset-0 h-full w-full object-contain"
-                  style={{ opacity: imageOpacity }}
+            <div className="grid grid-cols-3 gap-2">
+              {RIG_STYLES.map((s) => (
+                <StyleCard
+                  key={s.id}
+                  style={s}
+                  pose={poses.rest}
+                  colors={colors}
+                  widthScale={widthScale}
+                  upperCurve={upperCurve}
+                  lowerCurve={lowerCurve}
+                  selected={s.id === styleId}
+                  onClick={() => setStyleId(s.id)}
                 />
-              )}
-              <svg viewBox={VIEWBOX} className="absolute inset-0 h-full w-full">
-                <path d={restPathD} {...strokeProps} />
-              </svg>
-            </div>
-
-            {/* Reference image controls */}
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] hover:bg-panel-2"
-              >
-                <ImageIcon size={13} />
-                {referenceImage ? "Change reference" : "Upload reference image"}
-              </button>
-              <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
-              {referenceImage && (
-                <>
-                  <input
-                    type="range"
-                    min="0.05"
-                    max="0.6"
-                    step="0.05"
-                    value={imageOpacity}
-                    onChange={(e) => setImageOpacity(Number(e.target.value))}
-                    className="w-20"
-                    title="Reference opacity"
-                  />
-                  <button
-                    onClick={() => setReferenceImage(null)}
-                    className="text-[10px] text-muted-foreground hover:text-destructive"
-                  >
-                    <X size={12} />
-                  </button>
-                </>
-              )}
-            </div>
-
-            {/* Lip color */}
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-muted-foreground">Lip colour</span>
-              <input
-                type="color"
-                value={lipColor}
-                onChange={(e) => setLipColor(e.target.value)}
-                className="h-6 w-8 cursor-pointer rounded border border-border"
-              />
+              ))}
             </div>
           </div>
 
-          {/* Right — sliders */}
-          <div className="flex flex-1 flex-col gap-3">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-              Fine-tune
+          {/* Viseme board — all 10 poses, click to edit */}
+          <div>
+            <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              All visemes — click to edit pose
             </div>
-
-            <SliderRow
-              label="Width"
-              hint="Narrow → Wide"
-              min={0.4} max={1.6} step={0.05}
-              value={params.width}
-              onChange={setParam("width")}
-            />
-            <SliderRow
-              label="Upper lip height"
-              hint="Flat → Arched"
-              min={0.0} max={1.5} step={0.05}
-              value={params.topHeight}
-              onChange={setParam("topHeight")}
-            />
-            <SliderRow
-              label="Lower lip fullness"
-              hint="Thin → Full"
-              min={0.0} max={1.5} step={0.05}
-              value={params.bottomHeight}
-              onChange={setParam("bottomHeight")}
-            />
-            <SliderRow
-              label="Upper lip curve"
-              hint="Smooth → Peaked"
-              min={0.0} max={2.0} step={0.05}
-              value={params.upperArch}
-              onChange={setParam("upperArch")}
-            />
-            <SliderRow
-              label="Lower lip curve"
-              hint="Smooth → Full"
-              min={0.0} max={2.0} step={0.05}
-              value={params.lowerArch}
-              onChange={setParam("lowerArch")}
-            />
-
-            <button
-              onClick={() => { setParams(DEFAULT_PARAMS); setActiveStyle("natural"); }}
-              className="mt-1 w-full rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-panel-2 hover:text-foreground"
-            >
-              Reset to defaults
-            </button>
+            <div className="grid grid-cols-5 gap-2">
+              {MOUTH_VISEMES.map((viseme) => (
+                <VisemeCell
+                  key={viseme}
+                  viseme={viseme}
+                  style={style}
+                  pose={poses[viseme]}
+                  colors={colors}
+                  widthScale={widthScale}
+                  upperCurve={upperCurve}
+                  lowerCurve={lowerCurve}
+                  selected={viseme === selectedViseme}
+                  onClick={() => setSelectedViseme(viseme === selectedViseme ? null : viseme)}
+                />
+              ))}
+            </div>
           </div>
-        </div>
 
-        {/* Viseme preview strip */}
-        <div className="border-t border-border px-4 py-3">
-          <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            How it morphs — all visemes generated from your rest shape
-          </div>
-          <div className="flex gap-2 overflow-x-auto pb-1">
-            {MOUTH_VISEMES.map((viseme) => {
-              const d = viseme === "rest" ? restPathD : morphedPath(restSvg, viseme);
-              return (
-                <div key={viseme} className="flex flex-shrink-0 flex-col items-center gap-1">
-                  <div className="rounded border border-border bg-background p-1" style={{ width: 60, height: 36 }}>
-                    <svg viewBox={VIEWBOX} className="h-full w-full">
-                      <path d={d} {...strokeProps} />
-                    </svg>
-                  </div>
-                  <span className="text-[9px] uppercase tracking-wider text-muted-foreground">
-                    {viseme}
-                  </span>
-                </div>
-              );
-            })}
+          {/* Per-viseme pose editor */}
+          {selectedViseme && (
+            <PoseEditor
+              viseme={selectedViseme}
+              pose={poses[selectedViseme]}
+              style={style}
+              colors={colors}
+              widthScale={widthScale}
+              upperCurve={upperCurve}
+              lowerCurve={lowerCurve}
+              onChange={(param, value) => setPoseParam(selectedViseme, param, value)}
+              onReset={() => handleReset(selectedViseme)}
+            />
+          )}
+
+          {/* Controls */}
+          <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+            <ShapeSlider label="Width" value={widthScale} min={0.7} max={1.3} step={0.05} onChange={setWidthScale} />
+            <ShapeSlider label="Upper lip arch" value={upperCurve} min={-1} max={1} step={0.05} onChange={setUpperCurve} />
+            <ShapeSlider label="Lower lip arch" value={lowerCurve} min={-1} max={1} step={0.05} onChange={setLowerCurve} />
+            {/* Colour pickers */}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <ColorPicker label="Lips" value={lipColor} onChange={setLipColor} />
+              <ColorPicker label="Teeth" value={teethColor} onChange={setTeethColor} />
+              <ColorPicker label="Tongue" value={tongueColor} onChange={setTongueColor} />
+              <ColorPicker label="Interior" value={interiorColor} onChange={setInteriorColor} />
+            </div>
           </div>
         </div>
 
@@ -356,7 +170,7 @@ export function MouthCreator({ isOpen, onClose, onSave }: MouthCreatorProps) {
             onClick={handleSave}
             className="rounded bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90"
           >
-            Save Rest Mouth
+            Save Mouth Style
           </button>
         </div>
       </div>
@@ -364,43 +178,275 @@ export function MouthCreator({ isOpen, onClose, onSave }: MouthCreatorProps) {
   );
 }
 
-function SliderRow({
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+interface Colors {
+  lipColor: string;
+  teethColor: string;
+  tongueColor: string;
+  interiorColor: string;
+}
+
+function StyleCard({
+  style,
+  pose,
+  colors,
+  widthScale,
+  upperCurve,
+  lowerCurve,
+  selected,
+  onClick,
+}: {
+  style: RigStyle;
+  pose: MouthPose;
+  colors: Colors;
+  widthScale: number;
+  upperCurve: number;
+  lowerCurve: number;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex flex-col items-center gap-1.5 rounded border px-2 py-2 text-[11px] transition-colors ${
+        selected
+          ? "border-primary bg-primary/15 text-primary"
+          : "border-border bg-background hover:bg-panel-2"
+      }`}
+    >
+      <div className="w-full" style={{ aspectRatio: "100/60" }}>
+        <RigPreview style={style} pose={pose} colors={colors} widthScale={widthScale} upperCurve={upperCurve} lowerCurve={lowerCurve} />
+      </div>
+      {style.label}
+    </button>
+  );
+}
+
+function VisemeCell({
+  viseme,
+  style,
+  pose,
+  colors,
+  widthScale,
+  upperCurve,
+  lowerCurve,
+  selected,
+  onClick,
+}: {
+  viseme: MouthViseme;
+  style: RigStyle;
+  pose: MouthPose;
+  colors: Colors;
+  widthScale: number;
+  upperCurve: number;
+  lowerCurve: number;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex flex-col items-center gap-1 rounded border p-1 transition-colors ${
+        selected
+          ? "border-primary bg-primary/15"
+          : "border-border bg-background hover:border-primary/50"
+      }`}
+    >
+      <div className="w-full" style={{ aspectRatio: "100/60" }}>
+        <RigPreview style={style} pose={pose} colors={colors} widthScale={widthScale} upperCurve={upperCurve} lowerCurve={lowerCurve} />
+      </div>
+      <span className="text-[9px] uppercase tracking-wider text-muted-foreground">{viseme}</span>
+    </button>
+  );
+}
+
+function PoseEditor({
+  viseme,
+  pose,
+  style,
+  colors,
+  widthScale,
+  upperCurve,
+  lowerCurve,
+  onChange,
+  onReset,
+}: {
+  viseme: MouthViseme;
+  pose: MouthPose;
+  style: RigStyle;
+  colors: Colors;
+  widthScale: number;
+  upperCurve: number;
+  lowerCurve: number;
+  onChange: (param: keyof MouthPose, value: number) => void;
+  onReset: () => void;
+}) {
+  const params: { key: keyof MouthPose; label: string; min: number; max: number; step: number }[] = [
+    { key: "open",    label: "Open",    min: -0.2, max: 1,   step: 0.05 },
+    { key: "wide",    label: "Wide",    min: -0.6, max: 1,   step: 0.05 },
+    { key: "round",   label: "Round",   min: 0,    max: 1,   step: 0.05 },
+    { key: "smile",   label: "Smile",   min: 0,    max: 1,   step: 0.05 },
+    { key: "teeth",   label: "Teeth",   min: 0,    max: 1,   step: 0.05 },
+    { key: "tongue",  label: "Tongue",  min: 0,    max: 1,   step: 0.05 },
+    { key: "fvBite",  label: "FV Bite", min: 0,    max: 1,   step: 0.05 },
+  ];
+
+  return (
+    <div className="rounded border border-primary/30 bg-primary/5 p-3">
+      <div className="mb-3 flex items-center justify-between">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-primary">
+          Editing: {viseme}
+        </span>
+        <div className="flex items-center gap-3">
+          <div className="h-10 w-16 shrink-0">
+            <RigPreview style={style} pose={pose} colors={colors} widthScale={widthScale} upperCurve={upperCurve} lowerCurve={lowerCurve} />
+          </div>
+          <button
+            type="button"
+            onClick={onReset}
+            className="text-[10px] text-muted-foreground underline hover:text-foreground"
+          >
+            Reset
+          </button>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+        {params.map(({ key, label, min, max, step }) => (
+          <div key={key} className="flex flex-col gap-0.5">
+            <div className="flex justify-between text-[10px]">
+              <span className="text-muted-foreground">{label}</span>
+              <span className="tabular-nums text-muted-foreground">{pose[key].toFixed(2)}</span>
+            </div>
+            <input
+              type="range"
+              min={min}
+              max={max}
+              step={step}
+              value={pose[key]}
+              onChange={(e) => onChange(key, Number(e.target.value))}
+              className="w-full accent-primary"
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ShapeSlider({
   label,
-  hint,
+  value,
   min,
   max,
   step,
-  value,
   onChange,
 }: {
   label: string;
-  hint: string;
+  value: number;
   min: number;
   max: number;
   step: number;
-  value: number;
-  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onChange: (v: number) => void;
 }) {
   return (
-    <div className="space-y-0.5">
-      <div className="flex items-baseline justify-between">
-        <span className="text-[12px] font-medium">{label}</span>
-        <span className="text-[10px] text-muted-foreground">{hint}</span>
+    <div className="flex flex-col gap-0.5">
+      <div className="flex justify-between text-[11px]">
+        <span className="text-muted-foreground">{label}</span>
+        <span className="tabular-nums text-muted-foreground">{value.toFixed(2)}</span>
       </div>
       <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
+        type="range" min={min} max={max} step={step}
         value={value}
-        onChange={onChange}
+        onChange={(e) => onChange(Number(e.target.value))}
         className="w-full accent-primary"
       />
     </div>
   );
 }
 
-export function createMouthSvgFile(svgContent: string, viseme: string): File {
-  const blob = new Blob([svgContent], { type: "image/svg+xml" });
-  return new File([blob], `mouth-${viseme}.svg`, { type: "image/svg+xml" });
+function ColorPicker({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1">
+      <span className="text-[11px] text-muted-foreground">{label}</span>
+      <input
+        type="color"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="h-6 w-8 cursor-pointer rounded border border-border"
+      />
+    </div>
+  );
+}
+
+// ─── Rig preview (pure SVG, no DOM IDs, no GSAP) ─────────────────────────────
+// Used only in the MouthCreator UI. Stage and export use GSAP on DOM elements.
+export function RigPreview({
+  style,
+  pose,
+  colors,
+  widthScale = 1,
+  upperCurve = 0,
+  lowerCurve = 0,
+}: {
+  style: RigStyle;
+  pose: MouthPose;
+  colors: Colors;
+  widthScale?: number;
+  upperCurve?: number;
+  lowerCurve?: number;
+}) {
+  const t = poseToTransforms(pose, style, { upperCurve, lowerCurve });
+
+  const ux = t.upperLip.scaleX * widthScale;
+  const lx = t.lowerLip.scaleX * widthScale;
+  const ix = t.interior.scaleX * widthScale;
+
+  const cx = 50; // horizontal transform origin (centre of viewBox)
+  const cy = 30; // vertical transform origin (lip line)
+
+  const transform = (y: number, sx: number, sy = 1) =>
+    `translate(${cx} ${cy + y}) scale(${sx} ${sy}) translate(${-cx} ${-cy})`;
+
+  return (
+    <svg viewBox={MOUTH_VIEWBOX} className="h-full w-full" aria-hidden>
+      <path
+        d={style.interiorPath}
+        fill={colors.interiorColor}
+        opacity={t.interior.opacity}
+        transform={transform(0, ix, Math.max(0.01, t.interior.scaleY))}
+      />
+      <path
+        d={style.tonguePath}
+        fill={colors.tongueColor}
+        opacity={t.tongue.opacity}
+        transform={transform(t.tongue.y, lx)}
+      />
+      <path
+        d={style.teethPath}
+        fill={colors.teethColor}
+        opacity={t.teeth.opacity}
+        transform={transform(t.teeth.y, ux)}
+      />
+      <path
+        d={style.lowerLipPath}
+        fill={colors.lipColor}
+        transform={transform(t.lowerLip.y, lx, t.lowerLip.scaleY)}
+      />
+      <path
+        d={style.upperLipPath}
+        fill={colors.lipColor}
+        transform={transform(t.upperLip.y, ux, t.upperLip.scaleY)}
+      />
+    </svg>
+  );
 }

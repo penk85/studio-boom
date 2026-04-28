@@ -165,6 +165,33 @@ export interface HeadVariant {
   featureOffsetY?: number;
 }
 
+/** Pose parameters for one viseme in a transform-based mouth rig. All values 0..1 unless noted. */
+export interface MouthPose {
+  open: number;     // 0=closed → 1=max jaw drop
+  wide: number;     // 0=neutral → 1=stretched (E-shape); negative = narrower
+  round: number;    // 0=neutral → 1=maximum pucker (O/U/WQ)
+  smile: number;    // 0=neutral → 1=corners lifted
+  teeth: number;    // 0=hidden → 1=fully visible
+  tongue: number;   // 0=hidden → 1=fully visible
+  fvBite: number;   // 0=normal → 1=upper teeth on lower lip (FV)
+}
+
+/** Transform-based mouth rig stored on the character. Drives lip sync via GSAP tweens. */
+export interface MouthRig {
+  styleId: string;
+  lipColor: string;
+  teethColor: string;
+  tongueColor: string;
+  interiorColor: string;
+  widthScale: number;
+  /** 0 = default arch, positive = more bow/arch, negative = flatter. Range roughly -1 to 1. */
+  upperCurve: number;
+  lowerCurve: number;
+  /** Placement on the character canvas (SVG viewBox 0 0 100 60 maps into this box). */
+  placement: { x: number; y: number; width: number; height: number; zIndex: number };
+  poses: Record<MouthViseme, MouthPose>;
+}
+
 /** Placement for generated fallback mouth shapes when a rig has no custom mouth visemes. */
 export interface FallbackMouthAnchor {
   x: number;
@@ -210,6 +237,8 @@ export interface CharacterPreset {
   headVariants?: HeadVariant[];
   /** Where generated fallback lip-sync mouth shapes should appear. */
   fallbackMouth?: FallbackMouthAnchor;
+  /** Transform-based mouth rig. When present, replaces SVG-file viseme parts for lip sync. */
+  mouthRig?: MouthRig;
   createdAt: number;
   updatedAt: number;
 }

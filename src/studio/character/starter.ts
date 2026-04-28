@@ -1,6 +1,7 @@
 import { db, importMediaFile } from "../db";
 import type { CharacterPreset, MouthViseme } from "../types";
 import { createBlankCharacter, makePart } from "./character-utils";
+import { createDefaultMouthRig } from "./mouth-libraries";
 
 const STARTER_ID = "builtin-starter-character";
 const CANVAS_W = 600;
@@ -163,6 +164,13 @@ export async function ensureStarterCharacterSeeded() {
       mouthPart(mouthFv.id, "FV"),
       mouthPart(mouthL.id, "L"),
     ],
+    mouthRig: createDefaultMouthRig("natural", {
+      x: 210,
+      y: 330,
+      width: 180,
+      height: 108,
+      zIndex: 60,
+    }),
     createdAt: now,
     updatedAt: now,
   };
@@ -181,7 +189,8 @@ export async function ensureStarterCharacterSeeded() {
     const hasRaisedBrows = existing.parts.some(
       (part) => part.role === "eyebrow" && part.pose === "raised",
     );
-    if (hasOpenEyes && hasClosedEyes && hasNeutralBrows && hasRaisedBrows) return existing;
+    if (hasOpenEyes && hasClosedEyes && hasNeutralBrows && hasRaisedBrows && existing.mouthRig)
+      return existing;
   }
 
   await db.characters.put(character);

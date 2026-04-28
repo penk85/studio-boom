@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type SVGAttributes } from "react";
-import { MouthCreator } from "./MouthCreator";
+import { MouthCreator, RigPreview } from "./MouthCreator";
+import { RIG_STYLES } from "./mouth-libraries";
 import {
   ArrowDown,
   ArrowUp,
@@ -29,14 +30,11 @@ import {
 } from "./character-utils";
 import { MOUTH_VISEMES, MOUTH_VISEME_DESCRIPTIONS } from "../lipsync/viseme-schema";
 import {
-  absolutizeAndMorphPath,
   clamp,
   fmt,
-  MOUTH_MORPH_PRESETS,
   parseSvgPath,
   parseViewBox,
   resolvePoint,
-  type MouthMorphProfile,
   type PathCommand,
 } from "./mouth-morph";
 import type {
@@ -45,6 +43,7 @@ import type {
   CharacterPreset,
   EyeState,
   ID,
+  MouthRig,
   MouthViseme,
   MovementPresetKind,
   PartManifest,
@@ -116,6 +115,7 @@ export function CharacterEditor({ characterId }: Props) {
   const navigate = useNavigate();
   const [doc, setDoc] = useState<CharacterPreset | null>(null);
   const [selectedPartId, setSelectedPartId] = useState<ID | null>(null);
+  const [rigSelected, setRigSelected] = useState(false);
   const [scale, setScale] = useState(0.7);
   const [mode, setMode] = useState<EditorMode>("select");
   const [preview, setPreview] = useState<PreviewState | null>(null);
@@ -256,6 +256,13 @@ export function CharacterEditor({ characterId }: Props) {
 
   const selectedPart = doc.parts.find((p) => p.id === selectedPartId) ?? null;
   const orderedParts = doc.parts.slice().sort((a, b) => a.zIndex - b.zIndex);
+
+  const selectPart = (id: ID) => { setSelectedPartId(id); setRigSelected(false); };
+  const selectRig = () => { setSelectedPartId(null); setRigSelected(true); };
+  const updateRigPlacement = (placement: NonNullable<typeof doc.mouthRig>["placement"]) => {
+    if (!doc.mouthRig) return;
+    updateDoc({ mouthRig: { ...doc.mouthRig, placement } });
+  };
   const exportData = JSON.stringify(normalizeCharacterSlots(doc), null, 2);
   const manifest = normalizePartManifest(doc.manifest);
   const mouthEditingPart =
@@ -317,19 +324,22 @@ export function CharacterEditor({ characterId }: Props) {
             onImport={importSvg}
             parts={doc.parts}
             manifest={manifest}
+            mouthRig={doc.mouthRig}
+            onSaveRig={(rig) => updateDoc({ mouthRig: rig })}
             selectedId={selectedPartId}
-            onEditPart={(id) => {
-              setSelectedPartId(id);
-              setMode("mouth-shape");
-            }}
-            onSelectPart={setSelectedPartId}
+            onEditPart={(id) => { selectPart(id); setMode("mouth-shape"); }}
+            onSelectPart={selectPart}
           />
           <LayerList
             parts={orderedParts}
             selectedId={selectedPartId}
-            onSelect={setSelectedPartId}
+            onSelect={selectPart}
             onChange={updatePart}
             onRemove={removePart}
+            mouthRig={doc.mouthRig}
+            rigSelected={rigSelected}
+            onSelectRig={selectRig}
+            onChangeRigZIndex={(z) => doc.mouthRig && updateDoc({ mouthRig: { ...doc.mouthRig, placement: { ...doc.mouthRig.placement, zIndex: z } } })}
           />
         </aside>
 
@@ -367,11 +377,21 @@ export function CharacterEditor({ characterId }: Props) {
                     mode={mode}
                     preview={preview}
                     previewParentPart={previewParentPart}
-                    onSelect={() => setSelectedPartId(part.id)}
+                    onSelect={() => selectPart(part.id)}
                     onChange={(patch) => updatePart(part.id, patch)}
                     onModeDone={() => setMode("select")}
                   />
                 ))}
+              {doc.mouthRig && (
+                <RigPlacementLayer
+                  key="mouth-rig"
+                  rig={doc.mouthRig}
+                  selected={rigSelected}
+                  scale={scale}
+                  onSelect={selectRig}
+                  onChange={updateRigPlacement}
+                />
+              )}
             </div>
           </div>
           <div className="pointer-events-none absolute bottom-2 right-3 rounded bg-panel/80 px-2 py-1 text-[10px] text-muted-foreground">
@@ -413,6 +433,8 @@ export function CharacterEditor({ characterId }: Props) {
             onDuplicate={duplicatePart}
             onPreview={setPreview}
             onCanvasChange={(patch) => updateDoc(patch)}
+            rigSelected={rigSelected}
+            onRigChange={(rig) => updateDoc({ mouthRig: rig })}
           />
         </aside>
       </div>
@@ -477,6 +499,8 @@ function UploadSlots({
   onImport,
   parts,
   manifest,
+  mouthRig,
+  onSaveRig,
   selectedId,
   onEditPart,
   onSelectPart,
@@ -484,6 +508,8 @@ function UploadSlots({
   onImport: (file: File, options?: ImportOptions) => void;
   parts: CharacterPart[];
   manifest: PartManifest;
+  mouthRig: MouthRig | undefined;
+  onSaveRig: (rig: MouthRig) => void;
   selectedId: ID | null;
   onEditPart: (id: ID) => void;
   onSelectPart: (id: ID) => void;
@@ -561,6 +587,8 @@ function UploadSlots({
       {manifest.hasMouth && (
         <MouthShapeSetup
           parts={parts}
+          mouthRig={mouthRig}
+          onSaveRig={onSaveRig}
           onImport={onImport}
           selectedId={selectedId}
           onEditPart={onEditPart}
@@ -611,166 +639,48 @@ function SlotUpload({
 
 function MouthShapeSetup({
   parts,
+  mouthRig,
+  onSaveRig,
   onImport,
   selectedId,
   onEditPart,
   onSelectPart,
 }: {
   parts: CharacterPart[];
+  mouthRig: MouthRig | undefined;
+  onSaveRig: (rig: MouthRig) => void;
   onImport: (file: File, options?: ImportOptions) => void;
   selectedId: ID | null;
   onEditPart: (id: ID) => void;
   onSelectPart: (id: ID) => void;
 }) {
   const [designerOpen, setDesignerOpen] = useState(false);
-  const rest = parts.find((p) => p.role === "mouth" && p.viseme === "rest");
-  const restReady = Boolean(rest?.morph?.primaryPath);
-
-  const importDesignedRest = (svg: string) => {
-    const file = new File([svg], "mouth_rest.svg", { type: "image/svg+xml" });
-    onImport(file, {
-      role: "mouth",
-      viseme: "rest",
-      label: "Mouth rest",
-      slotId: "role:mouth",
-      zIndex: 60,
-      placement: { x: 240, y: 320, width: 120, height: 72, rotation: 0, pivot: { x: 300, y: 356 } },
-    });
-  };
-  const importFromRest = (viseme: MouthViseme, source: CharacterPart) => {
-    const file = createMouthVariantFile(source, viseme);
-    if (!file) return;
-    onImport(file, {
-      role: "mouth",
-      viseme,
-      label: `Mouth ${viseme}`,
-      slotId: "role:mouth",
-      zIndex: source.zIndex,
-      placement: {
-        x: source.x,
-        y: source.y,
-        width: source.width,
-        height: source.height,
-        rotation: source.rotation,
-        pivot: source.pivot,
-      },
-    });
-  };
-  const createGenericRest = () => {
-    const file = createGenericRestMouthFile();
-    onImport(file, {
-      role: "mouth",
-      viseme: "rest",
-      label: "Mouth rest",
-      slotId: "role:mouth",
-      zIndex: 60,
-      placement: {
-        x: 240,
-        y: 320,
-        width: 120,
-        height: 72,
-        rotation: 0,
-        pivot: { x: 300, y: 356 },
-      },
-    });
-  };
-  const createAllFromRest = () => {
-    if (!rest) return;
-    for (const viseme of MOUTH_VISEMES) {
-      if (viseme === "rest") continue;
-      const part = parts.find((p) => p.role === "mouth" && p.viseme === viseme);
-      if (part) continue;
-      importFromRest(viseme, rest);
-    }
-  };
 
   return (
     <div className="rounded border border-border bg-panel-2 p-2">
-      <div className="mb-1 font-semibold uppercase tracking-wider text-muted-foreground">
+      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
         Mouth Shapes
       </div>
-      <div className="mb-2 rounded border border-border bg-panel px-2 py-2 text-[10px] text-muted-foreground">
-        1. Make or upload `Rest`.
-        <br />
-        2. Generate the other shapes from `Rest`.
-        <br />
-        3. Click `Edit on canvas` on any shape to drag points and fix it.
-      </div>
-      <div className="mb-2 grid grid-cols-1 gap-1.5">
-        {!rest ? (
-          <div className="rounded border border-border bg-background px-2 py-1.5 text-[10px] text-muted-foreground">
-            Start here: create a basic Rest mouth, or upload your own Rest SVG.
-          </div>
-        ) : restReady ? (
-          <div className="rounded border border-border bg-background px-2 py-1.5 text-[10px] text-muted-foreground">
-            Rest is ready. Generate shapes, then open one on the canvas and drag the points until it
-            looks right.
-          </div>
-        ) : (
-          <div className="rounded border border-border bg-background px-2 py-1.5 text-[10px] text-muted-foreground">
-            Rest is here, but it needs a simpler main SVG path before the point editor can work
-            well.
-          </div>
-        )}
-      </div>
-      <div className="mb-2 rounded border border-border bg-background px-2 py-1.5 text-[10px] text-muted-foreground">
-        {restReady
-          ? "Rest is ready. Create or rebuild shapes from Rest to keep morphing smooth."
-          : rest
-            ? "Rest exists, but it needs a readable SVG path before morph generation can start."
-            : "Upload Rest first. After that, each missing mouth shape can be generated from Rest."}
-      </div>
-      {!rest && (
-        <div className="mb-2 flex flex-col gap-1.5">
-          <button
-            type="button"
-            onClick={() => setDesignerOpen(true)}
-            className="w-full rounded border border-primary bg-primary/10 px-2 py-1.5 text-[11px] font-medium text-primary hover:bg-primary/20"
-          >
-            Design Rest Mouth…
-          </button>
-          <button
-            type="button"
-            onClick={createGenericRest}
-            className="w-full rounded border border-border bg-panel px-2 py-1 text-[11px] text-muted-foreground hover:bg-background"
-          >
-            Quick autogenerate
-          </button>
-        </div>
-      )}
+      <button
+        type="button"
+        onClick={() => setDesignerOpen(true)}
+        className="mb-3 w-full rounded border border-primary bg-primary/10 px-2 py-1.5 text-[11px] font-medium text-primary hover:bg-primary/20"
+      >
+        {mouthRig ? `Rig: ${mouthRig.styleId} — Edit…` : "Choose mouth style…"}
+      </button>
       <MouthCreator
         isOpen={designerOpen}
         onClose={() => setDesignerOpen(false)}
-        onSave={(svg) => { importDesignedRest(svg); setDesignerOpen(false); }}
+        initialRig={mouthRig}
+        onSave={(rig) => { onSaveRig(rig); setDesignerOpen(false); }}
       />
-      {restReady && (
-        <button
-          type="button"
-          onClick={createAllFromRest}
-          className="mb-2 w-full rounded border border-border bg-panel px-2 py-1.5 text-[11px] hover:bg-background"
-        >
-          Generate All from Rest
-        </button>
-      )}
+      {!mouthRig && (
       <div className="grid grid-cols-2 gap-1.5">
         {MOUTH_VISEMES.map((viseme) => {
           const part = parts.find((p) => p.role === "mouth" && p.viseme === viseme);
-          const canCreate = Boolean(restReady && viseme !== "rest");
-          const canRegenerate = Boolean(canCreate && rest && part && viseme !== "rest");
-          const status =
-            viseme === "rest"
-              ? restReady
-                ? "template ready"
-                : rest
-                  ? "needs clean path"
-                  : "upload required"
-              : part
-                ? part.morph?.compatibleWithRest === false
-                  ? "swap only"
-                  : "morph ready"
-                : restReady
-                  ? "missing"
-                  : "waiting for Rest";
+          const status = part
+            ? part.morph?.compatibleWithRest === false ? "swap only" : "morph ready"
+            : "missing";
           return (
             <div
               key={viseme}
@@ -813,37 +723,11 @@ function MouthShapeSetup({
                   </button>
                 </div>
               )}
-              {viseme !== "rest" && (
-                <button
-                  type="button"
-                  disabled={!canCreate || !rest}
-                  onClick={() => rest && importFromRest(viseme, rest)}
-                  className="w-full rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-panel hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
-                  title={
-                    restReady
-                      ? "Generate this shape from Rest"
-                      : rest
-                        ? "Rest needs a simple SVG path first"
-                        : "Upload Rest first"
-                  }
-                >
-                  {part ? "Rebuild from Rest" : "Create from Rest"}
-                </button>
-              )}
-              {canRegenerate && part?.morph?.compatibleWithRest === false && (
-                <div className="px-1 text-[9px] text-muted-foreground">
-                  Upload keeps your custom look. Rebuild re-aligns it for morphing.
-                </div>
-              )}
-              {viseme === "rest" && !restReady && (
-                <div className="px-1 text-[9px] text-muted-foreground">
-                  Best result: upload a simple SVG with a main mouth path.
-                </div>
-              )}
             </div>
           );
         })}
       </div>
+      )}
     </div>
   );
 }
@@ -854,12 +738,20 @@ function LayerList({
   onSelect,
   onChange,
   onRemove,
+  mouthRig,
+  rigSelected,
+  onSelectRig,
+  onChangeRigZIndex,
 }: {
   parts: CharacterPart[];
   selectedId: ID | null;
   onSelect: (id: ID) => void;
   onChange: (id: ID, patch: Partial<CharacterPart>) => void;
   onRemove: (id: ID) => void;
+  mouthRig?: MouthRig;
+  rigSelected?: boolean;
+  onSelectRig?: () => void;
+  onChangeRigZIndex?: (z: number) => void;
 }) {
   return (
     <div className="mt-4">
@@ -867,6 +759,27 @@ function LayerList({
         Layers
       </div>
       <ul className="space-y-1">
+        {mouthRig && (
+          <li
+            onClick={onSelectRig}
+            className={`flex cursor-pointer items-center gap-2 rounded border px-2 py-1.5 ${
+              rigSelected ? "border-primary bg-primary/15" : "border-border bg-panel-2 hover:bg-panel"
+            }`}
+          >
+            <span className="min-w-0 flex-1 truncate font-medium">
+              Mouth rig
+              <span className="ml-1 font-normal text-muted-foreground">{mouthRig.styleId}</span>
+            </span>
+            <button
+              onClick={(e) => { e.stopPropagation(); onChangeRigZIndex?.(mouthRig.placement.zIndex + 1); }}
+              className="rounded p-1 text-muted-foreground hover:text-foreground" title="Bring forward"
+            ><ArrowUp size={14} /></button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onChangeRigZIndex?.(mouthRig.placement.zIndex - 1); }}
+              className="rounded p-1 text-muted-foreground hover:text-foreground" title="Send backward"
+            ><ArrowDown size={14} /></button>
+          </li>
+        )}
         {parts
           .slice()
           .reverse()
@@ -943,6 +856,8 @@ function Inspector({
   onDuplicate,
   onPreview,
   onCanvasChange,
+  rigSelected,
+  onRigChange,
 }: {
   doc: CharacterPreset;
   part: CharacterPart | null;
@@ -953,7 +868,30 @@ function Inspector({
   onDuplicate: (part: CharacterPart) => void;
   onPreview: (preview: PreviewState) => void;
   onCanvasChange: (patch: Partial<CharacterPreset>) => void;
+  rigSelected: boolean;
+  onRigChange: (rig: MouthRig) => void;
 }) {
+  if (rigSelected && doc.mouthRig) {
+    const rig = doc.mouthRig;
+    const p = rig.placement;
+    const setP = (patch: Partial<typeof p>) => onRigChange({ ...rig, placement: { ...p, ...patch } });
+    return (
+      <div className="space-y-4">
+        <CanvasControls doc={doc} onChange={onCanvasChange} />
+        <section className="rounded border border-border bg-panel-2 p-3">
+          <div className="mb-3 font-medium">Mouth Rig — {rig.styleId}</div>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="X"><input type="number" value={p.x} onChange={(e) => setP({ x: Number(e.target.value) })} className="w-full rounded border border-border bg-background px-2 py-1" /></Field>
+            <Field label="Y"><input type="number" value={p.y} onChange={(e) => setP({ y: Number(e.target.value) })} className="w-full rounded border border-border bg-background px-2 py-1" /></Field>
+            <Field label="Width"><input type="number" value={p.width} onChange={(e) => setP({ width: Number(e.target.value) })} className="w-full rounded border border-border bg-background px-2 py-1" /></Field>
+            <Field label="Height"><input type="number" value={p.height} onChange={(e) => setP({ height: Number(e.target.value) })} className="w-full rounded border border-border bg-background px-2 py-1" /></Field>
+            <Field label="Z-index"><input type="number" value={p.zIndex} onChange={(e) => setP({ zIndex: Number(e.target.value) })} className="w-full rounded border border-border bg-background px-2 py-1" /></Field>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
   if (!part) {
     return (
       <div className="space-y-4">
@@ -1287,6 +1225,76 @@ function CanvasControls({
         />
       </div>
     </section>
+  );
+}
+
+function RigPlacementLayer({
+  rig,
+  selected,
+  scale,
+  onSelect,
+  onChange,
+}: {
+  rig: MouthRig;
+  selected: boolean;
+  scale: number;
+  onSelect: () => void;
+  onChange: (placement: MouthRig["placement"]) => void;
+}) {
+  const rigStyle = RIG_STYLES.find((s) => s.id === rig.styleId) ?? RIG_STYLES[0];
+  const { placement: p } = rig;
+
+  const startDrag = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    onSelect();
+    if (e.button !== 0) return;
+    const sx = e.clientX, sy = e.clientY;
+    const ox = p.x, oy = p.y;
+    const move = (ev: PointerEvent) => onChange({ ...p, x: Math.round(ox + (ev.clientX - sx) / scale), y: Math.round(oy + (ev.clientY - sy) / scale) });
+    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  const resize = (corner: ResizeCorner) => (e: React.PointerEvent) => {
+    e.stopPropagation();
+    const sx = e.clientX, sy = e.clientY;
+    const { x: ox, y: oy, width: ow, height: oh } = p;
+    const move = (ev: PointerEvent) => {
+      const dx = (ev.clientX - sx) / scale;
+      const dy = (ev.clientY - sy) / scale;
+      const width = Math.max(20, corner.includes("e") ? ow + dx : ow - dx);
+      const height = Math.max(12, corner.includes("s") ? oh + dy : oh - dy);
+      onChange({ ...p, width: Math.round(width), height: Math.round(height), x: Math.round(corner.includes("w") ? ox + (ow - width) : ox), y: Math.round(corner.includes("n") ? oy + (oh - height) : oy) });
+    };
+    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  return (
+    <div
+      onPointerDown={startDrag}
+      className={`absolute cursor-move select-none outline outline-offset-0 ${selected ? "outline-2 outline-primary" : "outline-1 outline-transparent hover:outline-accent/70"}`}
+      style={{ left: p.x, top: p.y, width: p.width, height: p.height, zIndex: p.zIndex }}
+    >
+      <RigPreview
+        style={rigStyle}
+        pose={rig.poses.rest}
+        colors={rig}
+        widthScale={rig.widthScale}
+        upperCurve={rig.upperCurve}
+        lowerCurve={rig.lowerCurve}
+      />
+      {selected && (
+        <>
+          <ResizeHandle corner="nw" onResize={resize} />
+          <ResizeHandle corner="ne" onResize={resize} />
+          <ResizeHandle corner="sw" onResize={resize} />
+          <ResizeHandle corner="se" onResize={resize} />
+        </>
+      )}
+    </div>
   );
 }
 
@@ -2164,48 +2172,8 @@ function normalizeColorForInput(value: string) {
 }
 
 
-function createMouthVariantFile(rest: CharacterPart, viseme: MouthViseme) {
-  const path = rest.morph?.primaryPath;
-  if (!path) return null;
-  const viewBox = rest.morph?.viewBox ?? `0 0 ${rest.width} ${rest.height}`;
-  const nextPath = transformMouthPath(path, viewBox, MOUTH_MORPH_PRESETS[viseme]);
-  if (!nextPath) return null;
-  const fill = rest.morph?.fill ? ` fill="${escapeSvgAttr(rest.morph.fill)}"` : "";
-  const stroke = rest.morph?.stroke ? ` stroke="${escapeSvgAttr(rest.morph.stroke)}"` : "";
-  const strokeWidth = rest.morph?.strokeWidth
-    ? ` stroke-width="${escapeSvgAttr(rest.morph.strokeWidth)}"`
-    : "";
-  const strokeLinecap = rest.morph?.strokeLinecap
-    ? ` stroke-linecap="${escapeSvgAttr(rest.morph.strokeLinecap)}"`
-    : "";
-  const strokeLinejoin = rest.morph?.strokeLinejoin
-    ? ` stroke-linejoin="${escapeSvgAttr(rest.morph.strokeLinejoin)}"`
-    : "";
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${escapeSvgAttr(
-    viewBox,
-  )}"><path d="${escapeSvgAttr(nextPath)}"${fill}${stroke}${strokeWidth}${strokeLinecap}${strokeLinejoin}/></svg>`;
-  return new File([svg], `mouth_${viseme}.svg`, { type: "image/svg+xml" });
-}
-
-function createGenericRestMouthFile() {
-  const viewBox = "0 0 100 60";
-  const path = createGenericRestMouthPath(viewBox);
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}"><path d="${path}" fill="#733f43"/></svg>`;
-  return new File([svg], "mouth_rest.svg", { type: "image/svg+xml" });
-}
-
-function transformMouthPath(path: string, viewBox: string, preset: MouthMorphProfile) {
-  try {
-    return absolutizeAndMorphPath(path, parseViewBox(viewBox), preset);
-  } catch {
-    return null;
-  }
-}
 
 
-function escapeSvgAttr(value: string) {
-  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
-}
 
 
 function absolutizePathCommands(path: string): PathCommand[] {

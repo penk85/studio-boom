@@ -25,7 +25,9 @@ import {
   roleEnabledByManifest,
 } from "../character/character-utils";
 import { combinedParallax } from "../character/parallax";
-import { buildCharacterTimeline, slotDomId, visemeDomId, eyeDomId } from "../export/timeline-builder";
+import { buildCharacterTimeline, slotDomId, visemeDomId, eyeDomId, rigComponentId } from "../export/timeline-builder";
+import { RIG_STYLES, poseToTransforms, MOUTH_VIEWBOX } from "../character/mouth-libraries";
+import type { MouthRig } from "../types";
 
 export function Stage() {
   const project = useStudio((s) => s.project);
@@ -254,6 +256,7 @@ function ClipLayer({
             character={character}
             playhead={playhead}
             presetMap={presetMap}
+            fps={fps}
           />
         ) : (
           <CharacterPlaceholder clip={clip as CharacterClip} playhead={playhead} fps={fps} />
@@ -660,11 +663,13 @@ function CharacterRig({
   character,
   playhead,
   presetMap,
+  fps,
 }: {
   clip: CharacterClip;
   character: CharacterPreset;
   playhead: number;
   presetMap: Map<string, import("../types").ActionPreset>;
+  fps: number;
 }) {
   const tlRef = useRef<gsap.core.Timeline | null>(null);
 
@@ -689,33 +694,38 @@ function CharacterRig({
     [character.parts, character.manifest],
   );
 
-  const VISEMES: MouthViseme[] = ["rest", "A", "E", "O", "U", "MBP", "FV", "L", "WQ", "Smile"];
+  const visemeState = visemeStateAt(clip.visemes, Math.max(0, playhead - clip.start), {
+    minHoldSeconds: 4 / Math.max(1, fps),
+    blendWindowSeconds: 0.075,
+  });
 
   return (
     <div className="absolute inset-0 overflow-hidden">
       <div className="absolute left-0 top-0" style={{ width: "100%", height: "100%" }}>
+        {/* Transform-based mouth rig — rendered outside the slot loop */}
+        {character.mouthRig && (
+          <MouthRigRenderer
+            rig={character.mouthRig}
+            clipId={clip.id}
+            scaleX={scaleX}
+            scaleY={scaleY}
+          />
+        )}
+
         {slots.map((slot) => {
+          // Skip mouth slot when a transform rig handles it.
+          if (slot.role === "mouth" && character.mouthRig) return null;
+
           if (slot.role === "mouth") {
-            // All viseme variants are in the DOM simultaneously; GSAP toggles opacity.
             return (
-              <div key={slot.id}>
-                {VISEMES.map((viseme) => {
-                  const part = slot.parts.find(
-                    (p) => p.visible && (p.viseme === viseme || p.pose === viseme),
-                  );
-                  if (!part) return null;
-                  return (
-                    <PartImageScaled
-                      key={`${slot.id}-${viseme}`}
-                      id={visemeDomId(clip.id, slot.id, viseme)}
-                      part={part}
-                      scaleX={scaleX}
-                      scaleY={scaleY}
-                      initialOpacity={viseme === "rest" ? 1 : 0}
-                    />
-                  );
-                })}
-              </div>
+              <MorphedMouthSlot
+                key={slot.id}
+                slot={slot}
+                clip={clip}
+                scaleX={scaleX}
+                scaleY={scaleY}
+                visemeState={visemeState}
+              />
             );
           }
 
@@ -783,6 +793,163 @@ function CharacterRig({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+const VISEMES: MouthViseme[] = ["rest", "A", "E", "O", "U", "MBP", "FV", "L", "WQ", "Smile"];
+
+/**
+ * Renders a mouth slot either as a React-morphed SVG (when all viseme parts have
+ * compatible primaryPath data) or as GSAP opacity-toggled fallback variants.
+ */
+function MorphedMouthSlot({
+  slot,
+  clip,
+  scaleX,
+  scaleY,
+  visemeState,
+}: {
+  slot: ReturnType<typeof listCharacterSlots>[number];
+  clip: CharacterClip;
+  scaleX: number;
+  scaleY: number;
+  visemeState: { current: MouthViseme; next?: MouthViseme; blend: number };
+}) {
+  const currentPart =
+    slot.parts.find((p) => p.visible && (p.viseme === visemeState.current || p.pose === visemeState.current)) ??
+    slot.parts.find((p) => p.visible && (p.viseme === "rest" || p.pose === "rest"));
+
+  const nextPart = visemeState.next
+    ? slot.parts.find((p) => p.visible && (p.viseme === visemeState.next || p.pose === visemeState.next))
+    : undefined;
+
+  const morphedD = useMemo(() => {
+    if (!currentPart?.morph?.primaryPath) return null;
+    if (!nextPart?.morph?.primaryPath || visemeState.blend === 0) return currentPart.morph.primaryPath;
+    return (
+      interpolatedPath(currentPart.morph.primaryPath, nextPart.morph.primaryPath, visemeState.blend) ??
+      currentPart.morph.primaryPath
+    );
+  }, [currentPart, nextPart, visemeState.blend]);
+
+  if (morphedD && currentPart?.morph) {
+    const { morph } = currentPart;
+    return (
+      <svg
+        id={slotDomId(clip.id, slot.id)}
+        viewBox={morph.viewBox ?? `0 0 ${currentPart.width} ${currentPart.height}`}
+        className="absolute overflow-visible"
+        style={{
+          left: currentPart.x * scaleX,
+          top: currentPart.y * scaleY,
+          width: currentPart.width * scaleX,
+          height: currentPart.height * scaleY,
+          zIndex: currentPart.zIndex,
+          opacity: 1,
+          transformOrigin: `${currentPart.anchorX * 100}% ${currentPart.anchorY * 100}%`,
+          pointerEvents: "none",
+        }}
+        aria-hidden
+      >
+        <path
+          d={morphedD}
+          fill={morph.fill ?? "#733f43"}
+          stroke={morph.stroke}
+          strokeWidth={morph.strokeWidth}
+          strokeLinecap={morph.strokeLinecap as SVGAttributes<SVGPathElement>["strokeLinecap"]}
+          strokeLinejoin={morph.strokeLinejoin as SVGAttributes<SVGPathElement>["strokeLinejoin"]}
+        />
+      </svg>
+    );
+  }
+
+  // Fallback: GSAP opacity toggle for image-based or non-morph mouth parts.
+  return (
+    <div>
+      {VISEMES.map((viseme) => {
+        const part = slot.parts.find((p) => p.visible && (p.viseme === viseme || p.pose === viseme));
+        if (!part) return null;
+        return (
+          <PartImageScaled
+            key={`${slot.id}-${viseme}`}
+            id={visemeDomId(clip.id, slot.id, viseme)}
+            part={part}
+            scaleX={scaleX}
+            scaleY={scaleY}
+            initialOpacity={viseme === "rest" ? 1 : 0}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Renders the 5 transform-based mouth rig components (upper lip, lower lip,
+ * interior, teeth, tongue). GSAP targets each by rigComponentId for animation.
+ * The components sit at rest transforms; tl.to() moves them per viseme.
+ */
+function MouthRigRenderer({
+  rig,
+  clipId,
+  scaleX,
+  scaleY,
+}: {
+  rig: MouthRig;
+  clipId: string;
+  scaleX: number;
+  scaleY: number;
+}) {
+  const style = RIG_STYLES.find((s) => s.id === rig.styleId) ?? RIG_STYLES[0];
+  const { placement } = rig;
+  const svgStyle: React.CSSProperties = {
+    position: "absolute",
+    left: placement.x * scaleX,
+    top: placement.y * scaleY,
+    width: placement.width * scaleX,
+    height: placement.height * scaleY,
+    zIndex: placement.zIndex,
+    overflow: "visible",
+    pointerEvents: "none",
+    transformOrigin: "50% 50%",
+  };
+
+  // Each component shares the same container position; GSAP applies y/scaleX/scaleY.
+  // transform-origin is set to the horizontal centre of the lip line (cx=50, cy=30 in SVG units).
+  const componentStyle = (id: string): React.CSSProperties => ({
+    position: "absolute",
+    inset: 0,
+    transformOrigin: `50% ${(30 / 60) * 100}%`,
+  });
+
+  return (
+    <div id={rigComponentId(clipId, "container")} style={svgStyle}>
+      {/* Interior — rendered first (bottom layer) */}
+      <svg id={rigComponentId(clipId, "interior")} viewBox={MOUTH_VIEWBOX}
+        style={componentStyle(rigComponentId(clipId, "interior"))} aria-hidden>
+        <path d={style.interiorPath} fill={rig.interiorColor} />
+      </svg>
+      {/* Tongue */}
+      <svg id={rigComponentId(clipId, "tongue")} viewBox={MOUTH_VIEWBOX}
+        style={{ ...componentStyle(rigComponentId(clipId, "tongue")), opacity: 0 }} aria-hidden>
+        <path d={style.tonguePath} fill={rig.tongueColor} />
+      </svg>
+      {/* Teeth */}
+      <svg id={rigComponentId(clipId, "teeth")} viewBox={MOUTH_VIEWBOX}
+        style={{ ...componentStyle(rigComponentId(clipId, "teeth")), opacity: 0 }} aria-hidden>
+        <path d={style.teethPath} fill={rig.teethColor} />
+      </svg>
+      {/* Lower lip */}
+      <svg id={rigComponentId(clipId, "lower-lip")} viewBox={MOUTH_VIEWBOX}
+        style={componentStyle(rigComponentId(clipId, "lower-lip"))} aria-hidden>
+        <path d={style.lowerLipPath} fill={rig.lipColor} />
+      </svg>
+      {/* Upper lip — top layer */}
+      <svg id={rigComponentId(clipId, "upper-lip")} viewBox={MOUTH_VIEWBOX}
+        style={componentStyle(rigComponentId(clipId, "upper-lip"))} aria-hidden>
+        <path d={style.upperLipPath} fill={rig.lipColor} />
+      </svg>
     </div>
   );
 }
