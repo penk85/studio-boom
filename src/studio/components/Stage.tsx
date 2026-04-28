@@ -25,6 +25,7 @@ import {
   roleEnabledByManifest,
 } from "../character/character-utils";
 import { combinedParallax } from "../character/parallax";
+import { buildCharacterTimeline, slotDomId, visemeDomId, eyeDomId } from "../export/timeline-builder";
 
 export function Stage() {
   const project = useStudio((s) => s.project);
@@ -251,7 +252,6 @@ function ClipLayer({
           <CharacterRig
             clip={clip as CharacterClip}
             character={character}
-            fps={fps}
             playhead={playhead}
             presetMap={presetMap}
           />
@@ -592,14 +592,14 @@ function inheritedMotionForPart({
   const transformedPivot = transformPointAroundPivot(
     childPivot,
     partPivot(parentPart),
-    parentDelta,
+    { ...parentDelta, opacity: parentDelta.opacity ?? undefined },
   );
   return {
     dx: transformedPivot.x - childPivot.x,
     dy: transformedPivot.y - childPivot.y,
     scale: parentDelta.scale,
     rotation: parentDelta.rotation,
-    opacity: parentDelta.opacity,
+    opacity: parentDelta.opacity ?? undefined,
   };
 }
 
@@ -650,46 +650,37 @@ function CharacterPlaceholder({
   );
 }
 
-/** Render a real character rig: composes parts, applies actions and parallax. */
+/**
+ * Render a real character rig using GSAP seek.
+ * All parts are in the DOM at rest positions. buildCharacterTimeline drives all
+ * transforms; tl.seek(t) positions the rig at any time without React re-renders.
+ */
 function CharacterRig({
   clip,
   character,
-  fps,
   playhead,
   presetMap,
 }: {
   clip: CharacterClip;
   character: CharacterPreset;
-  fps: number;
   playhead: number;
   presetMap: Map<string, import("../types").ActionPreset>;
 }) {
-  const tInClip = playhead - clip.start;
-  const composed = useMemo(
-    () => composeActionsAt(clip, tInClip, presetMap),
-    [clip, tInClip, presetMap],
-  );
-  const visemeState = composed.mouthLocked
-    ? { current: undefined, next: undefined, blend: 0 }
-    : visemeStateAt(clip.visemes, tInClip, {
-        minHoldSeconds: 4 / Math.max(1, fps),
-      });
-  const viseme = visemeState.current;
-  const nextViseme = visemeState.next;
-  const visemeBlend = visemeState.blend;
+  const tlRef = useRef<gsap.core.Timeline | null>(null);
 
-  // Active head variant (from headTurn presets)
-  const headVariant = useMemo(() => {
-    if (!composed.headDirection || !character.headVariants?.length) return null;
-    return character.headVariants.find((v) => v.direction === composed.headDirection) ?? null;
-  }, [composed.headDirection, character.headVariants]);
+  // Rebuild GSAP timeline when clip or character changes.
+  useEffect(() => {
+    tlRef.current = buildCharacterTimeline(clip, character, presetMap);
+  }, [clip.id, clip.actions, clip.visemes, clip.autoBlink, character.id, character.parts, presetMap]);
 
-  // Clip motion delta = the character's own composed camera
-  // (presets that drive __camera shift the whole character clip; treat that
-  // as clip motion for parallax purposes).
-  const clipDelta = { dx: composed.camera.dx, dy: composed.camera.dy };
+  // Seek to current playhead position on every frame.
+  useEffect(() => {
+    tlRef.current?.seek(Math.max(0, playhead - clip.start), false);
+  }, [playhead, clip.start]);
 
-  // Slots render one active variant each, while the whole rig remains one clip.
+  const scaleX = clip.width / character.canvasWidth;
+  const scaleY = clip.height / character.canvasHeight;
+
   const slots = useMemo(
     () =>
       listCharacterSlots(character.parts).filter((slot) =>
@@ -697,204 +688,211 @@ function CharacterRig({
       ),
     [character.parts, character.manifest],
   );
-  const fallbackMouth = useMemo(() => fallbackMouthPlacement(character), [character]);
-  // Do not synthesize generated mouth art when a viseme is missing. Missing
-  // shapes fall back through the user's own mouth slot variants (rest first),
-  // or render nothing when no mouth SVG exists.
-  const shouldUseFallbackMouth = false;
-  const fallbackMouthDelta = shouldUseFallbackMouth
-    ? deltaFor(composed, "mouth", fallbackMouth.slotId)
-    : null;
-  const fallbackMouthParallax = shouldUseFallbackMouth
-    ? combinedParallax(fallbackMouth.depth, character.parallax, { clipDelta })
-    : { dx: 0, dy: 0 };
-  const fallbackMouthFaceOffset =
-    shouldUseFallbackMouth && headVariant
-      ? { dx: headVariant.featureOffsetX ?? 0, dy: headVariant.featureOffsetY ?? 0 }
-      : { dx: 0, dy: 0 };
-  const headSlot = slots.find((slot) => slot.role === "head");
-  const fallbackMouthInherited = (() => {
-    if (!shouldUseFallbackMouth || !headSlot) return { dx: 0, dy: 0, scale: 1, rotation: 0 };
-    const headPart = pickActivePartForSlot(headSlot, { pose: undefined });
-    if (!headPart) return { dx: 0, dy: 0, scale: 1, rotation: 0 };
-    const headDelta = deltaFor(composed, "head", headSlot.id);
-    const fallbackPivot = {
-      x: fallbackMouth.x + fallbackMouth.width * fallbackMouth.anchorX,
-      y: fallbackMouth.y + fallbackMouth.height * fallbackMouth.anchorY,
-    };
-    const transformedPivot = transformPointAroundPivot(
-      fallbackPivot,
-      partPivot(headPart),
-      headDelta,
-    );
-    return {
-      dx: transformedPivot.x - fallbackPivot.x,
-      dy: transformedPivot.y - fallbackPivot.y,
-      scale: headDelta.scale,
-      rotation: headDelta.rotation,
-    };
-  })();
+
+  const VISEMES: MouthViseme[] = ["rest", "A", "E", "O", "U", "MBP", "FV", "L", "WQ", "Smile"];
 
   return (
     <div className="absolute inset-0 overflow-hidden">
-      <div
-        className="absolute left-0 top-0 origin-top-left"
-        style={{
-          width: character.canvasWidth,
-          height: character.canvasHeight,
-          transform: `scale(${clip.width / character.canvasWidth}, ${clip.height / character.canvasHeight})`,
-        }}
-      >
+      <div className="absolute left-0 top-0" style={{ width: "100%", height: "100%" }}>
         {slots.map((slot) => {
-          const role = slot.role;
-          if (role === "mouth" && shouldUseFallbackMouth) return null;
-          const poseSwap =
-            poseSwapFor(composed, role, slot.id) ?? clip.poses[slot.id] ?? clip.poses[role];
-          const eyeState =
-            role === "eye"
-              ? (() => {
-                  const resolved =
-                    poseSwap ??
-                    clip.poses[slot.id] ??
-                    clip.poses[role] ??
-                    clip.poses["eye"] ??
-                    "open";
-                  return resolved === "open" && autoBlinkClosedAt(clip, tInClip)
-                    ? "closed"
-                    : resolved;
-                })()
-              : undefined;
-          const part =
-            role === "mouth" && viseme
-              ? (exactMouthPartForSlot(slot, viseme, fallbackMouth) ??
-                pickActivePartForSlot(slot, {
-                  pose: poseSwap,
-                  viseme,
-                  eyeState,
-                }))
-              : pickActivePartForSlot(slot, {
-                  pose: poseSwap,
-                  viseme: role === "mouth" ? viseme : undefined,
-                  eyeState,
-                });
-          if (!part) return null;
-          const nextPart =
-            role === "mouth" && nextViseme && visemeBlend > 0
-              ? exactMouthPartForSlot(slot, nextViseme, fallbackMouth)
-              : undefined;
-          const baseDelta = deltaFor(composed, role, slot.id);
-          const d = role === "eye" ? motionForEye(part, slot, baseDelta, eyeState) : baseDelta;
-          const inherited = inheritedMotionForPart({ part, role, slots, composed });
-          const parallax = combinedParallax(part.depth, character.parallax, {
-            clipDelta,
-          });
-          // If this is the head and a head variant is active, swap the media id.
-          const overrideMediaId = role === "head" && headVariant ? headVariant.mediaId : undefined;
-          // Apply per-direction face feature offset to face features.
-          const faceOffset =
-            headVariant && (role === "eye" || role === "eyebrow" || role === "mouth")
-              ? { dx: headVariant.featureOffsetX ?? 0, dy: headVariant.featureOffsetY ?? 0 }
-              : { dx: 0, dy: 0 };
-          const sharedProps = {
-            dx: inherited.dx + d.dx + parallax.dx + faceOffset.dx,
-            dy: inherited.dy + d.dy + parallax.dy + faceOffset.dy,
-            scale: inherited.scale * d.scale,
-            scaleY: d.scaleY,
-            rotation: inherited.rotation + d.rotation,
-          };
-          if (role === "mouth" && nextPart && nextPart.id !== part.id) {
+          if (slot.role === "mouth") {
+            // All viseme variants are in the DOM simultaneously; GSAP toggles opacity.
             return (
-              <MorphingMouthPart
-                key={slot.id}
-                part={part}
-                nextPart={nextPart}
-                blend={visemeBlend}
-                opacity={d.opacity ?? 1}
-                {...sharedProps}
-              />
+              <div key={slot.id}>
+                {VISEMES.map((viseme) => {
+                  const part = slot.parts.find(
+                    (p) => p.visible && (p.viseme === viseme || p.pose === viseme),
+                  );
+                  if (!part) return null;
+                  return (
+                    <PartImageScaled
+                      key={`${slot.id}-${viseme}`}
+                      id={visemeDomId(clip.id, slot.id, viseme)}
+                      part={part}
+                      scaleX={scaleX}
+                      scaleY={scaleY}
+                      initialOpacity={viseme === "rest" ? 1 : 0}
+                    />
+                  );
+                })}
+              </div>
             );
           }
+
+          if (slot.role === "eye") {
+            // Container receives GSAP action transforms; variants inside toggle for blink.
+            const openPart = slot.parts.find(
+              (p) => p.visible && (p.eyeState === "open" || (!p.eyeState && !p.pose)),
+            );
+            const closedPart = slot.parts.find(
+              (p) => p.visible && (p.eyeState === "closed" || p.pose === "closed"),
+            );
+            const basePart = openPart ?? closedPart;
+            if (!basePart) return null;
+
+            return (
+              <div
+                key={slot.id}
+                id={slotDomId(clip.id, slot.id)}
+                style={{
+                  position: "absolute",
+                  left: basePart.x * scaleX,
+                  top: basePart.y * scaleY,
+                  width: basePart.width * scaleX,
+                  height: basePart.height * scaleY,
+                  zIndex: basePart.zIndex,
+                  transformOrigin: `${basePart.anchorX * 100}% ${basePart.anchorY * 100}%`,
+                }}
+              >
+                {openPart && (
+                  <EyeVariantImage
+                    id={eyeDomId(clip.id, slot.id, "open")}
+                    part={openPart}
+                    containerPart={basePart}
+                    scaleX={scaleX}
+                    scaleY={scaleY}
+                    initialOpacity={1}
+                  />
+                )}
+                {closedPart && (
+                  <EyeVariantImage
+                    id={eyeDomId(clip.id, slot.id, "closed")}
+                    part={closedPart}
+                    containerPart={basePart}
+                    scaleX={scaleX}
+                    scaleY={scaleY}
+                    initialOpacity={0}
+                  />
+                )}
+              </div>
+            );
+          }
+
+          // All other roles: render the first visible part.
+          const part = slot.parts.find((p) => p.visible);
+          if (!part) return null;
           return (
-            <PartImage
+            <PartImageScaled
               key={slot.id}
+              id={slotDomId(clip.id, slot.id)}
               part={part}
-              overrideMediaId={overrideMediaId}
-              {...sharedProps}
-              opacity={d.opacity ?? 1}
-              transitionMs={role === "mouth" ? 30 : 0}
+              scaleX={scaleX}
+              scaleY={scaleY}
+              initialOpacity={1}
             />
           );
         })}
-        {shouldUseFallbackMouth &&
-          viseme &&
-          fallbackMouthDelta &&
-          (nextViseme && visemeBlend > 0 ? (
-            <>
-              <DefaultMouthShape
-                viseme={viseme}
-                placement={fallbackMouth}
-                dx={
-                  fallbackMouthInherited.dx +
-                  fallbackMouthDelta.dx +
-                  fallbackMouthParallax.dx +
-                  fallbackMouthFaceOffset.dx
-                }
-                dy={
-                  fallbackMouthInherited.dy +
-                  fallbackMouthDelta.dy +
-                  fallbackMouthParallax.dy +
-                  fallbackMouthFaceOffset.dy
-                }
-                scale={fallbackMouthInherited.scale * fallbackMouthDelta.scale}
-                rotation={fallbackMouthInherited.rotation + fallbackMouthDelta.rotation}
-                opacity={(fallbackMouthDelta.opacity ?? 1) * (1 - visemeBlend)}
-                transitionMs={0}
-              />
-              <DefaultMouthShape
-                viseme={nextViseme}
-                placement={fallbackMouth}
-                dx={
-                  fallbackMouthInherited.dx +
-                  fallbackMouthDelta.dx +
-                  fallbackMouthParallax.dx +
-                  fallbackMouthFaceOffset.dx
-                }
-                dy={
-                  fallbackMouthInherited.dy +
-                  fallbackMouthDelta.dy +
-                  fallbackMouthParallax.dy +
-                  fallbackMouthFaceOffset.dy
-                }
-                scale={fallbackMouthInherited.scale * fallbackMouthDelta.scale}
-                rotation={fallbackMouthInherited.rotation + fallbackMouthDelta.rotation}
-                opacity={(fallbackMouthDelta.opacity ?? 1) * visemeBlend}
-                transitionMs={0}
-              />
-            </>
-          ) : (
-            <DefaultMouthShape
-              viseme={viseme}
-              placement={fallbackMouth}
-              dx={
-                fallbackMouthInherited.dx +
-                fallbackMouthDelta.dx +
-                fallbackMouthParallax.dx +
-                fallbackMouthFaceOffset.dx
-              }
-              dy={
-                fallbackMouthInherited.dy +
-                fallbackMouthDelta.dy +
-                fallbackMouthParallax.dy +
-                fallbackMouthFaceOffset.dy
-              }
-              scale={fallbackMouthInherited.scale * fallbackMouthDelta.scale}
-              rotation={fallbackMouthInherited.rotation + fallbackMouthDelta.rotation}
-              opacity={fallbackMouthDelta.opacity ?? 1}
-              transitionMs={30}
-            />
-          ))}
       </div>
     </div>
+  );
+}
+
+/**
+ * Render a character part with explicitly scaled coordinates.
+ * GSAP applies x/y/scale/rotation/opacity transforms on top.
+ * Handles SVG path parts (mouth with morph metadata) and image parts.
+ */
+function PartImageScaled({
+  id,
+  part,
+  scaleX,
+  scaleY,
+  initialOpacity,
+}: {
+  id: string;
+  part: CharacterPart;
+  scaleX: number;
+  scaleY: number;
+  initialOpacity: number;
+}) {
+  const url = useMediaUrl(part.mediaId);
+  const svgSpec = useSvgPathSpec(part);
+
+  const style: React.CSSProperties = {
+    position: "absolute",
+    left: part.x * scaleX,
+    top: part.y * scaleY,
+    width: part.width * scaleX,
+    height: part.height * scaleY,
+    zIndex: part.zIndex,
+    opacity: initialOpacity,
+    transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
+    pointerEvents: "none",
+  };
+
+  if (svgSpec) {
+    return (
+      <svg
+        id={id}
+        viewBox={svgSpec.viewBox ?? `0 0 ${part.width} ${part.height}`}
+        className="absolute overflow-visible"
+        style={style}
+        aria-hidden
+      >
+        <path
+          d={svgSpec.d}
+          fill={svgSpec.fill ?? (svgSpec.stroke ? "none" : "#733f43")}
+          stroke={svgSpec.stroke}
+          strokeWidth={svgSpec.strokeWidth}
+          strokeLinecap={svgSpec.strokeLinecap as import("react").SVGAttributes<SVGPathElement>["strokeLinecap"]}
+          strokeLinejoin={svgSpec.strokeLinejoin as import("react").SVGAttributes<SVGPathElement>["strokeLinejoin"]}
+        />
+      </svg>
+    );
+  }
+
+  if (!url) return null;
+  return (
+    <img
+      id={id}
+      src={url}
+      alt={part.name}
+      draggable={false}
+      className="absolute object-contain"
+      style={style}
+    />
+  );
+}
+
+/**
+ * Eye variant image positioned relative to its slot container.
+ * The container div (slotDomId) receives action transforms; this element just
+ * toggles opacity for blink via GSAP.
+ */
+function EyeVariantImage({
+  id,
+  part,
+  containerPart,
+  scaleX,
+  scaleY,
+  initialOpacity,
+}: {
+  id: string;
+  part: CharacterPart;
+  containerPart: CharacterPart;
+  scaleX: number;
+  scaleY: number;
+  initialOpacity: number;
+}) {
+  const url = useMediaUrl(part.mediaId);
+  if (!url) return null;
+  return (
+    <img
+      id={id}
+      src={url}
+      alt={part.name}
+      draggable={false}
+      className="absolute object-contain"
+      style={{
+        left: (part.x - containerPart.x) * scaleX,
+        top: (part.y - containerPart.y) * scaleY,
+        width: part.width * scaleX,
+        height: part.height * scaleY,
+        opacity: initialOpacity,
+        transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
+        pointerEvents: "none",
+      }}
+    />
   );
 }
 
@@ -1112,8 +1110,9 @@ function interpolatedPath(from: string, to: string, blend: number): string | nul
       if (left.value !== right.value) return null;
       out.push(left.value);
     } else {
-      const value = left.value + (right.value - left.value) * blend;
-      out.push(formatPathNumber(value));
+      const lv = left.value as number;
+      const rv = (right as { kind: "number"; value: number }).value;
+      out.push(formatPathNumber(lv + (rv - lv) * blend));
     }
   }
   return out.join(" ");
