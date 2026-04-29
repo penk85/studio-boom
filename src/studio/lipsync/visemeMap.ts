@@ -18,9 +18,9 @@ export interface VisemeTimingOptions {
 }
 
 const REST_GAP = 0.12; // silence > 120ms between chars => insert rest
-const MIN_VISEME_HOLD = 0.06; // minimum 60ms hold before switching
+const MIN_VISEME_HOLD = 0.02; // minimum 60ms hold before switching
 const AUDIO_LEAD_MS = 30; // mouth moves this many ms before sound
-const VISEME_BLEND_WINDOW = 0.075; // crossfade near boundaries for softer swaps
+const VISEME_BLEND_WINDOW = 0.175; // crossfade near boundaries for softer swaps
 
 function letterToViseme(ch: string, lastVowel: MouthViseme | null): MouthViseme | null {
   const c = ch.toLowerCase();

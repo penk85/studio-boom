@@ -2,230 +2,392 @@ import type { MouthPose, MouthRig, MouthViseme } from "../types";
 
 // ─── ViewBox ─────────────────────────────────────────────────────────────────
 // All rig component paths are designed in this coordinate space.
+// Paths are centered around x=50 and the mouth line y=30.
+// This keeps scaleX/scaleY transforms predictable across styles.
 export const MOUTH_VIEWBOX = "0 0 100 60";
 
 // ─── Default colours ─────────────────────────────────────────────────────────
-export const DEFAULT_LIP_COLOR = "#b05a6a";
-export const DEFAULT_TEETH_COLOR = "#f0ede8";
-export const DEFAULT_TONGUE_COLOR = "#c9566a";
-export const DEFAULT_INTERIOR_COLOR = "#1a0808";
+export const DEFAULT_LIP_COLOR = "#b35b68";
+export const DEFAULT_TEETH_COLOR = "#fff2df";
+export const DEFAULT_TONGUE_COLOR = "#d96b76";
+export const DEFAULT_INTERIOR_COLOR = "#23090b";
 
-// ─── Preston Blair viseme poses ───────────────────────────────────────────────
-// Values tuned to match the standard Papagayo / Preston Blair mouth chart.
+// ─── Preston Blair / Papagayo-inspired viseme poses ───────────────────────────
+// These are not drawings. They are semantic animation targets.
+// The rig turns these values into GSAP-safe transforms.
+//
+// Important lip-sync note:
+// Do not swap these too quickly. The mouth will usually look better with
+// fewer stronger shapes and short holds than with constant rapid changes.
 export const VISEME_POSES: Record<MouthViseme, MouthPose> = {
-  rest:  { open: 0,    wide: 0,    round: 0,   smile: 0,   teeth: 0,   tongue: 0,   fvBite: 0 },
-  MBP:   { open: -0.1, wide: 0,    round: 0,   smile: 0,   teeth: 0,   tongue: 0,   fvBite: 0 },
-  A:     { open: 1,    wide: 0.3,  round: 0,   smile: 0,   teeth: 0.8, tongue: 0.5, fvBite: 0 },
-  E:     { open: 0.15, wide: 1,    round: 0,   smile: 0.4, teeth: 0.9, tongue: 0,   fvBite: 0 },
-  O:     { open: 0.6,  wide: -0.2, round: 0.7, smile: 0,   teeth: 0,   tongue: 0,   fvBite: 0 },
-  U:     { open: 0.3,  wide: -0.4, round: 0.9, smile: 0,   teeth: 0,   tongue: 0,   fvBite: 0 },
-  WQ:    { open: 0.1,  wide: -0.5, round: 1,   smile: 0,   teeth: 0,   tongue: 0,   fvBite: 0 },
-  FV:    { open: 0.1,  wide: 0.1,  round: 0,   smile: 0,   teeth: 0.8, tongue: 0,   fvBite: 1 },
-  L:     { open: 0.5,  wide: 0.1,  round: 0,   smile: 0.1, teeth: 0.3, tongue: 1,   fvBite: 0 },
-  Smile: { open: 0,    wide: 0.8,  round: 0,   smile: 1,   teeth: 0.5, tongue: 0,   fvBite: 0 },
+  rest: {
+    open: 0.04,
+    wide: 0,
+    round: 0,
+    smile: 0,
+    teeth: 0,
+    tongue: 0,
+    fvBite: 0,
+  },
+
+  MBP: {
+    open: -0.08,
+    wide: 0,
+    round: 0,
+    smile: 0,
+    teeth: 0,
+    tongue: 0,
+    fvBite: 0,
+  },
+
+  A: {
+    open: 1.0,
+    wide: 0.15,
+    round: 0,
+    smile: 0,
+    teeth: 0.35,
+    tongue: 0.65,
+    fvBite: 0,
+  },
+
+  E: {
+    open: 0.28,
+    wide: 1.0,
+    round: 0,
+    smile: 0.35,
+    teeth: 0.85,
+    tongue: 0.05,
+    fvBite: 0,
+  },
+
+  O: {
+    open: 0.72,
+    wide: -0.35,
+    round: 0.85,
+    smile: 0,
+    teeth: 0.05,
+    tongue: 0.05,
+    fvBite: 0,
+  },
+
+  U: {
+    open: 0.42,
+    wide: -0.55,
+    round: 1.0,
+    smile: 0,
+    teeth: 0,
+    tongue: 0,
+    fvBite: 0,
+  },
+
+  WQ: {
+    open: 0.22,
+    wide: -0.7,
+    round: 1.0,
+    smile: 0,
+    teeth: 0,
+    tongue: 0,
+    fvBite: 0,
+  },
+
+  FV: {
+    open: 0.16,
+    wide: 0.15,
+    round: 0,
+    smile: 0.05,
+    teeth: 0.9,
+    tongue: 0,
+    fvBite: 1,
+  },
+
+  L: {
+    open: 0.55,
+    wide: 0.15,
+    round: 0,
+    smile: 0.1,
+    teeth: 0.45,
+    tongue: 1,
+    fvBite: 0,
+  },
+
+  Smile: {
+    open: 0.08,
+    wide: 0.95,
+    round: 0,
+    smile: 1,
+    teeth: 0.55,
+    tongue: 0,
+    fvBite: 0,
+  },
 };
 
 // ─── Transforms ───────────────────────────────────────────────────────────────
-// All values in SVG user units (viewBox 0 0 100 60).
-// The timeline builder multiplies by (placement.height / 60) to get CSS pixels.
-
+// All values are in SVG user units, based on viewBox 0 0 100 60.
+// The timeline builder can multiply positional offsets by
+// placement.height / 60 to convert into CSS pixels if needed.
 export interface RigTransforms {
-  upperLip: { y: number; scaleX: number; scaleY: number };
-  lowerLip: { y: number; scaleX: number; scaleY: number };
-  interior:  { scaleX: number; scaleY: number; opacity: number };
-  teeth:     { opacity: number; y: number };
-  tongue:    { opacity: number; y: number };
+  upperLip: {
+    y: number;
+    scaleX: number;
+    scaleY: number;
+  };
+
+  lowerLip: {
+    y: number;
+    scaleX: number;
+    scaleY: number;
+  };
+
+  interior: {
+    scaleX: number;
+    scaleY: number;
+    opacity: number;
+  };
+
+  teeth: {
+    opacity: number;
+    y: number;
+    scaleX: number;
+  };
+
+  tongue: {
+    opacity: number;
+    y: number;
+    scaleX: number;
+    scaleY: number;
+  };
 }
 
-// ─── Style definitions ────────────────────────────────────────────────────────
+// ─── Style definitions ───────────────────────────────────────────────────────
 export interface RigStyle {
   id: string;
   label: string;
+
   // Component paths at rest, in viewBox 0 0 100 60.
-  // Upper lip: cupid's bow — corners at (18,30)/(82,30), bow peak at (50,25).
+  // These paths should remain static. Do not animate path d values.
+  // Animate only transforms: x/y/scale/opacity/etc.
   upperLipPath: string;
-  // Lower lip: fuller arch — corners at (18,30)/(82,30), fullness at (50,38).
   lowerLipPath: string;
-  // Interior cavity (dark): flat ellipse that scaleY-expands with opening.
   interiorPath: string;
-  // Teeth strip: thin rectangle across the opening.
   teethPath: string;
-  // Tongue: rounded oval below the opening.
   tonguePath: string;
-  // Scale factors — controls how expressively each style reacts to pose params.
-  openScale:  number;
-  wideScale:  number;
+
+  // Style-level response multipliers.
+  // These let the same viseme poses behave differently per mouth style.
+  openScale: number;
+  wideScale: number;
   roundScale: number;
   smileScale: number;
 }
 
-// ─── Natural style ────────────────────────────────────────────────────────────
-// Realistic proportions following Preston Blair's construction:
-//   Upper lip: cupid's bow with philtrum dip, thin body
-//   Lower lip: fuller, rounded, slightly wider than upper
-const natural: RigStyle = {
-  id: "natural",
-  label: "Natural",
+// ─── Soft Cartoon ─────────────────────────────────────────────────────────────
+// Best default.
+// Friendly, readable, and broad enough to work on children’s/cartoon faces.
+const softCartoon: RigStyle = {
+  id: "softCartoon",
+  label: "Soft Cartoon",
 
-  // Upper lip: cupid's bow top edge, thin lip body
-  // Left corner (18,30) → left peak (37,25) → philtrum dip (50,27) →
-  // right peak (63,25) → right corner (82,30) → inner edge back to start
   upperLipPath:
-    "M 18 30 C 26 27 33 24 37 25 C 42 26 47 27 50 27" +
-    " C 53 27 58 26 63 25 C 67 24 74 27 82 30" +
-    " C 70 32 55 33 50 33 C 45 33 30 32 18 30 Z",
+    "M 18 30 " +
+    "C 28 25 39 24 50 26 " +
+    "C 61 24 72 25 82 30 " +
+    "C 72 33 60 34 50 34 " +
+    "C 40 34 28 33 18 30 Z",
 
-  // Lower lip: single fuller arch
-  // Left corner (18,30) → flat top → right corner (82,30) → bottom fullness (50,40)
   lowerLipPath:
-    "M 18 30 C 30 30 45 30 50 30 C 55 30 70 30 82 30" +
-    " C 74 37 60 41 50 41 C 40 41 26 37 18 30 Z",
+    "M 18 30 " +
+    "C 30 31 42 31 50 31 " +
+    "C 58 31 70 31 82 30 " +
+    "C 75 39 62 44 50 44 " +
+    "C 38 44 25 39 18 30 Z",
 
-  // Interior: D-arch — steep sides, flat ceiling, gentle lower curve.
-  // Control points sit directly above corners so the top stays flat (arch).
+  // Bean/oval cavity. This scales better than a very thin slit.
   interiorPath:
-    "M 22 30 C 22 28 78 28 78 30 C 65 33 35 33 22 30 Z",
+    "M 24 30 " + "C 28 23 72 23 76 30 " + "C 75 39 64 45 50 45 " + "C 36 45 25 39 24 30 Z",
 
-  // Teeth: flat strip just inside upper lip
-  teethPath:
-    "M 30 29 C 40 28 60 28 70 29 L 70 33 C 60 34 40 34 30 33 Z",
+  teethPath: "M 28 29 " + "C 38 27 62 27 72 29 " + "L 72 35 " + "C 61 37 39 37 28 35 Z",
 
-  // Tongue: rounded oval sitting in lower opening
-  tonguePath:
-    "M 35 34 C 35 32 65 32 65 34 C 65 40 35 40 35 34 Z",
+  tonguePath: "M 34 38 " + "C 38 34 62 34 66 38 " + "C 64 44 36 44 34 38 Z",
 
-  openScale:  1.0,
-  wideScale:  1.0,
+  openScale: 1.0,
+  wideScale: 1.0,
   roundScale: 1.0,
   smileScale: 1.0,
 };
 
-// ─── Wide style ───────────────────────────────────────────────────────────────
-const wide: RigStyle = {
-  id: "wide",
-  label: "Wide",
-  upperLipPath:
-    "M 10 30 C 20 27 29 23 34 24 C 40 25 46 27 50 27" +
-    " C 54 27 60 25 66 24 C 71 23 80 27 90 30" +
-    " C 76 32 56 33 50 33 C 44 33 24 32 10 30 Z",
-  lowerLipPath:
-    "M 10 30 C 24 30 42 30 50 30 C 58 30 76 30 90 30" +
-    " C 80 38 64 43 50 43 C 36 43 20 38 10 30 Z",
-  interiorPath:
-    "M 14 30 C 14 28 86 28 86 30 C 70 34 30 34 14 30 Z",
-  teethPath:
-    "M 22 29 C 36 27 64 27 78 29 L 78 33 C 64 35 36 35 22 33 Z",
-  tonguePath:
-    "M 30 34 C 30 31 70 31 70 34 C 70 41 30 41 30 34 Z",
-  openScale:  1.1,
-  wideScale:  1.1,
-  roundScale: 0.8,
-  smileScale: 1.1,
-};
+// ─── Tiny Cute ────────────────────────────────────────────────────────────────
+// For kawaii/simple faces.
+// Less lip detail, smaller silhouette, works well at small sizes.
+const tinyCute: RigStyle = {
+  id: "tinyCute",
+  label: "Tiny Cute",
 
-// ─── Petite style ─────────────────────────────────────────────────────────────
-const petite: RigStyle = {
-  id: "petite",
-  label: "Petite",
   upperLipPath:
-    "M 24 30 C 31 27 37 24 42 25 C 46 26 48 27 50 27" +
-    " C 52 27 54 26 58 25 C 63 24 69 27 76 30" +
-    " C 66 32 56 33 50 33 C 44 33 34 32 24 30 Z",
+    "M 28 30 " +
+    "C 35 27 43 26 50 27 " +
+    "C 57 26 65 27 72 30 " +
+    "C 64 32 57 33 50 33 " +
+    "C 43 33 36 32 28 30 Z",
+
   lowerLipPath:
-    "M 24 30 C 34 30 44 30 50 30 C 56 30 66 30 76 30" +
-    " C 68 36 58 39 50 39 C 42 39 32 36 24 30 Z",
+    "M 28 30 " +
+    "C 36 31 44 31 50 31 " +
+    "C 56 31 64 31 72 30 " +
+    "C 66 36 58 39 50 39 " +
+    "C 42 39 34 36 28 30 Z",
+
   interiorPath:
-    "M 28 30 C 28 28 72 28 72 30 C 62 33 38 33 28 30 Z",
-  teethPath:
-    "M 34 29 C 42 28 58 28 66 29 L 66 33 C 58 34 42 34 34 33 Z",
-  tonguePath:
-    "M 38 34 C 38 32 62 32 62 34 C 62 39 38 39 38 34 Z",
-  openScale:  0.85,
-  wideScale:  0.85,
-  roundScale: 1.1,
+    "M 31 30 " + "C 34 25 66 25 69 30 " + "C 68 36 60 40 50 40 " + "C 40 40 32 36 31 30 Z",
+
+  teethPath: "M 36 29 " + "C 43 28 57 28 64 29 " + "L 64 33 " + "C 57 34 43 34 36 33 Z",
+
+  tonguePath: "M 39 36 " + "C 43 33 57 33 61 36 " + "C 59 40 41 40 39 36 Z",
+
+  openScale: 0.82,
+  wideScale: 0.85,
+  roundScale: 1.05,
   smileScale: 0.9,
 };
 
-// ─── Cartoon style ────────────────────────────────────────────────────────────
-// Exaggerated — bigger opening, more pronounced bow, wider lower lip
-const cartoon: RigStyle = {
-  id: "cartoon",
-  label: "Cartoon",
-  upperLipPath:
-    "M 14 30 C 24 25 31 21 37 22 C 43 23 47 26 50 26" +
-    " C 53 26 57 23 63 22 C 69 21 76 25 86 30" +
-    " C 72 33 56 34 50 34 C 44 34 28 33 14 30 Z",
-  lowerLipPath:
-    "M 14 30 C 26 30 42 30 50 30 C 58 30 74 30 86 30" +
-    " C 76 39 62 45 50 45 C 38 45 24 39 14 30 Z",
-  // Cartoon gets a more exaggerated arch peak (y=26 vs y=28) for drama.
-  interiorPath:
-    "M 18 30 C 18 26 82 26 82 30 C 68 35 32 35 18 30 Z",
-  teethPath:
-    "M 24 28 C 37 26 63 26 76 28 L 76 33 C 63 35 37 35 24 33 Z",
-  tonguePath:
-    "M 30 34 C 30 31 70 31 70 34 C 70 42 30 42 30 34 Z",
-  openScale:  1.3,
-  wideScale:  1.2,
-  roundScale: 0.9,
-  smileScale: 1.3,
-};
+// ─── Big Expressive ───────────────────────────────────────────────────────────
+// More elastic.
+// Good for funny/kids characters and strong lip-sync readability.
+const bigExpressive: RigStyle = {
+  id: "bigExpressive",
+  label: "Big Expressive",
 
-// ─── Straight style ───────────────────────────────────────────────────────────
-// No cupid's bow — single smooth arch on the upper lip.
-// Works for adult male, neutral, or stylised characters.
-const straight: RigStyle = {
-  id: "straight",
-  label: "Straight",
-  // Upper lip: single arch, no double peak, no philtrum dip.
-  // Left corner (18,30) → uniform arch peaking at (50,26) → right corner (82,30)
   upperLipPath:
-    "M 18 30 C 32 25 68 25 82 30" +
-    " C 70 32 55 33 50 33 C 45 33 30 32 18 30 Z",
+    "M 12 30 " +
+    "C 24 23 38 22 50 25 " +
+    "C 62 22 76 23 88 30 " +
+    "C 76 34 62 36 50 36 " +
+    "C 38 36 24 34 12 30 Z",
+
   lowerLipPath:
-    "M 18 30 C 30 30 45 30 50 30 C 55 30 70 30 82 30" +
-    " C 74 37 60 41 50 41 C 40 41 26 37 18 30 Z",
+    "M 12 30 " +
+    "C 26 31 40 32 50 32 " +
+    "C 60 32 74 31 88 30 " +
+    "C 80 42 65 49 50 49 " +
+    "C 35 49 20 42 12 30 Z",
+
   interiorPath:
-    "M 22 30 C 22 28 78 28 78 30 C 65 33 35 33 22 30 Z",
-  teethPath:
-    "M 30 29 C 40 28 60 28 70 29 L 70 33 C 60 34 40 34 30 33 Z",
-  tonguePath:
-    "M 35 34 C 35 32 65 32 65 34 C 65 40 35 40 35 34 Z",
-  openScale:  1.0,
-  wideScale:  1.0,
+    "M 18 30 " + "C 22 21 78 21 82 30 " + "C 81 43 67 51 50 51 " + "C 33 51 19 43 18 30 Z",
+
+  teethPath: "M 24 28 " + "C 36 25 64 25 76 28 " + "L 76 36 " + "C 63 39 37 39 24 36 Z",
+
+  tonguePath: "M 29 40 " + "C 35 35 65 35 71 40 " + "C 68 48 32 48 29 40 Z",
+
+  openScale: 1.18,
+  wideScale: 1.12,
   roundScale: 0.95,
-  smileScale: 0.9,
+  smileScale: 1.18,
 };
 
-// ─── Broad style ──────────────────────────────────────────────────────────────
-// Wide, thick, straight upper lip — suited to strong masculine or cartoon male.
-// Corners extend to (12,30)/(88,30); both lips are fuller than Natural.
-const broad: RigStyle = {
-  id: "broad",
-  label: "Broad",
+// ─── Simple Line ──────────────────────────────────────────────────────────────
+// Minimal style for very simple characters.
+// Cleaner silhouette, less lip body, less mature/realistic.
+const simpleLine: RigStyle = {
+  id: "simpleLine",
+  label: "Simple Line",
+
   upperLipPath:
-    "M 12 30 C 28 25 72 25 88 30" +
-    " C 74 33 56 34 50 34 C 44 34 26 33 12 30 Z",
+    "M 20 30 " + "C 32 27 68 27 80 30 " + "C 68 32 58 33 50 33 " + "C 42 33 32 32 20 30 Z",
+
   lowerLipPath:
-    "M 12 30 C 26 30 44 30 50 30 C 56 30 74 30 88 30" +
-    " C 78 39 62 44 50 44 C 38 44 22 39 12 30 Z",
+    "M 20 30 " + "C 32 31 68 31 80 30 " + "C 72 36 60 39 50 39 " + "C 40 39 28 36 20 30 Z",
+
   interiorPath:
-    "M 16 30 C 16 28 84 28 84 30 C 68 34 32 34 16 30 Z",
-  teethPath:
-    "M 22 29 C 36 27 64 27 78 29 L 78 33 C 64 35 36 35 22 33 Z",
-  tonguePath:
-    "M 28 34 C 28 31 72 31 72 34 C 72 42 28 42 28 34 Z",
-  openScale:  1.1,
-  wideScale:  1.15,
-  roundScale: 0.8,
+    "M 25 30 " + "C 30 26 70 26 75 30 " + "C 73 36 62 40 50 40 " + "C 38 40 27 36 25 30 Z",
+
+  teethPath: "M 31 29 " + "C 40 28 60 28 69 29 " + "L 69 33 " + "C 60 34 40 34 31 33 Z",
+
+  tonguePath: "M 36 36 " + "C 40 33 60 33 64 36 " + "C 62 40 38 40 36 36 Z",
+
+  openScale: 0.95,
+  wideScale: 1.0,
+  roundScale: 1.0,
   smileScale: 0.95,
 };
 
-export const RIG_STYLES: RigStyle[] = [natural, straight, wide, broad, petite, cartoon];
+// ─── Wide Smile ───────────────────────────────────────────────────────────────
+// Good for friendly characters with broad faces.
+const wideSmile: RigStyle = {
+  id: "wideSmile",
+  label: "Wide Smile",
+
+  upperLipPath:
+    "M 8 30 " +
+    "C 22 25 38 24 50 26 " +
+    "C 62 24 78 25 92 30 " +
+    "C 78 33 62 35 50 35 " +
+    "C 38 35 22 33 8 30 Z",
+
+  lowerLipPath:
+    "M 8 30 " +
+    "C 24 31 40 31 50 31 " +
+    "C 60 31 76 31 92 30 " +
+    "C 82 39 66 44 50 44 " +
+    "C 34 44 18 39 8 30 Z",
+
+  interiorPath:
+    "M 14 30 " + "C 20 24 80 24 86 30 " + "C 84 38 68 44 50 44 " + "C 32 44 16 38 14 30 Z",
+
+  teethPath: "M 20 28 " + "C 34 26 66 26 80 28 " + "L 80 35 " + "C 66 37 34 37 20 35 Z",
+
+  tonguePath: "M 28 38 " + "C 34 34 66 34 72 38 " + "C 69 44 31 44 28 38 Z",
+
+  openScale: 1.0,
+  wideScale: 1.18,
+  roundScale: 0.82,
+  smileScale: 1.15,
+};
+
+// ─── Round Puppet ─────────────────────────────────────────────────────────────
+// Best for characters where O/U/WQ shapes need to read clearly.
+const roundPuppet: RigStyle = {
+  id: "roundPuppet",
+  label: "Round Puppet",
+
+  upperLipPath:
+    "M 20 30 " +
+    "C 30 24 40 23 50 26 " +
+    "C 60 23 70 24 80 30 " +
+    "C 70 34 60 36 50 36 " +
+    "C 40 36 30 34 20 30 Z",
+
+  lowerLipPath:
+    "M 20 30 " +
+    "C 30 31 42 32 50 32 " +
+    "C 58 32 70 31 80 30 " +
+    "C 74 42 62 48 50 48 " +
+    "C 38 48 26 42 20 30 Z",
+
+  interiorPath:
+    "M 27 30 " + "C 28 22 72 22 73 30 " + "C 73 43 63 50 50 50 " + "C 37 50 27 43 27 30 Z",
+
+  teethPath: "M 32 28 " + "C 40 26 60 26 68 28 " + "L 68 34 " + "C 60 36 40 36 32 34 Z",
+
+  tonguePath: "M 36 40 " + "C 40 36 60 36 64 40 " + "C 62 46 38 46 36 40 Z",
+
+  openScale: 1.05,
+  wideScale: 0.92,
+  roundScale: 1.22,
+  smileScale: 0.85,
+};
+
+export const RIG_STYLES: RigStyle[] = [
+  softCartoon,
+  tinyCute,
+  bigExpressive,
+  simpleLine,
+  wideSmile,
+  roundPuppet,
+];
 
 // ─── Pose → transforms ────────────────────────────────────────────────────────
-// Returns SVG-unit offsets. Timeline builder converts to CSS px using placement size.
-// curve options are rig-level (character shape), not per-viseme.
+// Converts semantic pose values into SVG-unit transforms.
+// These transform values should be applied through GSAP timelines.
+// Do not use CSS transitions for lip sync, and do not animate SVG d paths.
 export function poseToTransforms(
   pose: MouthPose,
   style: RigStyle,
@@ -236,43 +398,93 @@ export function poseToTransforms(
   const rs = style.roundScale;
   const ss = style.smileScale;
 
-  // Wide and round pull in opposite directions on scaleX.
-  const lipScaleX = 1 + pose.wide * 0.28 * ws - pose.round * 0.28 * rs;
+  const open = Math.max(0, pose.open);
+  const closedPress = Math.min(0, pose.open);
 
-  // Upper lip moves up with open and smile; pressed down slightly for MBP.
-  const upperY = -pose.open * 10 * os - pose.smile * 3 * ss + (pose.open < 0 ? pose.open * 2 : 0);
+  // Wide and round fight each other.
+  // Round gets a stronger narrowing effect so O/U/WQ read clearly.
+  const baseScaleX = 1 + pose.wide * 0.34 * ws - pose.round * 0.38 * rs;
 
-  // Lower lip moves down with open; rises for fvBite (lower lip toward upper teeth).
-  const lowerY = pose.open * 13 * os - pose.fvBite * 7;
+  const lipScaleX = Math.max(0.38, baseScaleX);
 
-  // Interior scales vertically with openness, narrowed by round.
-  const interiorScaleY = Math.max(0, pose.open) * 3.5 * os;
-  const interiorScaleX = lipScaleX * (1 - pose.round * 0.2 * rs);
-  const interiorOpacity = Math.max(0, pose.open) > 0.05 ? 1 : 0;
+  // Upper lip moves, but less than the lower jaw.
+  // Too much upper movement makes the whole mouth look like it floats.
+  const upperY = -open * 5.5 * os - pose.smile * 2.5 * ss + closedPress * 3;
 
-  // Teeth track the upper lip, appear with teeth param.
-  const teethY = upperY * 0.6;
+  // Lower lip carries most jaw action.
+  // FV pulls the lower lip upward toward the teeth.
+  const lowerY = open * 15.5 * os - pose.fvBite * 8 + closedPress * 2;
 
-  // Tongue sits in the lower opening.
-  const tongueY = lowerY * 0.4;
+  // Interior:
+  // - Rest has a tiny visible slit.
+  // - Open expands vertically.
+  // - Round narrows horizontally and slightly increases verticality.
+  const interiorScaleX = Math.max(0.28, lipScaleX * (1 - pose.round * 0.24 * rs));
 
-  // Bow curve: scaleY > 1 = more arched, < 1 = flatter.
-  // Scaled from cy=30 (the lip line), which is 50% of the 60-unit viewBox.
-  const upperScaleY = 1 + (options?.upperCurve ?? 0) * 0.6;
-  const lowerScaleY = 1 + (options?.lowerCurve ?? 0) * 0.6;
+  const interiorScaleY = Math.max(0.04, 0.08 + open * 1.95 * os + pose.round * 0.28 * rs);
+
+  const interiorOpacity = open > 0.025 ? 1 : pose.open < 0 ? 0 : 0.55;
+
+  // Teeth should appear late/subtly, not constantly.
+  // This prevents creepy flashing teeth during fast lip sync.
+  const teethOpacity = pose.teeth <= 0 ? 0 : open < 0.08 && pose.smile < 0.5 ? 0 : pose.teeth;
+
+  const teethY = upperY * 0.55 + pose.fvBite * 1.5;
+
+  const teethScaleX = Math.max(0.45, lipScaleX * (1 - pose.round * 0.25));
+
+  // Tongue is mostly for A/L, and should sit low in the mouth.
+  const tongueOpacity = pose.tongue <= 0 ? 0 : open < 0.25 ? pose.tongue * 0.35 : pose.tongue;
+
+  const tongueY = lowerY * 0.45 + open * 2.5;
+
+  const tongueScaleX = Math.max(0.45, lipScaleX * (1 - pose.round * 0.15));
+
+  const tongueScaleY = Math.max(0.55, 1 + open * 0.15 - pose.round * 0.25);
+
+  // User style controls.
+  // These are rig-level art controls, not per-viseme controls.
+  const upperScaleY = Math.max(0.25, 1 + (options?.upperCurve ?? 0) * 0.45);
+
+  const lowerScaleY = Math.max(0.25, 1 + (options?.lowerCurve ?? 0) * 0.45);
 
   return {
-    upperLip: { y: upperY, scaleX: lipScaleX, scaleY: Math.max(0.1, upperScaleY) },
-    lowerLip: { y: lowerY, scaleX: lipScaleX, scaleY: Math.max(0.1, lowerScaleY) },
-    interior: { scaleX: interiorScaleX, scaleY: interiorScaleY, opacity: interiorOpacity },
-    teeth:    { opacity: pose.teeth,  y: teethY },
-    tongue:   { opacity: pose.tongue, y: tongueY },
+    upperLip: {
+      y: upperY,
+      scaleX: lipScaleX,
+      scaleY: upperScaleY,
+    },
+
+    lowerLip: {
+      y: lowerY,
+      scaleX: lipScaleX,
+      scaleY: lowerScaleY,
+    },
+
+    interior: {
+      scaleX: interiorScaleX,
+      scaleY: interiorScaleY,
+      opacity: interiorOpacity,
+    },
+
+    teeth: {
+      opacity: teethOpacity,
+      y: teethY,
+      scaleX: teethScaleX,
+    },
+
+    tongue: {
+      opacity: tongueOpacity,
+      y: tongueY,
+      scaleX: tongueScaleX,
+      scaleY: tongueScaleY,
+    },
   };
 }
 
 // ─── Default rig factory ──────────────────────────────────────────────────────
 export function createDefaultMouthRig(
-  styleId = "natural",
+  styleId = "softCartoon",
   placement = { x: 210, y: 310, width: 180, height: 108, zIndex: 60 },
 ): MouthRig {
   return {
@@ -281,10 +493,13 @@ export function createDefaultMouthRig(
     teethColor: DEFAULT_TEETH_COLOR,
     tongueColor: DEFAULT_TONGUE_COLOR,
     interiorColor: DEFAULT_INTERIOR_COLOR,
+
     widthScale: 1.0,
     upperCurve: 0,
     lowerCurve: 0,
+
     placement,
+
     poses: { ...VISEME_POSES },
   };
 }

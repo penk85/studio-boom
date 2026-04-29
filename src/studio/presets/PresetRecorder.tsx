@@ -39,18 +39,19 @@ interface RecorderPartState {
 export function PresetRecorder({
   character,
   onClose,
-  initialKeypose,
+  initialPreset,
 }: {
   character: CharacterPreset;
   onClose: () => void;
-  initialKeypose?: RecordedKeypose;
+  /** When provided, the recorder opens in edit mode and saves back to the same id. */
+  initialPreset?: ActionPreset;
 }) {
-  const [name, setName] = useState("New preset");
-  const [category, setCategory] = useState<ActionCategory>("expression");
-  const [duration, setDuration] = useState(1);
+  const [name, setName] = useState(initialPreset?.name ?? "New preset");
+  const [category, setCategory] = useState<ActionCategory>(initialPreset?.category ?? "expression");
+  const [duration, setDuration] = useState(initialPreset?.duration ?? 1);
   const [time, setTime] = useState(0);
   const [keyposes, setKeyposes] = useState<RecordedKeypose[]>(
-    initialKeypose ? [initialKeypose] : [],
+    initialPreset?.keyposes ? [...initialPreset.keyposes] : [],
   );
   // Live pose overrides per part (relative to rest)
   const [overrides, setOverrides] = useState<Map<string, RecorderPartState>>(new Map());
@@ -139,15 +140,15 @@ export function PresetRecorder({
       return;
     }
     const preset: ActionPreset = {
-      id: uid(),
+      id: initialPreset?.id ?? uid(),
       name: name.trim() || "Untitled preset",
       category,
       duration: Math.max(0.1, duration),
       loop: false,
-      tracks: [],
+      tracks: initialPreset?.tracks ?? [],
       keyposes: keyposes.sort((a, b) => a.t - b.t),
       builtin: false,
-      createdAt: Date.now(),
+      createdAt: initialPreset?.createdAt ?? Date.now(),
       updatedAt: Date.now(),
     };
     await db.movements.put(preset);
@@ -158,7 +159,9 @@ export function PresetRecorder({
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-background/90 p-6">
       <div className="flex w-full max-w-6xl flex-col overflow-hidden rounded-lg border border-border bg-panel">
         <header className="flex items-center gap-3 border-b border-border bg-panel-2 px-4 py-2">
-          <span className="text-sm font-semibold">Record Preset</span>
+          <span className="text-sm font-semibold">
+            {initialPreset ? "Edit Preset" : "Record Preset"}
+          </span>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -199,7 +202,7 @@ export function PresetRecorder({
               onClick={save}
               className="rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-90"
             >
-              Save preset
+              {initialPreset ? "Update preset" : "Save preset"}
             </button>
           </div>
         </header>
@@ -247,9 +250,9 @@ export function PresetRecorder({
 
           <aside className="w-72 shrink-0 overflow-auto border-l border-border bg-panel p-3 text-xs">
             <div className="mb-3 text-[11px] text-muted-foreground">
-              <strong>How it works:</strong> Drag parts to pose them. Click <em>Capture pose</em>.
-              Move the time slider, repose, capture again. Save when done. The preset interpolates
-              smoothly between captures.
+              <strong>How it works:</strong> Drag parts to pose them. Use the circle handle to rotate,
+              the square handle to scale. Click <em>Capture pose</em>. Move the slider, repose,
+              capture again. Save when done.
             </div>
 
             <div className="mb-3">
@@ -337,6 +340,7 @@ function PoseLayer({
   const sc = override?.scale ?? 1;
   const rot = override?.rotation ?? 0;
 
+  // Drag handler for position
   const onPointerDown = (e: React.PointerEvent) => {
     e.stopPropagation();
     if (e.button !== 0) return;
@@ -349,6 +353,48 @@ function PoseLayer({
         dx: Math.round(ox + (ev.clientX - sx) / scale),
         dy: Math.round(oy + (ev.clientY - sy) / scale),
       });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  // Rotation handle — circle above the part's top center
+  const onRotateDown = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    // Pivot is the part's anchor in screen space (scaled)
+    const pivotX = (part.x + dx + part.width * part.anchorX) * scale;
+    const pivotY = (part.y + dy + part.height * part.anchorY) * scale;
+    const startAngle = Math.atan2(e.clientY - pivotY, e.clientX - pivotX) * (180 / Math.PI);
+    const startRot = rot;
+    const move = (ev: PointerEvent) => {
+      const angle = Math.atan2(ev.clientY - pivotY, ev.clientX - pivotX) * (180 / Math.PI);
+      onChange({ rotation: round(startRot + (angle - startAngle), 1) });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  // Scale handle — square at the bottom-right corner
+  const onScaleDown = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    const pivotX = (part.x + dx + part.width * part.anchorX) * scale;
+    const pivotY = (part.y + dy + part.height * part.anchorY) * scale;
+    const startDist = Math.hypot(e.clientX - pivotX, e.clientY - pivotY);
+    const startScale = sc;
+    const move = (ev: PointerEvent) => {
+      const dist = Math.hypot(ev.clientX - pivotX, ev.clientY - pivotY);
+      if (startDist < 1) return;
+      onChange({ scale: round(Math.max(0.1, startScale * (dist / startDist)), 2) });
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
@@ -385,6 +431,20 @@ function PoseLayer({
           className="h-full w-full object-contain pointer-events-none"
         />
       )}
+      {/* Rotation handle */}
+      <div
+        onPointerDown={onRotateDown}
+        title="Drag to rotate"
+        className="absolute rounded-full bg-primary border border-white cursor-grab active:cursor-grabbing"
+        style={{ width: 10, height: 10, top: -14, left: "50%", transform: "translateX(-50%)" }}
+      />
+      {/* Scale handle */}
+      <div
+        onPointerDown={onScaleDown}
+        title="Drag to scale"
+        className="absolute rounded-sm bg-accent border border-white cursor-nwse-resize"
+        style={{ width: 10, height: 10, bottom: -6, right: -6 }}
+      />
     </div>
   );
 }

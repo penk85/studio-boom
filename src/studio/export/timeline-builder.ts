@@ -388,6 +388,24 @@ export function buildCharacterTimeline(
 
 // ─── Rig viseme events ────────────────────────────────────────────────────────
 
+type RigTransforms = ReturnType<typeof poseToTransforms>;
+
+function rigPropsUpper(t: RigTransforms, pxY: number, widthScale: number) {
+  return { y: t.upperLip.y * pxY, scaleX: t.upperLip.scaleX * widthScale, scaleY: t.upperLip.scaleY };
+}
+function rigPropsLower(t: RigTransforms, pxY: number, widthScale: number) {
+  return { y: t.lowerLip.y * pxY, scaleX: t.lowerLip.scaleX * widthScale, scaleY: t.lowerLip.scaleY };
+}
+function rigPropsInterior(t: RigTransforms, widthScale: number) {
+  return { scaleY: t.interior.scaleY, scaleX: t.interior.scaleX * widthScale, opacity: t.interior.opacity };
+}
+function rigPropsTeeth(t: RigTransforms, pxY: number) {
+  return { opacity: t.teeth.opacity, y: t.teeth.y * pxY };
+}
+function rigPropsTongue(t: RigTransforms, pxY: number) {
+  return { opacity: t.tongue.opacity, y: t.tongue.y * pxY };
+}
+
 function addRigVisemeEvents(
   tl: gsap.core.Timeline,
   clip: CharacterClip,
@@ -398,9 +416,8 @@ function addRigVisemeEvents(
 
   const rigStyle = RIG_STYLES.find((s) => s.id === mouthRig.styleId) ?? RIG_STYLES[0];
   const { placement } = mouthRig;
-  // Convert SVG-unit offsets to CSS pixels using the rendered placement size.
   const pxPerSvgY = placement.height / 60;
-  const pxPerSvgX = placement.width / 100;
+  const widthScale = mouthRig.widthScale;
 
   const ids = {
     upperLip: `#${rigComponentId(clip.id, "upper-lip")}`,
@@ -415,28 +432,32 @@ function addRigVisemeEvents(
     lowerCurve: mouthRig.lowerCurve ?? 0,
   };
 
-  const applyTransforms = (transforms: ReturnType<typeof poseToTransforms>, atTime: number, duration: number) => {
-    const { upperLip, lowerLip, interior, teeth, tongue } = transforms;
-    tl.to(ids.upperLip, { y: upperLip.y * pxPerSvgY, scaleX: upperLip.scaleX * mouthRig.widthScale, scaleY: upperLip.scaleY, duration, ease: "power1.out" }, atTime);
-    tl.to(ids.lowerLip, { y: lowerLip.y * pxPerSvgY, scaleX: lowerLip.scaleX * mouthRig.widthScale, scaleY: lowerLip.scaleY, duration, ease: "power1.out" }, atTime);
-    tl.to(ids.interior, { scaleY: interior.scaleY, scaleX: interior.scaleX * mouthRig.widthScale, opacity: interior.opacity, duration, ease: "power1.out" }, atTime);
-    tl.to(ids.teeth,    { opacity: teeth.opacity,  y: teeth.y * pxPerSvgY,  duration: duration * 0.7 }, atTime);
-    tl.to(ids.tongue,   { opacity: tongue.opacity, y: tongue.y * pxPerSvgY, duration: duration * 0.7 }, atTime);
-  };
-
   // Set initial rest state at t=0.
-  const restTransforms = poseToTransforms(mouthRig.poses.rest, rigStyle, curveOpts);
-  applyTransforms(restTransforms, 0, 0);
+  const restT = poseToTransforms(mouthRig.poses.rest, rigStyle, curveOpts);
+  tl.set(ids.upperLip, rigPropsUpper(restT, pxPerSvgY, widthScale), 0);
+  tl.set(ids.lowerLip, rigPropsLower(restT, pxPerSvgY, widthScale), 0);
+  tl.set(ids.interior, rigPropsInterior(restT, widthScale), 0);
+  tl.set(ids.teeth,    rigPropsTeeth(restT, pxPerSvgY), 0);
+  tl.set(ids.tongue,   rigPropsTongue(restT, pxPerSvgY), 0);
 
-  // Emit tl.to() tweens for each viseme event (smoothed to ≤10/sec, vowels preferred).
+  // fromTo tweens: bake prev→next so backward scrubbing is correct.
   const BLEND = 0.075;
   const sortedVisemes = smoothVisemes(clip.visemes ?? []);
+  let prev = restT;
 
   for (const { t, v } of sortedVisemes) {
     if (t < 0 || t > clip.duration) continue;
     const pose = mouthRig.poses[v as MouthViseme] ?? mouthRig.poses.rest;
-    const transforms = poseToTransforms(pose, rigStyle, curveOpts);
+    const next = poseToTransforms(pose, rigStyle, curveOpts);
     const startAt = Math.max(0, t - BLEND);
-    applyTransforms(transforms, startAt, Math.min(BLEND, t));
+    const dur = Math.min(BLEND, t);
+
+    tl.fromTo(ids.upperLip, rigPropsUpper(prev, pxPerSvgY, widthScale), { ...rigPropsUpper(next, pxPerSvgY, widthScale), duration: dur, ease: "power1.out" }, startAt);
+    tl.fromTo(ids.lowerLip, rigPropsLower(prev, pxPerSvgY, widthScale), { ...rigPropsLower(next, pxPerSvgY, widthScale), duration: dur, ease: "power1.out" }, startAt);
+    tl.fromTo(ids.interior, rigPropsInterior(prev, widthScale), { ...rigPropsInterior(next, widthScale), duration: dur, ease: "power1.out" }, startAt);
+    tl.fromTo(ids.teeth,    rigPropsTeeth(prev, pxPerSvgY),    { ...rigPropsTeeth(next, pxPerSvgY),    duration: dur * 0.7 }, startAt);
+    tl.fromTo(ids.tongue,   rigPropsTongue(prev, pxPerSvgY),   { ...rigPropsTongue(next, pxPerSvgY),   duration: dur * 0.7 }, startAt);
+
+    prev = next;
   }
 }

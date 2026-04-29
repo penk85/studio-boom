@@ -3,7 +3,8 @@ import { useEffect, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db } from "@/studio/db";
 import { ensurePresetsSeeded } from "@/studio/presets/seed";
-import type { ActionCategory } from "@/studio/types";
+import { PresetRecorder } from "@/studio/presets/PresetRecorder";
+import type { ActionCategory, ActionPreset, CharacterPreset } from "@/studio/types";
 
 export const Route = createFileRoute("/presets")({
   head: () => ({
@@ -27,24 +28,76 @@ const CATEGORIES: { id: ActionCategory | "all"; label: string }[] = [
 function PresetsRoute() {
   const [mounted, setMounted] = useState(false);
   const [cat, setCat] = useState<ActionCategory | "all">("all");
+  const [selectedCharId, setSelectedCharId] = useState<string>("");
+  const [recorder, setRecorder] = useState<{ character: CharacterPreset; preset?: ActionPreset } | null>(null);
+
   useEffect(() => {
     setMounted(true);
     void ensurePresetsSeeded();
   }, []);
+
   const presets = useLiveQuery(() => db.movements.orderBy("createdAt").toArray(), []) ?? [];
+  const characters = useLiveQuery(() => db.characters.orderBy("name").toArray(), []) ?? [];
+
+  // Auto-select first character
+  useEffect(() => {
+    if (!selectedCharId && characters.length > 0) {
+      setSelectedCharId(characters[0].id);
+    }
+  }, [characters, selectedCharId]);
+
   if (!mounted) return null;
+
   const filtered = cat === "all" ? presets : presets.filter((p) => p.category === cat);
+  const selectedChar = characters.find((c) => c.id === selectedCharId);
+
+  const openRecorder = (preset?: ActionPreset) => {
+    if (!selectedChar) return;
+    setRecorder({ character: selectedChar, preset });
+  };
+
+  if (recorder) {
+    return (
+      <PresetRecorder
+        character={recorder.character}
+        initialPreset={recorder.preset}
+        onClose={() => setRecorder(null)}
+      />
+    );
+  }
 
   return (
     <main className="min-h-screen bg-background p-6 text-foreground">
-      <header className="mb-6 flex items-center gap-3">
+      <header className="mb-6 flex items-center gap-3 flex-wrap">
         <Link to="/" className="rounded border border-border px-2 py-1 text-xs hover:bg-panel-2">
           ← Studio
         </Link>
         <h1 className="text-2xl font-semibold">Action Presets</h1>
         <p className="ml-3 text-xs text-muted-foreground">
-          Reusable expressions, gestures, full-body and camera moves. Apply to any character clip.
+          Reusable expressions, gestures, full-body and camera moves.
         </p>
+        <div className="ml-auto flex items-center gap-2">
+          {characters.length > 0 ? (
+            <select
+              value={selectedCharId}
+              onChange={(e) => setSelectedCharId(e.target.value)}
+              className="rounded border border-border bg-input px-2 py-1 text-xs"
+            >
+              {characters.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          ) : (
+            <span className="text-xs text-muted-foreground">No characters yet</span>
+          )}
+          <button
+            onClick={() => openRecorder()}
+            disabled={!selectedChar}
+            className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            + New preset
+          </button>
+        </div>
       </header>
 
       <div className="mb-4 flex flex-wrap gap-2">
@@ -67,16 +120,24 @@ function PresetsRoute() {
         {filtered.map((p) => (
           <div key={p.id} className="rounded-lg border border-border bg-panel p-3">
             <div className="mb-1 flex items-center gap-2">
-              <span className="font-medium">{p.name}</span>
+              <span className="flex-1 font-medium">{p.name}</span>
               {p.builtin && (
                 <span className="rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase text-secondary-foreground">
                   built-in
                 </span>
               )}
+              {!p.builtin && (
+                <button
+                  onClick={() => openRecorder(p)}
+                  disabled={!selectedChar}
+                  className="text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-40"
+                >
+                  Edit
+                </button>
+              )}
             </div>
             <div className="text-[11px] text-muted-foreground">
-              {p.category} · {p.duration}s · {p.tracks.length} track
-              {p.tracks.length !== 1 ? "s" : ""}
+              {p.category} · {p.duration}s
               {p.loop ? " · loops" : ""}
             </div>
             {p.description && (
@@ -90,10 +151,6 @@ function PresetsRoute() {
           </div>
         )}
       </div>
-      <p className="mt-6 text-[11px] text-muted-foreground">
-        Authoring custom presets in the visual editor is coming next. For now, built-ins cover most
-        expressions and gestures, and you can apply multiple presets per clip from the Inspector.
-      </p>
     </main>
   );
 }

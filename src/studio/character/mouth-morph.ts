@@ -1,21 +1,75 @@
 import type { MouthViseme } from "../types";
 
+/**
+ * Semantic mouth profile.
+ *
+ * Values describe the intention of the mouth shape.
+ * They are converted into GSAP-safe transforms for separate mouth rig parts:
+ * upper lip, lower lip, interior, corners, teeth, tongue.
+ *
+ * Do NOT animate SVG `d` — use the transform output from profileToMouthTransforms().
+ */
 export interface MouthMorphProfile {
+  /** Overall horizontal expansion. Positive = wider. Negative = narrower. */
   width: number;
+  /** Overall mouth opening. Positive = open. Negative = pressed closed. */
   openness: number;
+  /** Round/pursed quality. Positive = puckered. Negative = spread. */
   pucker: number;
+  /** Vertical corner lift. Positive = smile. Negative = frown. */
   cornerLift: number;
+  /** Horizontal corner pull. Positive = corners pull outward. */
   cornerPull: number;
+  /** Upper lip movement. Positive = upper lip lifts. */
   upperLift: number;
+  /** Lower lip / jaw movement. Positive = lower lip drops. */
   lowerDrop: number;
+  /** FV-style bite. Positive = lower lip rises toward upper teeth. */
   bite: number;
+  /** Optional one-sided offset for L/smirk-like shapes. */
   asymmetry?: number;
 }
 
+/**
+ * Transform output for a HyperFrames-safe mouth rig.
+ * All values are GSAP-animatable: x, y, scaleX, scaleY, rotation, opacity.
+ * No SVG path `d` animation required.
+ */
+export interface MouthRigTransforms {
+  root: { scaleX: number; scaleY: number; skewX: number };
+  upperLip: { y: number; scaleX: number; scaleY: number; rotation: number };
+  lowerLip: { y: number; scaleX: number; scaleY: number; rotation: number };
+  leftCorner: { x: number; y: number };
+  rightCorner: { x: number; y: number };
+  interior: { scaleX: number; scaleY: number; opacity: number };
+  teeth: { opacity: number; y: number; scaleX: number; scaleY: number };
+  tongue: { opacity: number; y: number; scaleX: number; scaleY: number };
+}
+
+/** Style multipliers — different mouth art styles can respond differently to the same viseme. */
+export interface MouthRigResponse {
+  widthScale: number;
+  openScale: number;
+  puckerScale: number;
+  smileScale: number;
+  biteScale: number;
+  asymmetryScale: number;
+}
+
+export const DEFAULT_MOUTH_RIG_RESPONSE: MouthRigResponse = {
+  widthScale: 1,
+  openScale: 1,
+  puckerScale: 1,
+  smileScale: 1,
+  biteScale: 1,
+  asymmetryScale: 1,
+};
+
+/** Papagayo / Preston Blair-inspired viseme profiles. */
 export const MOUTH_MORPH_PRESETS: Record<MouthViseme, MouthMorphProfile> = {
   rest: {
     width: 0,
-    openness: 0,
+    openness: 0.02,
     pucker: 0,
     cornerLift: 0,
     cornerPull: 0,
@@ -24,307 +78,211 @@ export const MOUTH_MORPH_PRESETS: Record<MouthViseme, MouthMorphProfile> = {
     bite: 0,
   },
   A: {
-    width: -0.06,
-    openness: 0.42,
+    width: 0.02,
+    openness: 0.75,
     pucker: -0.04,
     cornerLift: -0.02,
-    cornerPull: -0.04,
-    upperLift: 0.08,
-    lowerDrop: 0.28,
+    cornerPull: -0.02,
+    upperLift: 0.12,
+    lowerDrop: 0.62,
     bite: 0,
   },
   E: {
-    width: 0.24,
-    openness: 0.08,
-    pucker: -0.18,
-    cornerLift: 0.06,
-    cornerPull: 0.12,
-    upperLift: 0.02,
-    lowerDrop: 0.03,
-    bite: 0.02,
+    width: 0.42,
+    openness: 0.16,
+    pucker: -0.24,
+    cornerLift: 0.12,
+    cornerPull: 0.28,
+    upperLift: 0.03,
+    lowerDrop: 0.08,
+    bite: 0,
   },
   O: {
-    width: -0.14,
-    openness: 0.22,
-    pucker: 0.24,
-    cornerLift: -0.01,
-    cornerPull: -0.08,
-    upperLift: 0.04,
-    lowerDrop: 0.12,
+    width: -0.22,
+    openness: 0.52,
+    pucker: 0.58,
+    cornerLift: 0,
+    cornerPull: -0.18,
+    upperLift: 0.08,
+    lowerDrop: 0.34,
     bite: 0,
   },
   U: {
-    width: -0.22,
-    openness: 0.12,
-    pucker: 0.36,
+    width: -0.36,
+    openness: 0.32,
+    pucker: 0.72,
     cornerLift: 0,
-    cornerPull: -0.12,
+    cornerPull: -0.26,
+    upperLift: 0.04,
+    lowerDrop: 0.18,
+    bite: 0,
+  },
+  WQ: {
+    width: -0.46,
+    openness: 0.18,
+    pucker: 0.85,
+    cornerLift: 0,
+    cornerPull: -0.34,
     upperLift: 0.02,
-    lowerDrop: 0.04,
+    lowerDrop: 0.08,
     bite: 0,
   },
   MBP: {
-    width: 0.05,
+    width: 0.04,
     openness: -0.18,
     pucker: -0.04,
-    cornerLift: 0.01,
+    cornerLift: 0,
     cornerPull: 0.02,
-    upperLift: -0.02,
+    upperLift: -0.06,
     lowerDrop: -0.08,
     bite: 0,
   },
   FV: {
-    width: 0.1,
-    openness: 0.03,
-    pucker: -0.08,
-    cornerLift: 0.01,
-    cornerPull: 0.04,
-    upperLift: -0.06,
-    lowerDrop: 0.1,
-    bite: 0.1,
+    width: 0.12,
+    openness: 0.08,
+    pucker: -0.1,
+    cornerLift: 0.02,
+    cornerPull: 0.08,
+    upperLift: -0.02,
+    lowerDrop: 0.04,
+    bite: 0.9,
   },
   L: {
-    width: -0.04,
-    openness: 0.18,
-    pucker: -0.02,
-    cornerLift: 0.02,
-    cornerPull: -0.02,
-    upperLift: 0.02,
-    lowerDrop: 0.18,
+    width: 0.04,
+    openness: 0.42,
+    pucker: -0.04,
+    cornerLift: 0.04,
+    cornerPull: 0,
+    upperLift: 0.04,
+    lowerDrop: 0.32,
     bite: 0,
-    asymmetry: 0.08,
-  },
-  WQ: {
-    width: -0.26,
-    openness: 0.06,
-    pucker: 0.44,
-    cornerLift: 0,
-    cornerPull: -0.16,
-    upperLift: 0.01,
-    lowerDrop: 0.03,
-    bite: 0,
+    asymmetry: 0.14,
   },
   Smile: {
-    width: 0.28,
-    openness: 0.02,
-    pucker: -0.12,
-    cornerLift: 0.16,
-    cornerPull: 0.18,
+    width: 0.46,
+    openness: 0.08,
+    pucker: -0.18,
+    cornerLift: 0.36,
+    cornerPull: 0.36,
     upperLift: -0.02,
     lowerDrop: -0.02,
     bite: 0,
   },
 };
 
-export type PathCommand = { cmd: string; values: number[] };
+/**
+ * Convert a semantic mouth profile into GSAP-safe transform values.
+ *
+ * Assumes SVG viewBox ~0 0 100 60, mouth centered near x=50, resting lip line near y=30.
+ * Apply the output to separate SVG groups/paths — one per layer.
+ */
+export function profileToMouthTransforms(
+  profile: MouthMorphProfile,
+  response: Partial<MouthRigResponse> = {},
+): MouthRigTransforms {
+  const r: MouthRigResponse = { ...DEFAULT_MOUTH_RIG_RESPONSE, ...response };
 
-const PATH_PARAM_COUNT: Record<string, number> = {
-  M: 2,
-  L: 2,
-  H: 1,
-  V: 1,
-  C: 6,
-  S: 4,
-  Q: 4,
-  T: 2,
-  A: 7,
-  Z: 0,
-};
+  const width = profile.width * r.widthScale;
+  const openness = profile.openness * r.openScale;
+  const pucker = profile.pucker * r.puckerScale;
+  const cornerLift = profile.cornerLift * r.smileScale;
+  const cornerPull = profile.cornerPull * r.widthScale;
+  const upperLift = profile.upperLift * r.openScale;
+  const lowerDrop = profile.lowerDrop * r.openScale;
+  const bite = profile.bite * r.biteScale;
+  const asymmetry = (profile.asymmetry ?? 0) * r.asymmetryScale;
 
-function tokenizeSvgPath(path: string) {
-  return path.match(/[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+\.?)(?:e[-+]?\d+)?/g) ?? [];
-}
+  const open = Math.max(0, openness);
+  const closed = Math.min(0, openness);
 
-export function parseSvgPath(path: string): PathCommand[] {
-  const tokens = tokenizeSvgPath(path);
-  const commands: PathCommand[] = [];
-  let i = 0;
-  let currentCmd = "";
-  while (i < tokens.length) {
-    if (/^[a-zA-Z]$/.test(tokens[i])) {
-      currentCmd = tokens[i];
-      i += 1;
-    }
-    if (!currentCmd) break;
-    const upper = currentCmd.toUpperCase();
-    const paramCount = PATH_PARAM_COUNT[upper];
-    if (paramCount === 0) {
-      commands.push({ cmd: upper, values: [] });
-      currentCmd = "";
-      continue;
-    }
-    if (i + paramCount > tokens.length) break;
-    const values = tokens.slice(i, i + paramCount).map(Number);
-    commands.push({ cmd: currentCmd, values });
-    i += paramCount;
-    if (upper === "M") currentCmd = currentCmd === "M" ? "L" : "l";
-  }
-  return commands;
-}
+  const mouthScaleX = clamp(1 + width * 0.9 - pucker * 0.38, 0.45, 1.65);
+  const rootScaleY = clamp(1 + open * 0.08 - pucker * 0.03, 0.9, 1.12);
+  const rootSkewX = clamp(asymmetry * 8, -5, 5);
 
-export function parseViewBox(viewBox: string) {
-  const [x = 0, y = 0, width = 100, height = 60] = viewBox.trim().split(/\s+/).map(Number);
-  return { x, y, width, height };
-}
+  const upperY = clamp(-upperLift * 18 - open * 2.5 + closed * 6 - bite * 1.5, -10, 5);
+  const lowerY = clamp(lowerDrop * 26 + open * 8 + closed * 6 - bite * 9, -8, 28);
 
-export function resolvePoint(
-  x: number,
-  y: number,
-  relative: boolean,
-  state: { x: number; y: number },
-  xOnly = false,
-  yOnly = false,
-) {
-  return {
-    x: xOnly ? (relative ? state.x + x : x) : relative ? state.x + x : x,
-    y: yOnly ? (relative ? state.y + y : y) : relative ? state.y + y : y,
-  };
-}
+  const lipScaleX = clamp(mouthScaleX + cornerPull * 0.15, 0.42, 1.7);
+  const upperScaleY = clamp(1 + upperLift * 0.15 - bite * 0.08, 0.8, 1.25);
+  const lowerScaleY = clamp(1 + lowerDrop * 0.22 + open * 0.08, 0.82, 1.4);
 
-export function morphPoint(
-  x: number,
-  y: number,
-  box: ReturnType<typeof parseViewBox>,
-  preset: MouthMorphProfile,
-) {
-  const cx = box.x + box.width / 2;
-  const cy = box.y + box.height / 2;
-  const halfW = Math.max(1, box.width / 2);
-  const halfH = Math.max(1, box.height / 2);
-  const nx = clamp((x - cx) / halfW, -1.2, 1.2);
-  const ny = clamp((y - cy) / halfH, -1.2, 1.2);
-  const absX = Math.abs(nx);
-  const cornerWeight = smoothstep(0.42, 0.98, absX);
-  const centerWeight = 1 - smoothstep(0.08, 0.78, absX);
-  const upperWeight = smoothstep(-0.95, -0.05, -ny);
-  const lowerWeight = smoothstep(-0.95, -0.05, ny);
-  const lipLineWeight = 1 - Math.min(1, Math.abs(ny));
-  const signX = nx === 0 ? 0 : Math.sign(nx);
-  const asymmetry = preset.asymmetry ?? 0;
+  const cornerX = clamp(cornerPull * 24 + width * 14 - pucker * 9, -16, 18);
+  const cornerY = clamp(-cornerLift * 22 + open * 2 + pucker * 1.5, -11, 8);
 
-  const horizontal =
-    nx * preset.width * centerWeight * 0.65 +
-    signX * preset.cornerPull * cornerWeight +
-    nx * preset.pucker * (0.55 + centerWeight * 0.35);
-  const vertical =
-    -preset.cornerLift * cornerWeight +
-    -preset.upperLift * upperWeight +
-    preset.lowerDrop * lowerWeight +
-    preset.openness * (lowerWeight - upperWeight) * (0.55 + centerWeight * 0.45) -
-    preset.bite * upperWeight * centerWeight * 0.8 +
-    preset.bite * lowerWeight * lipLineWeight * 0.15 +
-    asymmetry * nx * centerWeight * 0.35;
+  const interiorScaleX = clamp(1 + width * 0.75 - pucker * 0.55 + cornerPull * 0.15, 0.28, 1.55);
+  const interiorScaleY = clamp(0.08 + open * 2.15 + pucker * 0.28 + lowerDrop * 0.6, 0.03, 2.7);
+  const interiorOpacity = openness < -0.08 ? 0 : open < 0.03 ? 0.55 : 1;
+
+  const wantsTeeth =
+    profile.bite > 0.2 || profile.cornerLift > 0.08 ||
+    profile.width > 0.18 || profile.openness > 0.55;
+  const teethOpacity =
+    wantsTeeth && openness > -0.05
+      ? clamp(
+          profile.bite * 0.95 +
+            Math.max(0, profile.cornerLift) * 1.5 +
+            Math.max(0, profile.width) * 0.8 +
+            Math.max(0, profile.openness - 0.55) * 0.35,
+          0,
+          1,
+        )
+      : 0;
+  const teethY = clamp(upperY * 0.45 + bite * 2 - open * 0.8, -6, 6);
+  const teethScaleX = clamp(interiorScaleX * (1 - Math.max(0, pucker) * 0.2), 0.42, 1.45);
+
+  const wantsTongue = profile.openness > 0.35 && profile.pucker < 0.25 && profile.bite < 0.2;
+  const tongueOpacity = wantsTongue
+    ? clamp(open * 0.9 + Math.max(0, profile.lowerDrop) * 0.5, 0, 1)
+    : 0;
+  const tongueY = clamp(lowerY * 0.45 + open * 7, 2, 22);
+  const tongueScaleX = clamp(interiorScaleX * (1 - Math.max(0, pucker) * 0.25), 0.45, 1.35);
+  const tongueScaleY = clamp(1 + open * 0.18 - Math.max(0, pucker) * 0.25, 0.55, 1.35);
+
+  const upperRotation = clamp(asymmetry * -4, -3, 3);
+  const lowerRotation = clamp(asymmetry * 5, -4, 4);
 
   return {
-    x: x + horizontal * halfW,
-    y: y + vertical * halfH,
+    root: { scaleX: mouthScaleX, scaleY: rootScaleY, skewX: rootSkewX },
+    upperLip: { y: upperY, scaleX: lipScaleX, scaleY: upperScaleY, rotation: upperRotation },
+    lowerLip: { y: lowerY, scaleX: lipScaleX, scaleY: lowerScaleY, rotation: lowerRotation },
+    leftCorner: { x: -cornerX, y: cornerY + asymmetry * 3 },
+    rightCorner: { x: cornerX, y: cornerY - asymmetry * 3 },
+    interior: { scaleX: interiorScaleX, scaleY: interiorScaleY, opacity: interiorOpacity },
+    teeth: { opacity: teethOpacity, y: teethY, scaleX: teethScaleX, scaleY: 1 },
+    tongue: { opacity: tongueOpacity, y: tongueY, scaleX: tongueScaleX, scaleY: tongueScaleY },
   };
 }
 
-export function absolutizeAndMorphPath(
-  path: string,
-  box: ReturnType<typeof parseViewBox>,
-  preset: MouthMorphProfile,
-) {
-  const commands = parseSvgPath(path);
-  const out: string[] = [];
-  const state = {
-    x: box.x + box.width / 2,
-    y: box.y + box.height / 2,
-    subpathX: box.x + box.width / 2,
-    subpathY: box.y + box.height / 2,
+/** Convenience: look up a viseme and convert directly to transforms. */
+export function visemeToMouthTransforms(
+  viseme: MouthViseme,
+  response?: Partial<MouthRigResponse>,
+): MouthRigTransforms {
+  return profileToMouthTransforms(MOUTH_MORPH_PRESETS[viseme], response);
+}
+
+/** Blend two profiles linearly. Useful for manual sampling between visemes. */
+export function blendMouthProfiles(
+  from: MouthMorphProfile,
+  to: MouthMorphProfile,
+  t: number,
+): MouthMorphProfile {
+  const u = clamp(t, 0, 1);
+  return {
+    width: lerp(from.width, to.width, u),
+    openness: lerp(from.openness, to.openness, u),
+    pucker: lerp(from.pucker, to.pucker, u),
+    cornerLift: lerp(from.cornerLift, to.cornerLift, u),
+    cornerPull: lerp(from.cornerPull, to.cornerPull, u),
+    upperLift: lerp(from.upperLift, to.upperLift, u),
+    lowerDrop: lerp(from.lowerDrop, to.lowerDrop, u),
+    bite: lerp(from.bite, to.bite, u),
+    asymmetry: lerp(from.asymmetry ?? 0, to.asymmetry ?? 0, u),
   };
-
-  for (const command of commands) {
-    const upper = command.cmd.toUpperCase();
-    const relative = command.cmd !== upper;
-    switch (upper) {
-      case "M":
-      case "L":
-      case "T": {
-        const point = resolvePoint(command.values[0], command.values[1], relative, state);
-        const morphed = morphPoint(point.x, point.y, box, preset);
-        out.push(`${upper} ${fmt(morphed.x)} ${fmt(morphed.y)}`);
-        state.x = point.x;
-        state.y = point.y;
-        if (upper === "M") {
-          state.subpathX = point.x;
-          state.subpathY = point.y;
-        }
-        break;
-      }
-      case "H": {
-        const point = resolvePoint(command.values[0], 0, relative, state, true, false);
-        const morphed = morphPoint(point.x, state.y, box, preset);
-        out.push(`L ${fmt(morphed.x)} ${fmt(morphed.y)}`);
-        state.x = point.x;
-        break;
-      }
-      case "V": {
-        const point = resolvePoint(0, command.values[0], relative, state, false, true);
-        const morphed = morphPoint(state.x, point.y, box, preset);
-        out.push(`L ${fmt(morphed.x)} ${fmt(morphed.y)}`);
-        state.y = point.y;
-        break;
-      }
-      case "C": {
-        const p1 = resolvePoint(command.values[0], command.values[1], relative, state);
-        const p2 = resolvePoint(command.values[2], command.values[3], relative, state);
-        const p = resolvePoint(command.values[4], command.values[5], relative, state);
-        const m1 = morphPoint(p1.x, p1.y, box, preset);
-        const m2 = morphPoint(p2.x, p2.y, box, preset);
-        const mp = morphPoint(p.x, p.y, box, preset);
-        out.push(`C ${fmt(m1.x)} ${fmt(m1.y)} ${fmt(m2.x)} ${fmt(m2.y)} ${fmt(mp.x)} ${fmt(mp.y)}`);
-        state.x = p.x;
-        state.y = p.y;
-        break;
-      }
-      case "S":
-      case "Q": {
-        const p1 = resolvePoint(command.values[0], command.values[1], relative, state);
-        const p = resolvePoint(command.values[2], command.values[3], relative, state);
-        const m1 = morphPoint(p1.x, p1.y, box, preset);
-        const mp = morphPoint(p.x, p.y, box, preset);
-        out.push(`${upper} ${fmt(m1.x)} ${fmt(m1.y)} ${fmt(mp.x)} ${fmt(mp.y)}`);
-        state.x = p.x;
-        state.y = p.y;
-        break;
-      }
-      case "A": {
-        const rx = command.values[0];
-        const ry = command.values[1];
-        const rotation = command.values[2];
-        const largeArcFlag = command.values[3];
-        const sweepFlag = command.values[4];
-        const p = resolvePoint(command.values[5], command.values[6], relative, state);
-        const mp = morphPoint(p.x, p.y, box, preset);
-        const centerScale = 1 + preset.pucker * 0.35 - preset.width * 0.15;
-        const openScale = 1 + preset.openness * 0.4;
-        out.push(
-          `A ${fmt(Math.max(0.01, rx * centerScale))} ${fmt(Math.max(0.01, ry * openScale))} ${fmt(rotation)} ${largeArcFlag} ${sweepFlag} ${fmt(mp.x)} ${fmt(mp.y)}`,
-        );
-        state.x = p.x;
-        state.y = p.y;
-        break;
-      }
-      case "Z":
-        out.push("Z");
-        state.x = state.subpathX;
-        state.y = state.subpathY;
-        break;
-    }
-  }
-
-  return out.join(" ");
 }
 
-export function smoothstep(edge0: number, edge1: number, x: number) {
-  const t = clamp((x - edge0) / Math.max(0.0001, edge1 - edge0), 0, 1);
-  return t * t * (3 - 2 * t);
-}
-
-export function fmt(value: number) {
-  return Number(value.toFixed(3)).toString();
+export function lerp(a: number, b: number, t: number) {
+  return a + (b - a) * t;
 }
 
 export function clamp(value: number, min: number, max: number) {

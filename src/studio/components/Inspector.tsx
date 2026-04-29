@@ -1,6 +1,8 @@
 // Inspector — edits the currently selected clip's properties.
+import { useLiveQuery } from "dexie-react-hooks";
+import { db } from "../db";
 import { useStudio } from "../store";
-import type { CharacterClip } from "../types";
+import type { CharacterClip, CharacterPreset } from "../types";
 import { VoiceLipSyncPanel } from "./VoiceLipSyncPanel";
 import { ActionsPanel } from "./ActionsPanel";
 
@@ -10,6 +12,11 @@ export function Inspector() {
   const update = useStudio((s) => s.updateClip);
   const remove = useStudio((s) => s.removeClip);
   const clip = project?.clips.find((c) => c.id === id);
+  const characterId = clip?.kind === "character" ? (clip as CharacterClip).characterId : undefined;
+  const character = useLiveQuery<CharacterPreset | undefined>(
+    () => (characterId ? db.characters.get(characterId) : Promise.resolve(undefined)),
+    [characterId],
+  );
   const linkedSpeechAudio =
     clip?.kind === "audio" &&
     !!clip.linkedCharacterClipId &&
@@ -133,7 +140,7 @@ export function Inspector() {
                     Adds a subtle regular blink during playback when the eyes are otherwise open.
                   </p>
                 </div>
-                <ActionsPanel clip={clip as CharacterClip} />
+                {character && <ActionsPanel clip={clip as CharacterClip} character={character} />}
                 <VoiceLipSyncPanel clip={clip as CharacterClip} />
               </>
             )}

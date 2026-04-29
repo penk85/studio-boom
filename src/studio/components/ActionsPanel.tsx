@@ -4,17 +4,37 @@ import { useLiveQuery } from "dexie-react-hooks";
 import { db, uid } from "../db";
 import { useStudio } from "../store";
 import { ensurePresetsSeeded } from "../presets/seed";
-import type { ActionPreset, AppliedAction, CharacterClip } from "../types";
+import { PresetRecorder } from "../presets/PresetRecorder";
+import type { ActionCategory, ActionPreset, AppliedAction, CharacterClip, CharacterPreset } from "../types";
 
-export function ActionsPanel({ clip }: { clip: CharacterClip }) {
+const CATEGORY_TABS: { id: ActionCategory | "all"; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "expression", label: "Expression" },
+  { id: "gesture", label: "Gesture" },
+  { id: "full-body", label: "Full body" },
+  { id: "camera", label: "Camera" },
+  { id: "custom", label: "Custom" },
+];
+
+export function ActionsPanel({ clip, character }: { clip: CharacterClip; character: CharacterPreset }) {
   const update = useStudio((s) => s.updateClip);
   const [picking, setPicking] = useState(false);
+  const [filterCat, setFilterCat] = useState<ActionCategory | "all">("all");
+  const [search, setSearch] = useState("");
+  const [recording, setRecording] = useState(false);
+  const [editingPreset, setEditingPreset] = useState<ActionPreset | null>(null);
 
   useEffect(() => {
     void ensurePresetsSeeded();
   }, []);
   const presets = useLiveQuery(() => db.movements.toArray(), []) ?? [];
   const presetMap = new Map(presets.map((p) => [p.id, p] as const));
+
+  const filteredPresets = presets.filter((p) => {
+    if (filterCat !== "all" && p.category !== filterCat) return false;
+    if (search && !p.name.toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  });
 
   const actions = clip.actions ?? [];
 
@@ -39,37 +59,81 @@ export function ActionsPanel({ clip }: { clip: CharacterClip }) {
     update(clip.id, { actions: actions.filter((a) => a.id !== id) } as Partial<CharacterClip>);
   };
 
+  if (recording || editingPreset) {
+    return (
+      <PresetRecorder
+        character={character}
+        initialPreset={editingPreset ?? undefined}
+        onClose={() => { setRecording(false); setEditingPreset(null); }}
+      />
+    );
+  }
+
   return (
     <div className="rounded border border-border bg-panel-2 p-2">
       <div className="mb-2 flex items-center justify-between">
         <span className="font-semibold uppercase tracking-wider text-muted-foreground">
           Actions
         </span>
-        <button
-          onClick={() => setPicking((v) => !v)}
-          className="rounded bg-primary/30 px-2 py-0.5 text-[10px] text-foreground hover:bg-primary/50"
-        >
-          {picking ? "Cancel" : "+ Apply"}
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setRecording(true)}
+            className="rounded border border-border bg-panel px-2 py-0.5 text-[10px] text-foreground hover:bg-panel-2"
+          >
+            Record new
+          </button>
+          <button
+            onClick={() => setPicking((v) => !v)}
+            className="rounded bg-primary/30 px-2 py-0.5 text-[10px] text-foreground hover:bg-primary/50"
+          >
+            {picking ? "Cancel" : "+ Apply"}
+          </button>
+        </div>
       </div>
 
       {picking && (
-        <div className="mb-2 max-h-48 overflow-auto rounded border border-border bg-panel">
-          {presets.map((p) => (
-            <button
-              key={p.id}
-              onClick={() => addAction(p)}
-              className="block w-full border-b border-border px-2 py-1.5 text-left text-[11px] hover:bg-panel-2"
-            >
-              <div className="flex items-center gap-2">
-                <span className="flex-1 truncate text-foreground">{p.name}</span>
-                <span className="text-[10px] text-muted-foreground">{p.category}</span>
-              </div>
-            </button>
-          ))}
-          {presets.length === 0 && (
-            <div className="p-2 text-[11px] text-muted-foreground">No presets.</div>
-          )}
+        <div className="mb-2 rounded border border-border bg-panel">
+          {/* Category filter */}
+          <div className="flex flex-wrap gap-1 border-b border-border p-1.5">
+            {CATEGORY_TABS.map((c) => (
+              <button
+                key={c.id}
+                onClick={() => setFilterCat(c.id)}
+                className={`rounded px-1.5 py-0.5 text-[10px] ${filterCat === c.id ? "bg-primary/30 text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+              >
+                {c.label}
+              </button>
+            ))}
+          </div>
+          {/* Search */}
+          <div className="border-b border-border px-2 py-1">
+            <input
+              type="text"
+              placeholder="Search…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full rounded border border-border bg-input px-2 py-0.5 text-[11px]"
+            />
+          </div>
+          {/* Preset list */}
+          <div className="max-h-48 overflow-auto">
+            {filteredPresets.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => addAction(p)}
+                className="block w-full border-b border-border px-2 py-1.5 text-left text-[11px] hover:bg-panel-2"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="flex-1 truncate text-foreground">{p.name}</span>
+                  <span className="text-[10px] text-muted-foreground">{p.duration}s</span>
+                  <span className="text-[10px] text-muted-foreground">{p.category}</span>
+                </div>
+              </button>
+            ))}
+            {filteredPresets.length === 0 && (
+              <div className="p-2 text-[11px] text-muted-foreground">No presets match.</div>
+            )}
+          </div>
         </div>
       )}
 
@@ -83,6 +147,15 @@ export function ActionsPanel({ clip }: { clip: CharacterClip }) {
                   {preset?.name ?? "Unknown preset"}
                 </span>
                 <span className="text-[10px] text-muted-foreground">{preset?.category}</span>
+                {preset && !preset.builtin && (
+                  <button
+                    onClick={() => setEditingPreset(preset)}
+                    className="text-[10px] text-muted-foreground hover:text-foreground"
+                    title="Edit preset"
+                  >
+                    Edit
+                  </button>
+                )}
                 <button onClick={() => removeAction(a.id)} className="text-[10px] text-destructive">
                   ✕
                 </button>
