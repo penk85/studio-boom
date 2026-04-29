@@ -5,17 +5,22 @@ import type {
   ActionPreset,
   AppliedAction,
   CharacterClip,
+  ColorTint,
   HeadDirection,
   PartRole,
   RecordedKeypose,
+  RecordedPartOverride,
 } from "../types";
 
 export interface ComposedDelta {
   dx: number;
   dy: number;
-  scale: number; // 1 = no change
+  scale: number; // uniform scale multiplier (1 = no change)
+  scaleX: number; // horizontal squash multiplier (1 = no change)
+  scaleY: number; // vertical stretch multiplier (1 = no change)
   rotation: number; // additive degrees
   opacity: number | null; // null = inherit
+  colorTint: ColorTint | null;
 }
 
 export interface ComposedActions {
@@ -38,6 +43,35 @@ const EASE: Record<string, (x: number) => number> = {
   easeIn: (x) => x * x,
   easeOut: (x) => 1 - (1 - x) * (1 - x),
   easeInOut: (x) => (x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2),
+  // friendly aliases
+  soft: (x) => (x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2),
+  snappy: (x) => 1 - Math.pow(1 - x, 4),
+  overshoot: (x) => {
+    const c = 1.70158;
+    return (c + 1) * x * x * x - c * x * x;
+  },
+  bounce: (x) => {
+    const n1 = 7.5625,
+      d1 = 2.75;
+    if (x < 1 / d1) return n1 * x * x;
+    if (x < 2 / d1) {
+      x -= 1.5 / d1;
+      return n1 * x * x + 0.75;
+    }
+    if (x < 2.5 / d1) {
+      x -= 2.25 / d1;
+      return n1 * x * x + 0.9375;
+    }
+    x -= 2.625 / d1;
+    return n1 * x * x + 0.984375;
+  },
+  elastic: (x) =>
+    x === 0
+      ? 0
+      : x === 1
+        ? 1
+        : -Math.pow(2, 10 * x - 10) * Math.sin((x * 10 - 10.75) * ((2 * Math.PI) / 3)),
+  hold: (x) => (x < 1 ? 0 : 1),
 };
 
 function ease(name: string | undefined, x: number) {
@@ -45,7 +79,16 @@ function ease(name: string | undefined, x: number) {
 }
 
 function emptyDelta(): ComposedDelta {
-  return { dx: 0, dy: 0, scale: 1, rotation: 0, opacity: null };
+  return {
+    dx: 0,
+    dy: 0,
+    scale: 1,
+    scaleX: 1,
+    scaleY: 1,
+    rotation: 0,
+    opacity: null,
+    colorTint: null,
+  };
 }
 
 function interpKf(a: ActionKeyframe, b: ActionKeyframe, u: number): ComposedDelta {
@@ -60,9 +103,12 @@ function interpKf(a: ActionKeyframe, b: ActionKeyframe, u: number): ComposedDelt
     dx: lerp(a.dx, b.dx, 0),
     dy: lerp(a.dy, b.dy, 0),
     scale: lerp(a.scale, b.scale, 1),
+    scaleX: lerp(a.scaleX, b.scaleX, 1),
+    scaleY: lerp(a.scaleY, b.scaleY, 1),
     rotation: lerp(a.rotation, b.rotation, 0),
     opacity:
       a.opacity === undefined && b.opacity === undefined ? null : lerp(a.opacity, b.opacity, 1),
+    colorTint: null,
   };
 }
 
@@ -77,8 +123,11 @@ function sampleTrack(
       dx: k.dx ?? 0,
       dy: k.dy ?? 0,
       scale: k.scale ?? 1,
+      scaleX: k.scaleX ?? 1,
+      scaleY: k.scaleY ?? 1,
       rotation: k.rotation ?? 0,
       opacity: k.opacity ?? null,
+      colorTint: null,
     };
   }
   // find segment
@@ -98,8 +147,11 @@ function applyIntensity(d: ComposedDelta, intensity: number): ComposedDelta {
     dx: d.dx * intensity,
     dy: d.dy * intensity,
     scale: 1 + (d.scale - 1) * intensity,
+    scaleX: 1 + (d.scaleX - 1) * intensity,
+    scaleY: 1 + (d.scaleY - 1) * intensity,
     rotation: d.rotation * intensity,
     opacity: d.opacity,
+    colorTint: d.colorTint ? { ...d.colorTint, a: d.colorTint.a * intensity } : null,
   };
 }
 
@@ -108,8 +160,11 @@ function combine(a: ComposedDelta, b: ComposedDelta): ComposedDelta {
     dx: a.dx + b.dx,
     dy: a.dy + b.dy,
     scale: a.scale * b.scale,
+    scaleX: a.scaleX * b.scaleX,
+    scaleY: a.scaleY * b.scaleY,
     rotation: a.rotation + b.rotation,
     opacity: b.opacity ?? a.opacity,
+    colorTint: b.colorTint ?? a.colorTint,
   };
 }
 
@@ -145,9 +200,10 @@ export function composeActionsAt(
     const preset = presets.get(a.presetId);
     if (!preset) continue;
     const dur = a.duration ?? preset.duration;
-    let local = tInClip - a.offset;
-    if (local < 0 || (!preset.loop && local > dur)) continue;
-    if (preset.loop && local > dur) local = local % dur;
+    const occurrences = generateLoopOccurrences(a, preset, clip.duration);
+    const occurrence = occurrences.find((o) => tInClip >= o.start && tInClip <= o.end);
+    if (!occurrence) continue;
+    const local = tInClip - occurrence.start;
     const u = dur > 0 ? Math.max(0, Math.min(1, local / dur)) : 0;
     const intensity = a.intensity ?? 1;
 
@@ -162,7 +218,7 @@ export function composeActionsAt(
     }
 
     if (preset.keyposes && preset.keyposes.length > 0) {
-      applyKeyposes(out, preset.keyposes, dur, local, intensity);
+      applyKeyposes(out, expandKeyposesWithAnticipation(preset.keyposes), dur, local, intensity);
       continue;
     }
 
@@ -235,11 +291,14 @@ function applyKeyposes(
       dx: lerp(pa?.dx, pb?.dx, 0),
       dy: lerp(pa?.dy, pb?.dy, 0),
       scale: lerp(pa?.scale, pb?.scale, 1),
+      scaleX: lerp(pa?.scaleX, pb?.scaleX, 1),
+      scaleY: lerp(pa?.scaleY, pb?.scaleY, 1),
       rotation: lerp(pa?.rotation, pb?.rotation, 0),
       opacity:
         pa?.opacity === undefined && pb?.opacity === undefined
           ? null
           : lerp(pa?.opacity, pb?.opacity, 1),
+      colorTint: lerpTint(pa?.colorTint, pb?.colorTint, u),
     };
     const scaled = applyIntensity(sample, intensity);
     const prev = out.perPart.get(key) ?? emptyDelta();
@@ -247,6 +306,67 @@ function applyKeyposes(
     const swap = (u >= 0.5 ? pb?.poseSwap : pa?.poseSwap) ?? pa?.poseSwap ?? pb?.poseSwap;
     if (swap) out.poseSwap.set(key, swap);
   }
+}
+
+function lerpTint(a: ColorTint | undefined, b: ColorTint | undefined, u: number): ColorTint | null {
+  if (!a && !b) return null;
+  const left = a ?? { ...(b as ColorTint), a: 0 };
+  const right = b ?? { ...(a as ColorTint), a: 0 };
+  return {
+    r: left.r + (right.r - left.r) * u,
+    g: left.g + (right.g - left.g) * u,
+    b: left.b + (right.b - left.b) * u,
+    a: left.a + (right.a - left.a) * u,
+    blendMode: (u >= 0.5 ? right.blendMode : left.blendMode) ?? right.blendMode ?? left.blendMode,
+  };
+}
+
+function invertOverrideForAnticipation(
+  part: RecordedPartOverride,
+  amount: number,
+): RecordedPartOverride {
+  const invertAroundOne = (value: number | undefined) =>
+    value === undefined ? undefined : 1 - (value - 1) * amount;
+  return {
+    ...part,
+    dx: part.dx === undefined ? undefined : -part.dx * amount,
+    dy: part.dy === undefined ? undefined : -part.dy * amount,
+    scale: invertAroundOne(part.scale),
+    scaleX: invertAroundOne(part.scaleX),
+    scaleY: invertAroundOne(part.scaleY),
+    rotation: part.rotation === undefined ? undefined : -part.rotation * amount,
+    opacity: part.opacity,
+    colorTint: part.colorTint ? { ...part.colorTint, a: part.colorTint.a * amount } : undefined,
+    poseSwap: undefined,
+  };
+}
+
+export function expandKeyposesWithAnticipation(keyposes: RecordedKeypose[]): RecordedKeypose[] {
+  const expanded: RecordedKeypose[] = [];
+  for (const keypose of keyposes) {
+    const spec = keypose.anticipation;
+    if (spec && spec.amount > 0 && spec.duration > 0 && keypose.t > 0) {
+      expanded.push({
+        t: Math.max(0, keypose.t - spec.duration),
+        ease: "easeOut",
+        parts: keypose.parts.map((part) =>
+          invertOverrideForAnticipation(part, Math.max(0, Math.min(1, spec.amount))),
+        ),
+        camera: keypose.camera
+          ? {
+              dx: keypose.camera.dx === undefined ? undefined : -keypose.camera.dx * spec.amount,
+              dy: keypose.camera.dy === undefined ? undefined : -keypose.camera.dy * spec.amount,
+              zoom:
+                keypose.camera.zoom === undefined
+                  ? undefined
+                  : 1 - (keypose.camera.zoom - 1) * spec.amount,
+            }
+          : undefined,
+      });
+    }
+    expanded.push(keypose);
+  }
+  return expanded.sort((a, b) => a.t - b.t);
 }
 
 /** Get composed delta for a specific role with sensible defaults. */
@@ -269,4 +389,63 @@ export function poseSwapFor(
     (slotId ? composed.poseSwap.get(slotKey(slotId)) : undefined) ??
     composed.poseSwap.get(roleKey(role))
   );
+}
+
+// ─── Loop occurrence engine ────────────────────────────────────────────────────
+
+export interface LoopOccurrence {
+  start: number;
+  end: number;
+}
+
+function hashString(value: string): number {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
+function mulberry32(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    s += 0x6d2b79f5;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Returns a deterministic list of {start, end} occurrences for an applied action.
+ * Non-looping actions return a single occurrence. Looping actions unroll all
+ * repetitions within clipDuration.
+ *
+ * Both collectCriticalTimes() and composeActionsAt() must call this with the
+ * same arguments to guarantee identical occurrence schedules.
+ */
+export function generateLoopOccurrences(
+  action: AppliedAction,
+  preset: ActionPreset,
+  clipDuration: number,
+): LoopOccurrence[] {
+  const dur = Math.max(0.0001, action.duration ?? preset.duration);
+  const looping = action.loop ?? preset.loop;
+  if (!looping) {
+    return [{ start: action.offset, end: action.offset + dur }];
+  }
+  const gap = Math.max(0, action.loopGap ?? 0);
+  const gapMax = action.loopMode === "random" ? Math.max(gap, action.loopGapMax ?? gap) : gap;
+  const rng = mulberry32(hashString(action.id));
+  const occurrences: LoopOccurrence[] = [];
+  let t = action.offset;
+  let guard = 0;
+  while (t < clipDuration && guard < 1000) {
+    occurrences.push({ start: t, end: t + dur });
+    const nextGap = gap >= gapMax ? gap : gap + rng() * (gapMax - gap);
+    t += dur + nextGap;
+    guard++;
+  }
+  return occurrences;
 }

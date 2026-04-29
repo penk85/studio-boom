@@ -12,6 +12,9 @@ import {
   type PartRole,
 } from "../types";
 import { legacyVisemeToStandard } from "../lipsync/viseme-schema";
+import { alphaCenterForPart } from "./alpha-bounds";
+
+const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
 
 export function defaultFallbackMouthAnchor(
   canvasWidth: number,
@@ -81,17 +84,21 @@ export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
       const role = normalizePartRole(part.role as string);
       const slotId =
         part.slotId ?? defaultSlotIdForRole(role, role === "custom" ? part.id : undefined);
-      const pivot = part.pivot ?? {
-        x: Math.round(part.x + part.width * (part.anchorX ?? 0.5)),
-        y: Math.round(part.y + part.height * (part.anchorY ?? 0.5)),
-      };
       const viseme = legacyVisemeToStandard(part.viseme) ?? part.viseme;
+      const withNormalizedIds = { ...part, role, slotId, viseme };
+      const alphaPivot = alphaCenterForPart(withNormalizedIds);
+      const pivot = part.pivot ?? {
+        x: Math.round(alphaPivot.x),
+        y: Math.round(alphaPivot.y),
+      };
       return {
         ...part,
         role,
         slotId,
         slotName: part.slotName ?? roleLabel(role),
         viseme,
+        anchorX: clamp01((pivot.x - part.x) / Math.max(1, part.width)),
+        anchorY: clamp01((pivot.y - part.y) / Math.max(1, part.height)),
         pivot,
         movement: part.movement ?? defaultMovementForRole(role, viseme),
         morph:
@@ -204,6 +211,18 @@ export function makePart(
   opts: Partial<CharacterPart> = {},
 ): CharacterPart {
   const id = opts.id ?? uid();
+  const base = {
+    x: opts.x ?? 100,
+    y: opts.y ?? 100,
+    width: opts.width ?? 200,
+    height: opts.height ?? 200,
+    alphaBounds: opts.alphaBounds,
+  } as CharacterPart;
+  const defaultPivot = alphaCenterForPart(base);
+  const pivot = opts.pivot ?? {
+    x: Math.round(defaultPivot.x),
+    y: Math.round(defaultPivot.y),
+  };
   return {
     id,
     slotId: opts.slotId ?? defaultSlotIdForRole(role, role === "custom" ? id : undefined),
@@ -215,16 +234,17 @@ export function makePart(
     eyeState: opts.eyeState,
     side: opts.side,
     mediaId,
-    x: opts.x ?? 100,
-    y: opts.y ?? 100,
-    width: opts.width ?? 200,
-    height: opts.height ?? 200,
+    x: base.x,
+    y: base.y,
+    width: base.width,
+    height: base.height,
     rotation: opts.rotation ?? 0,
-    anchorX: opts.anchorX ?? 0.5,
-    anchorY: opts.anchorY ?? 0.5,
-    pivot: opts.pivot,
+    anchorX: opts.anchorX ?? clamp01((pivot.x - base.x) / Math.max(1, base.width)),
+    anchorY: opts.anchorY ?? clamp01((pivot.y - base.y) / Math.max(1, base.height)),
+    pivot,
     parentId: opts.parentId,
     bounds: opts.bounds,
+    alphaBounds: opts.alphaBounds,
     movement: opts.movement ?? defaultMovementForRole(role, opts.viseme),
     morph: opts.morph,
     zIndex: opts.zIndex ?? 0,

@@ -9,6 +9,8 @@ import {
   Download,
   Eye,
   EyeOff,
+  Maximize2,
+  Minimize2,
   MousePointer2,
   RotateCw,
   Trash2,
@@ -27,6 +29,18 @@ import {
   roleLabel,
   saveCharacter,
 } from "./character-utils";
+import {
+  alphaMaskContains,
+  alphaCenterForPart,
+  createAlphaHitMaskFromBlob,
+  editorControlBounds,
+  editorSelectionBounds,
+  localAlphaBounds,
+  measureAlphaBoundsFromBlob,
+  pivotForPart,
+  pointInEditorHitBounds,
+  type AlphaHitMask,
+} from "./alpha-bounds";
 import { MOUTH_VISEMES, MOUTH_VISEME_DESCRIPTIONS } from "../lipsync/viseme-schema";
 import type {
   CharacterPart,
@@ -101,6 +115,7 @@ const SAMPLE_WORDS = ["Hello", "Shalom", "Mommy", "Welcome"];
 const EYE_STATES: EyeState[] = ["open", "half", "closed", "wink"];
 
 type EditorMode = "select" | "pivot" | "bounds-rect" | "bounds-ellipse";
+type EditorBoundsMode = "frame" | "art";
 
 export function CharacterEditor({ characterId }: Props) {
   const navigate = useNavigate();
@@ -109,15 +124,25 @@ export function CharacterEditor({ characterId }: Props) {
   const [rigSelected, setRigSelected] = useState(false);
   const [scale, setScale] = useState(0.7);
   const [mode, setMode] = useState<EditorMode>("select");
+  const [boundsMode, setBoundsMode] = useState<EditorBoundsMode>("frame");
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [, setPreviewTick] = useState(0);
   const [status, setStatus] = useState<string | null>(null);
-  const [rigPreview, setRigPreview] = useState<{ visemes: MouthViseme[]; startedAt: number; durationMs: number } | null>(null);
+  const [rigPreview, setRigPreview] = useState<{
+    visemes: MouthViseme[];
+    startedAt: number;
+    durationMs: number;
+  } | null>(null);
   const [rigAudioViseme, setRigAudioViseme] = useState<MouthViseme>("rest");
   const [rigAudioPlaying, setRigAudioPlaying] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
   const rigAudioCtxRef = useRef<AudioContext | null>(null);
   const rigRafRef = useRef<number | null>(null);
+  const alphaBackfillRef = useRef<Set<string>>(new Set());
+  const alphaMaskRef = useRef<Map<string, AlphaHitMask>>(new Map());
+  const alphaMaskLoadingRef = useRef<Set<string>>(new Set());
+  const [, setAlphaMaskTick] = useState(0);
 
   useEffect(() => {
     (async () => {
@@ -148,6 +173,86 @@ export function CharacterEditor({ characterId }: Props) {
     });
     ro.observe(wrapRef.current);
     return () => ro.disconnect();
+  }, [doc]);
+
+  useEffect(() => {
+    if (!doc) return;
+    const missing = doc.parts.filter(
+      (part) => !part.alphaBounds && !alphaBackfillRef.current.has(part.id),
+    );
+    if (missing.length === 0) return;
+    for (const part of missing) alphaBackfillRef.current.add(part.id);
+    let alive = true;
+    void (async () => {
+      const measured = await Promise.all(
+        missing.map(async (part) => {
+          const [blobRow, media] = await Promise.all([
+            db.mediaBlobs.get(part.mediaId),
+            db.media.get(part.mediaId),
+          ]);
+          if (!blobRow?.blob) return null;
+          const alphaBounds = await measureAlphaBoundsFromBlob(
+            blobRow.blob,
+            media?.width ?? part.width,
+            media?.height ?? part.height,
+          );
+          return { id: part.id, alphaBounds };
+        }),
+      );
+      const patches = measured.filter(Boolean) as NonNullable<(typeof measured)[number]>[];
+      if (!alive || patches.length === 0) return;
+      setDoc((current) => {
+        if (!current) return current;
+        const patchMap = new Map(patches.map((patch) => [patch.id, patch.alphaBounds] as const));
+        return {
+          ...current,
+          parts: current.parts.map((part) => {
+            const alphaBounds = patchMap.get(part.id);
+            if (!alphaBounds || part.alphaBounds) return part;
+            return normalizePartPatch({ ...part, alphaBounds }, { alphaBounds });
+          }),
+          updatedAt: Date.now(),
+        };
+      });
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [doc]);
+
+  useEffect(() => {
+    if (!doc) return;
+    const missingMasks = doc.parts.filter(
+      (part) => !alphaMaskRef.current.has(part.id) && !alphaMaskLoadingRef.current.has(part.id),
+    );
+    if (missingMasks.length === 0) return;
+    for (const part of missingMasks) alphaMaskLoadingRef.current.add(part.id);
+    let alive = true;
+    void (async () => {
+      const masks = await Promise.all(
+        missingMasks.map(async (part) => {
+          const [blobRow, media] = await Promise.all([
+            db.mediaBlobs.get(part.mediaId),
+            db.media.get(part.mediaId),
+          ]);
+          if (!blobRow?.blob) return null;
+          const mask = await createAlphaHitMaskFromBlob(
+            blobRow.blob,
+            media?.width ?? part.width,
+            media?.height ?? part.height,
+          );
+          return mask ? { id: part.id, mask } : null;
+        }),
+      );
+      if (!alive) return;
+      for (const item of masks) {
+        if (item) alphaMaskRef.current.set(item.id, item.mask);
+      }
+      setAlphaMaskTick((tick) => tick + 1);
+    })();
+    return () => {
+      alive = false;
+    };
   }, [doc]);
 
   useEffect(() => {
@@ -236,6 +341,7 @@ export function CharacterEditor({ characterId }: Props) {
       const viseme = options.viseme ?? (role === "mouth" ? detectViseme(file.name) : undefined);
       const eyeState = options.eyeState ?? (role === "eye" ? detectEyeState(file.name) : undefined);
       const fitted = fitAsset(asset.width, asset.height, doc.canvasWidth, doc.canvasHeight);
+      const alphaBounds = await measureAlphaBoundsFromBlob(file, asset.width, asset.height);
       const id = uid();
       const label = options.label ?? asset.name;
       const part = makePart(role, asset.id, {
@@ -246,6 +352,7 @@ export function CharacterEditor({ characterId }: Props) {
         side,
         viseme,
         eyeState,
+        alphaBounds,
         ...fitted,
         ...options.placement,
         zIndex: options.zIndex ?? maxZ(doc.parts) + 1,
@@ -261,8 +368,14 @@ export function CharacterEditor({ characterId }: Props) {
   const selectedPart = doc.parts.find((p) => p.id === selectedPartId) ?? null;
   const orderedParts = doc.parts.slice().sort((a, b) => a.zIndex - b.zIndex);
 
-  const selectPart = (id: ID) => { setSelectedPartId(id); setRigSelected(false); };
-  const selectRig = () => { setSelectedPartId(null); setRigSelected(true); };
+  const selectPart = (id: ID) => {
+    setSelectedPartId(id);
+    setRigSelected(false);
+  };
+  const selectRig = () => {
+    setSelectedPartId(null);
+    setRigSelected(true);
+  };
   const updateRigPlacement = (placement: NonNullable<typeof doc.mouthRig>["placement"]) => {
     if (!doc.mouthRig) return;
     updateDoc({ mouthRig: { ...doc.mouthRig, placement } });
@@ -326,6 +439,117 @@ export function CharacterEditor({ characterId }: Props) {
     preview?.targetRole === "head"
       ? orderedParts.find((part) => part.id === preview.targetPartId)
       : undefined;
+  const visibleEditorParts = orderedParts
+    .filter((part) => roleEnabledByManifest(part.role, manifest))
+    .filter((part) => !(part.role === "mouth" && effectiveMouthMode === "rig"));
+  const selectedEditorPart = selectedPart
+    ? visibleEditorParts.find((part) => part.id === selectedPart.id)
+    : null;
+
+  const canvasPointFromEvent = (e: React.PointerEvent) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    return {
+      x: (e.clientX - rect.left) / scale,
+      y: (e.clientY - rect.top) / scale,
+    };
+  };
+
+  const localPointForPart = (part: CharacterPart, point: { x: number; y: number }) =>
+    canvasPointToPartLocal(part, point, previewDelta(part, preview, previewParentPart));
+
+  const pickPartAt = (point: { x: number; y: number }) => {
+    const exact: CharacterPart[] = [];
+    const padded: CharacterPart[] = [];
+    const candidates = visibleEditorParts
+      .filter((part) => part.visible || part.id === selectedPartId)
+      .slice()
+      .sort((a, b) => b.zIndex - a.zIndex);
+
+    for (const part of candidates) {
+      const transform = previewDelta(part, preview, previewParentPart);
+      if (transform.opacity <= 0.05 && part.id !== selectedPartId) continue;
+      const local = canvasPointToPartLocal(part, point, transform);
+      if (boundsMode === "frame") {
+        if (pointInEditorHitBounds(part, local, scale, boundsMode)) exact.push(part);
+      } else if (alphaMaskContains(alphaMaskRef.current.get(part.id), part, local)) {
+        exact.push(part);
+      } else if (pointInEditorHitBounds(part, local, scale, boundsMode)) {
+        padded.push(part);
+      }
+    }
+    return exact[0] ?? padded[0] ?? null;
+  };
+
+  const startCanvasPartDrag = (
+    e: React.PointerEvent,
+    part: CharacterPart,
+    point: { x: number; y: number },
+  ) => {
+    if (e.button !== 0) return;
+    const localDown = localPointForPart(part, point);
+    selectPart(part.id);
+
+    if (mode === "pivot") {
+      updatePart(part.id, {
+        pivot: {
+          x: Math.round(localDown.x + part.x),
+          y: Math.round(localDown.y + part.y),
+        },
+      });
+      setMode("select");
+      return;
+    }
+
+    if (mode.startsWith("bounds")) {
+      const bounds = editorSelectionBounds(part, boundsMode);
+      updatePart(part.id, {
+        bounds: {
+          type: mode === "bounds-ellipse" ? "ellipse" : "rect",
+          x: Math.round(part.x + bounds.x - bounds.width * 0.08),
+          y: Math.round(part.y + bounds.y - bounds.height * 0.08),
+          width: Math.round(bounds.width * 1.16),
+          height: Math.round(bounds.height * 1.16),
+        },
+      });
+      setMode("select");
+      return;
+    }
+
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const ox = part.x;
+    const oy = part.y;
+    const originalPivot = pivotForPart(part);
+    const move = (ev: PointerEvent) => {
+      const dx = Math.round((ev.clientX - sx) / scale);
+      const dy = Math.round((ev.clientY - sy) / scale);
+      updatePart(part.id, {
+        x: ox + dx,
+        y: oy + dy,
+        pivot: { x: originalPivot.x + dx, y: originalPivot.y + dy },
+      });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  const handleCanvasPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    const point = canvasPointFromEvent(e);
+    if (!point) return;
+    const picked = pickPartAt(point);
+    if (!picked) {
+      setSelectedPartId(null);
+      setRigSelected(false);
+      return;
+    }
+    startCanvasPartDrag(e, picked, point);
+  };
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
@@ -385,7 +609,9 @@ export function CharacterEditor({ characterId }: Props) {
             onSetMouthStyle={(style) => updateDoc({ mouthStyle: style })}
           />
           <LayerList
-            parts={orderedParts.filter((p) => !(p.role === "mouth" && effectiveMouthMode === "rig"))}
+            parts={orderedParts.filter(
+              (p) => !(p.role === "mouth" && effectiveMouthMode === "rig"),
+            )}
             selectedId={selectedPartId}
             onSelect={selectPart}
             onChange={updatePart}
@@ -393,7 +619,12 @@ export function CharacterEditor({ characterId }: Props) {
             mouthRig={effectiveMouthMode === "rig" ? doc.mouthRig : undefined}
             rigSelected={rigSelected}
             onSelectRig={selectRig}
-            onChangeRigZIndex={(z) => doc.mouthRig && updateDoc({ mouthRig: { ...doc.mouthRig, placement: { ...doc.mouthRig.placement, zIndex: z } } })}
+            onChangeRigZIndex={(z) =>
+              doc.mouthRig &&
+              updateDoc({
+                mouthRig: { ...doc.mouthRig, placement: { ...doc.mouthRig.placement, zIndex: z } },
+              })
+            }
           />
         </aside>
 
@@ -413,6 +644,9 @@ export function CharacterEditor({ characterId }: Props) {
             style={{ width: doc.canvasWidth * scale, height: doc.canvasHeight * scale }}
           >
             <div
+              ref={canvasRef}
+              data-editor-canvas
+              onPointerDown={handleCanvasPointerDown}
               className="absolute left-0 top-0 origin-top-left"
               style={{
                 width: doc.canvasWidth,
@@ -420,23 +654,15 @@ export function CharacterEditor({ characterId }: Props) {
                 transform: `scale(${scale})`,
               }}
             >
-              {orderedParts
-                .filter((part) => roleEnabledByManifest(part.role, manifest))
-                .filter((part) => !(part.role === "mouth" && effectiveMouthMode === "rig"))
-                .map((part) => (
-                  <PartLayer
-                    key={part.id}
-                    part={part}
-                    selected={part.id === selectedPartId}
-                    scale={scale}
-                    mode={mode}
-                    preview={preview}
-                    previewParentPart={previewParentPart}
-                    onSelect={() => selectPart(part.id)}
-                    onChange={(patch) => updatePart(part.id, patch)}
-                    onModeDone={() => setMode("select")}
-                  />
-                ))}
+              {visibleEditorParts.map((part) => (
+                <PartLayer
+                  key={part.id}
+                  part={part}
+                  selected={part.id === selectedPartId}
+                  preview={preview}
+                  previewParentPart={previewParentPart}
+                />
+              ))}
               {doc.mouthRig && effectiveMouthMode === "rig" && (
                 <RigPlacementLayer
                   key="mouth-rig"
@@ -446,6 +672,19 @@ export function CharacterEditor({ characterId }: Props) {
                   currentViseme={rigCurrentViseme}
                   onSelect={selectRig}
                   onChange={updateRigPlacement}
+                />
+              )}
+              {selectedEditorPart && (
+                <PartControlsOverlay
+                  part={selectedEditorPart}
+                  canvasWidth={doc.canvasWidth}
+                  canvasHeight={doc.canvasHeight}
+                  scale={scale}
+                  boundsMode={boundsMode}
+                  onBoundsModeChange={setBoundsMode}
+                  preview={preview}
+                  previewParentPart={previewParentPart}
+                  onChange={(patch) => updatePart(selectedEditorPart.id, patch)}
                 />
               )}
             </div>
@@ -465,7 +704,9 @@ export function CharacterEditor({ characterId }: Props) {
             doc={doc}
             part={selectedPart}
             mode={mode}
+            boundsMode={boundsMode}
             onModeChange={setMode}
+            onBoundsModeChange={setBoundsMode}
             onChange={updatePart}
             onRemove={removePart}
             onDuplicate={duplicatePart}
@@ -473,7 +714,9 @@ export function CharacterEditor({ characterId }: Props) {
             onCanvasChange={(patch) => updateDoc(patch)}
             rigSelected={rigSelected}
             onRigChange={(rig) => updateDoc({ mouthRig: rig })}
-            onRigPreview={(visemes) => setRigPreview({ visemes, startedAt: Date.now(), durationMs: 1400 })}
+            onRigPreview={(visemes) =>
+              setRigPreview({ visemes, startedAt: Date.now(), durationMs: 1400 })
+            }
             onRigAudioFile={playRigAudio}
             rigAudioPlaying={rigAudioPlaying}
           />
@@ -732,7 +975,10 @@ function MouthShapeSetup({
             isOpen={designerOpen}
             onClose={() => setDesignerOpen(false)}
             initialRig={mouthRig}
-            onSave={(rig) => { onSaveRig(rig); setDesignerOpen(false); }}
+            onSave={(rig) => {
+              onSaveRig(rig);
+              setDesignerOpen(false);
+            }}
           />
         </>
       ) : (
@@ -794,7 +1040,9 @@ function LayerList({
           <li
             onClick={onSelectRig}
             className={`flex cursor-pointer items-center gap-2 rounded border px-2 py-1.5 ${
-              rigSelected ? "border-primary bg-primary/15" : "border-border bg-panel-2 hover:bg-panel"
+              rigSelected
+                ? "border-primary bg-primary/15"
+                : "border-border bg-panel-2 hover:bg-panel"
             }`}
           >
             <span className="min-w-0 flex-1 truncate font-medium">
@@ -802,13 +1050,25 @@ function LayerList({
               <span className="ml-1 font-normal text-muted-foreground">{mouthRig.styleId}</span>
             </span>
             <button
-              onClick={(e) => { e.stopPropagation(); onChangeRigZIndex?.(mouthRig.placement.zIndex + 1); }}
-              className="rounded p-1 text-muted-foreground hover:text-foreground" title="Bring forward"
-            ><ArrowUp size={14} /></button>
+              onClick={(e) => {
+                e.stopPropagation();
+                onChangeRigZIndex?.(mouthRig.placement.zIndex + 1);
+              }}
+              className="rounded p-1 text-muted-foreground hover:text-foreground"
+              title="Bring forward"
+            >
+              <ArrowUp size={14} />
+            </button>
             <button
-              onClick={(e) => { e.stopPropagation(); onChangeRigZIndex?.(mouthRig.placement.zIndex - 1); }}
-              className="rounded p-1 text-muted-foreground hover:text-foreground" title="Send backward"
-            ><ArrowDown size={14} /></button>
+              onClick={(e) => {
+                e.stopPropagation();
+                onChangeRigZIndex?.(mouthRig.placement.zIndex - 1);
+              }}
+              className="rounded p-1 text-muted-foreground hover:text-foreground"
+              title="Send backward"
+            >
+              <ArrowDown size={14} />
+            </button>
           </li>
         )}
         {parts
@@ -881,7 +1141,9 @@ function Inspector({
   doc,
   part,
   mode,
+  boundsMode,
   onModeChange,
+  onBoundsModeChange,
   onChange,
   onRemove,
   onDuplicate,
@@ -896,7 +1158,9 @@ function Inspector({
   doc: CharacterPreset;
   part: CharacterPart | null;
   mode: EditorMode;
+  boundsMode: EditorBoundsMode;
   onModeChange: (mode: EditorMode) => void;
+  onBoundsModeChange: (mode: EditorBoundsMode) => void;
   onChange: (id: ID, patch: Partial<CharacterPart>) => void;
   onRemove: (id: ID) => void;
   onDuplicate: (part: CharacterPart) => void;
@@ -911,18 +1175,54 @@ function Inspector({
   if (rigSelected && doc.mouthRig) {
     const rig = doc.mouthRig;
     const p = rig.placement;
-    const setP = (patch: Partial<typeof p>) => onRigChange({ ...rig, placement: { ...p, ...patch } });
+    const setP = (patch: Partial<typeof p>) =>
+      onRigChange({ ...rig, placement: { ...p, ...patch } });
     return (
       <div className="space-y-4">
         <CanvasControls doc={doc} onChange={onCanvasChange} />
         <section className="rounded border border-border bg-panel-2 p-3">
           <div className="mb-3 font-medium">Mouth Rig — {rig.styleId}</div>
           <div className="grid grid-cols-2 gap-2">
-            <Field label="X"><input type="number" value={p.x} onChange={(e) => setP({ x: Number(e.target.value) })} className="w-full rounded border border-border bg-background px-2 py-1" /></Field>
-            <Field label="Y"><input type="number" value={p.y} onChange={(e) => setP({ y: Number(e.target.value) })} className="w-full rounded border border-border bg-background px-2 py-1" /></Field>
-            <Field label="Width"><input type="number" value={p.width} onChange={(e) => setP({ width: Number(e.target.value) })} className="w-full rounded border border-border bg-background px-2 py-1" /></Field>
-            <Field label="Height"><input type="number" value={p.height} onChange={(e) => setP({ height: Number(e.target.value) })} className="w-full rounded border border-border bg-background px-2 py-1" /></Field>
-            <Field label="Z-index"><input type="number" value={p.zIndex} onChange={(e) => setP({ zIndex: Number(e.target.value) })} className="w-full rounded border border-border bg-background px-2 py-1" /></Field>
+            <Field label="X">
+              <input
+                type="number"
+                value={p.x}
+                onChange={(e) => setP({ x: Number(e.target.value) })}
+                className="w-full rounded border border-border bg-background px-2 py-1"
+              />
+            </Field>
+            <Field label="Y">
+              <input
+                type="number"
+                value={p.y}
+                onChange={(e) => setP({ y: Number(e.target.value) })}
+                className="w-full rounded border border-border bg-background px-2 py-1"
+              />
+            </Field>
+            <Field label="Width">
+              <input
+                type="number"
+                value={p.width}
+                onChange={(e) => setP({ width: Number(e.target.value) })}
+                className="w-full rounded border border-border bg-background px-2 py-1"
+              />
+            </Field>
+            <Field label="Height">
+              <input
+                type="number"
+                value={p.height}
+                onChange={(e) => setP({ height: Number(e.target.value) })}
+                className="w-full rounded border border-border bg-background px-2 py-1"
+              />
+            </Field>
+            <Field label="Z-index">
+              <input
+                type="number"
+                value={p.zIndex}
+                onChange={(e) => setP({ zIndex: Number(e.target.value) })}
+                className="w-full rounded border border-border bg-background px-2 py-1"
+              />
+            </Field>
           </div>
         </section>
         <section className="rounded border border-border bg-panel-2 p-3">
@@ -1078,6 +1378,30 @@ function Inspector({
         <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
           Transform
         </div>
+        <div className="mb-3 grid grid-cols-2 gap-1 rounded border border-border bg-background p-1">
+          <button
+            type="button"
+            onClick={() => onBoundsModeChange("frame")}
+            className={`flex items-center justify-center gap-1 rounded px-2 py-1 ${
+              boundsMode === "frame" ? "bg-primary text-primary-foreground" : "hover:bg-panel"
+            }`}
+            title="Use the full transparent registration frame for editor controls"
+          >
+            <Maximize2 size={12} />
+            Frame
+          </button>
+          <button
+            type="button"
+            onClick={() => onBoundsModeChange("art")}
+            className={`flex items-center justify-center gap-1 rounded px-2 py-1 ${
+              boundsMode === "art" ? "bg-primary text-primary-foreground" : "hover:bg-panel"
+            }`}
+            title="Use the visible non-transparent art bounds for editor controls"
+          >
+            <Minimize2 size={12} />
+            Art
+          </button>
+        </div>
         <div className="grid grid-cols-2 gap-2">
           <NumberField label="X" value={part.x} onChange={(x) => onChange(part.id, { x })} />
           <NumberField label="Y" value={part.y} onChange={(y) => onChange(part.id, { y })} />
@@ -1122,16 +1446,16 @@ function Inspector({
         <div className="mb-3 grid grid-cols-2 gap-2">
           <NumberField
             label="Pivot X"
-            value={Math.round(part.pivot?.x ?? part.x + part.width / 2)}
+            value={Math.round((part.pivot ?? alphaCenterForPart(part)).x)}
             onChange={(x) =>
-              onChange(part.id, { pivot: { x, y: part.pivot?.y ?? part.y + part.height / 2 } })
+              onChange(part.id, { pivot: { x, y: (part.pivot ?? alphaCenterForPart(part)).y } })
             }
           />
           <NumberField
             label="Pivot Y"
-            value={Math.round(part.pivot?.y ?? part.y + part.height / 2)}
+            value={Math.round((part.pivot ?? alphaCenterForPart(part)).y)}
             onChange={(y) =>
-              onChange(part.id, { pivot: { x: part.pivot?.x ?? part.x + part.width / 2, y } })
+              onChange(part.id, { pivot: { x: (part.pivot ?? alphaCenterForPart(part)).x, y } })
             }
           />
         </div>
@@ -1269,26 +1593,46 @@ function RigPlacementLayer({
     e.stopPropagation();
     onSelect();
     if (e.button !== 0) return;
-    const sx = e.clientX, sy = e.clientY;
-    const ox = p.x, oy = p.y;
-    const move = (ev: PointerEvent) => onChange({ ...p, x: Math.round(ox + (ev.clientX - sx) / scale), y: Math.round(oy + (ev.clientY - sy) / scale) });
-    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+    const sx = e.clientX,
+      sy = e.clientY;
+    const ox = p.x,
+      oy = p.y;
+    const move = (ev: PointerEvent) =>
+      onChange({
+        ...p,
+        x: Math.round(ox + (ev.clientX - sx) / scale),
+        y: Math.round(oy + (ev.clientY - sy) / scale),
+      });
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   };
 
   const resize = (corner: ResizeCorner) => (e: React.PointerEvent) => {
     e.stopPropagation();
-    const sx = e.clientX, sy = e.clientY;
+    const sx = e.clientX,
+      sy = e.clientY;
     const { x: ox, y: oy, width: ow, height: oh } = p;
     const move = (ev: PointerEvent) => {
       const dx = (ev.clientX - sx) / scale;
       const dy = (ev.clientY - sy) / scale;
       const width = Math.max(20, corner.includes("e") ? ow + dx : ow - dx);
       const height = Math.max(12, corner.includes("s") ? oh + dy : oh - dy);
-      onChange({ ...p, width: Math.round(width), height: Math.round(height), x: Math.round(corner.includes("w") ? ox + (ow - width) : ox), y: Math.round(corner.includes("n") ? oy + (oh - height) : oy) });
+      onChange({
+        ...p,
+        width: Math.round(width),
+        height: Math.round(height),
+        x: Math.round(corner.includes("w") ? ox + (ow - width) : ox),
+        y: Math.round(corner.includes("n") ? oy + (oh - height) : oy),
+      });
     };
-    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   };
@@ -1322,26 +1666,15 @@ function RigPlacementLayer({
 function PartLayer({
   part,
   selected,
-  scale,
-  mode,
   preview,
   previewParentPart,
-  onSelect,
-  onChange,
-  onModeDone,
 }: {
   part: CharacterPart;
   selected: boolean;
-  scale: number;
-  mode: EditorMode;
   preview: PreviewState | null;
   previewParentPart?: CharacterPart;
-  onSelect: () => void;
-  onChange: (patch: Partial<CharacterPart>) => void;
-  onModeDone: () => void;
 }) {
   const url = useMediaUrl(part.mediaId);
-  const layerRef = useRef<HTMLDivElement>(null);
   const previewingTalk = preview?.kind === "talk";
   const previewingBlink = preview?.kind === "blink" && preview.targetSlotId === part.slotId;
   if (
@@ -1366,51 +1699,114 @@ function PartLayer({
 
   const previewTransform = previewDelta(part, preview, previewParentPart);
   const opacity = part.visible ? previewTransform.opacity : 0.28;
-  const pivot = part.pivot ?? { x: part.x + part.width / 2, y: part.y + part.height / 2 };
+  const pivot = pivotForPart(part);
 
-  const startDrag = (e: React.PointerEvent) => {
+  return (
+    <>
+      {part.bounds && <BoundsOverlay bounds={part.bounds} zIndex={part.zIndex - 1} />}
+      <div
+        className="absolute select-none"
+        style={{
+          left: part.x + previewTransform.dx,
+          top: part.y + previewTransform.dy,
+          width: part.width,
+          height: part.height,
+          zIndex: part.zIndex,
+          opacity,
+          pointerEvents: "none",
+          transform: `rotate(${part.rotation + previewTransform.rotation}deg) scale(${previewTransform.scale}, ${previewTransform.scaleY ?? previewTransform.scale})`,
+          transformOrigin: `${((pivot.x - part.x) / part.width) * 100}% ${((pivot.y - part.y) / part.height) * 100}%`,
+        }}
+      >
+        {url && (
+          <img
+            src={url}
+            alt={part.name}
+            draggable={false}
+            className="pointer-events-none h-full w-full object-contain"
+          />
+        )}
+      </div>
+    </>
+  );
+}
+
+function PartControlsOverlay({
+  part,
+  canvasWidth,
+  canvasHeight,
+  scale,
+  boundsMode,
+  onBoundsModeChange,
+  preview,
+  previewParentPart,
+  onChange,
+}: {
+  part: CharacterPart;
+  canvasWidth: number;
+  canvasHeight: number;
+  scale: number;
+  boundsMode: EditorBoundsMode;
+  onBoundsModeChange: (mode: EditorBoundsMode) => void;
+  preview: PreviewState | null;
+  previewParentPart?: CharacterPart;
+  onChange: (patch: Partial<CharacterPart>) => void;
+}) {
+  const previewTransform = previewDelta(part, preview, previewParentPart);
+  const pivot = pivotForPart(part);
+  const selection = editorSelectionBounds(part, boundsMode);
+  const control = editorControlBounds(part, scale, boundsMode);
+  const alpha = localAlphaBounds(part);
+  const viewportScale = Math.max(0.0001, scale);
+  const handleSize = 14 / viewportScale;
+  const rotateSize = 24 / viewportScale;
+  const toggleSize = 22 / viewportScale;
+  const pivotSize = 10 / viewportScale;
+  const margin = 12 / viewportScale;
+  const origin = {
+    x: part.x + previewTransform.dx,
+    y: part.y + previewTransform.dy,
+  };
+  const handlePositions = controlHandlePositions(
+    part,
+    control,
+    previewTransform,
+    canvasWidth,
+    canvasHeight,
+    margin,
+  );
+  const rotatePosition = rotateHandlePosition(
+    part,
+    control,
+    previewTransform,
+    canvasWidth,
+    canvasHeight,
+    margin,
+  );
+  const togglePosition = clampLocalPointToCanvas(
+    part,
+    { x: control.x - margin * 1.8, y: control.y - margin * 1.8 },
+    previewTransform,
+    canvasWidth,
+    canvasHeight,
+    margin,
+  );
+
+  const resize = (corner: ResizeCorner) => (e: React.PointerEvent<HTMLButtonElement>) => {
+    e.preventDefault();
     e.stopPropagation();
-    onSelect();
     if (e.button !== 0) return;
-    if (mode === "pivot") {
-      const rect = layerRef.current?.getBoundingClientRect();
-      const localX = rect ? (e.clientX - rect.left) / scale : part.width / 2;
-      const localY = rect ? (e.clientY - rect.top) / scale : part.height / 2;
-      onChange({
-        pivot: {
-          x: Math.round(localX + part.x),
-          y: Math.round(localY + part.y),
-        },
-      });
-      onModeDone();
-      return;
-    }
-    if (mode.startsWith("bounds")) {
-      onChange({
-        bounds: {
-          type: mode === "bounds-ellipse" ? "ellipse" : "rect",
-          x: Math.round(part.x - part.width * 0.08),
-          y: Math.round(part.y - part.height * 0.08),
-          width: Math.round(part.width * 1.16),
-          height: Math.round(part.height * 1.16),
-        },
-      });
-      onModeDone();
-      return;
-    }
-    const sx = e.clientX;
-    const sy = e.clientY;
-    const ox = part.x;
-    const oy = part.y;
-    const originalPivot = pivot;
+    const startX = e.clientX;
+    const startY = e.clientY;
     const move = (ev: PointerEvent) => {
-      const dx = Math.round((ev.clientX - sx) / scale);
-      const dy = Math.round((ev.clientY - sy) / scale);
-      onChange({
-        x: ox + dx,
-        y: oy + dy,
-        pivot: { x: originalPivot.x + dx, y: originalPivot.y + dy },
-      });
+      const delta = pointerDeltaToPartLocalDelta(
+        ev.clientX - startX,
+        ev.clientY - startY,
+        scale,
+        part,
+        previewTransform,
+      );
+      onChange(resizePartFromLocalBounds(part, selection, corner, delta.x, delta.y));
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
@@ -1420,46 +1816,23 @@ function PartLayer({
     window.addEventListener("pointerup", up);
   };
 
-  const resize = (corner: ResizeCorner) => (e: React.PointerEvent) => {
+  const rotate = (e: React.PointerEvent<HTMLButtonElement>) => {
+    e.preventDefault();
     e.stopPropagation();
-    const sx = e.clientX;
-    const sy = e.clientY;
-    const ow = part.width;
-    const oh = part.height;
-    const ox = part.x;
-    const oy = part.y;
-    const move = (ev: PointerEvent) => {
-      const dx = (ev.clientX - sx) / scale;
-      const dy = (ev.clientY - sy) / scale;
-      const width = Math.max(8, corner.includes("e") ? ow + dx : ow - dx);
-      const height = Math.max(8, corner.includes("s") ? oh + dy : oh - dy);
-      onChange({
-        width: Math.round(width),
-        height: Math.round(height),
-        x: Math.round(corner.includes("w") ? ox + (ow - width) : ox),
-        y: Math.round(corner.includes("n") ? oy + (oh - height) : oy),
-      });
+    if (e.button !== 0) return;
+    const canvas = e.currentTarget.closest("[data-editor-canvas]") as HTMLDivElement | null;
+    const rect = canvas?.getBoundingClientRect();
+    if (!rect) return;
+    const pivotScreen = {
+      x: rect.left + (pivot.x + previewTransform.dx) * scale,
+      y: rect.top + (pivot.y + previewTransform.dy) * scale,
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  };
-
-  const rotate = (e: React.PointerEvent) => {
-    e.stopPropagation();
-    const el = layerRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    const start = Math.atan2(e.clientY - cy, e.clientX - cx);
-    const base = part.rotation;
+    const startAngle = Math.atan2(e.clientY - pivotScreen.y, e.clientX - pivotScreen.x);
+    const baseRotation = part.rotation;
     const move = (ev: PointerEvent) => {
-      const now = Math.atan2(ev.clientY - cy, ev.clientX - cx);
-      onChange({ rotation: Math.round(base + ((now - start) * 180) / Math.PI) });
+      const nextAngle = Math.atan2(ev.clientY - pivotScreen.y, ev.clientX - pivotScreen.x);
+      const deltaDeg = ((nextAngle - startAngle) * 180) / Math.PI;
+      onChange({ rotation: Math.round(baseRotation + deltaDeg) });
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
@@ -1470,58 +1843,290 @@ function PartLayer({
   };
 
   return (
-    <>
-      {part.bounds && <BoundsOverlay bounds={part.bounds} zIndex={part.zIndex - 1} />}
+    <div
+      className="pointer-events-none absolute select-none"
+      style={{
+        left: origin.x,
+        top: origin.y,
+        width: part.width,
+        height: part.height,
+        zIndex: 10000,
+        transform: `rotate(${part.rotation + previewTransform.rotation}deg) scale(${previewTransform.scale}, ${previewTransform.scaleY ?? previewTransform.scale})`,
+        transformOrigin: `${((pivot.x - part.x) / part.width) * 100}% ${((pivot.y - part.y) / part.height) * 100}%`,
+      }}
+    >
       <div
-        ref={layerRef}
-        onPointerDown={startDrag}
-        className={`absolute select-none outline outline-offset-0 ${
-          selected
-            ? "outline-2 outline-primary"
-            : "outline-1 outline-transparent hover:outline-accent/70"
-        }`}
+        className="absolute border border-primary"
         style={{
-          left: part.x + previewTransform.dx,
-          top: part.y + previewTransform.dy,
-          width: part.width,
-          height: part.height,
-          zIndex: part.zIndex,
-          opacity,
-          cursor: mode === "select" ? "move" : "crosshair",
-          transform: `rotate(${part.rotation + previewTransform.rotation}deg) scale(${previewTransform.scale}, ${previewTransform.scaleY ?? previewTransform.scale})`,
-          transformOrigin: `${((pivot.x - part.x) / part.width) * 100}% ${((pivot.y - part.y) / part.height) * 100}%`,
+          left: selection.x,
+          top: selection.y,
+          width: selection.width,
+          height: selection.height,
+          boxShadow: "0 0 0 1px rgba(255,255,255,0.45)",
+        }}
+      />
+      {boundsMode === "frame" && part.alphaBounds && (
+        <div
+          className="absolute border border-dashed border-primary/60"
+          style={{
+            left: alpha.x,
+            top: alpha.y,
+            width: alpha.width,
+            height: alpha.height,
+          }}
+        />
+      )}
+      {(["nw", "ne", "sw", "se"] as ResizeCorner[]).map((corner) => (
+        <button
+          key={corner}
+          type="button"
+          aria-label={`Resize ${part.name} from ${corner}`}
+          onPointerDown={resize(corner)}
+          className={`pointer-events-auto absolute rounded-sm border border-background bg-primary shadow-[0_1px_4px_rgba(0,0,0,0.35)] ${resizeCursor(corner)}`}
+          style={{
+            left: handlePositions[corner].x,
+            top: handlePositions[corner].y,
+            width: handleSize,
+            height: handleSize,
+            transform: "translate(-50%, -50%)",
+          }}
+        />
+      ))}
+      <button
+        type="button"
+        aria-label={`Rotate ${part.name}`}
+        onPointerDown={rotate}
+        className="pointer-events-auto absolute flex items-center justify-center rounded-full border border-background bg-primary text-primary-foreground shadow-[0_1px_5px_rgba(0,0,0,0.35)]"
+        style={{
+          left: rotatePosition.x,
+          top: rotatePosition.y,
+          width: rotateSize,
+          height: rotateSize,
+          transform: "translate(-50%, -50%)",
         }}
       >
-        {url && (
-          <img
-            src={url}
-            alt={part.name}
-            draggable={false}
-            className="h-full w-full object-contain"
-          />
+        <RotateCw size={Math.max(10, rotateSize * 0.55)} strokeWidth={2.25} />
+      </button>
+      <button
+        type="button"
+        aria-label={
+          boundsMode === "frame"
+            ? `Use visible art bounds for ${part.name}`
+            : `Use full registration bounds for ${part.name}`
+        }
+        onPointerDown={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onBoundsModeChange(boundsMode === "frame" ? "art" : "frame");
+        }}
+        className="pointer-events-auto absolute flex items-center justify-center rounded border border-background bg-panel text-foreground shadow-[0_1px_5px_rgba(0,0,0,0.35)]"
+        style={{
+          left: togglePosition.x,
+          top: togglePosition.y,
+          width: toggleSize,
+          height: toggleSize,
+          transform: "translate(-50%, -50%)",
+        }}
+        title={boundsMode === "frame" ? "Switch to art bounds" : "Switch to full frame bounds"}
+      >
+        {boundsMode === "frame" ? (
+          <Minimize2 size={Math.max(10, toggleSize * 0.55)} />
+        ) : (
+          <Maximize2 size={Math.max(10, toggleSize * 0.55)} />
         )}
-        {selected && (
-          <>
-            <ResizeHandle corner="nw" onResize={resize} />
-            <ResizeHandle corner="ne" onResize={resize} />
-            <ResizeHandle corner="sw" onResize={resize} />
-            <ResizeHandle corner="se" onResize={resize} />
-            <button
-              onPointerDown={rotate}
-              className="absolute left-1/2 top-0 flex h-6 w-6 -translate-x-1/2 -translate-y-9 items-center justify-center rounded-full border border-primary bg-background text-primary"
-              title="Rotate"
-            >
-              <RotateCw size={14} />
-            </button>
-            <div
-              className="pointer-events-none absolute h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-primary bg-background"
-              style={{ left: pivot.x - part.x, top: pivot.y - part.y }}
-            />
-          </>
-        )}
-      </div>
-    </>
+      </button>
+      <div
+        className="absolute rounded-full border-2 border-primary bg-background"
+        style={{
+          left: pivot.x - part.x,
+          top: pivot.y - part.y,
+          width: Math.max(8, pivotSize),
+          height: Math.max(8, pivotSize),
+          transform: "translate(-50%, -50%)",
+          boxShadow: "0 0 0 1px rgba(255,255,255,0.45)",
+        }}
+      />
+    </div>
   );
+}
+
+function canvasPointToPartLocal(
+  part: CharacterPart,
+  canvasPoint: { x: number; y: number },
+  previewTransform: ReturnType<typeof previewDelta>,
+) {
+  const pivot = pivotForPart(part);
+  const pivotLocal = { x: pivot.x - part.x, y: pivot.y - part.y };
+  const pivotCanvas = {
+    x: part.x + previewTransform.dx + pivotLocal.x,
+    y: part.y + previewTransform.dy + pivotLocal.y,
+  };
+  const angle = -(((part.rotation + previewTransform.rotation) * Math.PI) / 180);
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const relX = canvasPoint.x - pivotCanvas.x;
+  const relY = canvasPoint.y - pivotCanvas.y;
+  const unrotatedX = relX * cos - relY * sin;
+  const unrotatedY = relX * sin + relY * cos;
+  return {
+    x: pivotLocal.x + unrotatedX / Math.max(0.0001, previewTransform.scale),
+    y:
+      pivotLocal.y +
+      unrotatedY / Math.max(0.0001, previewTransform.scaleY ?? previewTransform.scale),
+  };
+}
+
+function partLocalPointToCanvas(
+  part: CharacterPart,
+  localPoint: { x: number; y: number },
+  previewTransform: ReturnType<typeof previewDelta>,
+) {
+  const pivot = pivotForPart(part);
+  const pivotLocal = { x: pivot.x - part.x, y: pivot.y - part.y };
+  const pivotCanvas = {
+    x: part.x + previewTransform.dx + pivotLocal.x,
+    y: part.y + previewTransform.dy + pivotLocal.y,
+  };
+  const angle = ((part.rotation + previewTransform.rotation) * Math.PI) / 180;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const relX = (localPoint.x - pivotLocal.x) * previewTransform.scale;
+  const relY = (localPoint.y - pivotLocal.y) * (previewTransform.scaleY ?? previewTransform.scale);
+  return {
+    x: pivotCanvas.x + relX * cos - relY * sin,
+    y: pivotCanvas.y + relX * sin + relY * cos,
+  };
+}
+
+function pointerDeltaToPartLocalDelta(
+  screenDx: number,
+  screenDy: number,
+  viewportScale: number,
+  part: CharacterPart,
+  previewTransform: ReturnType<typeof previewDelta>,
+) {
+  const canvasDx = screenDx / Math.max(0.0001, viewportScale);
+  const canvasDy = screenDy / Math.max(0.0001, viewportScale);
+  const angle = -(((part.rotation + previewTransform.rotation) * Math.PI) / 180);
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const unrotatedX = canvasDx * cos - canvasDy * sin;
+  const unrotatedY = canvasDx * sin + canvasDy * cos;
+  return {
+    x: unrotatedX / Math.max(0.0001, previewTransform.scale),
+    y: unrotatedY / Math.max(0.0001, previewTransform.scaleY ?? previewTransform.scale),
+  };
+}
+
+function controlHandlePositions(
+  part: CharacterPart,
+  control: ReturnType<typeof editorControlBounds>,
+  previewTransform: ReturnType<typeof previewDelta>,
+  canvasWidth: number,
+  canvasHeight: number,
+  margin: number,
+): Record<ResizeCorner, { x: number; y: number }> {
+  const clampLocal = (point: { x: number; y: number }) =>
+    clampLocalPointToCanvas(part, point, previewTransform, canvasWidth, canvasHeight, margin);
+  return {
+    nw: clampLocal({ x: control.x, y: control.y }),
+    ne: clampLocal({ x: control.x + control.width, y: control.y }),
+    sw: clampLocal({ x: control.x, y: control.y + control.height }),
+    se: clampLocal({ x: control.x + control.width, y: control.y + control.height }),
+  };
+}
+
+function rotateHandlePosition(
+  part: CharacterPart,
+  control: ReturnType<typeof editorControlBounds>,
+  previewTransform: ReturnType<typeof previewDelta>,
+  canvasWidth: number,
+  canvasHeight: number,
+  margin: number,
+) {
+  const gap = margin * 2.4;
+  const candidates = [
+    { x: control.x + control.width / 2, y: control.y - gap },
+    { x: control.x + control.width / 2, y: control.y + control.height + gap },
+    { x: control.x - gap, y: control.y + control.height / 2 },
+    { x: control.x + control.width + gap, y: control.y + control.height / 2 },
+  ];
+  const best =
+    candidates
+      .map((localPoint) => {
+        const canvasPoint = partLocalPointToCanvas(part, localPoint, previewTransform);
+        const overflow =
+          Math.max(0, margin - canvasPoint.x) +
+          Math.max(0, canvasPoint.x - (canvasWidth - margin)) +
+          Math.max(0, margin - canvasPoint.y) +
+          Math.max(0, canvasPoint.y - (canvasHeight - margin));
+        const breathingRoom = Math.min(
+          Math.abs(canvasPoint.x - margin),
+          Math.abs(canvasWidth - margin - canvasPoint.x),
+          Math.abs(canvasPoint.y - margin),
+          Math.abs(canvasHeight - margin - canvasPoint.y),
+        );
+        return { localPoint, overflow, breathingRoom };
+      })
+      .sort((a, b) => a.overflow - b.overflow || b.breathingRoom - a.breathingRoom)[0]
+      ?.localPoint ?? candidates[0];
+
+  return clampLocalPointToCanvas(part, best, previewTransform, canvasWidth, canvasHeight, margin);
+}
+
+function resizeCursor(corner: ResizeCorner) {
+  return corner === "nw" || corner === "se" ? "cursor-nwse-resize" : "cursor-nesw-resize";
+}
+
+function clampLocalPointToCanvas(
+  part: CharacterPart,
+  localPoint: { x: number; y: number },
+  previewTransform: ReturnType<typeof previewDelta>,
+  canvasWidth: number,
+  canvasHeight: number,
+  margin: number,
+) {
+  const canvasPoint = partLocalPointToCanvas(part, localPoint, previewTransform);
+  const clampedCanvasPoint = {
+    x: clamp(canvasPoint.x, margin, canvasWidth - margin),
+    y: clamp(canvasPoint.y, margin, canvasHeight - margin),
+  };
+  return canvasPointToPartLocal(part, clampedCanvasPoint, previewTransform);
+}
+
+function resizePartFromLocalBounds(
+  part: CharacterPart,
+  bounds: { x: number; y: number; width: number; height: number },
+  corner: ResizeCorner,
+  dx: number,
+  dy: number,
+): Partial<CharacterPart> {
+  const fractionX = bounds.x / Math.max(1, part.width);
+  const fractionY = bounds.y / Math.max(1, part.height);
+  const fractionWidth = bounds.width / Math.max(1, part.width);
+  const fractionHeight = bounds.height / Math.max(1, part.height);
+
+  const visibleLeft = part.x + bounds.x;
+  const visibleTop = part.y + bounds.y;
+  const visibleRight = visibleLeft + bounds.width;
+  const visibleBottom = visibleTop + bounds.height;
+
+  const nextVisibleLeft = corner.includes("w") ? visibleLeft + dx : visibleLeft;
+  const nextVisibleTop = corner.includes("n") ? visibleTop + dy : visibleTop;
+  const nextVisibleRight = corner.includes("e") ? visibleRight + dx : visibleRight;
+  const nextVisibleBottom = corner.includes("s") ? visibleBottom + dy : visibleBottom;
+
+  const nextVisibleWidth = Math.max(4, nextVisibleRight - nextVisibleLeft);
+  const nextVisibleHeight = Math.max(4, nextVisibleBottom - nextVisibleTop);
+  const width = Math.max(8, nextVisibleWidth / Math.max(0.0001, fractionWidth));
+  const height = Math.max(8, nextVisibleHeight / Math.max(0.0001, fractionHeight));
+
+  return {
+    x: Math.round(nextVisibleLeft - fractionX * width),
+    y: Math.round(nextVisibleTop - fractionY * height),
+    width: Math.round(width),
+    height: Math.round(height),
+  };
 }
 
 function BoundsOverlay({ bounds, zIndex }: { bounds: CharacterPartBounds; zIndex: number }) {
@@ -1559,7 +2164,6 @@ function ResizeHandle({
     />
   );
 }
-
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -1843,8 +2447,9 @@ function normalizePartPatch(part: CharacterPart, patch: Partial<CharacterPart>):
     patch.x !== undefined ||
     patch.y !== undefined ||
     patch.width !== undefined ||
-    patch.height !== undefined
-      ? (part.pivot ?? { x: part.x + part.width / 2, y: part.y + part.height / 2 })
+    patch.height !== undefined ||
+    patch.alphaBounds !== undefined
+      ? (part.pivot ?? alphaCenterForPart(part))
       : part.pivot;
   const anchorX = pivot ? clamp((pivot.x - part.x) / Math.max(1, part.width), 0, 1) : part.anchorX;
   const anchorY = pivot ? clamp((pivot.y - part.y) / Math.max(1, part.height), 0, 1) : part.anchorY;
@@ -1856,4 +2461,3 @@ function normalizePartPatch(part: CharacterPart, patch: Partial<CharacterPart>):
     movement: part.movement ?? defaultMovementForRole(part.role, part.viseme),
   };
 }
-

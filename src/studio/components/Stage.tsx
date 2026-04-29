@@ -25,7 +25,13 @@ import {
   roleEnabledByManifest,
 } from "../character/character-utils";
 import { combinedParallax } from "../character/parallax";
-import { buildCharacterTimeline, slotDomId, visemeDomId, eyeDomId, rigComponentId } from "../export/timeline-builder";
+import {
+  buildCharacterTimeline,
+  slotDomId,
+  visemeDomId,
+  eyeDomId,
+  rigComponentId,
+} from "../export/timeline-builder";
 import { RIG_STYLES, poseToTransforms, MOUTH_VIEWBOX } from "../character/mouth-libraries";
 import type { MouthRig } from "../types";
 
@@ -592,11 +598,10 @@ function inheritedMotionForPart({
   if (!parentPart) return { dx: 0, dy: 0, scale: 1, rotation: 0 };
   const parentDelta = deltaFor(composed, parentSlot.role, parentSlot.id);
   const childPivot = partPivot(part);
-  const transformedPivot = transformPointAroundPivot(
-    childPivot,
-    partPivot(parentPart),
-    { ...parentDelta, opacity: parentDelta.opacity ?? undefined },
-  );
+  const transformedPivot = transformPointAroundPivot(childPivot, partPivot(parentPart), {
+    ...parentDelta,
+    opacity: parentDelta.opacity ?? undefined,
+  });
   return {
     dx: transformedPivot.x - childPivot.x,
     dy: transformedPivot.y - childPivot.y,
@@ -676,7 +681,7 @@ function CharacterRig({
   // Rebuild GSAP timeline when clip or character changes.
   useEffect(() => {
     tlRef.current = buildCharacterTimeline(clip, character, presetMap);
-  }, [clip.id, clip.actions, clip.visemes, clip.autoBlink, character.id, character.parts, presetMap]);
+  }, [clip, character, presetMap]);
 
   // Seek to current playhead position on every frame.
   useEffect(() => {
@@ -700,7 +705,7 @@ function CharacterRig({
   });
 
   return (
-    <div className="absolute inset-0 overflow-hidden">
+    <div className="absolute inset-0 overflow-hidden" style={{ isolation: "isolate" }}>
       <div className="absolute left-0 top-0" style={{ width: "100%", height: "100%" }}>
         {/* Transform-based mouth rig — rendered outside the slot loop */}
         {character.mouthRig && character.mouthStyle !== "images" && (
@@ -714,7 +719,8 @@ function CharacterRig({
 
         {slots.map((slot) => {
           // Skip mouth slot when a transform rig handles it.
-          if (slot.role === "mouth" && character.mouthRig && character.mouthStyle !== "images") return null;
+          if (slot.role === "mouth" && character.mouthRig && character.mouthStyle !== "images")
+            return null;
 
           if (slot.role === "mouth") {
             return (
@@ -752,6 +758,7 @@ function CharacterRig({
                   height: basePart.height * scaleY,
                   zIndex: basePart.zIndex,
                   transformOrigin: `${basePart.anchorX * 100}% ${basePart.anchorY * 100}%`,
+                  overflow: "visible",
                 }}
               >
                 {openPart && (
@@ -774,6 +781,7 @@ function CharacterRig({
                     initialOpacity={0}
                   />
                 )}
+                <TintOverlay id={`${slotDomId(clip.id, slot.id)}-tint`} />
               </div>
             );
           }
@@ -817,29 +825,35 @@ function MorphedMouthSlot({
   visemeState: { current: MouthViseme; next?: MouthViseme; blend: number };
 }) {
   const currentPart =
-    slot.parts.find((p) => p.visible && (p.viseme === visemeState.current || p.pose === visemeState.current)) ??
-    slot.parts.find((p) => p.visible && (p.viseme === "rest" || p.pose === "rest"));
+    slot.parts.find(
+      (p) => p.visible && (p.viseme === visemeState.current || p.pose === visemeState.current),
+    ) ?? slot.parts.find((p) => p.visible && (p.viseme === "rest" || p.pose === "rest"));
 
   const nextPart = visemeState.next
-    ? slot.parts.find((p) => p.visible && (p.viseme === visemeState.next || p.pose === visemeState.next))
+    ? slot.parts.find(
+        (p) => p.visible && (p.viseme === visemeState.next || p.pose === visemeState.next),
+      )
     : undefined;
 
   const morphedD = useMemo(() => {
     if (!currentPart?.morph?.primaryPath) return null;
-    if (!nextPart?.morph?.primaryPath || visemeState.blend === 0) return currentPart.morph.primaryPath;
+    if (!nextPart?.morph?.primaryPath || visemeState.blend === 0)
+      return currentPart.morph.primaryPath;
     return (
-      interpolatedPath(currentPart.morph.primaryPath, nextPart.morph.primaryPath, visemeState.blend) ??
-      currentPart.morph.primaryPath
+      interpolatedPath(
+        currentPart.morph.primaryPath,
+        nextPart.morph.primaryPath,
+        visemeState.blend,
+      ) ?? currentPart.morph.primaryPath
     );
   }, [currentPart, nextPart, visemeState.blend]);
 
   if (morphedD && currentPart?.morph) {
     const { morph } = currentPart;
     return (
-      <svg
+      <div
         id={slotDomId(clip.id, slot.id)}
-        viewBox={morph.viewBox ?? `0 0 ${currentPart.width} ${currentPart.height}`}
-        className="absolute overflow-visible"
+        className="absolute"
         style={{
           left: currentPart.x * scaleX,
           top: currentPart.y * scaleY,
@@ -849,38 +863,66 @@ function MorphedMouthSlot({
           opacity: 1,
           transformOrigin: `${currentPart.anchorX * 100}% ${currentPart.anchorY * 100}%`,
           pointerEvents: "none",
+          overflow: "visible",
         }}
-        aria-hidden
       >
-        <path
-          d={morphedD}
-          fill={morph.fill ?? "#733f43"}
-          stroke={morph.stroke}
-          strokeWidth={morph.strokeWidth}
-          strokeLinecap={morph.strokeLinecap as SVGAttributes<SVGPathElement>["strokeLinecap"]}
-          strokeLinejoin={morph.strokeLinejoin as SVGAttributes<SVGPathElement>["strokeLinejoin"]}
-        />
-      </svg>
+        <svg
+          viewBox={morph.viewBox ?? `0 0 ${currentPart.width} ${currentPart.height}`}
+          className="absolute inset-0 h-full w-full overflow-visible"
+          aria-hidden
+        >
+          <path
+            d={morphedD}
+            fill={morph.fill ?? "#733f43"}
+            stroke={morph.stroke}
+            strokeWidth={morph.strokeWidth}
+            strokeLinecap={morph.strokeLinecap as SVGAttributes<SVGPathElement>["strokeLinecap"]}
+            strokeLinejoin={morph.strokeLinejoin as SVGAttributes<SVGPathElement>["strokeLinejoin"]}
+          />
+        </svg>
+        <TintOverlay id={`${slotDomId(clip.id, slot.id)}-tint`} />
+      </div>
     );
   }
 
   // Fallback: GSAP opacity toggle for image-based or non-morph mouth parts.
+  const basePart =
+    slot.parts.find((p) => p.visible && (p.viseme === "rest" || p.pose === "rest")) ??
+    slot.parts.find((p) => p.visible);
+  if (!basePart) return null;
   return (
-    <div>
+    <div
+      id={slotDomId(clip.id, slot.id)}
+      className="absolute"
+      style={{
+        left: basePart.x * scaleX,
+        top: basePart.y * scaleY,
+        width: basePart.width * scaleX,
+        height: basePart.height * scaleY,
+        zIndex: basePart.zIndex,
+        transformOrigin: `${basePart.anchorX * 100}% ${basePart.anchorY * 100}%`,
+        pointerEvents: "none",
+        overflow: "visible",
+      }}
+    >
       {VISEMES.map((viseme) => {
-        const part = slot.parts.find((p) => p.visible && (p.viseme === viseme || p.pose === viseme));
+        const part = slot.parts.find(
+          (p) => p.visible && (p.viseme === viseme || p.pose === viseme),
+        );
         if (!part) return null;
         return (
-          <PartImageScaled
+          <SlotVariantImage
             key={`${slot.id}-${viseme}`}
             id={visemeDomId(clip.id, slot.id, viseme)}
             part={part}
+            containerPart={basePart}
             scaleX={scaleX}
             scaleY={scaleY}
             initialOpacity={viseme === "rest" ? 1 : 0}
           />
         );
       })}
+      <TintOverlay id={`${slotDomId(clip.id, slot.id)}-tint`} />
     </div>
   );
 }
@@ -926,28 +968,48 @@ function MouthRigRenderer({
   return (
     <div id={rigComponentId(clipId, "container")} style={svgStyle}>
       {/* Interior — rendered first (bottom layer) */}
-      <svg id={rigComponentId(clipId, "interior")} viewBox={MOUTH_VIEWBOX}
-        style={componentStyle(rigComponentId(clipId, "interior"))} aria-hidden>
+      <svg
+        id={rigComponentId(clipId, "interior")}
+        viewBox={MOUTH_VIEWBOX}
+        style={componentStyle(rigComponentId(clipId, "interior"))}
+        aria-hidden
+      >
         <path d={style.interiorPath} fill={rig.interiorColor} />
       </svg>
       {/* Tongue */}
-      <svg id={rigComponentId(clipId, "tongue")} viewBox={MOUTH_VIEWBOX}
-        style={{ ...componentStyle(rigComponentId(clipId, "tongue")), opacity: 0 }} aria-hidden>
+      <svg
+        id={rigComponentId(clipId, "tongue")}
+        viewBox={MOUTH_VIEWBOX}
+        style={{ ...componentStyle(rigComponentId(clipId, "tongue")), opacity: 0 }}
+        aria-hidden
+      >
         <path d={style.tonguePath} fill={rig.tongueColor} />
       </svg>
       {/* Teeth */}
-      <svg id={rigComponentId(clipId, "teeth")} viewBox={MOUTH_VIEWBOX}
-        style={{ ...componentStyle(rigComponentId(clipId, "teeth")), opacity: 0 }} aria-hidden>
+      <svg
+        id={rigComponentId(clipId, "teeth")}
+        viewBox={MOUTH_VIEWBOX}
+        style={{ ...componentStyle(rigComponentId(clipId, "teeth")), opacity: 0 }}
+        aria-hidden
+      >
         <path d={style.teethPath} fill={rig.teethColor} />
       </svg>
       {/* Lower lip */}
-      <svg id={rigComponentId(clipId, "lower-lip")} viewBox={MOUTH_VIEWBOX}
-        style={componentStyle(rigComponentId(clipId, "lower-lip"))} aria-hidden>
+      <svg
+        id={rigComponentId(clipId, "lower-lip")}
+        viewBox={MOUTH_VIEWBOX}
+        style={componentStyle(rigComponentId(clipId, "lower-lip"))}
+        aria-hidden
+      >
         <path d={style.lowerLipPath} fill={rig.lipColor} />
       </svg>
       {/* Upper lip — top layer */}
-      <svg id={rigComponentId(clipId, "upper-lip")} viewBox={MOUTH_VIEWBOX}
-        style={componentStyle(rigComponentId(clipId, "upper-lip"))} aria-hidden>
+      <svg
+        id={rigComponentId(clipId, "upper-lip")}
+        viewBox={MOUTH_VIEWBOX}
+        style={componentStyle(rigComponentId(clipId, "upper-lip"))}
+        aria-hidden
+      >
         <path d={style.upperLipPath} fill={rig.lipColor} />
       </svg>
     </div>
@@ -985,38 +1047,72 @@ function PartImageScaled({
     opacity: initialOpacity,
     transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
     pointerEvents: "none",
+    overflow: "visible",
+  };
+
+  const contentStyle: React.CSSProperties = {
+    position: "absolute",
+    inset: 0,
+    width: "100%",
+    height: "100%",
+    pointerEvents: "none",
   };
 
   if (svgSpec) {
     return (
-      <svg
-        id={id}
-        viewBox={svgSpec.viewBox ?? `0 0 ${part.width} ${part.height}`}
-        className="absolute overflow-visible"
-        style={style}
-        aria-hidden
-      >
-        <path
-          d={svgSpec.d}
-          fill={svgSpec.fill ?? (svgSpec.stroke ? "none" : "#733f43")}
-          stroke={svgSpec.stroke}
-          strokeWidth={svgSpec.strokeWidth}
-          strokeLinecap={svgSpec.strokeLinecap as import("react").SVGAttributes<SVGPathElement>["strokeLinecap"]}
-          strokeLinejoin={svgSpec.strokeLinejoin as import("react").SVGAttributes<SVGPathElement>["strokeLinejoin"]}
-        />
-      </svg>
+      <div id={id} style={style}>
+        <svg
+          viewBox={svgSpec.viewBox ?? `0 0 ${part.width} ${part.height}`}
+          className="overflow-visible"
+          style={contentStyle}
+          aria-hidden
+        >
+          <path
+            d={svgSpec.d}
+            fill={svgSpec.fill ?? (svgSpec.stroke ? "none" : "#733f43")}
+            stroke={svgSpec.stroke}
+            strokeWidth={svgSpec.strokeWidth}
+            strokeLinecap={
+              svgSpec.strokeLinecap as import("react").SVGAttributes<SVGPathElement>["strokeLinecap"]
+            }
+            strokeLinejoin={
+              svgSpec.strokeLinejoin as import("react").SVGAttributes<SVGPathElement>["strokeLinejoin"]
+            }
+          />
+        </svg>
+        <TintOverlay id={`${id}-tint`} />
+      </div>
     );
   }
 
   if (!url) return null;
   return (
-    <img
+    <div id={id} style={style}>
+      <img
+        src={url}
+        alt={part.name}
+        draggable={false}
+        className="absolute object-contain"
+        style={contentStyle}
+      />
+      <TintOverlay id={`${id}-tint`} />
+    </div>
+  );
+}
+
+function TintOverlay({ id }: { id: string }) {
+  return (
+    <div
       id={id}
-      src={url}
-      alt={part.name}
-      draggable={false}
-      className="absolute object-contain"
-      style={style}
+      style={{
+        position: "absolute",
+        inset: 0,
+        pointerEvents: "none",
+        mixBlendMode: "multiply",
+        opacity: 0,
+        backgroundColor: "rgba(0, 0, 0, 0)",
+        borderRadius: "inherit",
+      }}
     />
   );
 }
@@ -1059,6 +1155,68 @@ function EyeVariantImage({
         transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
         pointerEvents: "none",
       }}
+    />
+  );
+}
+
+function SlotVariantImage({
+  id,
+  part,
+  containerPart,
+  scaleX,
+  scaleY,
+  initialOpacity,
+}: {
+  id: string;
+  part: CharacterPart;
+  containerPart: CharacterPart;
+  scaleX: number;
+  scaleY: number;
+  initialOpacity: number;
+}) {
+  const url = useMediaUrl(part.mediaId);
+  const svgSpec = useSvgPathSpec(part);
+  const style: React.CSSProperties = {
+    position: "absolute",
+    left: (part.x - containerPart.x) * scaleX,
+    top: (part.y - containerPart.y) * scaleY,
+    width: part.width * scaleX,
+    height: part.height * scaleY,
+    opacity: initialOpacity,
+    transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
+    pointerEvents: "none",
+  };
+
+  if (svgSpec) {
+    return (
+      <svg
+        id={id}
+        viewBox={svgSpec.viewBox ?? `0 0 ${part.width} ${part.height}`}
+        className="overflow-visible"
+        style={style}
+        aria-hidden
+      >
+        <path
+          d={svgSpec.d}
+          fill={svgSpec.fill ?? (svgSpec.stroke ? "none" : "#733f43")}
+          stroke={svgSpec.stroke}
+          strokeWidth={svgSpec.strokeWidth}
+          strokeLinecap={svgSpec.strokeLinecap as SVGAttributes<SVGPathElement>["strokeLinecap"]}
+          strokeLinejoin={svgSpec.strokeLinejoin as SVGAttributes<SVGPathElement>["strokeLinejoin"]}
+        />
+      </svg>
+    );
+  }
+
+  if (!url) return null;
+  return (
+    <img
+      id={id}
+      src={url}
+      alt={part.name}
+      draggable={false}
+      className="absolute object-contain"
+      style={style}
     />
   );
 }

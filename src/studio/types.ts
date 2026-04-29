@@ -68,6 +68,17 @@ export interface CharacterPartBounds {
   height: number;
 }
 
+/** Tight visible-pixel bounds for an image/SVG part, measured in source media pixels. */
+export interface CharacterPartAlphaBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  sourceWidth: number;
+  sourceHeight: number;
+  threshold?: number;
+}
+
 export interface SvgMorphMetadata {
   /** First path from the uploaded SVG, saved for future path interpolation. */
   primaryPath?: string;
@@ -115,6 +126,8 @@ export interface CharacterPart {
   parentId?: ID;
   /** Soft motion bounds for future animation and preview tests. */
   bounds?: CharacterPartBounds;
+  /** Tight alpha bounds used by editors for selection, handles, and default pivots. */
+  alphaBounds?: CharacterPartAlphaBounds;
   movement?: MovementPresetKind;
   morph?: SvgMorphMetadata;
   zIndex: number;
@@ -167,13 +180,13 @@ export interface HeadVariant {
 
 /** Pose parameters for one viseme in a transform-based mouth rig. All values 0..1 unless noted. */
 export interface MouthPose {
-  open: number;     // 0=closed → 1=max jaw drop
-  wide: number;     // 0=neutral → 1=stretched (E-shape); negative = narrower
-  round: number;    // 0=neutral → 1=maximum pucker (O/U/WQ)
-  smile: number;    // 0=neutral → 1=corners lifted
-  teeth: number;    // 0=hidden → 1=fully visible
-  tongue: number;   // 0=hidden → 1=fully visible
-  fvBite: number;   // 0=normal → 1=upper teeth on lower lip (FV)
+  open: number; // 0=closed → 1=max jaw drop
+  wide: number; // 0=neutral → 1=stretched (E-shape); negative = narrower
+  round: number; // 0=neutral → 1=maximum pucker (O/U/WQ)
+  smile: number; // 0=neutral → 1=corners lifted
+  teeth: number; // 0=hidden → 1=fully visible
+  tongue: number; // 0=hidden → 1=fully visible
+  fvBite: number; // 0=normal → 1=upper teeth on lower lip (FV)
 }
 
 /** Transform-based mouth rig stored on the character. Drives lip sync via GSAP tweens. */
@@ -251,10 +264,12 @@ export interface ActionKeyframe {
   /** Offset deltas applied on top of the part's rest pose. */
   dx?: number;
   dy?: number;
-  scale?: number; // multiplier (1 = unchanged)
+  scale?: number; // uniform scale multiplier (1 = unchanged)
+  scaleX?: number; // horizontal squash multiplier (1 = unchanged)
+  scaleY?: number; // vertical stretch multiplier (1 = unchanged)
   rotation?: number; // additive degrees
   opacity?: number; // 0..1, replaces base
-  ease?: string; // simple name: linear|easeIn|easeOut|easeInOut
+  ease?: string; // linear|easeIn|easeOut|easeInOut|snappy|overshoot|bounce|elastic|hold
 }
 
 /** Per-part track inside an Action Preset. */
@@ -280,6 +295,14 @@ export type ActionCategory =
 
 /** Recorded pose snapshot used by the Preset Recorder.
  *  Each part override stores a *delta* relative to that part's rest pose. */
+export interface ColorTint {
+  r: number; // 0..255
+  g: number; // 0..255
+  b: number; // 0..255
+  a: number; // 0..1 opacity
+  blendMode?: "normal" | "multiply" | "screen";
+}
+
 export interface RecordedPartOverride {
   partRole: PartRole;
   /** Exact slot target when this was recorded against a specific character. */
@@ -289,8 +312,18 @@ export interface RecordedPartOverride {
   dx?: number;
   dy?: number;
   scale?: number;
+  scaleX?: number; // horizontal squash multiplier (1 = unchanged)
+  scaleY?: number; // vertical stretch multiplier (1 = unchanged)
   rotation?: number;
   opacity?: number;
+  colorTint?: ColorTint;
+}
+
+export interface AnticipationSpec {
+  /** Fraction of the main delta to pre-move in the opposite direction. */
+  amount: number; // 0..1
+  /** Seconds before the keypose to place the anticipation pre-pose. */
+  duration: number;
 }
 
 export interface RecordedKeypose {
@@ -300,6 +333,8 @@ export interface RecordedKeypose {
   parts: RecordedPartOverride[];
   /** Optional camera state at this keypose. */
   camera?: { dx?: number; dy?: number; zoom?: number };
+  /** Procedural anticipation pre-pose inserted before this keypose. */
+  anticipation?: AnticipationSpec;
 }
 
 /** Optional head-turn directive carried by headTurn presets. */
@@ -373,6 +408,14 @@ export interface AppliedAction {
   duration?: number;
   /** 0..1 scale of the effect. */
   intensity: number;
+  /** Per-instance loop override (overrides preset.loop). */
+  loop?: boolean;
+  /** Minimum seconds of silence between loop repetitions (default: 0). */
+  loopGap?: number;
+  /** "fixed" = constant gap, "random" = gap drawn from [loopGap, loopGapMax]. */
+  loopMode?: "fixed" | "random";
+  /** Upper bound for random gap mode. */
+  loopGapMax?: number;
 }
 
 export interface CharacterClip extends BaseClip {

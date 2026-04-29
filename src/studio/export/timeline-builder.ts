@@ -2,7 +2,14 @@
 // Builds a GSAP timeline from project data — no React imports.
 // Used by both Stage.tsx (live preview via tl.seek) and the future export serializer.
 import gsap from "gsap";
-import type { ActionPreset, CharacterClip, CharacterPart, CharacterPreset, MouthViseme } from "../types";
+import type {
+  ActionPreset,
+  CharacterClip,
+  CharacterPart,
+  CharacterPreset,
+  ColorTint,
+  MouthViseme,
+} from "../types";
 import type { CharacterSlotRef } from "../character/character-utils";
 import { RIG_STYLES, poseToTransforms } from "../character/mouth-libraries";
 import {
@@ -10,7 +17,12 @@ import {
   pickActivePartForSlot,
   roleEnabledByManifest,
 } from "../character/character-utils";
-import { composeActionsAt, deltaFor } from "../presets/apply";
+import {
+  composeActionsAt,
+  deltaFor,
+  expandKeyposesWithAnticipation,
+  generateLoopOccurrences,
+} from "../presets/apply";
 
 // ─── DOM ID scheme ─────────────────────────────────────────────────────────────
 // Stage.tsx creates elements with these IDs; this module targets them via GSAP.
@@ -43,10 +55,12 @@ function isFaceAttachedRole(role: CharacterPart["role"]): boolean {
 }
 
 function partPivot(part: CharacterPart): { x: number; y: number } {
-  return part.pivot ?? {
-    x: part.x + part.width * part.anchorX,
-    y: part.y + part.height * part.anchorY,
-  };
+  return (
+    part.pivot ?? {
+      x: part.x + part.width * part.anchorX,
+      y: part.y + part.height * part.anchorY,
+    }
+  );
 }
 
 function transformPointAroundPivot(
@@ -89,25 +103,29 @@ export function collectCriticalTimes(
   presets: Map<string, ActionPreset>,
 ): number[] {
   const times = new Set<number>([0, clip.duration]);
+  const addTime = (t: number) => {
+    if (t > 0 && t < clip.duration) times.add(t);
+  };
 
   for (const action of clip.actions ?? []) {
     const preset = presets.get(action.presetId);
     if (!preset) continue;
     const dur = action.duration ?? preset.duration;
-
-    times.add(Math.max(0, action.offset));
-    times.add(Math.min(clip.duration, action.offset + dur));
+    const occurrences = generateLoopOccurrences(action, preset, clip.duration);
 
     if (preset.keyposes?.length) {
-      for (const kp of preset.keyposes) {
-        const t = action.offset + kp.t;
-        if (t > 0 && t < clip.duration) times.add(t);
+      const keyposes = expandKeyposesWithAnticipation(preset.keyposes);
+      for (const occurrence of occurrences) {
+        addTime(occurrence.start);
+        addTime(occurrence.end);
+        for (const kp of keyposes) addTime(occurrence.start + kp.t);
       }
     } else {
-      for (const track of preset.tracks) {
-        for (const kf of track.keyframes) {
-          const t = action.offset + kf.t * dur;
-          if (t > 0 && t < clip.duration) times.add(t);
+      for (const occurrence of occurrences) {
+        addTime(occurrence.start);
+        addTime(occurrence.end);
+        for (const track of preset.tracks) {
+          for (const kf of track.keyframes) addTime(occurrence.start + kf.t * dur);
         }
       }
     }
@@ -127,8 +145,11 @@ interface PartFrame {
   x: number;
   y: number;
   scale: number;
+  scaleX: number;
+  scaleY: number;
   rotation: number;
   opacity: number;
+  tint: ColorTint | null;
 }
 
 function sampleSlot(
@@ -138,8 +159,8 @@ function sampleSlot(
   allSlots: CharacterSlotRef[],
   presets: Map<string, ActionPreset>,
   times: number[],
-  scaleX: number,
-  scaleY: number,
+  canvasScaleX: number,
+  canvasScaleY: number,
 ): PartFrame[] {
   return times.map((t) => {
     const composed = composeActionsAt(clip, t, presets);
@@ -169,11 +190,14 @@ function sampleSlot(
 
     return {
       t,
-      x: (d.dx + inhDx) * scaleX,
-      y: (d.dy + inhDy) * scaleY,
+      x: (d.dx + inhDx) * canvasScaleX,
+      y: (d.dy + inhDy) * canvasScaleY,
       scale: d.scale * inhScale,
+      scaleX: d.scaleX,
+      scaleY: d.scaleY,
       rotation: d.rotation + inhRotation,
       opacity: d.opacity ?? 1,
+      tint: d.colorTint,
     };
   });
 }
@@ -189,8 +213,59 @@ function emitTweens(tl: gsap.core.Timeline, domId: string, frames: PartFrame[]):
     if (duration <= 0) continue;
     tl.fromTo(
       `#${domId}`,
-      { x: a.x, y: a.y, scale: a.scale, rotation: a.rotation, opacity: a.opacity },
-      { x: b.x, y: b.y, scale: b.scale, rotation: b.rotation, opacity: b.opacity, duration, ease: "none" },
+      {
+        x: a.x,
+        y: a.y,
+        scaleX: a.scale * a.scaleX,
+        scaleY: a.scale * a.scaleY,
+        rotation: a.rotation,
+        opacity: a.opacity,
+      },
+      {
+        x: b.x,
+        y: b.y,
+        scaleX: b.scale * b.scaleX,
+        scaleY: b.scale * b.scaleY,
+        rotation: b.rotation,
+        opacity: b.opacity,
+        duration,
+        ease: "none",
+      },
+      a.t,
+    );
+  }
+  emitTintTweens(tl, `${domId}-tint`, frames);
+}
+
+function rgbaFrom(tint: ColorTint | null): string {
+  if (!tint) return "rgba(0, 0, 0, 0)";
+  return `rgba(${Math.round(tint.r)}, ${Math.round(tint.g)}, ${Math.round(tint.b)}, ${Math.max(
+    0,
+    Math.min(1, tint.a),
+  )})`;
+}
+
+function emitTintTweens(tl: gsap.core.Timeline, domId: string, frames: PartFrame[]): void {
+  if (!frames.some((frame) => frame.tint && frame.tint.a > 0)) return;
+  for (let i = 0; i < frames.length - 1; i++) {
+    const a = frames[i];
+    const b = frames[i + 1];
+    const duration = b.t - a.t;
+    if (duration <= 0) continue;
+    tl.fromTo(
+      `#${domId}`,
+      {
+        backgroundColor: rgbaFrom(a.tint),
+        opacity: a.tint?.a ?? 0,
+        mixBlendMode: a.tint?.blendMode ?? "multiply",
+      },
+      {
+        backgroundColor: rgbaFrom(b.tint),
+        opacity: b.tint?.a ?? 0,
+        mixBlendMode: b.tint?.blendMode ?? a.tint?.blendMode ?? "multiply",
+        duration,
+        ease: "none",
+      },
       a.t,
     );
   }
@@ -200,7 +275,16 @@ function emitTweens(tl: gsap.core.Timeline, domId: string, frames: PartFrame[]):
 
 // Vowels rank highest so they survive when rapid events get collapsed.
 const VISEME_PRIORITY: Record<MouthViseme, number> = {
-  A: 10, O: 9, U: 8, E: 7, WQ: 6, Smile: 5, L: 4, FV: 3, MBP: 2, rest: 1,
+  A: 10,
+  O: 9,
+  U: 8,
+  E: 7,
+  WQ: 6,
+  Smile: 5,
+  L: 4,
+  FV: 3,
+  MBP: 2,
+  rest: 1,
 };
 
 /**
@@ -221,7 +305,10 @@ function smoothVisemes(
 
   while (i < sorted.length) {
     // Skip events still inside the dead zone of the last emission.
-    if (sorted[i].t - lastT < minGap) { i++; continue; }
+    if (sorted[i].t - lastT < minGap) {
+      i++;
+      continue;
+    }
 
     // Collect all events in this window and pick the highest-priority one.
     const windowStart = sorted[i].t;
@@ -248,7 +335,16 @@ function addVisemeEvents(
   slots: CharacterSlotRef[],
 ): void {
   const VISEMES: import("../types").MouthViseme[] = [
-    "rest", "A", "E", "O", "U", "MBP", "FV", "L", "WQ", "Smile",
+    "rest",
+    "A",
+    "E",
+    "O",
+    "U",
+    "MBP",
+    "FV",
+    "L",
+    "WQ",
+    "Smile",
   ];
 
   for (const slot of slots) {
@@ -319,7 +415,7 @@ function addBlinkEvents(
     tl.set(openId, { opacity: 1 }, 0);
     tl.set(closedId, { opacity: 0 }, 0);
 
-    let t = ((cycle - blinkDuration - phaseOffset) % cycle + cycle) % cycle;
+    let t = (((cycle - blinkDuration - phaseOffset) % cycle) + cycle) % cycle;
     while (t < clip.duration) {
       if (t > 0) {
         const blinkEnd = Math.min(t + blinkDuration, clip.duration);
@@ -363,10 +459,9 @@ export function buildCharacterTimeline(
   const times = collectCriticalTimes(clip, presets);
 
   for (const slot of slots) {
-    if (slot.role === "mouth") continue; // handled by addVisemeEvents
-
     const defaultPart = pickActivePartForSlot(slot, {
       pose: undefined,
+      viseme: slot.role === "mouth" ? "rest" : undefined,
       eyeState: slot.role === "eye" ? "open" : undefined,
     });
     if (!defaultPart) continue;
@@ -391,13 +486,25 @@ export function buildCharacterTimeline(
 type RigTransforms = ReturnType<typeof poseToTransforms>;
 
 function rigPropsUpper(t: RigTransforms, pxY: number, widthScale: number) {
-  return { y: t.upperLip.y * pxY, scaleX: t.upperLip.scaleX * widthScale, scaleY: t.upperLip.scaleY };
+  return {
+    y: t.upperLip.y * pxY,
+    scaleX: t.upperLip.scaleX * widthScale,
+    scaleY: t.upperLip.scaleY,
+  };
 }
 function rigPropsLower(t: RigTransforms, pxY: number, widthScale: number) {
-  return { y: t.lowerLip.y * pxY, scaleX: t.lowerLip.scaleX * widthScale, scaleY: t.lowerLip.scaleY };
+  return {
+    y: t.lowerLip.y * pxY,
+    scaleX: t.lowerLip.scaleX * widthScale,
+    scaleY: t.lowerLip.scaleY,
+  };
 }
 function rigPropsInterior(t: RigTransforms, widthScale: number) {
-  return { scaleY: t.interior.scaleY, scaleX: t.interior.scaleX * widthScale, opacity: t.interior.opacity };
+  return {
+    scaleY: t.interior.scaleY,
+    scaleX: t.interior.scaleX * widthScale,
+    opacity: t.interior.opacity,
+  };
 }
 function rigPropsTeeth(t: RigTransforms, pxY: number) {
   return { opacity: t.teeth.opacity, y: t.teeth.y * pxY };
@@ -423,8 +530,8 @@ function addRigVisemeEvents(
     upperLip: `#${rigComponentId(clip.id, "upper-lip")}`,
     lowerLip: `#${rigComponentId(clip.id, "lower-lip")}`,
     interior: `#${rigComponentId(clip.id, "interior")}`,
-    teeth:    `#${rigComponentId(clip.id, "teeth")}`,
-    tongue:   `#${rigComponentId(clip.id, "tongue")}`,
+    teeth: `#${rigComponentId(clip.id, "teeth")}`,
+    tongue: `#${rigComponentId(clip.id, "tongue")}`,
   };
 
   const curveOpts = {
@@ -437,8 +544,8 @@ function addRigVisemeEvents(
   tl.set(ids.upperLip, rigPropsUpper(restT, pxPerSvgY, widthScale), 0);
   tl.set(ids.lowerLip, rigPropsLower(restT, pxPerSvgY, widthScale), 0);
   tl.set(ids.interior, rigPropsInterior(restT, widthScale), 0);
-  tl.set(ids.teeth,    rigPropsTeeth(restT, pxPerSvgY), 0);
-  tl.set(ids.tongue,   rigPropsTongue(restT, pxPerSvgY), 0);
+  tl.set(ids.teeth, rigPropsTeeth(restT, pxPerSvgY), 0);
+  tl.set(ids.tongue, rigPropsTongue(restT, pxPerSvgY), 0);
 
   // fromTo tweens: bake prev→next so backward scrubbing is correct.
   const BLEND = 0.075;
@@ -452,11 +559,36 @@ function addRigVisemeEvents(
     const startAt = Math.max(0, t - BLEND);
     const dur = Math.min(BLEND, t);
 
-    tl.fromTo(ids.upperLip, rigPropsUpper(prev, pxPerSvgY, widthScale), { ...rigPropsUpper(next, pxPerSvgY, widthScale), duration: dur, ease: "power1.out" }, startAt);
-    tl.fromTo(ids.lowerLip, rigPropsLower(prev, pxPerSvgY, widthScale), { ...rigPropsLower(next, pxPerSvgY, widthScale), duration: dur, ease: "power1.out" }, startAt);
-    tl.fromTo(ids.interior, rigPropsInterior(prev, widthScale), { ...rigPropsInterior(next, widthScale), duration: dur, ease: "power1.out" }, startAt);
-    tl.fromTo(ids.teeth,    rigPropsTeeth(prev, pxPerSvgY),    { ...rigPropsTeeth(next, pxPerSvgY),    duration: dur * 0.7 }, startAt);
-    tl.fromTo(ids.tongue,   rigPropsTongue(prev, pxPerSvgY),   { ...rigPropsTongue(next, pxPerSvgY),   duration: dur * 0.7 }, startAt);
+    tl.fromTo(
+      ids.upperLip,
+      rigPropsUpper(prev, pxPerSvgY, widthScale),
+      { ...rigPropsUpper(next, pxPerSvgY, widthScale), duration: dur, ease: "power1.out" },
+      startAt,
+    );
+    tl.fromTo(
+      ids.lowerLip,
+      rigPropsLower(prev, pxPerSvgY, widthScale),
+      { ...rigPropsLower(next, pxPerSvgY, widthScale), duration: dur, ease: "power1.out" },
+      startAt,
+    );
+    tl.fromTo(
+      ids.interior,
+      rigPropsInterior(prev, widthScale),
+      { ...rigPropsInterior(next, widthScale), duration: dur, ease: "power1.out" },
+      startAt,
+    );
+    tl.fromTo(
+      ids.teeth,
+      rigPropsTeeth(prev, pxPerSvgY),
+      { ...rigPropsTeeth(next, pxPerSvgY), duration: dur * 0.7 },
+      startAt,
+    );
+    tl.fromTo(
+      ids.tongue,
+      rigPropsTongue(prev, pxPerSvgY),
+      { ...rigPropsTongue(next, pxPerSvgY), duration: dur * 0.7 },
+      startAt,
+    );
 
     prev = next;
   }
