@@ -4,7 +4,7 @@ import { db } from "../db";
 import { useStudio } from "../store";
 import type { CharacterClip, CharacterPreset } from "../types";
 import { VoiceLipSyncPanel } from "./VoiceLipSyncPanel";
-import { ActionsPanel } from "./ActionsPanel";
+import { MotionPanel } from "./MotionPanel";
 
 export function Inspector() {
   const project = useStudio((s) => s.project);
@@ -140,7 +140,7 @@ export function Inspector() {
                     Adds a subtle regular blink during playback when the eyes are otherwise open.
                   </p>
                 </div>
-                {character && <ActionsPanel clip={clip as CharacterClip} character={character} />}
+                {character && <MotionPanel clip={clip as CharacterClip} character={character} />}
                 <VoiceLipSyncPanel clip={clip as CharacterClip} />
               </>
             )}

@@ -21,7 +21,7 @@ import { db, importMediaFile, uid } from "../db";
 import { useMediaUrl } from "../hooks/useMediaUrl";
 import {
   createBlankCharacter,
-  defaultMovementForRole,
+  defaultMotionBehaviorForRole,
   makePart,
   normalizeCharacterSlots,
   normalizePartManifest,
@@ -50,7 +50,7 @@ import type {
   ID,
   MouthRig,
   MouthViseme,
-  MovementPresetKind,
+  PartMotionBehavior,
   PartManifest,
   PartRole,
 } from "../types";
@@ -102,7 +102,7 @@ const ROLE_OPTIONS: PartRole[] = [
   "custom",
 ];
 
-const MOVEMENT_OPTIONS: Array<{ value: MovementPresetKind; label: string }> = [
+const MOTION_BEHAVIOR_OPTIONS: Array<{ value: PartMotionBehavior; label: string }> = [
   { value: "none", label: "None" },
   { value: "blink", label: "Blink" },
   { value: "rotate", label: "Rotate" },
@@ -356,7 +356,7 @@ export function CharacterEditor({ characterId }: Props) {
         ...fitted,
         ...options.placement,
         zIndex: options.zIndex ?? maxZ(doc.parts) + 1,
-        movement: defaultMovementForRole(role, viseme),
+        motionBehavior: defaultMotionBehaviorForRole(role, viseme),
       });
       addPart(part);
       setStatus(`${file.name} added`);
@@ -1314,7 +1314,10 @@ function Inspector({
               onChange={(e) =>
                 onChange(part.id, {
                   role: e.target.value as PartRole,
-                  movement: defaultMovementForRole(e.target.value as PartRole, part.viseme),
+                  motionBehavior: defaultMotionBehaviorForRole(
+                    e.target.value as PartRole,
+                    part.viseme,
+                  ),
                 })
               }
               className="w-full rounded border border-border bg-background px-2 py-1"
@@ -1326,15 +1329,15 @@ function Inspector({
               ))}
             </select>
           </Field>
-          <Field label="Movement">
+          <Field label="Rig behavior">
             <select
-              value={part.movement ?? "none"}
+              value={part.motionBehavior ?? "none"}
               onChange={(e) =>
-                onChange(part.id, { movement: e.target.value as MovementPresetKind })
+                onChange(part.id, { motionBehavior: e.target.value as PartMotionBehavior })
               }
               className="w-full rounded border border-border bg-background px-2 py-1"
             >
-              {MOVEMENT_OPTIONS.map((item) => (
+              {MOTION_BEHAVIOR_OPTIONS.map((item) => (
                 <option key={item.value} value={item.value}>
                   {item.label}
                 </option>
@@ -2209,18 +2212,18 @@ interface PreviewState {
 
 function previewLabels(part: CharacterPart): Array<{ kind: PreviewState["kind"]; label: string }> {
   const out: Array<{ kind: PreviewState["kind"]; label: string }> = [];
-  if (part.role === "eye" || (part.role === "custom" && part.movement === "blink"))
+  if (part.role === "eye" || (part.role === "custom" && part.motionBehavior === "blink"))
     out.push({ kind: "blink", label: "Test Blink" });
-  if (part.role === "mouth" || (part.role === "custom" && part.movement === "lipSync"))
+  if (part.role === "mouth" || (part.role === "custom" && part.motionBehavior === "lipSync"))
     out.push({ kind: "talk", label: "Test Talk" });
   if (part.role === "arm") out.push({ kind: "wave", label: "Test Wave" });
   if (part.role === "leg" || part.role === "foot") out.push({ kind: "kick", label: "Test Kick" });
-  if (part.role === "custom" && part.movement === "rotate")
+  if (part.role === "custom" && part.motionBehavior === "rotate")
     out.push({ kind: "wave", label: "Test Wave" });
   if (part.role === "head") out.push({ kind: "nod", label: "Test Nod" });
-  if (part.role === "hair" || (part.role === "custom" && part.movement === "bounce"))
+  if (part.role === "hair" || (part.role === "custom" && part.motionBehavior === "bounce"))
     out.push({ kind: "bounce", label: "Test Bounce" });
-  if (part.role === "eyebrow" || (part.role === "custom" && part.movement === "raise"))
+  if (part.role === "eyebrow" || (part.role === "custom" && part.motionBehavior === "raise"))
     out.push({ kind: "raise", label: "Test Raise" });
   return out;
 }
@@ -2458,6 +2461,6 @@ function normalizePartPatch(part: CharacterPart, patch: Partial<CharacterPart>):
     anchorX,
     anchorY,
     pivot,
-    movement: part.movement ?? defaultMovementForRole(part.role, part.viseme),
+    motionBehavior: part.motionBehavior ?? defaultMotionBehaviorForRole(part.role, part.viseme),
   };
 }

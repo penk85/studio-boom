@@ -30,9 +30,11 @@ export function MouthCreator({ isOpen, onClose, onSave, initialRig }: MouthCreat
   const [lipColor, setLipColor] = useState(initialRig?.lipColor ?? DEFAULT_LIP_COLOR);
   const [teethColor, setTeethColor] = useState(initialRig?.teethColor ?? DEFAULT_TEETH_COLOR);
   const [tongueColor, setTongueColor] = useState(initialRig?.tongueColor ?? DEFAULT_TONGUE_COLOR);
-  const [interiorColor, setInteriorColor] = useState(initialRig?.interiorColor ?? DEFAULT_INTERIOR_COLOR);
-  const [poses, setPoses] = useState<Record<MouthViseme, MouthPose>>(
-    () => initialRig?.poses ? { ...initialRig.poses } : { ...VISEME_POSES },
+  const [interiorColor, setInteriorColor] = useState(
+    initialRig?.interiorColor ?? DEFAULT_INTERIOR_COLOR,
+  );
+  const [poses, setPoses] = useState<Record<MouthViseme, MouthPose>>(() =>
+    initialRig?.poses ? { ...initialRig.poses } : { ...VISEME_POSES },
   );
   const [selectedViseme, setSelectedViseme] = useState<MouthViseme | null>(null);
 
@@ -66,7 +68,6 @@ export function MouthCreator({ isOpen, onClose, onSave, initialRig }: MouthCreat
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
       <div className="flex max-h-[95vh] w-[700px] flex-col rounded-lg bg-panel shadow-xl">
-
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <div>
@@ -82,7 +83,6 @@ export function MouthCreator({ isOpen, onClose, onSave, initialRig }: MouthCreat
 
         {/* Body */}
         <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-4">
-
           {/* Style selector */}
           <div>
             <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -145,9 +145,30 @@ export function MouthCreator({ isOpen, onClose, onSave, initialRig }: MouthCreat
 
           {/* Controls */}
           <div className="grid grid-cols-2 gap-x-6 gap-y-3">
-            <ShapeSlider label="Width" value={widthScale} min={0.7} max={1.3} step={0.05} onChange={setWidthScale} />
-            <ShapeSlider label="Upper lip arch" value={upperCurve} min={-1} max={1} step={0.05} onChange={setUpperCurve} />
-            <ShapeSlider label="Lower lip arch" value={lowerCurve} min={-1} max={1} step={0.05} onChange={setLowerCurve} />
+            <ShapeSlider
+              label="Width"
+              value={widthScale}
+              min={0.7}
+              max={1.3}
+              step={0.05}
+              onChange={setWidthScale}
+            />
+            <ShapeSlider
+              label="Upper lip arch"
+              value={upperCurve}
+              min={-1}
+              max={1}
+              step={0.05}
+              onChange={setUpperCurve}
+            />
+            <ShapeSlider
+              label="Lower lip arch"
+              value={lowerCurve}
+              min={-1}
+              max={1}
+              step={0.05}
+              onChange={setLowerCurve}
+            />
             {/* Colour pickers */}
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
               <ColorPicker label="Lips" value={lipColor} onChange={setLipColor} />
@@ -216,7 +237,14 @@ function StyleCard({
       }`}
     >
       <div className="w-full" style={{ aspectRatio: "100/60" }}>
-        <RigPreview style={style} pose={pose} colors={colors} widthScale={widthScale} upperCurve={upperCurve} lowerCurve={lowerCurve} />
+        <RigPreview
+          style={style}
+          pose={pose}
+          colors={colors}
+          widthScale={widthScale}
+          upperCurve={upperCurve}
+          lowerCurve={lowerCurve}
+        />
       </div>
       {style.label}
     </button>
@@ -255,7 +283,14 @@ function VisemeCell({
       }`}
     >
       <div className="w-full" style={{ aspectRatio: "100/60" }}>
-        <RigPreview style={style} pose={pose} colors={colors} widthScale={widthScale} upperCurve={upperCurve} lowerCurve={lowerCurve} />
+        <RigPreview
+          style={style}
+          pose={pose}
+          colors={colors}
+          widthScale={widthScale}
+          upperCurve={upperCurve}
+          lowerCurve={lowerCurve}
+        />
       </div>
       <span className="text-[9px] uppercase tracking-wider text-muted-foreground">{viseme}</span>
     </button>
@@ -283,15 +318,16 @@ function PoseEditor({
   onChange: (param: keyof MouthPose, value: number) => void;
   onReset: () => void;
 }) {
-  const params: { key: keyof MouthPose; label: string; min: number; max: number; step: number }[] = [
-    { key: "open",    label: "Open",    min: -0.2, max: 1,   step: 0.05 },
-    { key: "wide",    label: "Wide",    min: -0.6, max: 1,   step: 0.05 },
-    { key: "round",   label: "Round",   min: 0,    max: 1,   step: 0.05 },
-    { key: "smile",   label: "Smile",   min: 0,    max: 1,   step: 0.05 },
-    { key: "teeth",   label: "Teeth",   min: 0,    max: 1,   step: 0.05 },
-    { key: "tongue",  label: "Tongue",  min: 0,    max: 1,   step: 0.05 },
-    { key: "fvBite",  label: "FV Bite", min: 0,    max: 1,   step: 0.05 },
-  ];
+  const params: { key: keyof MouthPose; label: string; min: number; max: number; step: number }[] =
+    [
+      { key: "open", label: "Open", min: -0.2, max: 1, step: 0.05 },
+      { key: "wide", label: "Wide", min: -0.6, max: 1, step: 0.05 },
+      { key: "round", label: "Round", min: 0, max: 1, step: 0.05 },
+      { key: "smile", label: "Smile", min: 0, max: 1, step: 0.05 },
+      { key: "teeth", label: "Teeth", min: 0, max: 1, step: 0.05 },
+      { key: "tongue", label: "Tongue", min: 0, max: 1, step: 0.05 },
+      { key: "fvBite", label: "FV Bite", min: 0, max: 1, step: 0.05 },
+    ];
 
   return (
     <div className="rounded border border-primary/30 bg-primary/5 p-3">
@@ -301,7 +337,14 @@ function PoseEditor({
         </span>
         <div className="flex items-center gap-3">
           <div className="h-10 w-16 shrink-0">
-            <RigPreview style={style} pose={pose} colors={colors} widthScale={widthScale} upperCurve={upperCurve} lowerCurve={lowerCurve} />
+            <RigPreview
+              style={style}
+              pose={pose}
+              colors={colors}
+              widthScale={widthScale}
+              upperCurve={upperCurve}
+              lowerCurve={lowerCurve}
+            />
           </div>
           <button
             type="button"
@@ -357,7 +400,10 @@ function ShapeSlider({
         <span className="tabular-nums text-muted-foreground">{value.toFixed(2)}</span>
       </div>
       <input
-        type="range" min={min} max={max} step={step}
+        type="range"
+        min={min}
+        max={max}
+        step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
         className="w-full accent-primary"

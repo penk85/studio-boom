@@ -1,19 +1,19 @@
-// Built-in Action Preset library — seeded into IndexedDB on first run.
+// Built-in Motion Preset library — seeded into IndexedDB on first run.
 // These are character-agnostic: they target part roles and apply deltas
 // relative to each part's rest pose, so they work on any character that
 // has those roles enabled in its manifest.
 import { db, uid } from "../db";
-import type { ActionPreset, ActionTrack } from "../types";
+import type { MotionPreset, MotionTrack } from "../types";
 
 const now = () => Date.now();
 
 function preset(
   name: string,
-  category: ActionPreset["category"],
+  category: MotionPreset["category"],
   duration: number,
-  tracks: ActionTrack[],
-  opts: { loop?: boolean; description?: string; headTurn?: ActionPreset["headTurn"] } = {},
-): ActionPreset {
+  tracks: MotionTrack[],
+  opts: { loop?: boolean; description?: string; headTurn?: MotionPreset["headTurn"] } = {},
+): MotionPreset {
   return {
     id: `builtin-${name.toLowerCase().replace(/\s+/g, "-")}`,
     name,
@@ -29,7 +29,7 @@ function preset(
   };
 }
 
-const STARTERS: ActionPreset[] = [
+const STARTERS: MotionPreset[] = [
   // Expressions ------------------------------------------------------------
   preset(
     "Surprised",
@@ -39,7 +39,6 @@ const STARTERS: ActionPreset[] = [
       {
         partRole: "mouth",
         poseSwap: "O",
-        lockMouth: true,
         keyframes: [
           { t: 0, scale: 1, ease: "easeOut" },
           { t: 0.3, scale: 1.5, ease: "easeOut" },
@@ -73,7 +72,6 @@ const STARTERS: ActionPreset[] = [
     [
       {
         partRole: "mouth",
-        lockMouth: true,
         keyframes: [
           { t: 0, scale: 1 },
           { t: 1, scale: 1.2, dy: 2 },
@@ -100,7 +98,6 @@ const STARTERS: ActionPreset[] = [
     },
     {
       partRole: "mouth",
-      lockMouth: true,
       keyframes: [
         { t: 0, dy: 0, scale: 1 },
         { t: 1, dy: 6, scale: 0.85 },
@@ -125,7 +122,6 @@ const STARTERS: ActionPreset[] = [
     },
     {
       partRole: "mouth",
-      lockMouth: true,
       keyframes: [
         { t: 0, scale: 1 },
         { t: 1, scale: 0.9, dy: -2 },
@@ -426,16 +422,16 @@ const STARTERS: ActionPreset[] = [
 
 let seedPromise: Promise<void> | null = null;
 
-export function ensurePresetsSeeded(): Promise<void> {
+export function ensureMotionPresetsSeeded(): Promise<void> {
   if (seedPromise) return seedPromise;
   seedPromise = (async () => {
     for (const p of STARTERS) {
-      const existing = await db.movements.get(p.id);
+      const existing = await db.motionPresets.get(p.id);
       if (!existing) {
-        await db.movements.put(p);
+        await db.motionPresets.put(p);
       } else if (existing.builtin) {
         // Refresh builtin definitions in case we ship updates.
-        await db.movements.put({ ...p, createdAt: existing.createdAt });
+        await db.motionPresets.put({ ...p, createdAt: existing.createdAt });
       }
     }
   })();
@@ -443,7 +439,10 @@ export function ensurePresetsSeeded(): Promise<void> {
 }
 
 /** Create a fresh user-defined preset (not built-in). */
-export function createUserPreset(name: string, category: ActionPreset["category"]): ActionPreset {
+export function createUserMotionPreset(
+  name: string,
+  category: MotionPreset["category"],
+): MotionPreset {
   const t = Date.now();
   return {
     id: uid(),

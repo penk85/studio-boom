@@ -411,7 +411,7 @@ export function poseToTransforms(
   // Too much upper movement makes the whole mouth look like it floats.
   const upperY = -open * 5.5 * os - pose.smile * 2.5 * ss + closedPress * 3;
 
-  // Lower lip carries most jaw action.
+  // Lower lip carries most jaw motion.
   // FV pulls the lower lip upward toward the teeth.
   const lowerY = open * 15.5 * os - pose.fvBite * 8 + closedPress * 2;
 

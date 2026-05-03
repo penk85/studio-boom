@@ -1,43 +1,48 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db } from "@/studio/db";
-import { ensurePresetsSeeded } from "@/studio/presets/seed";
-import { PresetRecorder } from "@/studio/presets/PresetRecorder";
-import type { ActionCategory, ActionPreset, CharacterPreset } from "@/studio/types";
+import { ensureMotionPresetsSeeded } from "@/studio/presets/seed";
+import { MotionPresetRecorder } from "@/studio/presets/MotionPresetRecorder";
+import type { CharacterPreset, MotionCategory, MotionPreset } from "@/studio/types";
 
 export const Route = createFileRoute("/presets")({
   head: () => ({
     meta: [
-      { title: "Action Presets — Hyperframes Studio" },
+      { title: "Motion Presets — Hyperframes Studio" },
       { name: "description", content: "Reusable expressions, gestures, and camera moves." },
     ],
   }),
   component: PresetsRoute,
 });
 
-const CATEGORIES: { id: ActionCategory | "all"; label: string }[] = [
+const CATEGORIES: { id: MotionCategory | "all"; label: string }[] = [
   { id: "all", label: "All" },
   { id: "expression", label: "Expressions" },
-  { id: "gesture", label: "Gestures" },
+  { id: "gesture", label: "Body gestures" },
   { id: "full-body", label: "Full body" },
-  { id: "camera", label: "Camera" },
+  { id: "camera", label: "Camera moves" },
+  { id: "headTurn", label: "Head turns" },
   { id: "custom", label: "Custom" },
 ];
 
 function PresetsRoute() {
   const [mounted, setMounted] = useState(false);
-  const [cat, setCat] = useState<ActionCategory | "all">("all");
+  const [cat, setCat] = useState<MotionCategory | "all">("all");
   const [selectedCharId, setSelectedCharId] = useState<string>("");
-  const [recorder, setRecorder] = useState<{ character: CharacterPreset; preset?: ActionPreset } | null>(null);
+  const [recorder, setRecorder] = useState<{
+    character: CharacterPreset;
+    preset?: MotionPreset;
+  } | null>(null);
 
   useEffect(() => {
     setMounted(true);
-    void ensurePresetsSeeded();
+    void ensureMotionPresetsSeeded();
   }, []);
 
-  const presets = useLiveQuery(() => db.movements.orderBy("createdAt").toArray(), []) ?? [];
-  const characters = useLiveQuery(() => db.characters.orderBy("name").toArray(), []) ?? [];
+  const presets = useLiveQuery(() => db.motionPresets.orderBy("createdAt").toArray(), []) ?? [];
+  const queriedCharacters = useLiveQuery(() => db.characters.orderBy("name").toArray(), []);
+  const characters = useMemo(() => queriedCharacters ?? [], [queriedCharacters]);
 
   // Auto-select first character
   useEffect(() => {
@@ -51,14 +56,14 @@ function PresetsRoute() {
   const filtered = cat === "all" ? presets : presets.filter((p) => p.category === cat);
   const selectedChar = characters.find((c) => c.id === selectedCharId);
 
-  const openRecorder = (preset?: ActionPreset) => {
+  const openRecorder = (preset?: MotionPreset) => {
     if (!selectedChar) return;
     setRecorder({ character: selectedChar, preset });
   };
 
   if (recorder) {
     return (
-      <PresetRecorder
+      <MotionPresetRecorder
         character={recorder.character}
         initialPreset={recorder.preset}
         onClose={() => setRecorder(null)}
@@ -72,9 +77,9 @@ function PresetsRoute() {
         <Link to="/" className="rounded border border-border px-2 py-1 text-xs hover:bg-panel-2">
           ← Studio
         </Link>
-        <h1 className="text-2xl font-semibold">Action Presets</h1>
+        <h1 className="text-2xl font-semibold">Motion Presets</h1>
         <p className="ml-3 text-xs text-muted-foreground">
-          Reusable expressions, gestures, full-body and camera moves.
+          Reusable expressions, body gestures, full-body motion, head turns, and camera moves.
         </p>
         <div className="ml-auto flex items-center gap-2">
           {characters.length > 0 ? (
@@ -84,7 +89,9 @@ function PresetsRoute() {
               className="rounded border border-border bg-input px-2 py-1 text-xs"
             >
               {characters.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
               ))}
             </select>
           ) : (
@@ -95,7 +102,7 @@ function PresetsRoute() {
             disabled={!selectedChar}
             className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            + New preset
+            + New motion preset
           </button>
         </div>
       </header>
@@ -126,19 +133,16 @@ function PresetsRoute() {
                   built-in
                 </span>
               )}
-              {!p.builtin && (
-                <button
-                  onClick={() => openRecorder(p)}
-                  disabled={!selectedChar}
-                  className="text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-40"
-                >
-                  Edit
-                </button>
-              )}
+              <button
+                onClick={() => openRecorder(p)}
+                disabled={!selectedChar}
+                className="text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-40"
+              >
+                {p.builtin ? "Customize" : "Edit"}
+              </button>
             </div>
             <div className="text-[11px] text-muted-foreground">
-              {p.category} · {p.duration}s
-              {p.loop ? " · loops" : ""}
+              {p.category} · {p.duration}s{p.loop ? " · loops" : ""}
             </div>
             {p.description && (
               <p className="mt-2 text-[11px] text-muted-foreground">{p.description}</p>
@@ -147,7 +151,7 @@ function PresetsRoute() {
         ))}
         {filtered.length === 0 && (
           <div className="col-span-full rounded border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-            No presets in this category yet.
+            No motion presets in this category yet.
           </div>
         )}
       </div>

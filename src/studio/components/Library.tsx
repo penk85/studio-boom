@@ -1,4 +1,4 @@
-// Library panel — Media, Characters (with editor), Action Presets, Blocks (later).
+// Library panel — Media, Characters (with editor), Motion Presets, Blocks (later).
 import { useLiveQuery } from "dexie-react-hooks";
 import { Link } from "@tanstack/react-router";
 import { db, deleteMediaIfUnused, importMediaFile, mediaIdsForCharacter, uid } from "../db";
@@ -13,12 +13,12 @@ import {
   roleEnabledByManifest,
 } from "../character/character-utils";
 import { ensureStarterCharacterSeeded } from "../character/starter";
-import { ensurePresetsSeeded } from "../presets/seed";
+import { ensureMotionPresetsSeeded } from "../presets/seed";
 
 const TABS = [
   { id: "media", label: "Media" },
   { id: "characters", label: "Characters" },
-  { id: "presets", label: "Actions" },
+  { id: "presets", label: "Motion presets" },
   { id: "blocks", label: "Blocks" },
 ] as const;
 
@@ -276,9 +276,9 @@ function CharacterThumbnailPart({ part }: { part: CharacterPart }) {
 
 function PresetsTab() {
   useEffect(() => {
-    void ensurePresetsSeeded();
+    void ensureMotionPresetsSeeded();
   }, []);
-  const presets = useLiveQuery(() => db.movements.orderBy("category").toArray(), []) ?? [];
+  const presets = useLiveQuery(() => db.motionPresets.orderBy("category").toArray(), []) ?? [];
 
   const grouped = new Map<string, typeof presets>();
   for (const p of presets) {
@@ -298,7 +298,7 @@ function PresetsTab() {
         to="/presets"
         className="block w-full rounded border border-border bg-panel-2 px-2 py-1.5 text-center hover:bg-panel"
       >
-        Browse all presets →
+        Browse all motion presets →
       </Link>
       {Array.from(grouped.entries()).map(([cat, items]) => (
         <div key={cat}>

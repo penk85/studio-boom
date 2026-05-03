@@ -64,12 +64,25 @@ export async function saveCharacter(c: CharacterPreset) {
   return updated;
 }
 
-export function defaultSlotIdForRole(role: PartRole, partId?: string): string {
+const SIDED_SLOT_ROLES = new Set<PartRole>(["eye", "eyebrow", "arm", "hand", "leg", "foot"]);
+
+export function defaultSlotIdForRole(
+  role: PartRole,
+  partId?: string,
+  side?: CharacterPart["side"],
+): string {
+  if (side && SIDED_SLOT_ROLES.has(role) && (side === "left" || side === "right")) {
+    return `slot:${side}-${role}`;
+  }
+  if (side && role === "hair" && (side === "front" || side === "back")) {
+    return `slot:${side}-${role}`;
+  }
   return role === "custom" && partId ? `custom:${partId}` : `role:${role}`;
 }
 
 export function getPartSlotId(part: CharacterPart): ID {
-  return part.slotId ?? defaultSlotIdForRole(part.role, part.id);
+  if (part.slotId && !isGenericSidedSlot(part)) return part.slotId;
+  return defaultSlotIdForRole(part.role, part.id, part.side);
 }
 
 export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
@@ -83,10 +96,16 @@ export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
     parts: c.parts.map((part) => {
       const role = normalizePartRole(part.role as string);
       const slotId =
-        part.slotId ?? defaultSlotIdForRole(role, role === "custom" ? part.id : undefined);
+        part.slotId && !isGenericSidedSlot({ ...part, role })
+          ? part.slotId
+          : defaultSlotIdForRole(role, role === "custom" ? part.id : undefined, part.side);
       const viseme = legacyVisemeToStandard(part.viseme) ?? part.viseme;
       const withNormalizedIds = { ...part, role, slotId, viseme };
       const alphaPivot = alphaCenterForPart(withNormalizedIds);
+      const slotName =
+        part.slotName && part.slotName !== roleLabel(role)
+          ? part.slotName
+          : slotLabelForRoleSide(role, part.side);
       const pivot = part.pivot ?? {
         x: Math.round(alphaPivot.x),
         y: Math.round(alphaPivot.y),
@@ -95,12 +114,12 @@ export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
         ...part,
         role,
         slotId,
-        slotName: part.slotName ?? roleLabel(role),
+        slotName,
         viseme,
         anchorX: clamp01((pivot.x - part.x) / Math.max(1, part.width)),
         anchorY: clamp01((pivot.y - part.y) / Math.max(1, part.height)),
         pivot,
-        movement: part.movement ?? defaultMovementForRole(role, viseme),
+        motionBehavior: part.motionBehavior ?? defaultMotionBehaviorForRole(role, viseme),
         morph:
           role === "mouth" && part.morph
             ? {
@@ -193,7 +212,7 @@ export function normalizePartRole(role: string | undefined): PartRole {
   }
 }
 
-export function defaultMovementForRole(role: PartRole, viseme?: MouthViseme | string) {
+export function defaultMotionBehaviorForRole(role: PartRole, viseme?: MouthViseme | string) {
   if (role === "mouth" || viseme) return "lipSync";
   if (role === "eye") return "blink";
   if (role === "eyebrow") return "raise";
@@ -225,8 +244,9 @@ export function makePart(
   };
   return {
     id,
-    slotId: opts.slotId ?? defaultSlotIdForRole(role, role === "custom" ? id : undefined),
-    slotName: opts.slotName ?? roleLabel(role),
+    slotId:
+      opts.slotId ?? defaultSlotIdForRole(role, role === "custom" ? id : undefined, opts.side),
+    slotName: opts.slotName ?? slotLabelForRoleSide(role, opts.side),
     role,
     name: opts.name ?? roleLabel(role),
     pose: opts.pose,
@@ -245,7 +265,7 @@ export function makePart(
     parentId: opts.parentId,
     bounds: opts.bounds,
     alphaBounds: opts.alphaBounds,
-    movement: opts.movement ?? defaultMovementForRole(role, opts.viseme),
+    motionBehavior: opts.motionBehavior ?? defaultMotionBehaviorForRole(role, opts.viseme),
     morph: opts.morph,
     zIndex: opts.zIndex ?? 0,
     depth: opts.depth ?? 0,
@@ -284,6 +304,24 @@ export function roleLabel(role: PartRole): string {
   }
 }
 
+function isGenericSidedSlot(part: Pick<CharacterPart, "role" | "slotId" | "side">) {
+  if (!part.side || !part.slotId) return false;
+  if (part.slotId !== `role:${part.role}`) return false;
+  return (
+    (SIDED_SLOT_ROLES.has(part.role) && (part.side === "left" || part.side === "right")) ||
+    (part.role === "hair" && (part.side === "front" || part.side === "back"))
+  );
+}
+
+function slotLabelForRoleSide(role: PartRole, side?: CharacterPart["side"]) {
+  const base = roleLabel(role);
+  if (side === "left") return `Left ${base}`;
+  if (side === "right") return `Right ${base}`;
+  if (side === "front") return `${base} Front`;
+  if (side === "back") return `${base} Back`;
+  return base;
+}
+
 /** Group parts by role for the parts list. */
 export function groupParts(parts: CharacterPart[]): Map<PartRole, CharacterPart[]> {
   const m = new Map<PartRole, CharacterPart[]>();
@@ -319,11 +357,22 @@ export function listCharacterSlots(parts: CharacterPart[]): CharacterSlotRef[] {
       });
     }
   }
-  return Array.from(bySlot.values()).sort((a, b) => {
-    const az = Math.min(...a.parts.map((p) => p.zIndex));
-    const bz = Math.min(...b.parts.map((p) => p.zIndex));
-    return az - bz;
-  });
+  const slots = Array.from(bySlot.values());
+  const hasSidedEyeSlots = slots.some(
+    (slot) =>
+      slot.role === "eye" &&
+      slot.parts.some((part) => part.side === "left" || part.side === "right"),
+  );
+  return slots
+    .filter((slot) => {
+      if (!hasSidedEyeSlots || slot.role !== "eye") return true;
+      return slot.parts.some((part) => part.side === "left" || part.side === "right");
+    })
+    .sort((a, b) => {
+      const az = Math.min(...a.parts.map((p) => p.zIndex));
+      const bz = Math.min(...b.parts.map((p) => p.zIndex));
+      return az - bz;
+    });
 }
 
 /** Find the part to display for a role given current pose/viseme/eyeState. */

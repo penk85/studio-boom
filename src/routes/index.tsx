@@ -9,13 +9,13 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "Drag-and-drop movie studio for Hyperframes. Build scenes with reusable puppet characters, movement presets, and automatic lip sync — all in your browser.",
+          "Drag-and-drop movie studio for Hyperframes. Build scenes with reusable puppet characters, motion presets, and automatic lip sync — all in your browser.",
       },
       { property: "og:title", content: "Hyperframes Studio — Visual Movie Builder" },
       {
         property: "og:description",
         content:
-          "Toon Boom–style studio for Hyperframes: characters, movements, lip sync, and one-click project export.",
+          "Toon Boom–style studio for Hyperframes: characters, applied motions, lip sync, and one-click project export.",
       },
     ],
   }),

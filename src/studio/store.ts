@@ -5,11 +5,18 @@ import { db, deleteMediaIfUnused, uid } from "./db";
 import type { AnyClip, CharacterClip, MediaAsset, MediaClip, Project, Track } from "./types";
 
 const DEFAULT_TRACKS: Track[] = [
-  { id: uid(), name: "Background", kind: "background", lanes: 1 },
   { id: uid(), name: "Characters", kind: "character", lanes: 1 },
   { id: uid(), name: "Overlay", kind: "overlay", lanes: 1 },
+  { id: uid(), name: "Background", kind: "background", lanes: 1 },
   { id: uid(), name: "Audio", kind: "audio", lanes: 1 },
 ];
+
+const TRACK_KIND_ORDER: Record<Track["kind"], number> = {
+  character: 0,
+  overlay: 1,
+  background: 2,
+  audio: 3,
+};
 
 /** Find the lowest free lane in a track at the given time range, or return a new lane index. */
 export function pickFreeLane(
@@ -78,6 +85,8 @@ interface StudioState {
 
   // track lanes
   addLane: (trackIndex: number) => void;
+  removeLane: (trackIndex: number, laneIndex: number) => void;
+  normalizeTrackOrder: () => void;
 
   // project meta
   setProjectMeta: (
@@ -92,12 +101,37 @@ const trackIndexFor = (project: Project, kind: Track["kind"]) =>
     project.tracks.findIndex((t) => t.kind === kind),
   );
 
+function normalizeProjectTrackOrder(project: Project): Project {
+  const ordered = project.tracks
+    .map((track, oldIndex) => ({ track, oldIndex }))
+    .sort(
+      (a, b) =>
+        TRACK_KIND_ORDER[a.track.kind] - TRACK_KIND_ORDER[b.track.kind] || a.oldIndex - b.oldIndex,
+    );
+  const changed = ordered.some((entry, newIndex) => entry.oldIndex !== newIndex);
+  if (!changed) return project;
+  const indexMap = new Map(ordered.map((entry, newIndex) => [entry.oldIndex, newIndex] as const));
+  return {
+    ...project,
+    tracks: ordered.map((entry) => entry.track),
+    clips: project.clips.map((clip) => ({
+      ...clip,
+      trackIndex: indexMap.get(clip.trackIndex) ?? clip.trackIndex,
+    })),
+    updatedAt: Date.now(),
+  };
+}
+
 function isSpeechLinkedToCharacter(clip: AnyClip, character: CharacterClip) {
   return (
     clip.kind === "audio" &&
     ((clip as MediaClip).linkedCharacterClipId === character.id ||
       (!!character.lipSyncAudioId && clip.mediaId === character.lipSyncAudioId))
   );
+}
+
+function isLinkedSpeechAudioClip(clip: AnyClip) {
+  return clip.kind === "audio" && !!(clip as MediaClip).linkedCharacterClipId;
 }
 
 let saveTimer: number | undefined;
@@ -118,7 +152,11 @@ export const useStudio = create<StudioState>((set, get) => ({
 
   async loadProject(id) {
     const project = await db.projects.get(id);
-    if (project) set({ project, playhead: 0, selectedClipId: null });
+    if (project) {
+      const normalized = normalizeProjectTrackOrder(project);
+      if (normalized !== project) await db.projects.put(normalized);
+      set({ project: normalized, playhead: 0, selectedClipId: null });
+    }
   },
   async newProject() {
     const project = createBlankProject();
@@ -311,6 +349,42 @@ export const useStudio = create<StudioState>((set, get) => ({
       i === trackIndex ? { ...t, lanes: (t.lanes ?? 1) + 1 } : t,
     );
     set({ project: { ...p, tracks, updatedAt: Date.now() } });
+    scheduleSave(get);
+  },
+  removeLane(trackIndex, laneIndex) {
+    const p = get().project;
+    if (!p) return;
+    const track = p.tracks[trackIndex];
+    const laneCount = Math.max(1, track?.lanes ?? 1);
+    if (!track || laneCount <= 1) return;
+    const laneHasClips = p.clips.some(
+      (clip) =>
+        clip.trackIndex === trackIndex &&
+        (clip.laneIndex ?? 0) === laneIndex &&
+        !isLinkedSpeechAudioClip(clip),
+    );
+    if (laneHasClips) return;
+    const tracks = p.tracks.map((t, i) =>
+      i === trackIndex ? { ...t, lanes: Math.max(1, laneCount - 1) } : t,
+    );
+    const clips = p.clips.map((clip) => {
+      if (clip.trackIndex !== trackIndex) return clip;
+      const currentLane = clip.laneIndex ?? 0;
+      if (isLinkedSpeechAudioClip(clip) && currentLane === laneIndex) {
+        return { ...clip, laneIndex: Math.max(0, laneIndex - 1) } as AnyClip;
+      }
+      if (currentLane > laneIndex) return { ...clip, laneIndex: currentLane - 1 } as AnyClip;
+      return clip;
+    });
+    set({ project: { ...p, tracks, clips, updatedAt: Date.now() } });
+    scheduleSave(get);
+  },
+  normalizeTrackOrder() {
+    const p = get().project;
+    if (!p) return;
+    const normalized = normalizeProjectTrackOrder(p);
+    if (normalized === p) return;
+    set({ project: normalized });
     scheduleSave(get);
   },
 

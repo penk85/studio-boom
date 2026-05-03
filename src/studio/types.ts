@@ -56,7 +56,7 @@ export type MouthViseme = "rest" | "A" | "E" | "O" | "U" | "MBP" | "FV" | "L" | 
 
 export type EyeState = "open" | "half" | "closed" | "wink";
 
-export type MovementPresetKind = "none" | "blink" | "rotate" | "raise" | "lipSync" | "bounce";
+export type PartMotionBehavior = "none" | "blink" | "rotate" | "raise" | "lipSync" | "bounce";
 
 export type BoundsType = "rect" | "ellipse";
 
@@ -120,15 +120,15 @@ export interface CharacterPart {
   rotation: number; // degrees
   anchorX: number;
   anchorY: number; // 0..1 within the part (used as transform origin)
-  /** Absolute canvas pivot. Mirrors anchorX/Y for old presets, easier for users to drag. */
+  /** Absolute canvas pivot. Mirrors anchorX/Y and is easier for users to drag. */
   pivot?: { x: number; y: number };
-  /** Parent part id for future movement inheritance. */
+  /** Parent part id for future motion inheritance. */
   parentId?: ID;
   /** Soft motion bounds for future animation and preview tests. */
   bounds?: CharacterPartBounds;
   /** Tight alpha bounds used by editors for selection, handles, and default pivots. */
   alphaBounds?: CharacterPartAlphaBounds;
-  movement?: MovementPresetKind;
+  motionBehavior?: PartMotionBehavior;
   morph?: SvgMorphMetadata;
   zIndex: number;
   /** Parallax depth (-1 back .. 0 neutral .. +1 front). */
@@ -258,8 +258,8 @@ export interface CharacterPreset {
   updatedAt: number;
 }
 
-/** Single keyframe value for one part within an action preset. */
-export interface ActionKeyframe {
+/** Single keyframe value for one part within a reusable motion preset. */
+export interface MotionKeyframe {
   t: number; // 0..1 normalized (multiplied by preset.duration at runtime)
   /** Offset deltas applied on top of the part's rest pose. */
   dx?: number;
@@ -267,25 +267,27 @@ export interface ActionKeyframe {
   scale?: number; // uniform scale multiplier (1 = unchanged)
   scaleX?: number; // horizontal squash multiplier (1 = unchanged)
   scaleY?: number; // vertical stretch multiplier (1 = unchanged)
+  skewX?: number; // additive degrees
+  skewY?: number; // additive degrees
   rotation?: number; // additive degrees
+  originX?: number; // transform origin x, 0..1 within part
+  originY?: number; // transform origin y, 0..1 within part
   opacity?: number; // 0..1, replaces base
   ease?: string; // linear|easeIn|easeOut|easeInOut|snappy|overshoot|bounce|elastic|hold
 }
 
-/** Per-part track inside an Action Preset. */
-export interface ActionTrack {
+/** Per-part transform track inside a reusable motion preset. */
+export interface MotionTrack {
   /** Which part role to drive (e.g. "mouth", "armR", "brow"). */
   partRole: PartRole | "__camera";
   /** Optional exact slot target for character-specific presets. */
   slotId?: ID;
   /** Optional pose/variant swap for this part. Held for the duration. */
   poseSwap?: string;
-  /** If true, this preset's mouth track overrides lip sync visemes. */
-  lockMouth?: boolean;
-  keyframes: ActionKeyframe[];
+  keyframes: MotionKeyframe[];
 }
 
-export type ActionCategory =
+export type MotionCategory =
   | "expression"
   | "gesture"
   | "full-body"
@@ -293,16 +295,8 @@ export type ActionCategory =
   | "headTurn"
   | "custom";
 
-/** Recorded pose snapshot used by the Preset Recorder.
+/** Recorded pose snapshot used by the Motion Preset Recorder.
  *  Each part override stores a *delta* relative to that part's rest pose. */
-export interface ColorTint {
-  r: number; // 0..255
-  g: number; // 0..255
-  b: number; // 0..255
-  a: number; // 0..1 opacity
-  blendMode?: "normal" | "multiply" | "screen";
-}
-
 export interface RecordedPartOverride {
   partRole: PartRole;
   /** Exact slot target when this was recorded against a specific character. */
@@ -314,9 +308,12 @@ export interface RecordedPartOverride {
   scale?: number;
   scaleX?: number; // horizontal squash multiplier (1 = unchanged)
   scaleY?: number; // vertical stretch multiplier (1 = unchanged)
+  skewX?: number; // additive degrees
+  skewY?: number; // additive degrees
   rotation?: number;
+  originX?: number; // transform origin x, 0..1 within part
+  originY?: number; // transform origin y, 0..1 within part
   opacity?: number;
-  colorTint?: ColorTint;
 }
 
 export interface AnticipationSpec {
@@ -331,31 +328,36 @@ export interface RecordedKeypose {
   t: number;
   ease?: string;
   parts: RecordedPartOverride[];
+  /** Semantic horizontal face-turn control. Resolved to GSAP transforms at playback/export. */
+  faceTurnX?: number; // -1..1
   /** Optional camera state at this keypose. */
   camera?: { dx?: number; dy?: number; zoom?: number };
   /** Procedural anticipation pre-pose inserted before this keypose. */
   anticipation?: AnticipationSpec;
 }
 
-/** Optional head-turn directive carried by headTurn presets. */
+/** Optional head-turn directive carried by headTurn motion presets.
+ *  The current implementation is intentionally provisional; the face-plane
+ *  head-turn model is planned separately so expressions can stay attached to the head.
+ */
 export interface HeadTurnSpec {
   from: HeadDirection;
   to: HeadDirection;
   ease?: string;
 }
 
-/** Reusable "Action Preset" — covers expressions AND movements. */
-export interface ActionPreset {
+/** Reusable motion preset — covers expressions, gestures, full-body motion, camera moves, and head turns. */
+export interface MotionPreset {
   id: ID;
   name: string;
-  category: ActionCategory;
+  category: MotionCategory;
   /** Base duration in seconds. */
   duration: number;
   loop: boolean;
-  tracks: ActionTrack[];
+  tracks: MotionTrack[];
   /** Visual recorder data — preferred over `tracks` when present. */
   keyposes?: RecordedKeypose[];
-  /** For headTurn category. */
+  /** Provisional head-turn data. A richer face-plane head-turn design is deferred. */
   headTurn?: HeadTurnSpec;
   /** Optional description for tooltips. */
   description?: string;
@@ -363,14 +365,7 @@ export interface ActionPreset {
   builtin?: boolean;
   createdAt: number;
   updatedAt: number;
-
-  /** @deprecated v1 movement preset shape — kept for migration. */
-  keyframes?: unknown;
 }
-
-/** Backward-compat alias. */
-export type MovementPreset = ActionPreset;
-export type MovementKeyframe = ActionKeyframe;
 
 export type TrackKind = "background" | "character" | "audio" | "overlay";
 
@@ -399,10 +394,10 @@ export interface MediaClip extends BaseClip {
   linkedCharacterClipId?: ID;
 }
 
-export interface AppliedAction {
+export interface AppliedMotion {
   id: ID;
   presetId: ID;
-  /** Offset (seconds) within the character clip when this action starts. */
+  /** Offset (seconds) within the character clip when this applied motion starts. */
   offset: number;
   /** Optional duration override; defaults to preset.duration. */
   duration?: number;
@@ -427,10 +422,8 @@ export interface CharacterClip extends BaseClip {
   lipSyncAudioId?: ID;
   /** Generated viseme keyframes (relative to clip start). */
   visemes?: { t: number; v: MouthViseme }[];
-  /** Applied action presets (expressions, gestures, etc.). */
-  actions?: AppliedAction[];
-  /** @deprecated old movements list — migrated to `actions`. */
-  movements?: { presetId: ID; offset: number }[];
+  /** Applied motion instances on this character clip. */
+  motions?: AppliedMotion[];
   autoBlink?: boolean;
   /** ElevenLabs voice line that produced lipSyncAudioId + visemes. */
   voiceLine?: {

@@ -36,7 +36,7 @@ export function TopBar() {
         to="/presets"
         className="rounded border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-panel-2 hover:text-foreground"
       >
-        Presets
+        Motion presets
       </Link>
       <button
         onClick={saveNow}

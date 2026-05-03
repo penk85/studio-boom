@@ -1,244 +1,34 @@
 // Dexie database — local-first storage for projects, characters,
-// movement presets, and media blobs. Everything stays in the browser.
+// motion presets, and media blobs. Everything stays in the browser.
 import Dexie, { type Table } from "dexie";
 import type {
-  ActionPreset,
+  MotionPreset,
   CharacterPreset,
   MediaAsset,
   MediaBlobRow,
   Project,
   SavedVoice,
 } from "./types";
-import { legacyVisemeToStandard } from "./lipsync/viseme-schema";
 
 class StudioDB extends Dexie {
   projects!: Table<Project, string>;
   characters!: Table<CharacterPreset, string>;
-  /** Note: kept the table name `movements` for back-compat with v1 data;
-   *  it now stores ActionPreset records (movements + expressions). */
-  movements!: Table<ActionPreset, string>;
+  motionPresets!: Table<MotionPreset, string>;
   media!: Table<MediaAsset, string>;
   mediaBlobs!: Table<MediaBlobRow, string>;
   savedVoices!: Table<SavedVoice, string>;
 
   constructor() {
     super("hyperframes-studio");
-    this.version(1).stores({
+    this.version(8).stores({
       projects: "id, name, updatedAt",
       characters: "id, name, updatedAt",
-      movements: "id, name, createdAt",
-      media: "id, name, kind, createdAt",
-      mediaBlobs: "id",
-    });
-    // v2: same indexes, added `category` index on movements.
-    this.version(2)
-      .stores({
-        projects: "id, name, updatedAt",
-        characters: "id, name, updatedAt",
-        movements: "id, name, category, createdAt",
-        media: "id, name, kind, createdAt",
-        mediaBlobs: "id",
-      })
-      .upgrade(async (tx) => {
-        const table = tx.table<ActionPreset>("movements");
-        const all = await table.toArray();
-        for (const row of all) {
-          const legacy = row as ActionPreset & { keyframes?: unknown };
-          if (Array.isArray(legacy.keyframes) && !row.tracks) {
-            const kfs = legacy.keyframes as Array<{
-              t: number;
-              x?: number;
-              y?: number;
-              scale?: number;
-              rotation?: number;
-              opacity?: number;
-              ease?: string;
-              poses?: Record<string, string>;
-            }>;
-            const dur = Math.max(0.1, ...kfs.map((k) => k.t || 0));
-            const norm = kfs.map((k) => ({
-              t: dur > 0 ? Math.min(1, Math.max(0, k.t / dur)) : 0,
-              dx: k.x,
-              dy: k.y,
-              scale: k.scale,
-              rotation: k.rotation,
-              opacity: k.opacity,
-              ease: k.ease,
-            }));
-            await table.put({
-              ...row,
-              category: "custom",
-              loop: false,
-              tracks: [{ partRole: "custom", keyframes: norm }],
-              keyframes: undefined,
-              updatedAt: row.createdAt ?? Date.now(),
-            });
-          }
-        }
-      });
-    // v3: migrate CharacterPreset.parallaxEnabled → ParallaxConfig object;
-    // ensure headVariants exists.
-    this.version(3)
-      .stores({
-        projects: "id, name, updatedAt",
-        characters: "id, name, updatedAt",
-        movements: "id, name, category, createdAt",
-        media: "id, name, kind, createdAt",
-        mediaBlobs: "id",
-      })
-      .upgrade(async (tx) => {
-        const table = tx.table<CharacterPreset>("characters");
-        const all = await table.toArray();
-        for (const row of all) {
-          const legacy = row as CharacterPreset & { parallaxEnabled?: boolean };
-          if (!row.parallax) {
-            const enabled = legacy.parallaxEnabled !== false;
-            await table.put({
-              ...row,
-              parallax: {
-                onCamera: enabled,
-                onClip: enabled,
-                intensity: 0.15,
-              },
-              headVariants: row.headVariants ?? [],
-              parallaxEnabled: undefined,
-              updatedAt: Date.now(),
-            });
-          }
-        }
-      });
-    // v4: add stable part slot ids so actions can target exact rig layers.
-    this.version(4)
-      .stores({
-        projects: "id, name, updatedAt",
-        characters: "id, name, updatedAt",
-        movements: "id, name, category, createdAt",
-        media: "id, name, kind, createdAt",
-        mediaBlobs: "id",
-      })
-      .upgrade(async (tx) => {
-        const table = tx.table<CharacterPreset>("characters");
-        const all = await table.toArray();
-        for (const row of all) {
-          const parts = row.parts.map((part) => {
-            const slotId = part.slotId ?? slotIdForPart(part.role, part.id);
-            return {
-              ...part,
-              slotId,
-              slotName: part.slotName ?? roleLabelForSlot(part.role),
-            };
-          });
-          await table.put({ ...row, parts, updatedAt: Date.now() });
-        }
-      });
-    // v5: rename mouth visemes to a more standard animation-friendly set.
-    this.version(5)
-      .stores({
-        projects: "id, name, updatedAt",
-        characters: "id, name, updatedAt",
-        movements: "id, name, category, createdAt",
-        media: "id, name, kind, createdAt",
-        mediaBlobs: "id",
-      })
-      .upgrade(async (tx) => {
-        const characterTable = tx.table<CharacterPreset>("characters");
-        const projectTable = tx.table<Project>("projects");
-
-        const characters = await characterTable.toArray();
-        for (const character of characters) {
-          const parts = character.parts.map((part) => ({
-            ...part,
-            viseme: legacyVisemeToStandard(part.viseme) ?? part.viseme,
-          }));
-          await characterTable.put({ ...character, parts, updatedAt: Date.now() });
-        }
-
-        const projects = await projectTable.toArray();
-        for (const project of projects) {
-          const clips = project.clips.map((clip) =>
-            clip.kind === "character" && clip.visemes
-              ? {
-                  ...clip,
-                  visemes: clip.visemes.map((key) => ({
-                    ...key,
-                    v: legacyVisemeToStandard(key.v) ?? key.v,
-                  })),
-                }
-              : clip,
-          );
-          await projectTable.put({ ...project, clips, updatedAt: Date.now() });
-        }
-      });
-    // v6: add savedVoices table for custom ElevenLabs voices.
-    this.version(6).stores({
-      projects: "id, name, updatedAt",
-      characters: "id, name, updatedAt",
-      movements: "id, name, category, createdAt",
+      motionPresets: "id, name, category, createdAt",
       media: "id, name, kind, createdAt",
       mediaBlobs: "id",
       savedVoices: "id, voiceId, name, createdAt",
+      movements: null,
     });
-    // v7: SVG character builder schema. Normalize old role names and mouth visemes.
-    this.version(7)
-      .stores({
-        projects: "id, name, updatedAt",
-        characters: "id, name, updatedAt",
-        movements: "id, name, category, createdAt",
-        media: "id, name, kind, createdAt",
-        mediaBlobs: "id",
-        savedVoices: "id, voiceId, name, createdAt",
-      })
-      .upgrade(async (tx) => {
-        const characterTable = tx.table<CharacterPreset>("characters");
-        const characters = await characterTable.toArray();
-        for (const character of characters) {
-          const parts = character.parts.map((part) => {
-            const role = normalizeLegacyRole(part.role as string);
-            const pivot = part.pivot ?? {
-              x: Math.round(part.x + part.width * (part.anchorX ?? 0.5)),
-              y: Math.round(part.y + part.height * (part.anchorY ?? 0.5)),
-            };
-            const side =
-              part.side ??
-              ((part.role as string).endsWith("L")
-                ? "left"
-                : (part.role as string).endsWith("R")
-                  ? "right"
-                  : undefined);
-            return {
-              ...part,
-              role,
-              side,
-              slotId:
-                part.slotId && !part.slotId.startsWith("role:extra")
-                  ? part.slotId
-                  : slotIdForPart(role, part.id),
-              slotName: part.slotName ?? roleLabelForSlot(role),
-              viseme: legacyVisemeToStandard(part.viseme) ?? part.viseme,
-              pivot,
-            };
-          });
-          await characterTable.put({
-            ...character,
-            manifest: {
-              ...(character.manifest ?? {}),
-              hasHead: character.manifest?.hasHead ?? true,
-              hasBody: character.manifest?.hasBody ?? true,
-              hasArms: character.manifest?.hasArms ?? true,
-              hasHands: character.manifest?.hasHands ?? true,
-              hasLegs: character.manifest?.hasLegs ?? true,
-              hasFeet: character.manifest?.hasFeet ?? true,
-              hasEyes: character.manifest?.hasEyes ?? true,
-              hasBrows: character.manifest?.hasBrows ?? true,
-              hasMouth: character.manifest?.hasMouth ?? true,
-              hasHair: character.manifest?.hasHair ?? true,
-              hasAccessories: character.manifest?.hasAccessories ?? true,
-            },
-            parts,
-            updatedAt: Date.now(),
-          });
-        }
-      });
   }
 }
 
@@ -502,80 +292,6 @@ export async function garbageCollectUnusedInternalMedia(
     deletedIds.push(asset.id);
   }
   return { deletedIds };
-}
-
-function slotIdForPart(role: CharacterPreset["parts"][number]["role"], partId: string) {
-  return role === "custom" ? `custom:${partId}` : `role:${role}`;
-}
-
-function roleLabelForSlot(role: CharacterPreset["parts"][number]["role"]) {
-  switch (role) {
-    case "head":
-      return "Head";
-    case "body":
-      return "Body";
-    case "eye":
-      return "Eye";
-    case "eyebrow":
-      return "Eyebrow";
-    case "mouth":
-      return "Mouth";
-    case "arm":
-      return "Arm";
-    case "hand":
-      return "Hand";
-    case "leg":
-      return "Leg";
-    case "foot":
-      return "Foot";
-    case "hair":
-      return "Hair";
-    case "accessory":
-      return "Accessory";
-    case "static":
-      return "Static";
-    case "custom":
-      return "Custom";
-  }
-}
-
-function normalizeLegacyRole(role: string): CharacterPreset["parts"][number]["role"] {
-  switch (role) {
-    case "head":
-    case "body":
-    case "eye":
-    case "eyebrow":
-    case "mouth":
-    case "arm":
-    case "hand":
-    case "leg":
-    case "foot":
-    case "hair":
-    case "accessory":
-    case "static":
-    case "custom":
-      return role;
-    case "eyeL":
-    case "eyeR":
-      return "eye";
-    case "brow":
-    case "browL":
-    case "browR":
-      return "eyebrow";
-    case "armL":
-    case "armR":
-      return "arm";
-    case "legL":
-    case "legR":
-      return "leg";
-    case "footL":
-    case "footR":
-      return "foot";
-    case "extra":
-      return "custom";
-    default:
-      return "custom";
-  }
 }
 
 /** Save a custom ElevenLabs voice for reuse */

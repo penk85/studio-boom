@@ -214,8 +214,10 @@ export function profileToMouthTransforms(
   const interiorOpacity = openness < -0.08 ? 0 : open < 0.03 ? 0.55 : 1;
 
   const wantsTeeth =
-    profile.bite > 0.2 || profile.cornerLift > 0.08 ||
-    profile.width > 0.18 || profile.openness > 0.55;
+    profile.bite > 0.2 ||
+    profile.cornerLift > 0.08 ||
+    profile.width > 0.18 ||
+    profile.openness > 0.55;
   const teethOpacity =
     wantsTeeth && openness > -0.05
       ? clamp(

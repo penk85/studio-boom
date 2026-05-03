@@ -1,6 +1,20 @@
-// PresetRecorder — visual pose-and-capture flow for building action presets.
+// MotionPresetRecorder — visual pose-and-capture flow for reusable motion presets.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Eye, EyeOff, Lock, Maximize2, Minimize2, RotateCcw } from "lucide-react";
+import {
+  Crosshair,
+  Eye,
+  EyeOff,
+  Lock,
+  Maximize2,
+  Minimize2,
+  Move,
+  Pause,
+  Play,
+  RotateCcw,
+  RotateCw,
+  Scaling,
+  SkipBack,
+} from "lucide-react";
 import { db, uid } from "../db";
 import { useMediaUrl } from "../hooks/useMediaUrl";
 import {
@@ -9,23 +23,25 @@ import {
   roleEnabledByManifest,
 } from "../character/character-utils";
 import { localAlphaBounds, pivotForPart } from "../character/alpha-bounds";
+import { faceTurnMotionForPart } from "../character/face-turn";
 import { expandKeyposesWithAnticipation } from "./apply";
 import type {
-  ActionCategory,
-  ActionPreset,
   CharacterPart,
   CharacterPreset,
-  ColorTint,
+  MotionCategory,
+  MotionKeyframe,
+  MotionPreset,
+  MotionTrack,
   PartRole,
   RecordedKeypose,
   RecordedPartOverride,
 } from "../types";
 
-const CATEGORIES: { value: ActionCategory; label: string }[] = [
+const CATEGORIES: { value: MotionCategory; label: string }[] = [
   { value: "expression", label: "Expression" },
-  { value: "gesture", label: "Gesture" },
+  { value: "gesture", label: "Body gesture" },
   { value: "full-body", label: "Full body" },
-  { value: "camera", label: "Camera" },
+  { value: "camera", label: "Camera move" },
   { value: "headTurn", label: "Head turn" },
   { value: "custom", label: "Custom" },
 ];
@@ -48,20 +64,22 @@ const ROLE_GROUPS: { title: string; roles: PartRole[] }[] = [
   { title: "Other", roles: ["hair", "accessory", "static", "custom"] },
 ];
 
-const DEFAULT_TINT: ColorTint = { r: 255, g: 80, b: 80, a: 0.35, blendMode: "multiply" };
-
 type CharacterSlot = ReturnType<typeof listCharacterSlots>[number];
 
 interface RecorderPartState {
   slotId: string;
+  poseSwap?: string;
   dx: number;
   dy: number;
   scale: number;
   scaleX: number;
   scaleY: number;
+  skewX: number;
+  skewY: number;
   rotation: number;
+  originX: number;
+  originY: number;
   opacity: number;
-  colorTint?: ColorTint;
 }
 
 interface SelectPopover {
@@ -70,31 +88,19 @@ interface SelectPopover {
   slots: CharacterSlot[];
 }
 
-export function PresetRecorder({
+export function MotionPresetRecorder({
   character,
   onClose,
   initialPreset,
+  onSaved,
+  copyOnSave,
 }: {
   character: CharacterPreset;
   onClose: () => void;
-  initialPreset?: ActionPreset;
+  initialPreset?: MotionPreset;
+  onSaved?: (preset: MotionPreset) => void;
+  copyOnSave?: boolean;
 }) {
-  const [name, setName] = useState(initialPreset?.name ?? "New preset");
-  const [category, setCategory] = useState<ActionCategory>(initialPreset?.category ?? "expression");
-  const [duration, setDuration] = useState(initialPreset?.duration ?? 1);
-  const [time, setTime] = useState(0);
-  const [keyposes, setKeyposes] = useState<RecordedKeypose[]>(
-    initialPreset?.keyposes ? [...initialPreset.keyposes] : [],
-  );
-  const [overrides, setOverrides] = useState<Map<string, RecorderPartState>>(new Map());
-  const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
-  const [fitScale, setFitScale] = useState(0.5);
-  const [previewMode, setPreviewMode] = useState<"fit" | "export">("fit");
-  const [selectPopover, setSelectPopover] = useState<SelectPopover | null>(null);
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const planeRef = useRef<HTMLDivElement>(null);
-  const lastPickRef = useRef<{ x: number; y: number; key: string; index: number } | null>(null);
-
   const slots = useMemo(
     () =>
       listCharacterSlots(character.parts).filter((slot) =>
@@ -102,6 +108,28 @@ export function PresetRecorder({
       ),
     [character.parts, character.manifest],
   );
+  const [name, setName] = useState(
+    initialPreset && (initialPreset.builtin || copyOnSave)
+      ? customPresetName(initialPreset.name)
+      : (initialPreset?.name ?? "New motion preset"),
+  );
+  const [category, setCategory] = useState<MotionCategory>(initialPreset?.category ?? "expression");
+  const [duration, setDuration] = useState(initialPreset?.duration ?? 1);
+  const [time, setTime] = useState(0);
+  const [keyposes, setKeyposes] = useState<RecordedKeypose[]>(() =>
+    initialKeyposesForPreset(initialPreset, slots),
+  );
+  const [overrides, setOverrides] = useState<Map<string, RecorderPartState>>(new Map());
+  const [faceTurnX, setFaceTurnX] = useState(initialPreset?.keyposes?.[0]?.faceTurnX ?? 0);
+  const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
+  const [fitScale, setFitScale] = useState(0.5);
+  const [previewMode, setPreviewMode] = useState<"fit" | "export">("fit");
+  const [previewPlaying, setPreviewPlaying] = useState(false);
+  const [selectPopover, setSelectPopover] = useState<SelectPopover | null>(null);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const planeRef = useRef<HTMLDivElement>(null);
+  const lastPickRef = useRef<{ x: number; y: number; key: string; index: number } | null>(null);
 
   useEffect(() => {
     if (!selectedSlotId && slots.length > 0) setSelectedSlotId(slots[0].id);
@@ -122,40 +150,74 @@ export function PresetRecorder({
   }, [character.canvasWidth, character.canvasHeight]);
 
   useEffect(() => {
+    if (!previewPlaying) return;
+    let frame = 0;
+    let last = performance.now();
+    const tick = (now: number) => {
+      const maxTime = Math.max(0.1, duration);
+      const dt = Math.max(0, (now - last) / 1000);
+      last = now;
+      setTime((current) => {
+        const next = current + dt;
+        return next >= maxTime ? next % maxTime : next;
+      });
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [duration, previewPlaying]);
+
+  useEffect(() => {
+    setTime((current) => Math.min(current, Math.max(0.1, duration)));
+  }, [duration]);
+
+  useEffect(() => {
     const interp = sampleKeyposesAtTime(keyposes, time);
     const next = new Map<string, RecorderPartState>();
-    for (const ov of interp.values()) {
+    for (const ov of interp.parts.values()) {
       const slot = ov.slotId
         ? slots.find((s) => s.id === ov.slotId)
         : slots.find((s) => s.role === ov.partRole);
       if (!slot) continue;
+      const part = activePartForSlot(slot, ov.poseSwap);
       next.set(slot.id, {
-        slotId: slot.id,
+        ...defaultOverride(slot.id, part),
+        poseSwap: ov.poseSwap,
         dx: ov.dx ?? 0,
         dy: ov.dy ?? 0,
         scale: ov.scale ?? 1,
         scaleX: ov.scaleX ?? 1,
         scaleY: ov.scaleY ?? 1,
+        skewX: ov.skewX ?? 0,
+        skewY: ov.skewY ?? 0,
         rotation: ov.rotation ?? 0,
+        originX: ov.originX ?? part?.anchorX ?? 0.5,
+        originY: ov.originY ?? part?.anchorY ?? 0.5,
         opacity: ov.opacity ?? 1,
-        colorTint: ov.colorTint,
       });
     }
     setOverrides(next);
+    setFaceTurnX(interp.faceTurnX);
   }, [time, keyposes, slots]);
 
   const displayScale = previewMode === "export" ? 1 : fitScale;
   const selectedSlot = slots.find((slot) => slot.id === selectedSlotId) ?? null;
-  const selectedPart = selectedSlot ? (activePartForSlot(selectedSlot) ?? null) : null;
+  const selectedOverrideFromMap = selectedSlotId ? overrides.get(selectedSlotId) : undefined;
+  const selectedPart = selectedSlot
+    ? (activePartForSlot(selectedSlot, selectedOverrideFromMap?.poseSwap) ?? null)
+    : null;
   const selectedOverride = selectedSlotId
-    ? (overrides.get(selectedSlotId) ?? defaultOverride(selectedSlotId))
+    ? (selectedOverrideFromMap ?? defaultOverride(selectedSlotId, selectedPart ?? undefined))
     : null;
 
   const updateOverride = (slotId: string, patch: Partial<RecorderPartState>) => {
     setOverrides((prev) => {
       const next = new Map(prev);
-      const cur = next.get(slotId) ?? defaultOverride(slotId);
-      next.set(slotId, { ...cur, ...patch });
+      const slot = slots.find((item) => item.id === slotId);
+      const cur = next.get(slotId);
+      const curPart = slot ? activePartForSlot(slot, cur?.poseSwap) : undefined;
+      const base = cur ?? defaultOverride(slotId, curPart);
+      next.set(slotId, { ...base, ...patch });
       return next;
     });
   };
@@ -175,12 +237,21 @@ export function PresetRecorder({
     const y = (clientY - rect.top) / displayScale;
     return slots
       .filter((slot) => {
-        const part = activePartForSlot(slot);
+        const part = activePartForSlot(slot, overrides.get(slot.id)?.poseSwap);
         if (!part?.visible) return false;
-        const bounds = transformedBounds(part, overrides.get(slot.id));
+        const bounds = transformedBounds(
+          part,
+          overrides.get(slot.id),
+          faceTurnX,
+          character.canvasWidth,
+        );
         return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
       })
-      .sort((a, b) => (activePartForSlot(b)?.zIndex ?? 0) - (activePartForSlot(a)?.zIndex ?? 0));
+      .sort(
+        (a, b) =>
+          (activePartForSlot(b, overrides.get(b.id)?.poseSwap)?.zIndex ?? 0) -
+          (activePartForSlot(a, overrides.get(a.id)?.poseSwap)?.zIndex ?? 0),
+      );
   };
 
   const selectAtPoint = (clientX: number, clientY: number, altKey: boolean) => {
@@ -204,22 +275,28 @@ export function PresetRecorder({
     const parts: RecordedPartOverride[] = [];
     for (const ov of overrides.values()) {
       const slot = slots.find((s) => s.id === ov.slotId);
-      if (!slot || !isDirtyOverride(ov)) continue;
+      const activePart = slot ? activePartForSlot(slot, ov.poseSwap) : undefined;
+      if (!slot || !isDirtyOverride(ov, activePart)) continue;
       const part: RecordedPartOverride = { partRole: slot.role, slotId: slot.id };
+      if (ov.poseSwap) part.poseSwap = ov.poseSwap;
       if (ov.dx !== 0) part.dx = ov.dx;
       if (ov.dy !== 0) part.dy = ov.dy;
       if (ov.scale !== 1) part.scale = ov.scale;
       if (ov.scaleX !== 1) part.scaleX = ov.scaleX;
       if (ov.scaleY !== 1) part.scaleY = ov.scaleY;
+      if (ov.skewX !== 0) part.skewX = ov.skewX;
+      if (ov.skewY !== 0) part.skewY = ov.skewY;
       if (ov.rotation !== 0) part.rotation = ov.rotation;
+      if (ov.originX !== (activePart?.anchorX ?? 0.5)) part.originX = ov.originX;
+      if (ov.originY !== (activePart?.anchorY ?? 0.5)) part.originY = ov.originY;
       if (ov.opacity !== 1) part.opacity = ov.opacity;
-      if (ov.colorTint && ov.colorTint.a > 0) part.colorTint = ov.colorTint;
       parts.push(part);
     }
     const existing = keyposes.find((k) => Math.abs(k.t - time) <= 0.001);
     const kp: RecordedKeypose = {
       t: round(time, 2),
       parts,
+      faceTurnX: faceTurnX === 0 ? undefined : faceTurnX,
       ease: existing?.ease ?? "easeInOut",
       anticipation: existing?.anticipation,
     };
@@ -243,26 +320,30 @@ export function PresetRecorder({
       alert("Capture at least one pose before saving.");
       return;
     }
-    const preset: ActionPreset = {
-      id: initialPreset?.id ?? uid(),
-      name: name.trim() || "Untitled preset",
+    const now = Date.now();
+    const savingCopy = !!initialPreset && (!!initialPreset.builtin || !!copyOnSave);
+    const preset: MotionPreset = {
+      id: savingCopy ? uid() : (initialPreset?.id ?? uid()),
+      name: name.trim() || "Untitled motion preset",
       category,
       duration: Math.max(0.1, duration),
       loop: initialPreset?.loop ?? false,
-      tracks: initialPreset?.tracks ?? [],
-      keyposes: keyposes.sort((a, b) => a.t - b.t),
+      tracks: [],
+      keyposes: cloneKeyposes(keyposes).sort((a, b) => a.t - b.t),
       builtin: false,
-      createdAt: initialPreset?.createdAt ?? Date.now(),
-      updatedAt: Date.now(),
+      createdAt: savingCopy ? now : (initialPreset?.createdAt ?? now),
+      updatedAt: now,
     };
-    await db.movements.put(preset);
+    await db.motionPresets.put(preset);
+    onSaved?.(preset);
     onClose();
   };
 
-  function activePartForSlot(slot: CharacterSlot) {
+  function activePartForSlot(slot: CharacterSlot, poseSwap?: string) {
     return pickActivePartForSlot(slot, {
-      viseme: slot.role === "mouth" ? "rest" : undefined,
-      eyeState: slot.role === "eye" ? "open" : undefined,
+      pose: poseSwap,
+      viseme: slot.role === "mouth" ? (poseSwap ?? "rest") : undefined,
+      eyeState: slot.role === "eye" ? (poseSwap ?? "open") : undefined,
     });
   }
 
@@ -271,17 +352,17 @@ export function PresetRecorder({
       <div className="flex w-full max-w-7xl flex-col overflow-hidden rounded-lg border border-border bg-panel">
         <header className="flex items-center gap-3 border-b border-border bg-panel-2 px-4 py-2">
           <span className="text-sm font-semibold">
-            {initialPreset ? "Edit Preset" : "Record Preset"}
+            {initialPreset ? `Edit ${editorTitle(category)}` : `Create ${editorTitle(category)}`}
           </span>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="Preset name"
+            placeholder="Motion preset name"
             className="rounded border border-border bg-input px-2 py-1 text-xs"
           />
           <select
             value={category}
-            onChange={(e) => setCategory(e.target.value as ActionCategory)}
+            onChange={(e) => setCategory(e.target.value as MotionCategory)}
             className="rounded border border-border bg-input px-2 py-1 text-xs"
           >
             {CATEGORIES.map((c) => (
@@ -297,7 +378,7 @@ export function PresetRecorder({
               step={0.1}
               min={0.1}
               value={duration}
-              onChange={(e) => setDuration(Number(e.target.value))}
+              onChange={(e) => setDuration(Math.max(0.1, Number(e.target.value) || 0.1))}
               className="w-16 rounded border border-border bg-input px-1 py-0.5"
             />
             s
@@ -335,7 +416,11 @@ export function PresetRecorder({
               onClick={save}
               className="rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-90"
             >
-              {initialPreset ? "Update preset" : "Save preset"}
+              {initialPreset?.builtin || copyOnSave
+                ? "Save custom preset"
+                : initialPreset
+                  ? "Update motion preset"
+                  : "Save motion preset"}
             </button>
           </div>
         </header>
@@ -348,6 +433,14 @@ export function PresetRecorder({
               overrides={overrides}
               activePartForSlot={activePartForSlot}
               onSelect={setSelectedSlotId}
+              onToggleHidden={(slotId) => {
+                const slot = slots.find((item) => item.id === slotId);
+                const part = slot
+                  ? activePartForSlot(slot, overrides.get(slotId)?.poseSwap)
+                  : undefined;
+                const current = overrides.get(slotId) ?? defaultOverride(slotId, part);
+                updateOverride(slotId, { opacity: current.opacity <= 0.01 ? 1 : 0 });
+              }}
             />
           </aside>
 
@@ -374,7 +467,7 @@ export function PresetRecorder({
                 }}
               >
                 {slots.map((slot) => {
-                  const part = activePartForSlot(slot);
+                  const part = activePartForSlot(slot, overrides.get(slot.id)?.poseSwap);
                   if (!part) return null;
                   return (
                     <PoseLayer
@@ -383,6 +476,8 @@ export function PresetRecorder({
                       override={overrides.get(slot.id)}
                       selected={slot.id === selectedSlotId}
                       stageScale={displayScale}
+                      faceTurnX={faceTurnX}
+                      canvasWidth={character.canvasWidth}
                       onSelectAtPoint={selectAtPoint}
                       onSelect={() => {
                         setSelectedSlotId(slot.id);
@@ -397,6 +492,8 @@ export function PresetRecorder({
                     part={selectedPart}
                     override={selectedOverride}
                     scale={displayScale}
+                    faceTurnX={faceTurnX}
+                    canvasWidth={character.canvasWidth}
                     planeRef={planeRef}
                     onChange={(patch) => updateOverride(selectedOverride.slotId, patch)}
                   />
@@ -429,9 +526,26 @@ export function PresetRecorder({
               slot={selectedSlot}
               part={selectedPart}
               override={selectedOverride}
+              advancedOpen={advancedOpen}
+              onAdvancedOpenChange={setAdvancedOpen}
               onChange={(patch) => selectedSlotId && updateOverride(selectedSlotId, patch)}
               onResetAll={() => selectedSlotId && clearOverride(selectedSlotId)}
             />
+
+            <div className="mt-4 rounded border border-border bg-panel-2 p-3">
+              <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+                Face Turn
+              </div>
+              <PropertyRow
+                label="Turn X"
+                value={faceTurnX}
+                min={-1}
+                max={1}
+                step={0.01}
+                rest={0}
+                onChange={setFaceTurnX}
+              />
+            </div>
 
             <div className="mt-4 border-t border-border pt-3">
               <div className="mb-1 flex items-center justify-between">
@@ -451,6 +565,27 @@ export function PresetRecorder({
                 onChange={(e) => setTime(Number(e.target.value))}
                 className="w-full"
               />
+              <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPreviewPlaying((playing) => !playing)}
+                  className="flex items-center justify-center gap-1 rounded border border-border bg-panel-2 px-2 py-1 text-xs hover:bg-panel"
+                >
+                  {previewPlaying ? <Pause size={12} /> : <Play size={12} />}
+                  {previewPlaying ? "Pause preview" : "Play preview"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTime(0);
+                    setPreviewPlaying(true);
+                  }}
+                  className="flex items-center justify-center rounded border border-border bg-panel-2 px-2 py-1 hover:bg-panel"
+                  title="Restart preview"
+                >
+                  <SkipBack size={12} />
+                </button>
+              </div>
               <button
                 onClick={captureKeypose}
                 className="mt-2 w-full rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
@@ -562,12 +697,14 @@ function PartList({
   overrides,
   activePartForSlot,
   onSelect,
+  onToggleHidden,
 }: {
   slots: CharacterSlot[];
   selectedSlotId: string | null;
   overrides: Map<string, RecorderPartState>;
   activePartForSlot: (slot: CharacterSlot) => CharacterPart | undefined;
   onSelect: (id: string) => void;
+  onToggleHidden: (id: string) => void;
 }) {
   return (
     <div className="space-y-3">
@@ -582,29 +719,44 @@ function PartList({
             <div className="space-y-1">
               {groupSlots.map((slot) => {
                 const part = activePartForSlot(slot);
-                const dirty = isDirtyOverride(overrides.get(slot.id));
+                const override = overrides.get(slot.id);
+                const dirty = isDirtyOverride(override, part);
+                const hidden = (override?.opacity ?? 1) <= 0.01 || part?.visible === false;
                 return (
-                  <button
+                  <div
                     key={slot.id}
-                    onClick={() => onSelect(slot.id)}
-                    className={`flex w-full items-center gap-1 rounded px-1.5 py-1 text-left ${
+                    className={`flex w-full items-center gap-1 rounded ${
                       selectedSlotId === slot.id
                         ? "bg-primary/20 text-foreground"
                         : "text-muted-foreground hover:bg-panel-2 hover:text-foreground"
                     }`}
                   >
-                    <span className="w-2">{dirty ? "•" : ""}</span>
-                    <span className="min-w-0 flex-1 truncate">
-                      {slot.name ?? part?.name ?? roleLabel(slot.role)}
-                    </span>
-                    <span className="rounded bg-background/60 px-1 text-[9px]">{slot.role}</span>
-                    <Lock size={10} className="opacity-45" />
-                    {part?.visible === false ? (
-                      <EyeOff size={10} className="opacity-45" />
-                    ) : (
-                      <Eye size={10} className="opacity-45" />
-                    )}
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => onSelect(slot.id)}
+                      className="flex min-w-0 flex-1 items-center gap-1 px-1.5 py-1 text-left"
+                    >
+                      <span className="w-2">{dirty ? "•" : ""}</span>
+                      <span className="min-w-0 flex-1 truncate">
+                        {slot.name ?? part?.name ?? roleLabel(slot.role)}
+                      </span>
+                      <span className="rounded bg-background/60 px-1 text-[9px]">{slot.role}</span>
+                      <Lock size={10} className="opacity-45" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onToggleHidden(slot.id);
+                      }}
+                      className={`mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-background/70 ${
+                        hidden ? "text-muted-foreground" : "text-foreground"
+                      }`}
+                      title={hidden ? "Show layer in motion" : "Hide layer in motion"}
+                    >
+                      {hidden ? <EyeOff size={12} /> : <Eye size={12} />}
+                    </button>
+                  </div>
                 );
               })}
             </div>
@@ -619,12 +771,16 @@ function PropertiesPanel({
   slot,
   part,
   override,
+  advancedOpen,
+  onAdvancedOpenChange,
   onChange,
   onResetAll,
 }: {
   slot: CharacterSlot | null;
   part: CharacterPart | null;
   override: RecorderPartState | null;
+  advancedOpen: boolean;
+  onAdvancedOpenChange: (open: boolean) => void;
   onChange: (patch: Partial<RecorderPartState>) => void;
   onResetAll: () => void;
 }) {
@@ -635,7 +791,7 @@ function PropertiesPanel({
       </div>
     );
   }
-  const tint = override.colorTint;
+  const variantOptions = variantOptionsForSlot(slot);
   return (
     <div>
       <div className="mb-2 flex items-center gap-2">
@@ -653,6 +809,22 @@ function PropertiesPanel({
       </div>
 
       <div className="space-y-2">
+        {variantOptions.length > 1 && (
+          <label className="grid grid-cols-[64px_1fr] items-center gap-2 text-[10px]">
+            <span className="text-muted-foreground">Variant</span>
+            <select
+              value={override.poseSwap ?? ""}
+              onChange={(e) => onChange({ poseSwap: e.target.value || undefined })}
+              className="w-full rounded border border-border bg-input px-2 py-1"
+            >
+              {variantOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <PropertyRow
           label="X"
           value={override.dx}
@@ -672,7 +844,7 @@ function PropertiesPanel({
           onChange={(value) => onChange({ dy: value })}
         />
         <PropertyRow
-          label="Scale"
+          label="Size"
           value={override.scale}
           min={0.1}
           max={3}
@@ -681,7 +853,7 @@ function PropertiesPanel({
           onChange={(value) => onChange({ scale: value })}
         />
         <PropertyRow
-          label="Squash X"
+          label="Width"
           value={override.scaleX}
           min={0.1}
           max={3}
@@ -690,7 +862,7 @@ function PropertiesPanel({
           onChange={(value) => onChange({ scaleX: value })}
         />
         <PropertyRow
-          label="Stretch Y"
+          label="Height"
           value={override.scaleY}
           min={0.1}
           max={3}
@@ -707,79 +879,65 @@ function PropertiesPanel({
           rest={0}
           onChange={(value) => onChange({ rotation: value })}
         />
-        <PropertyRow
-          label="Opacity"
-          value={override.opacity}
-          min={0}
-          max={1}
-          step={0.01}
-          rest={1}
-          onChange={(value) => onChange({ opacity: value })}
-        />
       </div>
 
-      <div className="mt-3 rounded border border-border bg-panel-2 p-2">
-        <div className="mb-2 flex items-center justify-between">
-          <span className="font-medium text-muted-foreground">Tint</span>
-          <button
-            onClick={() => onChange({ colorTint: undefined })}
-            className="text-[10px] text-muted-foreground hover:text-foreground"
-          >
-            Reset
-          </button>
-        </div>
-        <div className="grid grid-cols-[48px_1fr] items-center gap-2">
-          <input
-            type="color"
-            value={rgbToHex(tint ?? DEFAULT_TINT)}
-            onChange={(e) =>
-              onChange({
-                colorTint: {
-                  ...hexToRgb(e.target.value),
-                  a: tint?.a ?? DEFAULT_TINT.a,
-                  blendMode: tint?.blendMode ?? DEFAULT_TINT.blendMode,
-                },
-              })
-            }
-            className="h-8 w-12 rounded border border-border bg-input"
+      <button
+        type="button"
+        onClick={() => onAdvancedOpenChange(!advancedOpen)}
+        className="mt-3 flex w-full items-center justify-between rounded border border-border px-2 py-1 text-left text-[11px] hover:bg-panel-2"
+      >
+        <span>Advanced transforms</span>
+        <span className="text-muted-foreground">{advancedOpen ? "Hide" : "Show"}</span>
+      </button>
+      {advancedOpen && (
+        <div className="mt-2 space-y-2 rounded border border-border bg-panel-2 p-2">
+          <PropertyRow
+            label="Skew X"
+            value={override.skewX}
+            min={-45}
+            max={45}
+            step={1}
+            rest={0}
+            onChange={(value) => onChange({ skewX: value })}
           />
-          <input
-            type="range"
+          <PropertyRow
+            label="Skew Y"
+            value={override.skewY}
+            min={-45}
+            max={45}
+            step={1}
+            rest={0}
+            onChange={(value) => onChange({ skewY: value })}
+          />
+          <PropertyRow
+            label="Pivot X"
+            value={override.originX}
+            min={-0.5}
+            max={1.5}
+            step={0.01}
+            rest={part.anchorX}
+            onChange={(value) => onChange({ originX: value })}
+          />
+          <PropertyRow
+            label="Pivot Y"
+            value={override.originY}
+            min={-0.5}
+            max={1.5}
+            step={0.01}
+            rest={part.anchorY}
+            onChange={(value) => onChange({ originY: value })}
+          />
+          <PropertyRow
+            label="Opacity"
+            value={override.opacity}
             min={0}
             max={1}
             step={0.01}
-            value={tint?.a ?? 0}
-            onChange={(e) =>
-              onChange({
-                colorTint: {
-                  ...(tint ?? DEFAULT_TINT),
-                  a: Number(e.target.value),
-                },
-              })
-            }
-            className="w-full"
+            rest={1}
+            onChange={(value) => onChange({ opacity: value })}
           />
         </div>
-        <label className="mt-2 block">
-          <span className="mb-1 block text-[10px] text-muted-foreground">Blend</span>
-          <select
-            value={tint?.blendMode ?? "multiply"}
-            onChange={(e) =>
-              onChange({
-                colorTint: {
-                  ...(tint ?? DEFAULT_TINT),
-                  blendMode: e.target.value as ColorTint["blendMode"],
-                },
-              })
-            }
-            className="w-full rounded border border-border bg-input px-1 py-0.5"
-          >
-            <option value="normal">Normal</option>
-            <option value="multiply">Multiply</option>
-            <option value="screen">Screen</option>
-          </select>
-        </label>
-      </div>
+      )}
     </div>
   );
 }
@@ -838,6 +996,8 @@ function PoseLayer({
   override,
   selected,
   stageScale,
+  faceTurnX,
+  canvasWidth,
   onSelect,
   onSelectAtPoint,
   onChange,
@@ -846,15 +1006,16 @@ function PoseLayer({
   override?: RecorderPartState;
   selected: boolean;
   stageScale: number;
+  faceTurnX: number;
+  canvasWidth: number;
   onSelect: () => void;
   onSelectAtPoint: (clientX: number, clientY: number, altKey: boolean) => void;
   onChange: (patch: Partial<RecorderPartState>) => void;
 }) {
   const url = useMediaUrl(part.mediaId);
-  const ov = override ?? defaultOverride(part.slotId);
-  const dirty = isDirtyOverride(override);
+  const ov = override ?? defaultOverride(part.slotId, part);
+  const turn = faceTurnMotionForPart(part, faceTurnX, canvasWidth);
   const alphaRect = localAlphaBounds(part);
-  const pivot = pivotForPart(part);
 
   const onPointerDown = (e: React.PointerEvent) => {
     e.stopPropagation();
@@ -896,17 +1057,17 @@ function PoseLayer({
     <div
       className="absolute select-none"
       style={{
-        left: part.x + ov.dx,
-        top: part.y + ov.dy,
+        left: part.x + ov.dx + turn.dx,
+        top: part.y + ov.dy + turn.dy,
         width: part.width,
         height: part.height,
         opacity: ov.opacity,
-        transform: `rotate(${part.rotation + ov.rotation}deg) scale(${ov.scale * ov.scaleX}, ${
-          ov.scale * ov.scaleY
-        })`,
-        transformOrigin: `${((pivot.x - part.x) / part.width) * 100}% ${
-          ((pivot.y - part.y) / part.height) * 100
-        }%`,
+        transform: `rotate(${part.rotation + ov.rotation + turn.rotation}deg) scale(${
+          ov.scale * ov.scaleX * turn.scaleX
+        }, ${ov.scale * ov.scaleY * turn.scaleY}) skew(${ov.skewX + turn.skewX}deg, ${
+          ov.skewY + turn.skewY
+        }deg)`,
+        transformOrigin: `${ov.originX * 100}% ${ov.originY * 100}%`,
         zIndex: part.zIndex,
         pointerEvents: "none",
       }}
@@ -920,30 +1081,15 @@ function PoseLayer({
           className="pointer-events-none h-full w-full object-contain"
         />
       )}
-      {ov.colorTint && ov.colorTint.a > 0 && (
-        <div
-          className="pointer-events-none absolute inset-0"
-          style={{
-            backgroundColor: `rgba(${ov.colorTint.r}, ${ov.colorTint.g}, ${ov.colorTint.b}, ${ov.colorTint.a})`,
-            mixBlendMode: ov.colorTint.blendMode ?? "multiply",
-          }}
-        />
-      )}
       <div
         onPointerDown={onPointerDown}
-        className={`absolute outline outline-offset-0 ${
-          selected
-            ? "outline-2 outline-primary"
-            : dirty
-              ? "outline-1 outline-primary/70"
-              : "outline-1 outline-transparent hover:outline-accent/60"
-        }`}
+        className={`absolute ${selected ? "outline outline-1 outline-primary/80" : ""}`}
         style={{
           left: alphaRect.x,
           top: alphaRect.y,
           width: alphaRect.width,
           height: alphaRect.height,
-          cursor: selected ? "move" : "pointer",
+          cursor: "pointer",
           pointerEvents: "auto",
         }}
       />
@@ -955,23 +1101,53 @@ function SelectionHandles({
   part,
   override,
   scale,
+  faceTurnX,
+  canvasWidth,
   planeRef,
   onChange,
 }: {
   part: CharacterPart;
   override: RecorderPartState;
   scale: number;
+  faceTurnX: number;
+  canvasWidth: number;
   planeRef: React.RefObject<HTMLDivElement | null>;
   onChange: (patch: Partial<RecorderPartState>) => void;
 }) {
+  const alphaRect = localAlphaBounds(part);
+  const turn = faceTurnMotionForPart(part, faceTurnX, canvasWidth);
+  const handleSize = 24 / Math.max(0.0001, scale);
+  const gap = 18 / Math.max(0.0001, scale);
+  const pivotLocal = { x: override.originX * part.width, y: override.originY * part.height };
+
+  const startMove = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const ox = override.dx;
+    const oy = override.dy;
+    const move = (ev: PointerEvent) => {
+      onChange({
+        dx: Math.round(ox + (ev.clientX - sx) / scale),
+        dy: Math.round(oy + (ev.clientY - sy) / scale),
+      });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
   const startRotate = (e: React.PointerEvent) => {
     e.stopPropagation();
     if (e.button !== 0) return;
     const rect = planeRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const pivot = pivotForPart(part);
-    const pivotX = rect.left + (pivot.x + override.dx) * scale;
-    const pivotY = rect.top + (pivot.y + override.dy) * scale;
+    const pivotX = rect.left + (part.x + override.dx + turn.dx + pivotLocal.x) * scale;
+    const pivotY = rect.top + (part.y + override.dy + turn.dy + pivotLocal.y) * scale;
     const startAngle = Math.atan2(e.clientY - pivotY, e.clientX - pivotX) * (180 / Math.PI);
     const startRot = override.rotation;
     const move = (ev: PointerEvent) => {
@@ -991,9 +1167,8 @@ function SelectionHandles({
     if (e.button !== 0) return;
     const rect = planeRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const pivot = pivotForPart(part);
-    const pivotX = rect.left + (pivot.x + override.dx) * scale;
-    const pivotY = rect.top + (pivot.y + override.dy) * scale;
+    const pivotX = rect.left + (part.x + override.dx + turn.dx + pivotLocal.x) * scale;
+    const pivotY = rect.top + (part.y + override.dy + turn.dy + pivotLocal.y) * scale;
     const startDist = Math.hypot(e.clientX - pivotX, e.clientY - pivotY);
     const startScaleValue = override.scale;
     const move = (ev: PointerEvent) => {
@@ -1009,22 +1184,42 @@ function SelectionHandles({
     window.addEventListener("pointerup", up);
   };
 
-  const alphaRect = localAlphaBounds(part);
-  const pivot = pivotForPart(part);
+  const startPivot = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    const rect = planeRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const move = (ev: PointerEvent) => {
+      const canvasX = (ev.clientX - rect.left) / scale;
+      const canvasY = (ev.clientY - rect.top) / scale;
+      onChange({
+        originX: round((canvasX - part.x - override.dx - turn.dx) / Math.max(1, part.width), 3),
+        originY: round((canvasY - part.y - override.dy - turn.dy) / Math.max(1, part.height), 3),
+      });
+    };
+    move(e.nativeEvent);
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
   return (
     <div
       className="pointer-events-none absolute"
       style={{
-        left: part.x + override.dx,
-        top: part.y + override.dy,
+        left: part.x + override.dx + turn.dx,
+        top: part.y + override.dy + turn.dy,
         width: part.width,
         height: part.height,
-        transform: `rotate(${part.rotation + override.rotation}deg) scale(${
-          override.scale * override.scaleX
-        }, ${override.scale * override.scaleY})`,
-        transformOrigin: `${((pivot.x - part.x) / part.width) * 100}% ${
-          ((pivot.y - part.y) / part.height) * 100
-        }%`,
+        transform: `rotate(${part.rotation + override.rotation + turn.rotation}deg) scale(${
+          override.scale * override.scaleX * turn.scaleX
+        }, ${override.scale * override.scaleY * turn.scaleY}) skew(${
+          override.skewX + turn.skewX
+        }deg, ${override.skewY + turn.skewY}deg)`,
+        transformOrigin: `${override.originX * 100}% ${override.originY * 100}%`,
         zIndex: 9999,
       }}
     >
@@ -1036,19 +1231,77 @@ function SelectionHandles({
           width: alphaRect.width,
           height: alphaRect.height,
         }}
+      />
+      <button
+        type="button"
+        onPointerDown={startMove}
+        className="pointer-events-auto absolute flex items-center justify-center rounded border border-background bg-panel text-foreground shadow"
+        style={{
+          left: alphaRect.x - gap,
+          top: alphaRect.y - gap,
+          width: handleSize,
+          height: handleSize,
+          transform: "translate(-50%, -50%)",
+        }}
+        title="Move"
       >
-        <button
-          onPointerDown={startRotate}
-          className="pointer-events-auto absolute left-1/2 flex h-4 w-4 -translate-x-1/2 items-center justify-center rounded-full border border-white bg-primary"
-          style={{ top: -20 }}
-          title="Rotate"
-        />
-        <button
-          onPointerDown={startScale}
-          className="pointer-events-auto absolute -bottom-2 -right-2 h-4 w-4 rounded-sm border border-white bg-accent"
-          title="Scale"
-        />
-      </div>
+        <Move size={Math.max(12, handleSize * 0.55)} />
+      </button>
+      <button
+        type="button"
+        onPointerDown={startRotate}
+        className="pointer-events-auto absolute flex items-center justify-center rounded-full border border-background bg-primary text-primary-foreground shadow"
+        style={{
+          left: alphaRect.x + alphaRect.width / 2,
+          top: alphaRect.y - gap,
+          width: handleSize,
+          height: handleSize,
+          transform: "translate(-50%, -50%)",
+        }}
+        title="Rotate"
+      >
+        <RotateCw size={Math.max(12, handleSize * 0.55)} />
+      </button>
+      <button
+        type="button"
+        onPointerDown={startScale}
+        className="pointer-events-auto absolute flex items-center justify-center rounded border border-background bg-accent text-accent-foreground shadow"
+        style={{
+          left: alphaRect.x + alphaRect.width + gap,
+          top: alphaRect.y + alphaRect.height + gap,
+          width: handleSize,
+          height: handleSize,
+          transform: "translate(-50%, -50%)",
+        }}
+        title="Scale"
+      >
+        <Scaling size={Math.max(12, handleSize * 0.55)} />
+      </button>
+      <button
+        type="button"
+        onPointerDown={startPivot}
+        className="pointer-events-auto absolute flex items-center justify-center rounded-full border border-background bg-panel text-foreground shadow"
+        style={{
+          left: alphaRect.x - gap,
+          top: alphaRect.y + alphaRect.height + gap,
+          width: handleSize,
+          height: handleSize,
+          transform: "translate(-50%, -50%)",
+        }}
+        title="Set pivot"
+      >
+        <Crosshair size={Math.max(12, handleSize * 0.55)} />
+      </button>
+      <div
+        className="absolute rounded-full border border-primary bg-background/80"
+        style={{
+          left: pivotLocal.x,
+          top: pivotLocal.y,
+          width: Math.max(8, handleSize * 0.4),
+          height: Math.max(8, handleSize * 0.4),
+          transform: "translate(-50%, -50%)",
+        }}
+      />
     </div>
   );
 }
@@ -1084,12 +1337,187 @@ function NumberInput({
   );
 }
 
+const MOTION_VALUE_KEYS = [
+  "dx",
+  "dy",
+  "scale",
+  "scaleX",
+  "scaleY",
+  "skewX",
+  "skewY",
+  "rotation",
+  "originX",
+  "originY",
+  "opacity",
+] as const;
+
+type MotionValueKey = (typeof MOTION_VALUE_KEYS)[number];
+
+const MOTION_VALUE_DEFAULTS: Record<MotionValueKey, number> = {
+  dx: 0,
+  dy: 0,
+  scale: 1,
+  scaleX: 1,
+  scaleY: 1,
+  skewX: 0,
+  skewY: 0,
+  rotation: 0,
+  originX: 0.5,
+  originY: 0.5,
+  opacity: 1,
+};
+
+function initialKeyposesForPreset(
+  preset: MotionPreset | undefined,
+  slots: CharacterSlot[],
+): RecordedKeypose[] {
+  if (!preset) return [];
+  if (preset.keyposes?.length) return cloneKeyposes(preset.keyposes);
+  return keyposesFromTracks(preset, slots);
+}
+
+function customPresetName(name: string) {
+  return /\bcustom$/i.test(name.trim()) ? name : `${name} custom`;
+}
+
+function editorTitle(category: MotionCategory) {
+  switch (category) {
+    case "expression":
+      return "Expression Editor";
+    case "gesture":
+      return "Body Gesture Editor";
+    case "full-body":
+      return "Full Body Motion Editor";
+    case "camera":
+      return "Camera Motion Editor";
+    case "headTurn":
+      return "Head Turn Editor";
+    case "custom":
+      return "Custom Motion Editor";
+  }
+}
+
+function cloneKeyposes(keyposes: RecordedKeypose[]): RecordedKeypose[] {
+  return keyposes.map((keypose) => ({
+    ...keypose,
+    parts: keypose.parts.map((part) => ({ ...part })),
+    camera: keypose.camera ? { ...keypose.camera } : undefined,
+    anticipation: keypose.anticipation ? { ...keypose.anticipation } : undefined,
+  }));
+}
+
+function keyposesFromTracks(preset: MotionPreset, slots: CharacterSlot[]): RecordedKeypose[] {
+  const tracks = preset.tracks ?? [];
+  if (tracks.length === 0) return [];
+  const duration = Math.max(0.1, preset.duration);
+  const normalizedTimes = new Set<number>([0, 1]);
+  for (const track of tracks) {
+    for (const keyframe of track.keyframes) {
+      normalizedTimes.add(round(Math.max(0, Math.min(1, keyframe.t)), 4));
+    }
+  }
+  return Array.from(normalizedTimes)
+    .sort((a, b) => a - b)
+    .map((tNorm) => {
+      const parts: RecordedPartOverride[] = [];
+      let camera: RecordedKeypose["camera"];
+      for (const track of tracks) {
+        const sample = sampleMotionTrack(track, tNorm);
+        const keys = usedMotionValueKeys(track);
+        if (track.partRole === "__camera") {
+          camera = {
+            dx: sample.dx,
+            dy: sample.dy,
+            zoom: sample.scale,
+          };
+          continue;
+        }
+        for (const slot of slotsForTrack(track, slots)) {
+          parts.push(recordedOverrideFromMotionTrack(track, slot, sample, keys));
+        }
+      }
+      return {
+        t: round(tNorm * duration, 3),
+        parts,
+        camera,
+      };
+    });
+}
+
+function slotsForTrack(track: MotionTrack, slots: CharacterSlot[]) {
+  if (track.slotId) return slots.filter((slot) => slot.id === track.slotId);
+  return slots.filter((slot) => slot.role === track.partRole);
+}
+
+function usedMotionValueKeys(track: MotionTrack): MotionValueKey[] {
+  return MOTION_VALUE_KEYS.filter((key) =>
+    track.keyframes.some((keyframe) => keyframe[key] !== undefined),
+  );
+}
+
+function recordedOverrideFromMotionTrack(
+  track: MotionTrack,
+  slot: CharacterSlot,
+  sample: Partial<Record<MotionValueKey, number>>,
+  keys: MotionValueKey[],
+): RecordedPartOverride {
+  const out: RecordedPartOverride = { partRole: slot.role, slotId: slot.id };
+  if (track.poseSwap) out.poseSwap = track.poseSwap;
+  const writable = out as RecordedPartOverride & Partial<Record<MotionValueKey, number>>;
+  for (const key of keys) {
+    const value = sample[key];
+    if (value !== undefined) writable[key] = round(value, 4);
+  }
+  return out;
+}
+
+function sampleMotionTrack(
+  track: MotionTrack,
+  tNorm: number,
+): Partial<Record<MotionValueKey, number>> {
+  const sorted = [...track.keyframes].sort((a, b) => a.t - b.t);
+  if (sorted.length === 0) return {};
+  if (sorted.length === 1) return sampleSingleMotionKeyframe(sorted[0]);
+  let a = sorted[0];
+  let b = sorted[sorted.length - 1];
+  for (let i = 0; i < sorted.length - 1; i++) {
+    if (sorted[i + 1].t >= tNorm) {
+      a = sorted[i];
+      b = sorted[i + 1];
+      break;
+    }
+  }
+  const span = Math.max(0.0001, b.t - a.t);
+  const u = easeValue(b.ease ?? a.ease, Math.max(0, Math.min(1, (tNorm - a.t) / span)));
+  const out: Partial<Record<MotionValueKey, number>> = {};
+  for (const key of MOTION_VALUE_KEYS) {
+    const av = a[key];
+    const bv = b[key];
+    if (av === undefined && bv === undefined) continue;
+    if (av === undefined) out[key] = bv;
+    else if (bv === undefined) out[key] = av;
+    else out[key] = av + (bv - av) * u;
+  }
+  return out;
+}
+
+function sampleSingleMotionKeyframe(
+  keyframe: MotionKeyframe,
+): Partial<Record<MotionValueKey, number>> {
+  const out: Partial<Record<MotionValueKey, number>> = {};
+  for (const key of MOTION_VALUE_KEYS) {
+    const value = keyframe[key] ?? MOTION_VALUE_DEFAULTS[key];
+    if (keyframe[key] !== undefined) out[key] = value;
+  }
+  return out;
+}
+
 function sampleKeyposesAtTime(
   keyposes: RecordedKeypose[],
   t: number,
-): Map<string, RecordedPartOverride> {
+): { parts: Map<string, RecordedPartOverride>; faceTurnX: number } {
   const out = new Map<string, RecordedPartOverride>();
-  if (keyposes.length === 0) return out;
+  if (keyposes.length === 0) return { parts: out, faceTurnX: 0 };
   const sorted = expandKeyposesWithAnticipation(keyposes);
   let a = sorted[0];
   let b = sorted[sorted.length - 1];
@@ -1103,6 +1531,12 @@ function sampleKeyposesAtTime(
   const span = Math.max(0.0001, b.t - a.t);
   const raw = Math.max(0, Math.min(1, (t - a.t) / span));
   const u = easeValue(b.ease ?? a.ease, raw);
+  const lerp = (av?: number, bv?: number, def = 0) => {
+    if (av === undefined && bv === undefined) return def;
+    if (av === undefined) return (bv as number) * u + def * (1 - u);
+    if (bv === undefined) return av * (1 - u) + def * u;
+    return av + (bv - av) * u;
+  };
   const targets = new Set<string>();
   for (const p of a.parts) targets.add(recordedTargetKey(p));
   for (const p of b.parts) targets.add(recordedTargetKey(p));
@@ -1111,12 +1545,6 @@ function sampleKeyposesAtTime(
     const pb = b.parts.find((p) => recordedTargetKey(p) === target);
     const src = pa ?? pb;
     if (!src) continue;
-    const lerp = (av?: number, bv?: number, def = 0) => {
-      if (av === undefined && bv === undefined) return def;
-      if (av === undefined) return (bv as number) * u + def * (1 - u);
-      if (bv === undefined) return av * (1 - u) + def * u;
-      return av + (bv - av) * u;
-    };
     out.set(target, {
       partRole: src.partRole,
       slotId: src.slotId,
@@ -1125,65 +1553,113 @@ function sampleKeyposesAtTime(
       scale: lerp(pa?.scale, pb?.scale, 1),
       scaleX: lerp(pa?.scaleX, pb?.scaleX, 1),
       scaleY: lerp(pa?.scaleY, pb?.scaleY, 1),
+      skewX: lerp(pa?.skewX, pb?.skewX, 0),
+      skewY: lerp(pa?.skewY, pb?.skewY, 0),
       rotation: lerp(pa?.rotation, pb?.rotation, 0),
+      originX:
+        pa?.originX === undefined && pb?.originX === undefined
+          ? undefined
+          : lerp(pa?.originX, pb?.originX, 0.5),
+      originY:
+        pa?.originY === undefined && pb?.originY === undefined
+          ? undefined
+          : lerp(pa?.originY, pb?.originY, 0.5),
       opacity:
         pa?.opacity === undefined && pb?.opacity === undefined
           ? undefined
           : lerp(pa?.opacity, pb?.opacity, 1),
-      colorTint: lerpTint(pa?.colorTint, pb?.colorTint, u),
+      poseSwap: (u >= 0.5 ? pb?.poseSwap : pa?.poseSwap) ?? pa?.poseSwap ?? pb?.poseSwap,
     });
   }
-  return out;
+  return { parts: out, faceTurnX: lerp(a.faceTurnX, b.faceTurnX, 0) };
 }
 
-function defaultOverride(slotId: string): RecorderPartState {
-  return { slotId, dx: 0, dy: 0, scale: 1, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 };
+function defaultOverride(slotId: string, part?: CharacterPart): RecorderPartState {
+  return {
+    slotId,
+    dx: 0,
+    dy: 0,
+    scale: 1,
+    scaleX: 1,
+    scaleY: 1,
+    skewX: 0,
+    skewY: 0,
+    rotation: 0,
+    originX: part?.anchorX ?? 0.5,
+    originY: part?.anchorY ?? 0.5,
+    opacity: 1,
+  };
 }
 
-function isDirtyOverride(override: RecorderPartState | undefined) {
+function isDirtyOverride(override: RecorderPartState | undefined, part?: CharacterPart) {
   if (!override) return false;
+  const rest = defaultOverride(override.slotId, part);
   return (
+    override.poseSwap !== undefined ||
     override.dx !== 0 ||
     override.dy !== 0 ||
     override.scale !== 1 ||
     override.scaleX !== 1 ||
     override.scaleY !== 1 ||
+    override.skewX !== 0 ||
+    override.skewY !== 0 ||
     override.rotation !== 0 ||
-    override.opacity !== 1 ||
-    !!(override.colorTint && override.colorTint.a > 0)
+    override.originX !== rest.originX ||
+    override.originY !== rest.originY ||
+    override.opacity !== 1
   );
 }
 
-function transformedBounds(part: CharacterPart, override: RecorderPartState | undefined) {
-  const ov = override ?? defaultOverride(part.slotId);
+function variantOptionsForSlot(slot: CharacterSlot) {
+  const variants = new Map<string, string>();
+  for (const part of slot.parts) {
+    const value =
+      slot.role === "mouth"
+        ? (part.viseme ?? part.pose)
+        : slot.role === "eye"
+          ? (part.eyeState ?? part.pose)
+          : part.pose;
+    if (!value) continue;
+    variants.set(value, variantLabel(slot.role, value));
+  }
+  if (variants.size === 0) return [];
+  const defaultValue = slot.role === "eye" ? "open" : slot.role === "mouth" ? "rest" : undefined;
+  return [
+    {
+      value: "",
+      label: defaultValue ? `Default (${variantLabel(slot.role, defaultValue)})` : "Default",
+    },
+    ...Array.from(variants, ([value, label]) => ({ value, label })),
+  ];
+}
+
+function variantLabel(role: PartRole, value: string) {
+  if (role === "mouth" && value === "O") return "Round / O";
+  if (role === "mouth" && value === "MBP") return "Closed / MBP";
+  if (role === "mouth" && value === "FV") return "Teeth / FV";
+  if (role === "mouth" && value === "WQ") return "Pucker / WQ";
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function transformedBounds(
+  part: CharacterPart,
+  override: RecorderPartState | undefined,
+  faceTurnX: number,
+  canvasWidth: number,
+) {
+  const ov = override ?? defaultOverride(part.slotId, part);
+  const turn = faceTurnMotionForPart(part, faceTurnX, canvasWidth);
   const alphaRect = localAlphaBounds(part);
   const pivot = pivotForPart(part);
   const pivotLocalX = pivot.x - part.x;
   const pivotLocalY = pivot.y - part.y;
-  const scaleX = ov.scale * ov.scaleX;
-  const scaleY = ov.scale * ov.scaleY;
-  const left = part.x + ov.dx + pivotLocalX + (alphaRect.x - pivotLocalX) * scaleX;
-  const top = part.y + ov.dy + pivotLocalY + (alphaRect.y - pivotLocalY) * scaleY;
+  const scaleX = ov.scale * ov.scaleX * turn.scaleX;
+  const scaleY = ov.scale * ov.scaleY * turn.scaleY;
+  const left = part.x + ov.dx + turn.dx + pivotLocalX + (alphaRect.x - pivotLocalX) * scaleX;
+  const top = part.y + ov.dy + turn.dy + pivotLocalY + (alphaRect.y - pivotLocalY) * scaleY;
   const width = alphaRect.width * scaleX;
   const height = alphaRect.height * scaleY;
   return { left, top, right: left + width, bottom: top + height };
-}
-
-function lerpTint(
-  a: ColorTint | undefined,
-  b: ColorTint | undefined,
-  u: number,
-): ColorTint | undefined {
-  if (!a && !b) return undefined;
-  const left = a ?? { ...(b as ColorTint), a: 0 };
-  const right = b ?? { ...(a as ColorTint), a: 0 };
-  return {
-    r: left.r + (right.r - left.r) * u,
-    g: left.g + (right.g - left.g) * u,
-    b: left.b + (right.b - left.b) * u,
-    a: left.a + (right.a - left.a) * u,
-    blendMode: (u >= 0.5 ? right.blendMode : left.blendMode) ?? right.blendMode ?? left.blendMode,
-  };
 }
 
 function recordedTargetKey(part: RecordedPartOverride) {
@@ -1195,23 +1671,6 @@ function roleLabel(role: PartRole) {
     .split("-")
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(" ");
-}
-
-function rgbToHex(tint: ColorTint) {
-  const toHex = (value: number) =>
-    Math.max(0, Math.min(255, Math.round(value)))
-      .toString(16)
-      .padStart(2, "0");
-  return `#${toHex(tint.r)}${toHex(tint.g)}${toHex(tint.b)}`;
-}
-
-function hexToRgb(hex: string) {
-  const value = hex.replace("#", "");
-  return {
-    r: parseInt(value.slice(0, 2), 16),
-    g: parseInt(value.slice(2, 4), 16),
-    b: parseInt(value.slice(4, 6), 16),
-  };
 }
 
 function easeValue(name: string | undefined, x: number) {

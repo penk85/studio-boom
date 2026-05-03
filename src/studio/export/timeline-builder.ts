@@ -3,14 +3,19 @@
 // Used by both Stage.tsx (live preview via tl.seek) and the future export serializer.
 import gsap from "gsap";
 import type {
-  ActionPreset,
+  MotionPreset,
   CharacterClip,
   CharacterPart,
   CharacterPreset,
-  ColorTint,
   MouthViseme,
 } from "../types";
 import type { CharacterSlotRef } from "../character/character-utils";
+import {
+  autoBlinkPoseSwapAt,
+  blinkWindowsForClip,
+  eyeStateSetForSlot,
+  resolveEyeState,
+} from "../character/eye-state";
 import { RIG_STYLES, poseToTransforms } from "../character/mouth-libraries";
 import {
   listCharacterSlots,
@@ -18,17 +23,19 @@ import {
   roleEnabledByManifest,
 } from "../character/character-utils";
 import {
-  composeActionsAt,
+  composeMotionsAt,
   deltaFor,
   expandKeyposesWithAnticipation,
-  generateLoopOccurrences,
+  generateMotionOccurrences,
+  poseSwapFor,
 } from "../presets/apply";
+import { faceTurnMotionForPart } from "../character/face-turn";
 
 // ─── DOM ID scheme ─────────────────────────────────────────────────────────────
 // Stage.tsx creates elements with these IDs; this module targets them via GSAP.
 // Never hardcode these patterns elsewhere — always call these functions.
 
-/** Container div for a slot. Receives action transforms (x/y/scale/rotation/opacity). */
+/** Container div for a slot. Receives motion transforms (x/y/scale/rotation/opacity). */
 export function slotDomId(clipId: string, slotId: string): string {
   return `char-${clipId}-${slotId.replace(/[^a-z0-9]/gi, "-")}`;
 }
@@ -87,31 +94,23 @@ function findSlotForPart(
   return slots.find((slot) => slot.parts.some((p) => p.id === partId));
 }
 
-function hashString(value: string): number {
-  let hash = 0;
-  for (let i = 0; i < value.length; i++) {
-    hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
-  }
-  return hash;
-}
-
 // ─── Critical time collection ──────────────────────────────────────────────────
 
 /** Returns sorted times at every animation boundary within the clip. */
 export function collectCriticalTimes(
   clip: CharacterClip,
-  presets: Map<string, ActionPreset>,
+  presets: Map<string, MotionPreset>,
 ): number[] {
   const times = new Set<number>([0, clip.duration]);
   const addTime = (t: number) => {
     if (t > 0 && t < clip.duration) times.add(t);
   };
 
-  for (const action of clip.actions ?? []) {
-    const preset = presets.get(action.presetId);
+  for (const motion of clip.motions ?? []) {
+    const preset = presets.get(motion.presetId);
     if (!preset) continue;
-    const dur = action.duration ?? preset.duration;
-    const occurrences = generateLoopOccurrences(action, preset, clip.duration);
+    const dur = motion.duration ?? preset.duration;
+    const occurrences = generateMotionOccurrences(motion, preset, clip.duration);
 
     if (preset.keyposes?.length) {
       const keyposes = expandKeyposesWithAnticipation(preset.keyposes);
@@ -147,9 +146,12 @@ interface PartFrame {
   scale: number;
   scaleX: number;
   scaleY: number;
+  skewX: number;
+  skewY: number;
   rotation: number;
+  originX: number;
+  originY: number;
   opacity: number;
-  tint: ColorTint | null;
 }
 
 function sampleSlot(
@@ -157,14 +159,16 @@ function sampleSlot(
   slot: CharacterSlotRef,
   defaultPart: CharacterPart,
   allSlots: CharacterSlotRef[],
-  presets: Map<string, ActionPreset>,
+  presets: Map<string, MotionPreset>,
   times: number[],
   canvasScaleX: number,
   canvasScaleY: number,
+  characterCanvasWidth: number,
 ): PartFrame[] {
   return times.map((t) => {
-    const composed = composeActionsAt(clip, t, presets);
+    const composed = composeMotionsAt(clip, t, presets);
     const d = deltaFor(composed, slot.role, slot.id);
+    const faceTurn = faceTurnMotionForPart(defaultPart, composed.faceTurnX, characterCanvasWidth);
 
     // Face parts inherit their parent's (head's) motion.
     let inhDx = 0,
@@ -190,14 +194,17 @@ function sampleSlot(
 
     return {
       t,
-      x: (d.dx + inhDx) * canvasScaleX,
-      y: (d.dy + inhDy) * canvasScaleY,
+      x: (d.dx + inhDx + faceTurn.dx) * canvasScaleX,
+      y: (d.dy + inhDy + faceTurn.dy) * canvasScaleY,
       scale: d.scale * inhScale,
-      scaleX: d.scaleX,
-      scaleY: d.scaleY,
-      rotation: d.rotation + inhRotation,
+      scaleX: d.scaleX * faceTurn.scaleX,
+      scaleY: d.scaleY * faceTurn.scaleY,
+      skewX: d.skewX + faceTurn.skewX,
+      skewY: d.skewY + faceTurn.skewY,
+      rotation: d.rotation + inhRotation + faceTurn.rotation,
+      originX: d.originX ?? defaultPart.anchorX,
+      originY: d.originY ?? defaultPart.anchorY,
       opacity: d.opacity ?? 1,
-      tint: d.colorTint,
     };
   });
 }
@@ -218,7 +225,10 @@ function emitTweens(tl: gsap.core.Timeline, domId: string, frames: PartFrame[]):
         y: a.y,
         scaleX: a.scale * a.scaleX,
         scaleY: a.scale * a.scaleY,
+        skewX: a.skewX,
+        skewY: a.skewY,
         rotation: a.rotation,
+        transformOrigin: `${a.originX * 100}% ${a.originY * 100}%`,
         opacity: a.opacity,
       },
       {
@@ -226,43 +236,11 @@ function emitTweens(tl: gsap.core.Timeline, domId: string, frames: PartFrame[]):
         y: b.y,
         scaleX: b.scale * b.scaleX,
         scaleY: b.scale * b.scaleY,
+        skewX: b.skewX,
+        skewY: b.skewY,
         rotation: b.rotation,
+        transformOrigin: `${b.originX * 100}% ${b.originY * 100}%`,
         opacity: b.opacity,
-        duration,
-        ease: "none",
-      },
-      a.t,
-    );
-  }
-  emitTintTweens(tl, `${domId}-tint`, frames);
-}
-
-function rgbaFrom(tint: ColorTint | null): string {
-  if (!tint) return "rgba(0, 0, 0, 0)";
-  return `rgba(${Math.round(tint.r)}, ${Math.round(tint.g)}, ${Math.round(tint.b)}, ${Math.max(
-    0,
-    Math.min(1, tint.a),
-  )})`;
-}
-
-function emitTintTweens(tl: gsap.core.Timeline, domId: string, frames: PartFrame[]): void {
-  if (!frames.some((frame) => frame.tint && frame.tint.a > 0)) return;
-  for (let i = 0; i < frames.length - 1; i++) {
-    const a = frames[i];
-    const b = frames[i + 1];
-    const duration = b.t - a.t;
-    if (duration <= 0) continue;
-    tl.fromTo(
-      `#${domId}`,
-      {
-        backgroundColor: rgbaFrom(a.tint),
-        opacity: a.tint?.a ?? 0,
-        mixBlendMode: a.tint?.blendMode ?? "multiply",
-      },
-      {
-        backgroundColor: rgbaFrom(b.tint),
-        opacity: b.tint?.a ?? 0,
-        mixBlendMode: b.tint?.blendMode ?? a.tint?.blendMode ?? "multiply",
         duration,
         ease: "none",
       },
@@ -386,49 +364,74 @@ function addVisemeEvents(
   }
 }
 
-// ─── Blink events ──────────────────────────────────────────────────────────────
+// ─── Eye state events ──────────────────────────────────────────────────────────
 
-function addBlinkEvents(
+function addEyeStateEvents(
   tl: gsap.core.Timeline,
   clip: CharacterClip,
   slots: CharacterSlotRef[],
+  presets: Map<string, MotionPreset>,
+  criticalTimes: number[],
 ): void {
-  if (clip.autoBlink === false) return;
+  const blinkWindows = blinkWindowsForClip(clip);
 
   for (const slot of slots) {
     if (slot.role !== "eye") continue;
 
-    const hasClosedVariant = slot.parts.some(
-      (p) => p.visible && (p.eyeState === "closed" || p.pose === "closed"),
-    );
-    if (!hasClosedVariant) continue;
+    const availableStates = eyeStateSetForSlot(slot);
+    if (availableStates.size === 0) continue;
 
-    const openId = `#${eyeDomId(clip.id, slot.id, "open")}`;
-    const closedId = `#${eyeDomId(clip.id, slot.id, "closed")}`;
-
-    const hash = hashString(clip.id);
-    const cycle = 3.2 + (hash % 140) / 100;
-    const phaseOffset = (((hash >>> 8) % 100) / 100) * cycle;
-    const blinkDuration = 0.14;
-
-    // Initial: open visible, closed hidden.
-    tl.set(openId, { opacity: 1 }, 0);
-    tl.set(closedId, { opacity: 0 }, 0);
-
-    let t = (((cycle - blinkDuration - phaseOffset) % cycle) + cycle) % cycle;
-    while (t < clip.duration) {
-      if (t > 0) {
-        const blinkEnd = Math.min(t + blinkDuration, clip.duration);
-        tl.set(openId, { opacity: 0 }, t);
-        tl.set(closedId, { opacity: 1 }, t);
-        if (blinkEnd < clip.duration) {
-          tl.set(openId, { opacity: 1 }, blinkEnd);
-          tl.set(closedId, { opacity: 0 }, blinkEnd);
-        }
+    const eventTimes = new Set<number>([0, clip.duration, ...criticalTimes]);
+    if (availableStates.has("closed")) {
+      for (const window of blinkWindows) {
+        eventTimes.add(window.start);
+        eventTimes.add(window.end);
       }
-      t += cycle;
+    }
+
+    for (const t of [...eventTimes].sort((a, b) => a - b)) {
+      if (t < 0 || t > clip.duration) continue;
+      const sampleTime = Math.min(clip.duration, t + 0.0001);
+      const activeState = eyeStateAt({
+        clip,
+        slot,
+        presets,
+        availableStates,
+        blinkWindows,
+        sampleTime,
+      });
+      for (const state of availableStates) {
+        tl.set(
+          `#${eyeDomId(clip.id, slot.id, state)}`,
+          { opacity: state === activeState ? 1 : 0 },
+          t,
+        );
+      }
     }
   }
+}
+
+function eyeStateAt({
+  clip,
+  slot,
+  presets,
+  availableStates,
+  blinkWindows,
+  sampleTime,
+}: {
+  clip: CharacterClip;
+  slot: CharacterSlotRef;
+  presets: Map<string, MotionPreset>;
+  availableStates: ReturnType<typeof eyeStateSetForSlot>;
+  blinkWindows: ReturnType<typeof blinkWindowsForClip>;
+  sampleTime: number;
+}) {
+  const composed = composeMotionsAt(clip, sampleTime, presets);
+  return resolveEyeState({
+    expressionPoseSwap: poseSwapFor(composed, "eye", slot.id),
+    proceduralPoseSwap: autoBlinkPoseSwapAt(blinkWindows, sampleTime),
+    availableStates,
+  });
 }
 
 // ─── Main entry point ──────────────────────────────────────────────────────────
@@ -446,7 +449,7 @@ function addBlinkEvents(
 export function buildCharacterTimeline(
   clip: CharacterClip,
   character: CharacterPreset,
-  presets: Map<string, ActionPreset>,
+  presets: Map<string, MotionPreset>,
 ): gsap.core.Timeline {
   const tl = gsap.timeline({ paused: true });
 
@@ -466,11 +469,21 @@ export function buildCharacterTimeline(
     });
     if (!defaultPart) continue;
 
-    const frames = sampleSlot(clip, slot, defaultPart, slots, presets, times, scaleX, scaleY);
+    const frames = sampleSlot(
+      clip,
+      slot,
+      defaultPart,
+      slots,
+      presets,
+      times,
+      scaleX,
+      scaleY,
+      character.canvasWidth,
+    );
     emitTweens(tl, slotDomId(clip.id, slot.id), frames);
   }
 
-  addBlinkEvents(tl, clip, slots);
+  addEyeStateEvents(tl, clip, slots, presets, times);
 
   if (character.mouthRig && character.mouthStyle !== "images") {
     addRigVisemeEvents(tl, clip, character);

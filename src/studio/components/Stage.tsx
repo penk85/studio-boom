@@ -1,6 +1,6 @@
 // Stage — the visual preview area. Renders all currently-active clips
 // using DOM layers (img / video / audio). Selection + drag/resize handles.
-import { useEffect, useMemo, useRef, useState, type SVGAttributes } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type SVGAttributes } from "react";
 import { ArrowDown, ArrowUp, RotateCw } from "lucide-react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { useStudio } from "../store";
@@ -17,14 +17,15 @@ import type {
 import { clipActiveAt } from "../timeline-utils";
 import { useMediaUrl } from "../hooks/useMediaUrl";
 import { visemeAt, visemeStateAt } from "../lipsync/visemeMap";
-import { ensurePresetsSeeded } from "../presets/seed";
-import { composeActionsAt, deltaFor, poseSwapFor } from "../presets/apply";
+import { ensureMotionPresetsSeeded } from "../presets/seed";
+import { composeMotionsAt, deltaFor, poseSwapFor } from "../presets/apply";
 import {
   listCharacterSlots,
   pickActivePartForSlot,
   roleEnabledByManifest,
 } from "../character/character-utils";
 import { combinedParallax } from "../character/parallax";
+import { eyeVariantsForSlot, slotHasEyeState } from "../character/eye-state";
 import {
   buildCharacterTimeline,
   slotDomId,
@@ -48,10 +49,10 @@ export function Stage() {
 
   // Seed presets + load characters/presets for compositing
   useEffect(() => {
-    void ensurePresetsSeeded();
+    void ensureMotionPresetsSeeded();
   }, []);
   const characters = useLiveQuery(() => db.characters.toArray(), []);
-  const presets = useLiveQuery(() => db.movements.toArray(), []);
+  const presets = useLiveQuery(() => db.motionPresets.toArray(), []);
   const charMap = useMemo(
     () => new Map((characters ?? []).map((c) => [c.id, c] as const)),
     [characters],
@@ -94,13 +95,19 @@ export function Stage() {
     return () => window.removeEventListener("keydown", handleKey);
   }, [selectedId, project, updateClip]);
 
-  const activeClips = useMemo(
-    () =>
-      project
-        ? project.clips.filter((c) => clipActiveAt(c, playhead)).sort((a, b) => a.zIndex - b.zIndex)
-        : [],
-    [project, playhead],
-  );
+  const activeClips = useMemo(() => {
+    if (!project) return [];
+    return project.clips
+      .filter((clip) => {
+        if (!clipActiveAt(clip, playhead)) return false;
+        if (clip.kind !== "audio" || !(clip as MediaClip).linkedCharacterClipId) return true;
+        const parent = project.clips.find(
+          (candidate) => candidate.id === (clip as MediaClip).linkedCharacterClipId,
+        );
+        return !!parent && clipActiveAt(parent, playhead);
+      })
+      .sort((a, b) => a.zIndex - b.zIndex);
+  }, [project, playhead]);
 
   if (!project) return null;
 
@@ -180,7 +187,7 @@ function ClipLayer({
   onSelect: () => void;
   onChange: (p: Partial<AnyClip>) => void;
   character?: CharacterPreset;
-  presetMap: Map<string, import("../types").ActionPreset>;
+  presetMap: Map<string, import("../types").MotionPreset>;
 }) {
   const mediaId = clip.kind !== "character" ? (clip as MediaClip).mediaId : undefined;
   const url = useMediaUrl(mediaId);
@@ -229,7 +236,7 @@ function ClipLayer({
   let charCamera = { dx: 0, dy: 0, zoom: 1 };
   if (clip.kind === "character") {
     const cc = clip as CharacterClip;
-    const composed = composeActionsAt(cc, playhead - cc.start, presetMap);
+    const composed = composeMotionsAt(cc, playhead - cc.start, presetMap);
     charCamera = composed.camera;
   }
 
@@ -413,29 +420,13 @@ interface PartMotion {
   dy: number;
   scale: number;
   scaleY?: number;
+  skewX?: number;
+  skewY?: number;
   rotation: number;
   opacity?: number;
 }
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
-
-function hashString(value: string) {
-  let hash = 0;
-  for (let i = 0; i < value.length; i++) {
-    hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
-  }
-  return hash;
-}
-
-function autoBlinkClosedAt(clip: CharacterClip, tInClip: number) {
-  if (clip.autoBlink === false || tInClip < 0) return false;
-  const hash = hashString(clip.id);
-  const cycle = 3.2 + (hash % 140) / 100;
-  const offset = (((hash >>> 8) % 100) / 100) * cycle;
-  const blinkDuration = 0.14;
-  const phase = (tInClip + offset) % cycle;
-  return phase >= cycle - blinkDuration;
-}
 
 function fallbackMouthPlacement(character: CharacterPreset): FallbackMouthPlacement {
   if (character.fallbackMouth) return character.fallbackMouth;
@@ -535,12 +526,6 @@ function exactMouthPartForSlot(
   })[0];
 }
 
-function hasEyeVariant(slot: ReturnType<typeof listCharacterSlots>[number], eyeState: string) {
-  return slot.parts.some(
-    (part) => part.visible && (part.eyeState === eyeState || part.pose === eyeState),
-  );
-}
-
 function isFaceAttachedRole(role: CharacterPart["role"]) {
   return role === "eye" || role === "eyebrow" || role === "mouth";
 }
@@ -584,7 +569,7 @@ function inheritedMotionForPart({
   part: CharacterPart;
   role: CharacterPart["role"];
   slots: ReturnType<typeof listCharacterSlots>;
-  composed: ReturnType<typeof composeActionsAt>;
+  composed: ReturnType<typeof composeMotionsAt>;
 }): PartMotion {
   const parentSlot =
     findSlotForPart(slots, part.parentId) ??
@@ -618,7 +603,7 @@ function motionForEye(
   requestedEyeState: string | undefined,
 ) {
   const usingRealClosedState = part.eyeState === "closed" || part.pose === "closed";
-  const slotHasClosedState = hasEyeVariant(slot, "closed");
+  const slotHasClosedState = slotHasEyeState(slot, "closed");
   if (usingRealClosedState && slotHasClosedState && d.scale < 0.35) {
     return { ...d, scale: 1 };
   }
@@ -673,20 +658,29 @@ function CharacterRig({
   clip: CharacterClip;
   character: CharacterPreset;
   playhead: number;
-  presetMap: Map<string, import("../types").ActionPreset>;
+  presetMap: Map<string, import("../types").MotionPreset>;
   fps: number;
 }) {
   const tlRef = useRef<gsap.core.Timeline | null>(null);
+  const localTime = Math.max(0, playhead - clip.start);
+  const localTimeRef = useRef(localTime);
+  localTimeRef.current = localTime;
 
-  // Rebuild GSAP timeline when clip or character changes.
-  useEffect(() => {
-    tlRef.current = buildCharacterTimeline(clip, character, presetMap);
+  // Rebuild and immediately seek so clip updates (including lip sync) do not reset pose state.
+  useLayoutEffect(() => {
+    const tl = buildCharacterTimeline(clip, character, presetMap);
+    tlRef.current = tl;
+    tl.seek(localTimeRef.current, false);
+    return () => {
+      tl.kill();
+      if (tlRef.current === tl) tlRef.current = null;
+    };
   }, [clip, character, presetMap]);
 
   // Seek to current playhead position on every frame.
-  useEffect(() => {
-    tlRef.current?.seek(Math.max(0, playhead - clip.start), false);
-  }, [playhead, clip.start]);
+  useLayoutEffect(() => {
+    tlRef.current?.seek(localTime, false);
+  }, [localTime]);
 
   const scaleX = clip.width / character.canvasWidth;
   const scaleY = clip.height / character.canvasHeight;
@@ -736,14 +730,10 @@ function CharacterRig({
           }
 
           if (slot.role === "eye") {
-            // Container receives GSAP action transforms; variants inside toggle for blink.
-            const openPart = slot.parts.find(
-              (p) => p.visible && (p.eyeState === "open" || (!p.eyeState && !p.pose)),
-            );
-            const closedPart = slot.parts.find(
-              (p) => p.visible && (p.eyeState === "closed" || p.pose === "closed"),
-            );
-            const basePart = openPart ?? closedPart;
+            // Container receives GSAP motion transforms; variants inside toggle for expressions/blink.
+            const variants = eyeVariantsForSlot(slot);
+            const openPart = variants.find((variant) => variant.state === "open")?.part;
+            const basePart = openPart ?? variants[0]?.part;
             if (!basePart) return null;
 
             return (
@@ -761,27 +751,19 @@ function CharacterRig({
                   overflow: "visible",
                 }}
               >
-                {openPart && (
+                {variants.map(({ state, part }) => (
                   <EyeVariantImage
-                    id={eyeDomId(clip.id, slot.id, "open")}
-                    part={openPart}
+                    key={state}
+                    id={eyeDomId(clip.id, slot.id, state)}
+                    part={part}
                     containerPart={basePart}
                     scaleX={scaleX}
                     scaleY={scaleY}
-                    initialOpacity={1}
+                    initialOpacity={
+                      state === "open" || (!openPart && state === variants[0].state) ? 1 : 0
+                    }
                   />
-                )}
-                {closedPart && (
-                  <EyeVariantImage
-                    id={eyeDomId(clip.id, slot.id, "closed")}
-                    part={closedPart}
-                    containerPart={basePart}
-                    scaleX={scaleX}
-                    scaleY={scaleY}
-                    initialOpacity={0}
-                  />
-                )}
-                <TintOverlay id={`${slotDomId(clip.id, slot.id)}-tint`} />
+                ))}
               </div>
             );
           }
@@ -828,6 +810,10 @@ function MorphedMouthSlot({
     slot.parts.find(
       (p) => p.visible && (p.viseme === visemeState.current || p.pose === visemeState.current),
     ) ?? slot.parts.find((p) => p.visible && (p.viseme === "rest" || p.pose === "rest"));
+  const basePart =
+    slot.parts.find((p) => p.visible && (p.viseme === "rest" || p.pose === "rest")) ??
+    currentPart ??
+    slot.parts.find((p) => p.visible);
 
   const nextPart = visemeState.next
     ? slot.parts.find(
@@ -848,26 +834,28 @@ function MorphedMouthSlot({
     );
   }, [currentPart, nextPart, visemeState.blend]);
 
-  if (morphedD && currentPart?.morph) {
+  if (morphedD && currentPart?.morph && basePart) {
     const { morph } = currentPart;
     return (
       <div
         id={slotDomId(clip.id, slot.id)}
         className="absolute"
         style={{
-          left: currentPart.x * scaleX,
-          top: currentPart.y * scaleY,
-          width: currentPart.width * scaleX,
-          height: currentPart.height * scaleY,
-          zIndex: currentPart.zIndex,
+          left: basePart.x * scaleX,
+          top: basePart.y * scaleY,
+          width: basePart.width * scaleX,
+          height: basePart.height * scaleY,
+          zIndex: basePart.zIndex,
           opacity: 1,
-          transformOrigin: `${currentPart.anchorX * 100}% ${currentPart.anchorY * 100}%`,
+          transformOrigin: `${basePart.anchorX * 100}% ${basePart.anchorY * 100}%`,
           pointerEvents: "none",
           overflow: "visible",
         }}
       >
         <svg
-          viewBox={morph.viewBox ?? `0 0 ${currentPart.width} ${currentPart.height}`}
+          viewBox={
+            basePart.morph?.viewBox ?? morph.viewBox ?? `0 0 ${basePart.width} ${basePart.height}`
+          }
           className="absolute inset-0 h-full w-full overflow-visible"
           aria-hidden
         >
@@ -880,15 +868,11 @@ function MorphedMouthSlot({
             strokeLinejoin={morph.strokeLinejoin as SVGAttributes<SVGPathElement>["strokeLinejoin"]}
           />
         </svg>
-        <TintOverlay id={`${slotDomId(clip.id, slot.id)}-tint`} />
       </div>
     );
   }
 
   // Fallback: GSAP opacity toggle for image-based or non-morph mouth parts.
-  const basePart =
-    slot.parts.find((p) => p.visible && (p.viseme === "rest" || p.pose === "rest")) ??
-    slot.parts.find((p) => p.visible);
   if (!basePart) return null;
   return (
     <div
@@ -922,7 +906,6 @@ function MorphedMouthSlot({
           />
         );
       })}
-      <TintOverlay id={`${slotDomId(clip.id, slot.id)}-tint`} />
     </div>
   );
 }
@@ -1080,7 +1063,6 @@ function PartImageScaled({
             }
           />
         </svg>
-        <TintOverlay id={`${id}-tint`} />
       </div>
     );
   }
@@ -1095,31 +1077,13 @@ function PartImageScaled({
         className="absolute object-contain"
         style={contentStyle}
       />
-      <TintOverlay id={`${id}-tint`} />
     </div>
-  );
-}
-
-function TintOverlay({ id }: { id: string }) {
-  return (
-    <div
-      id={id}
-      style={{
-        position: "absolute",
-        inset: 0,
-        pointerEvents: "none",
-        mixBlendMode: "multiply",
-        opacity: 0,
-        backgroundColor: "rgba(0, 0, 0, 0)",
-        borderRadius: "inherit",
-      }}
-    />
   );
 }
 
 /**
  * Eye variant image positioned relative to its slot container.
- * The container div (slotDomId) receives action transforms; this element just
+ * The container div (slotDomId) receives motion transforms; this element just
  * toggles opacity for blink via GSAP.
  */
 function EyeVariantImage({
