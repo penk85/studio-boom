@@ -270,7 +270,7 @@ const VISEME_PRIORITY: Record<MouthViseme, number> = {
  * highest-priority (vowel-preferring) viseme wins. Keeps natural-feeling lip
  * sync without rapid consonant chatter.
  */
-function smoothVisemes(
+export function smoothVisemes(
   raw: { t: number; v: MouthViseme }[],
   maxPerSec = 8,
 ): { t: number; v: MouthViseme }[] {
@@ -299,7 +299,7 @@ function smoothVisemes(
       j++;
     }
     out.push({ t: windowStart, v: best.v });
-    lastT = windowStart;
+    lastT = best.t;
     i = j;
   }
   return out;

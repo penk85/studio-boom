@@ -101,7 +101,7 @@ const trackIndexFor = (project: Project, kind: Track["kind"]) =>
     project.tracks.findIndex((t) => t.kind === kind),
   );
 
-function normalizeProjectTrackOrder(project: Project): Project {
+export function normalizeProjectTrackOrder(project: Project): Project {
   const ordered = project.tracks
     .map((track, oldIndex) => ({ track, oldIndex }))
     .sort(

@@ -77,7 +77,7 @@ const EASE: Record<string, (x: number) => number> = {
   hold: (x) => (x < 1 ? 0 : 1),
 };
 
-function ease(name: string | undefined, x: number) {
+export function ease(name: string | undefined, x: number) {
   return (EASE[name ?? "easeInOut"] ?? EASE.easeInOut)(Math.max(0, Math.min(1, x)));
 }
 
@@ -123,7 +123,7 @@ function interpKf(a: MotionKeyframe, b: MotionKeyframe, u: number): ComposedDelt
   };
 }
 
-function sampleTrack(
+export function sampleTrack(
   keyframes: MotionKeyframe[],
   u: number, // 0..1 within preset
 ): ComposedDelta {
@@ -156,7 +156,7 @@ function sampleTrack(
   return interpKf(a, b, local);
 }
 
-function applyIntensity(d: ComposedDelta, intensity: number): ComposedDelta {
+export function applyIntensity(d: ComposedDelta, intensity: number): ComposedDelta {
   return {
     dx: d.dx * intensity,
     dy: d.dy * intensity,
@@ -172,7 +172,7 @@ function applyIntensity(d: ComposedDelta, intensity: number): ComposedDelta {
   };
 }
 
-function combine(a: ComposedDelta, b: ComposedDelta): ComposedDelta {
+export function combine(a: ComposedDelta, b: ComposedDelta): ComposedDelta {
   return {
     dx: a.dx + b.dx,
     dy: a.dy + b.dy,

@@ -4,7 +4,7 @@ import type { CharacterSlotRef } from "./character-utils";
 export const EYE_STATES: EyeState[] = ["open", "half", "closed", "wink"];
 
 export interface EyeVariant {
-  state: EyeState;
+  state: string;
   part: CharacterPart;
 }
 
@@ -17,27 +17,28 @@ export function normalizeEyeState(value: string | undefined): EyeState | undefin
   return EYE_STATES.includes(value as EyeState) ? (value as EyeState) : undefined;
 }
 
-export function eyeStateForPart(part: CharacterPart): EyeState | undefined {
-  return (
-    normalizeEyeState(part.eyeState ?? part.pose) ??
-    (!part.eyeState && !part.pose ? "open" : undefined)
-  );
+export function eyeStateForPart(part: CharacterPart): string | undefined {
+  return part.eyeState ?? part.pose ?? "open";
 }
 
 export function eyeVariantsForSlot(slot: CharacterSlotRef): EyeVariant[] {
-  const variants = new Map<EyeState, CharacterPart>();
+  const variants = new Map<string, CharacterPart>();
   for (const part of slot.parts) {
     if (!part.visible) continue;
     const state = eyeStateForPart(part);
     if (state && !variants.has(state)) variants.set(state, part);
   }
-  return EYE_STATES.flatMap((state) => {
+  const ordered = EYE_STATES.flatMap((state) => {
     const part = variants.get(state);
-    return part ? [{ state, part }] : [];
+    if (!part) return [];
+    variants.delete(state);
+    return [{ state, part }];
   });
+  for (const [state, part] of variants) ordered.push({ state, part });
+  return ordered;
 }
 
-export function eyeStateSetForSlot(slot: CharacterSlotRef): Set<EyeState> {
+export function eyeStateSetForSlot(slot: CharacterSlotRef): Set<string> {
   return new Set(eyeVariantsForSlot(slot).map((variant) => variant.state));
 }
 
@@ -76,8 +77,9 @@ export function resolveEyeState({
 }: {
   expressionPoseSwap?: string;
   proceduralPoseSwap?: EyeState;
-  availableStates: Set<EyeState>;
-}): EyeState {
+  availableStates: Set<string>;
+}): string {
+  if (expressionPoseSwap && availableStates.has(expressionPoseSwap)) return expressionPoseSwap;
   const expressionState = normalizeEyeState(expressionPoseSwap);
   if (expressionState && availableStates.has(expressionState)) return expressionState;
   if (proceduralPoseSwap && availableStates.has(proceduralPoseSwap)) return proceduralPoseSwap;
