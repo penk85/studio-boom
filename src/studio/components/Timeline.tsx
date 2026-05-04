@@ -12,6 +12,7 @@ import type {
   AnyClip,
   AppliedMotion,
   CharacterClip,
+  EditorClip,
   MediaClip,
 } from "../types";
 import { fmtTime } from "../timeline-utils";
@@ -55,6 +56,8 @@ const CATEGORY_DOT_COLORS: Record<MotionCategory, string> = {
 
 export function Timeline() {
   const project = useStudio((s) => s.project);
+  const clips = useStudio((s) => s.clips);
+  const tracks = useStudio((s) => s.tracks);
   const playhead = useStudio((s) => s.playhead);
   const setPlayhead = useStudio((s) => s.setPlayhead);
   const playing = useStudio((s) => s.playing);
@@ -79,7 +82,7 @@ export function Timeline() {
   const queriedPresets = useLiveQuery(() => db.motionPresets.toArray(), []);
   const presets = useMemo(() => queriedPresets ?? [], [queriedPresets]);
   const presetMap = useMemo(() => new Map(presets.map((p) => [p.id, p] as const)), [presets]);
-  const trackKindOrderKey = project?.tracks.map((track) => track.kind).join("|") ?? "";
+  const trackKindOrderKey = tracks.map((track) => track.kind).join("|");
 
   // Playback loop
   useEffect(() => {
@@ -89,8 +92,8 @@ export function Timeline() {
       const dt = (now - lastTickRef.current) / 1000;
       lastTickRef.current = now;
       const next = useStudio.getState().playhead + dt;
-      if (next >= project.duration) {
-        useStudio.getState().setPlayhead(project.duration);
+      if (next >= project.hf.duration) {
+        useStudio.getState().setPlayhead(project.hf.duration);
         useStudio.getState().setPlaying(false);
         return;
       }
@@ -108,17 +111,17 @@ export function Timeline() {
   }, [normalizeTrackOrder, project, trackKindOrderKey]);
 
   if (!project) return null;
-  const totalWidth = Math.max(1200, project.duration * zoom);
-  const timelineClips = project.clips.filter((clip) => !isLinkedSpeechAudioClip(clip));
-  const linkedSpeechByCharacterId = new Map(
-    project.clips
+  const totalWidth = Math.max(1200, project.hf.duration * zoom);
+  const timelineClips = clips.filter((clip) => !isLinkedSpeechAudioClip(clip));
+  const linkedSpeechByCharacterId = new Map<string, EditorClip>(
+    clips
       .filter(isLinkedSpeechAudioClip)
       .map((clip) => [clip.linkedCharacterClipId!, clip] as const),
   );
-  const expandedCharacters = project.clips.filter(
-    (clip): clip is CharacterClip => clip.kind === "character" && expandedClipIds.has(clip.id),
+  const expandedCharacters = clips.filter(
+    (clip) => clip.kind === "character" && expandedClipIds.has(clip.id),
   );
-  const expandedLayouts = new Map(
+  const expandedLayouts = new Map<string, ExpandedClipLayout>(
     expandedCharacters.map(
       (clip) =>
         [
@@ -127,7 +130,7 @@ export function Timeline() {
         ] as const,
     ),
   );
-  const trackLayouts = project.tracks.map((track, trackIndex) =>
+  const trackLayouts = tracks.map((track, trackIndex) =>
     buildTrackLayout({
       trackIndex,
       laneCount: Math.max(1, track.lanes ?? 1),
@@ -205,7 +208,7 @@ export function Timeline() {
           ⏮
         </button>
         <div className="ml-2 font-mono text-foreground">
-          {fmtTime(playhead)} / {fmtTime(project.duration)}
+          {fmtTime(playhead)} / {fmtTime(project.hf.duration)}
         </div>
         <div className="ml-auto flex items-center gap-2">
           <span className="text-muted-foreground">Zoom</span>
@@ -231,7 +234,7 @@ export function Timeline() {
         >
           <div style={{ height: RULER_HEIGHT }} className="border-b border-border" />
           <div ref={headerTracksRef} style={{ willChange: "transform" }}>
-            {project.tracks.map((t, i) => {
+            {tracks.map((t, i) => {
               const layout = trackLayouts[i];
               const lanes = layout?.lanes ?? [];
               const lanePrefix =
@@ -328,11 +331,11 @@ export function Timeline() {
               className="sticky top-0 z-10 cursor-ew-resize border-b border-border bg-panel-2"
               style={{ height: RULER_HEIGHT }}
             >
-              <Ruler duration={project.duration} zoom={zoom} />
+              <Ruler duration={project.hf.duration} zoom={zoom} />
             </div>
 
             {/* Tracks */}
-            {project.tracks.map((t, i) => {
+            {tracks.map((t, i) => {
               const layout = trackLayouts[i];
               const lanes = layout?.lanes ?? [];
               const laneTops = lanes.map((lane) => lane.top);
@@ -374,8 +377,8 @@ export function Timeline() {
                           clip={c}
                           zoom={zoom}
                           selected={c.id === selectedId}
-                          tracks={project.tracks.length}
-                          duration={project.duration}
+                          tracks={tracks.length}
+                          duration={project.hf.duration}
                           laneTops={laneTops}
                           top={laneTop + 4}
                           presetMap={presetMap}
@@ -462,7 +465,7 @@ function ClipBlock({
   expanded,
   onToggleExpanded,
 }: {
-  clip: AnyClip;
+  clip: EditorClip;
   zoom: number;
   selected: boolean;
   tracks: number;
@@ -487,7 +490,7 @@ function ClipBlock({
 
   const lane = clip.laneIndex ?? 0;
   const linkedAudio =
-    clip.kind === "audio" && "linkedCharacterClipId" in clip && !!clip.linkedCharacterClipId;
+    clip.kind === "audio" && !!clip.linkedCharacterClipId;
   const clipMotions = clip.kind === "character" ? (clip.motions ?? []) : [];
 
   const onMouseDown = (e: React.MouseEvent) => {
@@ -624,7 +627,7 @@ function ClipBlock({
 }
 
 interface ExpandedClipRow {
-  clip: CharacterClip;
+  clip: EditorClip;
   layout: ExpandedClipLayout;
   top: number;
 }
@@ -648,7 +651,7 @@ function buildTrackLayout({
 }: {
   trackIndex: number;
   laneCount: number;
-  expandedCharacters: CharacterClip[];
+  expandedCharacters: EditorClip[];
   expandedLayouts: Map<string, ExpandedClipLayout>;
 }): TrackLayout {
   let top = 0;
@@ -699,7 +702,7 @@ interface MotionGroupLayout {
 }
 
 interface ExpandedClipLayout {
-  voice?: MediaClip;
+  voice?: EditorClip;
   groups: MotionGroupLayout[];
   height: number;
 }
@@ -708,7 +711,7 @@ function CharacterMotionHeader({
   clip,
   layout,
 }: {
-  clip: CharacterClip;
+  clip: EditorClip;
   layout: ExpandedClipLayout;
 }) {
   return (
@@ -763,7 +766,7 @@ function MotionLaneSet({
   createMotionId,
   presetMap,
 }: {
-  clip: CharacterClip;
+  clip: EditorClip;
   zoom: number;
   top: number;
   layout: ExpandedClipLayout;
@@ -871,7 +874,7 @@ function MotionBlock({
   onDelete,
 }: {
   motion: AppliedMotion;
-  clip: CharacterClip;
+  clip: EditorClip;
   preset?: MotionPreset;
   zoom: number;
   selected: boolean;
@@ -964,8 +967,8 @@ function VoiceBlock({
   audioClip,
   zoom,
 }: {
-  clip: CharacterClip;
-  audioClip: MediaClip;
+  clip: EditorClip;
+  audioClip: EditorClip;
   zoom: number;
 }) {
   const offset = Math.max(0, audioClip.start - clip.start);
@@ -989,9 +992,9 @@ function VoiceBlock({
 }
 
 function buildExpandedClipLayout(
-  clip: CharacterClip,
+  clip: EditorClip,
   presetMap: Map<string, MotionPreset>,
-  voice?: MediaClip,
+  voice?: EditorClip,
 ): ExpandedClipLayout {
   const motions = clip.motions ?? [];
   if (motions.length === 0) {
@@ -1039,7 +1042,7 @@ function buildExpandedClipLayout(
   };
 }
 
-function packMotionsForRows(motions: PackedMotion[], clip: CharacterClip): PackedMotion[][] {
+function packMotionsForRows(motions: PackedMotion[], clip: EditorClip): PackedMotion[][] {
   const sorted = [...motions].sort((a, b) => {
     const aDur = motionDuration(a.motion, a.preset);
     const bDur = motionDuration(b.motion, b.preset);
@@ -1104,9 +1107,9 @@ function intervalsOverlapAny(intervals: TimeSpan[], existing: TimeSpan[]) {
 }
 
 function isLinkedSpeechAudioClip(
-  clip: AnyClip,
-): clip is MediaClip & { linkedCharacterClipId: string } {
-  return clip.kind === "audio" && !!(clip as MediaClip).linkedCharacterClipId;
+  clip: EditorClip,
+): clip is EditorClip & { linkedCharacterClipId: string } {
+  return clip.kind === "audio" && !!clip.linkedCharacterClipId;
 }
 
 function formatSeconds(value: number) {

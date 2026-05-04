@@ -8,11 +8,13 @@ import { MotionPanel } from "./MotionPanel";
 
 export function Inspector() {
   const project = useStudio((s) => s.project);
+  const clips = useStudio((s) => s.clips);
+  const tracks = useStudio((s) => s.tracks);
   const id = useStudio((s) => s.selectedClipId);
   const update = useStudio((s) => s.updateClip);
   const remove = useStudio((s) => s.removeClip);
-  const clip = project?.clips.find((c) => c.id === id);
-  const characterId = clip?.kind === "character" ? (clip as CharacterClip).characterId : undefined;
+  const clip = clips.find((c) => c.id === id);
+  const characterId = clip?.kind === "character" ? clip.characterId : undefined;
   const character = useLiveQuery<CharacterPreset | undefined>(
     () => (characterId ? db.characters.get(characterId) : Promise.resolve(undefined)),
     [characterId],
@@ -20,7 +22,7 @@ export function Inspector() {
   const linkedSpeechAudio =
     clip?.kind === "audio" &&
     !!clip.linkedCharacterClipId &&
-    !!project?.clips.some((c) => c.id === clip.linkedCharacterClipId);
+    !!clips.some((c) => c.id === clip.linkedCharacterClipId);
 
   if (!project) return null;
 
@@ -100,7 +102,7 @@ export function Inspector() {
                   onChange={(e) => update(clip.id, { trackIndex: Number(e.target.value) })}
                   className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
                 >
-                  {project.tracks.map((t, i) => (
+                  {tracks.map((t, i) => (
                     <option key={t.id} value={i}>
                       {t.name}
                     </option>
@@ -129,9 +131,9 @@ export function Inspector() {
                   <label className="flex items-center gap-2 text-xs">
                     <input
                       type="checkbox"
-                      checked={(clip as CharacterClip).autoBlink !== false}
+                      checked={clip.autoBlink !== false}
                       onChange={(e) =>
-                        update((clip as CharacterClip).id, { autoBlink: e.target.checked })
+                        update(clip.id, { autoBlink: e.target.checked })
                       }
                     />
                     Auto blink
@@ -140,8 +142,8 @@ export function Inspector() {
                     Adds a subtle regular blink during playback when the eyes are otherwise open.
                   </p>
                 </div>
-                {character && <MotionPanel clip={clip as CharacterClip} character={character} />}
-                <VoiceLipSyncPanel clip={clip as CharacterClip} />
+                {character && <MotionPanel clip={clip as unknown as CharacterClip} character={character} />}
+                <VoiceLipSyncPanel clip={clip as unknown as CharacterClip} />
               </>
             )}
           </div>
@@ -162,25 +164,25 @@ export function Inspector() {
           </Field>
           <Field label="Duration (s)">
             <NumberInput
-              value={project.duration}
+              value={project.hf.duration}
               onChange={(v) => useStudio.getState().setProjectMeta({ duration: Math.max(1, v) })}
             />
           </Field>
           <Field label="Width">
             <NumberInput
-              value={project.width}
+              value={project.hf.width}
               onChange={(v) => useStudio.getState().setProjectMeta({ width: v })}
             />
           </Field>
           <Field label="Height">
             <NumberInput
-              value={project.height}
+              value={project.hf.height}
               onChange={(v) => useStudio.getState().setProjectMeta({ height: v })}
             />
           </Field>
           <Field label="FPS">
             <NumberInput
-              value={project.fps}
+              value={project.hf.fps}
               onChange={(v) => useStudio.getState().setProjectMeta({ fps: v })}
             />
           </Field>

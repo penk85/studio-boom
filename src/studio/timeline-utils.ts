@@ -1,7 +1,5 @@
 // Helper: which clips are active at a given time on the project timeline.
-import type { AnyClip } from "./types";
-
-export function clipActiveAt(clip: AnyClip, t: number): boolean {
+export function clipActiveAt(clip: { start: number; duration: number }, t: number): boolean {
   return t >= clip.start && t < clip.start + clip.duration;
 }
 

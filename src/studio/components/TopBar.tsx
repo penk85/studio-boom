@@ -1,13 +1,15 @@
-// Top bar — project name, render hint, soon-to-come export.
+// Top bar — project name, render hint, export.
 import { Link } from "@tanstack/react-router";
 import { Save } from "lucide-react";
 import { useState } from "react";
 import { useStudio } from "../store";
+import { exportProject } from "../export/exporter";
 
 export function TopBar() {
   const project = useStudio((s) => s.project);
   const saveProject = useStudio((s) => s.saveProject);
   const [saved, setSaved] = useState(false);
+  const [exporting, setExporting] = useState(false);
   if (!project) return null;
 
   const saveNow = async () => {
@@ -48,18 +50,26 @@ export function TopBar() {
       </button>
       <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
         <span>
-          {project.width}×{project.height}
+          {project.hf.width}×{project.hf.height}
         </span>
         <span>·</span>
-        <span>{project.fps}fps</span>
+        <span>{project.hf.fps}fps</span>
         <span>·</span>
-        <span>{project.duration}s</span>
+        <span>{project.hf.duration}s</span>
         <button
-          disabled
-          title="Hyperframes export coming in the next phase"
-          className="ml-3 cursor-not-allowed rounded-md bg-secondary px-3 py-1.5 text-xs font-medium text-secondary-foreground opacity-60"
+          disabled={exporting}
+          title={exporting ? "Exporting…" : "Export project as HyperFrames ZIP"}
+          className="ml-3 rounded-md bg-secondary px-3 py-1.5 text-xs font-medium text-secondary-foreground hover:bg-secondary/80 disabled:cursor-not-allowed disabled:opacity-60"
+          onClick={async () => {
+            setExporting(true);
+            try {
+              await exportProject(project);
+            } finally {
+              setExporting(false);
+            }
+          }}
         >
-          Export Hyperframes ▼
+          {exporting ? "Exporting…" : "Export Hyperframes ▼"}
         </button>
       </div>
     </header>

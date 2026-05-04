@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { pickFreeLane, createBlankProject, normalizeProjectTrackOrder } from "../store";
-import type { AnyClip, Project, Track } from "../types";
+import type { AnyClip, ClipEditorMeta, HFClip, MediaClip, Project, TrackMeta } from "../types";
+import { deriveEditorClips } from "../types";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -24,7 +25,7 @@ function makeClip(trackIndex: number, laneIndex: number, start: number, duration
   };
 }
 
-function makeTrack(overrides: Partial<Track> = {}): Track {
+function makeTrackMeta(overrides: Partial<TrackMeta> = {}): TrackMeta {
   return {
     id: `track-${Math.random()}`,
     name: "Track",
@@ -34,18 +35,57 @@ function makeTrack(overrides: Partial<Track> = {}): Track {
   };
 }
 
-function makeProject(tracks: Track[], clips: AnyClip[] = []): Project {
+function makeProject(tracks: TrackMeta[], clips: AnyClip[] = []): Project {
+  const hfClips: HFClip[] = clips.map((clip, i) => ({
+    id: clip.id,
+    tag: (clip.kind === "audio" ? "audio" : clip.kind === "video" ? "video" : clip.kind === "image" ? "img" : "div") as HFClip["tag"],
+    attrs: {
+      "data-start": clip.start,
+      "data-duration": clip.duration,
+      "data-track-index": i,
+    },
+    style: {
+      position: "absolute",
+      left: clip.x,
+      top: clip.y,
+      width: clip.width,
+      height: clip.height,
+      "z-index": clip.zIndex,
+      opacity: 0,
+    },
+    mediaId: clip.kind !== "character" ? (clip as MediaClip).mediaId : undefined,
+  }));
+
+  const clipsMeta: Record<string, ClipEditorMeta> = {};
+  clips.forEach((clip) => {
+    clipsMeta[clip.id] = {
+      name: clip.name,
+      kind: clip.kind as ClipEditorMeta["kind"],
+      uiTrackIndex: clip.trackIndex,
+      uiLaneIndex: clip.laneIndex ?? 0,
+    };
+  });
+
   return {
     id: "proj-1",
     name: "Test",
-    width: 1920,
-    height: 1080,
-    fps: 30,
-    duration: 30,
-    tracks,
-    clips,
     createdAt: 0,
     updatedAt: 0,
+    hf: {
+      id: "proj-1",
+      name: "Test",
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      duration: 30,
+      assets: [],
+      clips: hfClips,
+      compositions: [],
+    },
+    editorMeta: {
+      tracks,
+      clips: clipsMeta,
+    },
   };
 }
 
@@ -113,22 +153,22 @@ describe("createBlankProject", () => {
 
   it("has default stage dimensions 1920×1080", () => {
     const p = createBlankProject();
-    expect(p.width).toBe(1920);
-    expect(p.height).toBe(1080);
+    expect(p.hf.width).toBe(1920);
+    expect(p.hf.height).toBe(1080);
   });
 
   it("has 4 default tracks in canonical order", () => {
     const p = createBlankProject();
-    expect(p.tracks.length).toBe(4);
-    expect(p.tracks[0].kind).toBe("character");
-    expect(p.tracks[1].kind).toBe("overlay");
-    expect(p.tracks[2].kind).toBe("background");
-    expect(p.tracks[3].kind).toBe("audio");
+    expect(p.editorMeta.tracks.length).toBe(4);
+    expect(p.editorMeta.tracks[0].kind).toBe("character");
+    expect(p.editorMeta.tracks[1].kind).toBe("overlay");
+    expect(p.editorMeta.tracks[2].kind).toBe("background");
+    expect(p.editorMeta.tracks[3].kind).toBe("audio");
   });
 
   it("has no clips", () => {
     const p = createBlankProject();
-    expect(p.clips).toEqual([]);
+    expect(deriveEditorClips(p)).toEqual([]);
   });
 
   it("assigns unique ids", () => {
@@ -143,10 +183,10 @@ describe("createBlankProject", () => {
 describe("normalizeProjectTrackOrder", () => {
   it("returns the same project reference when order is already correct", () => {
     const tracks = [
-      makeTrack({ kind: "character" }),
-      makeTrack({ kind: "overlay" }),
-      makeTrack({ kind: "background" }),
-      makeTrack({ kind: "audio" }),
+      makeTrackMeta({ kind: "character" }),
+      makeTrackMeta({ kind: "overlay" }),
+      makeTrackMeta({ kind: "background" }),
+      makeTrackMeta({ kind: "audio" }),
     ];
     const project = makeProject(tracks);
     const result = normalizeProjectTrackOrder(project);
@@ -154,32 +194,33 @@ describe("normalizeProjectTrackOrder", () => {
   });
 
   it("reorders tracks to canonical order: character→overlay→background→audio", () => {
-    const audio = makeTrack({ kind: "audio" });
-    const bg = makeTrack({ kind: "background" });
-    const char = makeTrack({ kind: "character" });
-    const overlay = makeTrack({ kind: "overlay" });
+    const audio = makeTrackMeta({ kind: "audio" });
+    const bg = makeTrackMeta({ kind: "background" });
+    const char = makeTrackMeta({ kind: "character" });
+    const overlay = makeTrackMeta({ kind: "overlay" });
     const project = makeProject([audio, bg, char, overlay]);
     const result = normalizeProjectTrackOrder(project);
-    expect(result.tracks[0].kind).toBe("character");
-    expect(result.tracks[1].kind).toBe("overlay");
-    expect(result.tracks[2].kind).toBe("background");
-    expect(result.tracks[3].kind).toBe("audio");
+    expect(result.editorMeta.tracks[0].kind).toBe("character");
+    expect(result.editorMeta.tracks[1].kind).toBe("overlay");
+    expect(result.editorMeta.tracks[2].kind).toBe("background");
+    expect(result.editorMeta.tracks[3].kind).toBe("audio");
   });
 
   it("remaps clip trackIndex to match new track positions", () => {
     // audio at index 0, character at index 1 → after normalize, char→0, audio→1
-    const audio = makeTrack({ kind: "audio" });
-    const char = makeTrack({ kind: "character" });
+    const audio = makeTrackMeta({ kind: "audio" });
+    const char = makeTrackMeta({ kind: "character" });
     const clip = makeClip(1 /* character was at index 1 */, 0, 0, 5);
     const project = makeProject([audio, char], [clip]);
     const result = normalizeProjectTrackOrder(project);
     // character is now at index 0
-    expect(result.clips[0].trackIndex).toBe(0);
+    const editorClips = deriveEditorClips(result);
+    expect(editorClips[0].trackIndex).toBe(0);
   });
 
   it("is idempotent — calling twice produces same result", () => {
-    const audio = makeTrack({ kind: "audio" });
-    const char = makeTrack({ kind: "character" });
+    const audio = makeTrackMeta({ kind: "audio" });
+    const char = makeTrackMeta({ kind: "character" });
     const project = makeProject([audio, char]);
     const once = normalizeProjectTrackOrder(project);
     const twice = normalizeProjectTrackOrder(once);
@@ -187,14 +228,14 @@ describe("normalizeProjectTrackOrder", () => {
   });
 
   it("preserves relative order of same-kind tracks", () => {
-    const char1 = makeTrack({ kind: "character" });
-    const char2 = makeTrack({ kind: "character" });
-    const audio = makeTrack({ kind: "audio" });
+    const char1 = makeTrackMeta({ kind: "character" });
+    const char2 = makeTrackMeta({ kind: "character" });
+    const audio = makeTrackMeta({ kind: "audio" });
     const project = makeProject([audio, char1, char2]);
     const result = normalizeProjectTrackOrder(project);
     // Both character tracks should appear first, in original relative order
-    expect(result.tracks[0].id).toBe(char1.id);
-    expect(result.tracks[1].id).toBe(char2.id);
-    expect(result.tracks[2].kind).toBe("audio");
+    expect(result.editorMeta.tracks[0].id).toBe(char1.id);
+    expect(result.editorMeta.tracks[1].id).toBe(char2.id);
+    expect(result.editorMeta.tracks[2].kind).toBe("audio");
   });
 });

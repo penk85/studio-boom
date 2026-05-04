@@ -10,7 +10,7 @@ import { generateLipSyncForClip } from "../lipsync/elevenlabs";
 import { MOUTH_VISEMES, MOUTH_VISEME_DESCRIPTIONS } from "../lipsync/viseme-schema";
 
 export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
-  const project = useStudio((s) => s.project);
+  const clips = useStudio((s) => s.clips);
   const update = useStudio((s) => s.updateClip);
   const removeClip = useStudio((s) => s.removeClip);
   const saveProject = useStudio((s) => s.saveProject);
@@ -57,14 +57,13 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
   };
 
   const onClear = async () => {
-    const speechClips =
-      project?.clips.filter(
-        (c) =>
-          c.kind === "audio" &&
-          ((c as MediaClip).linkedCharacterClipId === clip.id ||
-            (!!clip.lipSyncAudioId && c.mediaId === clip.lipSyncAudioId)),
-      ) ?? [];
-    const mediaIds = new Set(speechClips.map((speechClip) => (speechClip as MediaClip).mediaId));
+    const speechClips = clips.filter(
+      (c) =>
+        c.kind === "audio" &&
+        (c.linkedCharacterClipId === clip.id ||
+          (!!clip.lipSyncAudioId && c.mediaId === clip.lipSyncAudioId)),
+    );
+    const mediaIds = new Set(speechClips.map((speechClip) => speechClip.mediaId).filter((id): id is string => !!id));
     if (clip.lipSyncAudioId) mediaIds.add(clip.lipSyncAudioId);
     for (const speechClip of speechClips) removeClip(speechClip.id);
     update(clip.id, {

@@ -180,7 +180,7 @@ describe("roleEnabledByManifest", () => {
   it("static and custom are always enabled regardless of manifest", () => {
     const emptyManifest = Object.fromEntries(
       Object.keys(fullManifest).map((k) => [k, false]),
-    ) as PartManifest;
+    ) as unknown as PartManifest;
     expect(roleEnabledByManifest("static", emptyManifest)).toBe(true);
     expect(roleEnabledByManifest("custom", emptyManifest)).toBe(true);
   });

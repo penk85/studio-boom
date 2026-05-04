@@ -28,7 +28,7 @@ export function eyeVariantsForSlot(slot: CharacterSlotRef): EyeVariant[] {
     const state = eyeStateForPart(part);
     if (state && !variants.has(state)) variants.set(state, part);
   }
-  const ordered = EYE_STATES.flatMap((state) => {
+  const ordered: EyeVariant[] = EYE_STATES.flatMap((state) => {
     const part = variants.get(state);
     if (!part) return [];
     variants.delete(state);

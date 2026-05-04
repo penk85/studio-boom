@@ -10,6 +10,7 @@ import type {
   CharacterClip,
   CharacterPart,
   CharacterPreset,
+  EditorClip,
   FallbackMouthAnchor,
   MediaClip,
   MouthViseme,
@@ -32,12 +33,14 @@ import {
   visemeDomId,
   eyeDomId,
   rigComponentId,
+  type GsapTimelineLike,
 } from "../export/timeline-builder";
 import { RIG_STYLES, poseToTransforms, MOUTH_VIEWBOX } from "../character/mouth-libraries";
 import type { MouthRig } from "../types";
 
 export function Stage() {
   const project = useStudio((s) => s.project);
+  const clips = useStudio((s) => s.clips);
   const playhead = useStudio((s) => s.playhead);
   const playing = useStudio((s) => s.playing);
   const selectedId = useStudio((s) => s.selectedClipId);
@@ -70,7 +73,7 @@ export function Stage() {
     const ro = new ResizeObserver(() => {
       const w = el.clientWidth - 32;
       const h = el.clientHeight - 32;
-      const s = Math.min(w / project.width, h / project.height, 1);
+      const s = Math.min(w / project.hf.width, h / project.hf.height, 1);
       setScale(s > 0 ? s : 0.1);
     });
     ro.observe(el);
@@ -84,10 +87,10 @@ export function Stage() {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.key === "]") {
         updateClip(selectedId, {
-          zIndex: (project?.clips.find((c) => c.id === selectedId)?.zIndex ?? 0) + 1,
+          zIndex: (clips.find((c) => c.id === selectedId)?.zIndex ?? 0) + 1,
         });
       } else if (e.key === "[") {
-        const current = project?.clips.find((c) => c.id === selectedId)?.zIndex ?? 0;
+        const current = clips.find((c) => c.id === selectedId)?.zIndex ?? 0;
         updateClip(selectedId, { zIndex: Math.max(0, current - 1) });
       }
     };
@@ -96,18 +99,18 @@ export function Stage() {
   }, [selectedId, project, updateClip]);
 
   const activeClips = useMemo(() => {
-    if (!project) return [];
-    return project.clips
+    if (!project) return [] as EditorClip[];
+    return clips
       .filter((clip) => {
         if (!clipActiveAt(clip, playhead)) return false;
-        if (clip.kind !== "audio" || !(clip as MediaClip).linkedCharacterClipId) return true;
-        const parent = project.clips.find(
-          (candidate) => candidate.id === (clip as MediaClip).linkedCharacterClipId,
+        if (clip.kind !== "audio" || !clip.linkedCharacterClipId) return true;
+        const parent = clips.find(
+          (candidate) => candidate.id === clip.linkedCharacterClipId,
         );
         return !!parent && clipActiveAt(parent, playhead);
       })
       .sort((a, b) => a.zIndex - b.zIndex);
-  }, [project, playhead]);
+  }, [clips, project, playhead]);
 
   if (!project) return null;
 
@@ -123,35 +126,35 @@ export function Stage() {
       <div
         className="relative shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] outline outline-1 outline-border"
         style={{
-          width: project.width * scale,
-          height: project.height * scale,
+          width: project.hf.width * scale,
+          height: project.hf.height * scale,
           background: "oklch(0.06 0 0)",
         }}
       >
         <div
           className="absolute left-0 top-0 origin-top-left"
           style={{
-            width: project.width,
-            height: project.height,
+            width: project.hf.width,
+            height: project.hf.height,
             transform: `scale(${scale})`,
           }}
         >
           {activeClips.map((c) =>
             c.kind === "audio" ? (
-              <AudioLayer key={c.id} clip={c as MediaClip} playhead={playhead} playing={playing} />
+              <AudioLayer key={c.id} clip={c as unknown as MediaClip} playhead={playhead} playing={playing} />
             ) : (
               <ClipLayer
                 key={c.id}
                 clip={c}
-                fps={project.fps}
+                fps={project.hf.fps}
                 playhead={playhead}
                 playing={playing}
                 selected={c.id === selectedId}
                 scale={scale}
                 onSelect={() => selectClip(c.id)}
-                onChange={(p) => updateClip(c.id, p)}
+                onChange={(p) => updateClip(c.id, p as Partial<AnyClip>)}
                 character={
-                  c.kind === "character" ? charMap.get((c as CharacterClip).characterId) : undefined
+                  c.kind === "character" ? charMap.get(c.characterId ?? "") : undefined
                 }
                 presetMap={presetMap}
               />
@@ -160,7 +163,7 @@ export function Stage() {
         </div>
       </div>
       <div className="pointer-events-none absolute bottom-2 right-3 rounded bg-panel/80 px-2 py-1 text-xs text-muted-foreground">
-        {project.width}×{project.height} · {Math.round(scale * 100)}%
+        {project.hf.width}×{project.hf.height} · {Math.round(scale * 100)}%
       </div>
     </div>
   );
@@ -178,7 +181,7 @@ function ClipLayer({
   character,
   presetMap,
 }: {
-  clip: AnyClip;
+  clip: EditorClip;
   fps: number;
   playhead: number;
   playing: boolean;
@@ -189,7 +192,7 @@ function ClipLayer({
   character?: CharacterPreset;
   presetMap: Map<string, import("../types").MotionPreset>;
 }) {
-  const mediaId = clip.kind !== "character" ? (clip as MediaClip).mediaId : undefined;
+  const mediaId = clip.kind !== "character" ? clip.mediaId : undefined;
   const url = useMediaUrl(mediaId);
   const videoRef = useRef<HTMLVideoElement>(null);
 
@@ -235,8 +238,7 @@ function ClipLayer({
   // For character clips: compose camera transform so the clip can apply a tiny scale.
   let charCamera = { dx: 0, dy: 0, zoom: 1 };
   if (clip.kind === "character") {
-    const cc = clip as CharacterClip;
-    const composed = composeMotionsAt(cc, playhead - cc.start, presetMap);
+    const composed = composeMotionsAt(clip as unknown as CharacterClip, playhead - clip.start, presetMap);
     charCamera = composed.camera;
   }
 
@@ -265,16 +267,16 @@ function ClipLayer({
       {clip.kind === "character" &&
         (character ? (
           <CharacterRig
-            clip={clip as CharacterClip}
+            clip={clip as unknown as CharacterClip}
             character={character}
             playhead={playhead}
             presetMap={presetMap}
             fps={fps}
           />
         ) : (
-          <CharacterPlaceholder clip={clip as CharacterClip} playhead={playhead} fps={fps} />
+          <CharacterPlaceholder clip={clip as unknown as CharacterClip} playhead={playhead} fps={fps} />
         ))}
-      {selected && <Handle clip={clip} scale={scale} onChange={onChange} />}
+      {selected && <Handle clip={clip as unknown as AnyClip} scale={scale} onChange={onChange} />}
     </div>
   );
 }
@@ -661,7 +663,7 @@ function CharacterRig({
   presetMap: Map<string, import("../types").MotionPreset>;
   fps: number;
 }) {
-  const tlRef = useRef<gsap.core.Timeline | null>(null);
+  const tlRef = useRef<GsapTimelineLike | null>(null);
   const localTime = Math.max(0, playhead - clip.start);
   const localTimeRef = useRef(localTime);
   localTimeRef.current = localTime;

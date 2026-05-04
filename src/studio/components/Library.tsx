@@ -60,6 +60,8 @@ export function Library() {
 
 function CharactersTab() {
   const project = useStudio((s) => s.project);
+  const clips = useStudio((s) => s.clips);
+  const tracks = useStudio((s) => s.tracks);
   const playhead = useStudio((s) => s.playhead);
   const addClip = useStudio((s) => s.addClip);
   const characters =
@@ -85,11 +87,11 @@ function CharactersTab() {
     if (!project) return;
     const trackIndex = Math.max(
       0,
-      project.tracks.findIndex((t) => t.kind === "character"),
+      tracks.findIndex((t) => t.kind === "character"),
     );
     const aspect = canvasWidth / Math.max(1, canvasHeight);
-    const maxW = Math.round(project.width * 0.42);
-    const maxH = Math.round(project.height * 0.68);
+    const maxW = Math.round(project.hf.width * 0.42);
+    const maxH = Math.round(project.hf.height * 0.68);
     let h = maxH;
     let w = Math.round(h * aspect);
     if (w > maxW) {
@@ -104,13 +106,13 @@ function CharactersTab() {
       trackIndex,
       start: playhead,
       duration: 4,
-      x: Math.round((project.width - w) / 2),
-      y: Math.round((project.height - h) / 2),
+      x: Math.round((project.hf.width - w) / 2),
+      y: Math.round((project.hf.height - h) / 2),
       width: w,
       height: h,
       rotation: 0,
       opacity: 1,
-      zIndex: project.clips.length,
+      zIndex: clips.length,
       poses: {},
       autoBlink: true,
     };
@@ -334,6 +336,7 @@ function MediaTab() {
   const allItems = useLiveQuery(() => db.media.orderBy("createdAt").reverse().toArray(), []) ?? [];
   const characters = useLiveQuery(() => db.characters.toArray(), []);
   const project = useStudio((s) => s.project);
+  const clips = useStudio((s) => s.clips);
   const inputRef = useRef<HTMLInputElement>(null);
   const addMedia = useStudio((s) => s.addMediaToTimeline);
 
@@ -343,11 +346,11 @@ function MediaTab() {
       for (const part of character.parts) ids.add(part.mediaId);
       for (const variant of character.headVariants ?? []) ids.add(variant.mediaId);
     }
-    for (const clip of project?.clips ?? []) {
+    for (const clip of clips) {
       if (clip.kind === "character" && clip.lipSyncAudioId) ids.add(clip.lipSyncAudioId);
     }
     return ids;
-  }, [characters, project?.clips]);
+  }, [characters, clips]);
 
   const items = allItems.filter(
     (asset) => (asset.scope ?? "library") === "library" && !internalMediaIds.has(asset.id),

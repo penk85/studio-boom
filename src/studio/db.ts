@@ -169,21 +169,22 @@ function collectProjectMediaUsages(project: Project, onlyMediaId?: string): Medi
     usages.push({ mediaId, ...usage });
   };
 
-  for (const clip of project.clips) {
-    if (clip.kind === "character") {
-      push(clip.lipSyncAudioId, {
+  for (const hfClip of project.hf.clips) {
+    const meta = project.editorMeta.clips[hfClip.id];
+    if (meta?.kind === "character") {
+      push(meta.lipSyncAudioId, {
         kind: "character-lipsync-audio",
         ownerId: project.id,
         ownerName: project.name,
-        detail: clip.name,
+        detail: meta.name,
       });
       continue;
     }
-    push(clip.mediaId, {
+    push(hfClip.mediaId, {
       kind: "project-clip",
       ownerId: project.id,
       ownerName: project.name,
-      detail: clip.name,
+      detail: meta?.name,
     });
   }
   return usages;

@@ -2,7 +2,7 @@
 // Stores the MP3 as a MediaAsset, attaches viseme keyframes to the clip,
 // and drops a synced audio clip on the Audio track.
 import { db, deleteMediaIfUnused, importMediaFile, uid } from "../db";
-import type { CharacterClip, MediaClip, Project, Track } from "../types";
+import type { CharacterClip, MediaClip } from "../types";
 import { useStudio } from "../store";
 import { generateTtsWithTimestamps } from "./tts.functions";
 import { alignmentToVisemes } from "./visemeMap";
@@ -15,8 +15,9 @@ function base64ToBlob(b64: string, mime: string): Blob {
   return new Blob([bytes], { type: mime });
 }
 
-function audioTrackIndex(project: Project): number {
-  const i = project.tracks.findIndex((t: Track) => t.kind === "audio");
+function audioTrackIndex(): number {
+  const tracks = useStudio.getState().tracks;
+  const i = tracks.findIndex((t) => t.kind === "audio");
   return i >= 0 ? i : 0;
 }
 
@@ -31,13 +32,12 @@ export interface GenerateLipSyncArgs {
 
 export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
   const state = useStudio.getState();
-  const project = state.project;
-  if (!project) throw new Error("No project loaded");
-  const clip = project.clips.find((c) => c.id === args.clipId);
+  if (!state.project) throw new Error("No project loaded");
+  const clip = state.clips.find((c) => c.id === args.clipId);
   if (!clip || clip.kind !== "character") {
     throw new Error("Clip is not a character clip");
   }
-  const charClip = clip as CharacterClip;
+  const charClip = clip as unknown as CharacterClip;
 
   const result = await generateTtsWithTimestamps({
     data: {
@@ -81,15 +81,15 @@ export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
 
   // Drop an audio clip on the Audio track aligned to the character clip's start.
   // Remove any prior auto-generated audio clip associated with this character.
-  const proj = useStudio.getState().project!;
-  const staleClips = proj.clips.filter(
+  const currentClips = useStudio.getState().clips;
+  const staleClips = currentClips.filter(
     (c) =>
       c.kind === "audio" &&
-      ((c as MediaClip).linkedCharacterClipId === charClip.id ||
+      (c.linkedCharacterClipId === charClip.id ||
         (!!charClip.lipSyncAudioId && c.mediaId === charClip.lipSyncAudioId) ||
         c.name === `🎙 ${charClip.name}`),
   );
-  const staleMediaIds = new Set(staleClips.map((clip) => (clip as MediaClip).mediaId));
+  const staleMediaIds = new Set(staleClips.map((c) => c.mediaId).filter((id): id is string => !!id));
   if (charClip.lipSyncAudioId) staleMediaIds.add(charClip.lipSyncAudioId);
   for (const stale of staleClips) state.removeClip(stale.id);
 
@@ -98,7 +98,7 @@ export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
     kind: "audio",
     mediaId: asset.id,
     name: `🎙 ${charClip.name}`,
-    trackIndex: audioTrackIndex(proj),
+    trackIndex: audioTrackIndex(),
     start: charClip.start,
     duration: audioDuration,
     x: 0,
@@ -107,7 +107,7 @@ export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
     height: 0,
     rotation: 0,
     opacity: 1,
-    zIndex: proj.clips.length,
+    zIndex: currentClips.length,
     linkedCharacterClipId: charClip.id,
   };
   state.addClip(audioClip);

@@ -1,7 +1,24 @@
 // HyperFrames-compliant character timeline builder.
 // Builds a GSAP timeline from project data — no React imports.
-// Used by both Stage.tsx (live preview via tl.seek) and the future export serializer.
+// Used by both Stage.tsx (live preview via tl.seek) and the export serializer.
 import gsap from "gsap";
+
+// ─── GSAP injection interfaces ─────────────────────────────────────────────────
+// Narrow interfaces so the export serializer can inject a recording shim instead
+// of the real GSAP without depending on GSAP types.
+
+export interface GsapTimelineLike {
+  to(targets: unknown, vars: object, position?: number): this;
+  set(targets: unknown, vars: object, position?: number): this;
+  fromTo(targets: unknown, fromVars: object, toVars: object, position?: number): this;
+  seek(time: number, suppressEvents?: boolean): this;
+  kill(): this;
+  duration(value?: number): number | this;
+}
+
+export type GsapLike = {
+  timeline(opts?: object): GsapTimelineLike;
+};
 import type {
   MotionPreset,
   CharacterClip,
@@ -212,7 +229,7 @@ function sampleSlot(
 // ─── Tween emission ────────────────────────────────────────────────────────────
 
 // fromTo ensures correct state at any seek position regardless of what came before.
-function emitTweens(tl: gsap.core.Timeline, domId: string, frames: PartFrame[]): void {
+function emitTweens(tl: GsapTimelineLike, domId: string, frames: PartFrame[]): void {
   for (let i = 0; i < frames.length - 1; i++) {
     const a = frames[i];
     const b = frames[i + 1];
@@ -308,7 +325,7 @@ export function smoothVisemes(
 // ─── Viseme events ─────────────────────────────────────────────────────────────
 
 function addVisemeEvents(
-  tl: gsap.core.Timeline,
+  tl: GsapTimelineLike,
   clip: CharacterClip,
   slots: CharacterSlotRef[],
 ): void {
@@ -367,7 +384,7 @@ function addVisemeEvents(
 // ─── Eye state events ──────────────────────────────────────────────────────────
 
 function addEyeStateEvents(
-  tl: gsap.core.Timeline,
+  tl: GsapTimelineLike,
   clip: CharacterClip,
   slots: CharacterSlotRef[],
   presets: Map<string, MotionPreset>,
@@ -442,6 +459,9 @@ function eyeStateAt({
  * The timeline targets DOM elements created by CharacterRig in Stage.tsx using
  * the shared ID scheme (slotDomId / visemeDomId / eyeDomId).
  *
+ * Pass a recording shim as `gsapInstance` to capture all calls for HTML export.
+ * Omit it (or pass undefined) to use the real GSAP for live preview.
+ *
  * Usage in Stage:
  *   const tl = buildCharacterTimeline(clip, character, presetMap);
  *   tl.seek(playhead - clip.start, false);
@@ -450,8 +470,9 @@ export function buildCharacterTimeline(
   clip: CharacterClip,
   character: CharacterPreset,
   presets: Map<string, MotionPreset>,
-): gsap.core.Timeline {
-  const tl = gsap.timeline({ paused: true });
+  gsapInstance: GsapLike = gsap as unknown as GsapLike,
+): GsapTimelineLike {
+  const tl = gsapInstance.timeline({ paused: true });
 
   const scaleX = clip.width / character.canvasWidth;
   const scaleY = clip.height / character.canvasHeight;
@@ -527,7 +548,7 @@ function rigPropsTongue(t: RigTransforms, pxY: number) {
 }
 
 function addRigVisemeEvents(
-  tl: gsap.core.Timeline,
+  tl: GsapTimelineLike,
   clip: CharacterClip,
   character: CharacterPreset,
 ): void {
