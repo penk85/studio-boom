@@ -1,15 +1,15 @@
-// Top bar — project name, render hint, export.
-import { Link } from "@tanstack/react-router";
+// Top bar — project name, render action, save.
 import { Save } from "lucide-react";
 import { useState } from "react";
 import { useStudio } from "../store";
-import { exportProject } from "../export/exporter";
+import { renderProjectToMp4 } from "../export/render-client";
 
 export function TopBar() {
   const project = useStudio((s) => s.project);
   const saveProject = useStudio((s) => s.saveProject);
   const [saved, setSaved] = useState(false);
-  const [exporting, setExporting] = useState(false);
+  const [rendering, setRendering] = useState(false);
+  const [renderError, setRenderError] = useState<string | null>(null);
   if (!project) return null;
 
   const saveNow = async () => {
@@ -34,12 +34,12 @@ export function TopBar() {
         className="ml-4 max-w-xs flex-1 rounded border border-transparent bg-transparent px-2 py-1 text-sm text-foreground hover:border-border focus:border-primary focus:outline-none"
         aria-label="Project name"
       />
-      <Link
-        to="/presets"
+      <button
+        onClick={() => useStudio.getState().openModal({ type: "presets" })}
         className="rounded border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-panel-2 hover:text-foreground"
       >
         Motion presets
-      </Link>
+      </button>
       <button
         onClick={saveNow}
         className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-panel-2 hover:text-foreground"
@@ -49,6 +49,11 @@ export function TopBar() {
         {saved ? "Saved" : "Save"}
       </button>
       <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+        {renderError && (
+          <span className="max-w-[360px] truncate text-destructive" title={renderError}>
+            {renderError}
+          </span>
+        )}
         <span>
           {project.hf.width}×{project.hf.height}
         </span>
@@ -57,19 +62,23 @@ export function TopBar() {
         <span>·</span>
         <span>{project.hf.duration}s</span>
         <button
-          disabled={exporting}
-          title={exporting ? "Exporting…" : "Export project as HyperFrames ZIP"}
+          disabled={rendering}
+          title={rendering ? "Rendering…" : "Render MP4 with HyperFrames"}
           className="ml-3 rounded-md bg-secondary px-3 py-1.5 text-xs font-medium text-secondary-foreground hover:bg-secondary/80 disabled:cursor-not-allowed disabled:opacity-60"
           onClick={async () => {
-            setExporting(true);
+            setRendering(true);
+            setRenderError(null);
             try {
-              await exportProject(project);
+              await saveProject();
+              await renderProjectToMp4(project);
+            } catch (error) {
+              setRenderError(error instanceof Error ? error.message : String(error));
             } finally {
-              setExporting(false);
+              setRendering(false);
             }
           }}
         >
-          {exporting ? "Exporting…" : "Export Hyperframes ▼"}
+          {rendering ? "Rendering…" : "Render MP4"}
         </button>
       </div>
     </header>

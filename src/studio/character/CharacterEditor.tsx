@@ -16,9 +16,9 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { Link, useNavigate } from "@tanstack/react-router";
 import { db, importMediaFile, uid } from "../db";
 import { useMediaUrl } from "../hooks/useMediaUrl";
+import { useStudio } from "../store";
 import {
   createBlankCharacter,
   defaultMotionBehaviorForRole,
@@ -57,6 +57,7 @@ import type {
 
 interface Props {
   characterId: string;
+  onClose: () => void;
 }
 
 const CANVAS_PRESETS = [
@@ -117,8 +118,7 @@ const EYE_STATES: EyeState[] = ["open", "half", "closed", "wink"];
 type EditorMode = "select" | "pivot" | "bounds-rect" | "bounds-ellipse";
 type EditorBoundsMode = "frame" | "art";
 
-export function CharacterEditor({ characterId }: Props) {
-  const navigate = useNavigate();
+export function CharacterEditor({ characterId, onClose }: Props) {
   const [doc, setDoc] = useState<CharacterPreset | null>(null);
   const [selectedPartId, setSelectedPartId] = useState<ID | null>(null);
   const [rigSelected, setRigSelected] = useState(false);
@@ -151,6 +151,7 @@ export function CharacterEditor({ characterId }: Props) {
         row = createBlankCharacter();
         row.id = characterId;
         await db.characters.put(row);
+        useStudio.getState().registerCharacterPreset(row);
       }
       setDoc(normalizeCharacterSlots(row));
     })();
@@ -158,7 +159,11 @@ export function CharacterEditor({ characterId }: Props) {
 
   useEffect(() => {
     if (!doc) return;
-    const t = window.setTimeout(() => void saveCharacter(doc), 450);
+    const t = window.setTimeout(() => {
+      void saveCharacter(doc).then((saved) => {
+        useStudio.getState().registerCharacterPreset(saved);
+      });
+    }, 450);
     return () => window.clearTimeout(t);
   }, [doc]);
 
@@ -336,6 +341,7 @@ export function CharacterEditor({ characterId }: Props) {
   const importSvg = async (file: File, options: ImportOptions = {}) => {
     try {
       const asset = await importMediaFile(file, { scope: "character-part" });
+      useStudio.getState().registerMediaAsset(asset);
       const role = options.role ?? detectRole(file.name);
       const side = options.side ?? detectSide(file.name);
       const viseme = options.viseme ?? (role === "mouth" ? detectViseme(file.name) : undefined);
@@ -554,9 +560,9 @@ export function CharacterEditor({ characterId }: Props) {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <header className="flex items-center gap-3 border-b border-border bg-panel px-4 py-2">
-        <Link to="/" className="rounded border border-border px-2 py-1 text-xs hover:bg-panel-2">
+        <button onClick={onClose} className="rounded border border-border px-2 py-1 text-xs hover:bg-panel-2">
           ← Studio
-        </Link>
+        </button>
         <input
           value={doc.name}
           onChange={(e) => updateDoc({ name: e.target.value })}
@@ -583,8 +589,9 @@ export function CharacterEditor({ characterId }: Props) {
           <button
             onClick={async () => {
               const saved = await saveCharacter(doc);
+              useStudio.getState().registerCharacterPreset(saved);
               setDoc(saved);
-              navigate({ to: "/" });
+              onClose();
             }}
             className="rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-90"
           >

@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { db, uid } from "../db";
 import { useMediaUrl } from "../hooks/useMediaUrl";
+import { useStudio } from "../store";
 import {
   listCharacterSlots,
   pickActivePartForSlot,
@@ -335,6 +336,7 @@ export function MotionPresetRecorder({
       updatedAt: now,
     };
     await db.motionPresets.put(preset);
+    useStudio.getState().registerMotionPreset(preset);
     onSaved?.(preset);
     onClose();
   };

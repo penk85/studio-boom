@@ -1,9 +1,43 @@
-// @lovable.dev/vite-tanstack-config already includes the following — do NOT add them manually
-// or the app will break with duplicate plugins:
-//   - tanstackStart, viteReact, tailwindcss, tsConfigPaths, cloudflare (build-only),
-//     componentTagger (dev-only), VITE_* env injection, @ path alias, React/TanStack dedupe,
-//     error logger plugins, and sandbox detection (port/host/strictPort).
-// You can pass additional config via defineConfig({ vite: { ... } }) if needed.
-import { defineConfig } from "@lovable.dev/vite-tanstack-config";
+import tailwindcss from "@tailwindcss/vite";
+import viteReact from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
+import { defineConfig, mergeConfig, type PluginOption } from "vite";
+import tsConfigPaths from "vite-tsconfig-paths";
+import { hyperframesRenderPlugin } from "./src/studio/hyperframes/render-plugin";
 
-export default defineConfig();
+export default defineConfig(() => {
+  const plugins: PluginOption[] = [
+    tailwindcss(),
+    tsConfigPaths({ projects: ["./tsconfig.json"] }),
+    viteReact(),
+    hyperframesRenderPlugin(),
+  ];
+
+  return mergeConfig(
+    { server: { host: "::", port: 8080 } },
+    {
+      plugins,
+      define: {
+        "process.env.NODE_ENV": JSON.stringify("production"),
+        "process.platform": JSON.stringify("browser"),
+        "process.version": JSON.stringify(""),
+        "process.env": "{}",
+        global: "globalThis",
+      },
+      resolve: {
+        alias: {
+          "@": fileURLToPath(new URL("./src", import.meta.url)),
+          "@hyperframes/core/runtime/lottie-readiness": fileURLToPath(
+            new URL("./src/shims/lottie-readiness.ts", import.meta.url),
+          ),
+          path: fileURLToPath(new URL("./src/shims/path.ts", import.meta.url)),
+          "node:path": fileURLToPath(new URL("./src/shims/path.ts", import.meta.url)),
+          "node:url": fileURLToPath(new URL("./src/shims/node-url.ts", import.meta.url)),
+          "node:fs": fileURLToPath(new URL("./src/shims/node-fs.ts", import.meta.url)),
+          esbuild: fileURLToPath(new URL("./src/shims/esbuild.ts", import.meta.url)),
+        },
+        dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime", "@hyperframes/core"],
+      },
+    },
+  );
+});

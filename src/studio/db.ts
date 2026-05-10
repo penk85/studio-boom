@@ -140,11 +140,7 @@ export async function deleteMedia(id: string) {
   });
 }
 
-export type MediaUsageKind =
-  | "project-clip"
-  | "character-lipsync-audio"
-  | "character-part"
-  | "head-variant";
+export type MediaUsageKind = "project-asset" | "character-part" | "head-variant";
 
 export interface MediaUsage {
   mediaId: string;
@@ -162,29 +158,38 @@ export function mediaIdsForCharacter(character: CharacterPreset | null | undefin
   return ids;
 }
 
-function collectProjectMediaUsages(project: Project, onlyMediaId?: string): MediaUsage[] {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+export function isCurrentProjectShape(project: unknown): project is Project {
+  if (!isRecord(project) || !isRecord(project.hf) || !isRecord(project.editorMeta)) {
+    return false;
+  }
+  return (
+    typeof project.id === "string" &&
+    typeof project.name === "string" &&
+    Array.isArray(project.hf.assets) &&
+    typeof project.hf.rootHtml === "string" &&
+    isRecord(project.hf.compositionHtml) &&
+    Array.isArray(project.editorMeta.tracks) &&
+    isRecord(project.editorMeta.clips)
+  );
+}
+
+export function collectProjectMediaUsages(project: Project, onlyMediaId?: string): MediaUsage[] {
   const usages: MediaUsage[] = [];
   const push = (mediaId: string | undefined, usage: Omit<MediaUsage, "mediaId">) => {
     if (!mediaId || (onlyMediaId && mediaId !== onlyMediaId)) return;
     usages.push({ mediaId, ...usage });
   };
 
-  for (const hfClip of project.hf.clips) {
-    const meta = project.editorMeta.clips[hfClip.id];
-    if (meta?.kind === "character") {
-      push(meta.lipSyncAudioId, {
-        kind: "character-lipsync-audio",
-        ownerId: project.id,
-        ownerName: project.name,
-        detail: meta.name,
-      });
-      continue;
-    }
-    push(hfClip.mediaId, {
-      kind: "project-clip",
+  for (const asset of project.hf.assets) {
+    push(asset.id, {
+      kind: "project-asset",
       ownerId: project.id,
       ownerName: project.name,
-      detail: meta?.name,
+      detail: asset.filename || asset.id,
     });
   }
   return usages;

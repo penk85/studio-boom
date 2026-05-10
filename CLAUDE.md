@@ -1,150 +1,234 @@
-# Studio Boom — Architecture Guide
+# Studio Boom — Agent Instructions
 
-## Core principle: HyperFrames-compliant rendering
-
-All animation in this project is expressed as GSAP timelines and driven by `tl.seek(t)`.
-The live studio preview and the exported HTML package use the **same** rendering model.
-Never add a second rendering path. Never compute animation state inside a React render function.
+Studio Boom is a React editor shell for HyperFrames. React provides the editing UI.
+HyperFrames owns the film. The packages below are the implementation — read them
+before writing any code.
 
 ---
 
-## What HyperFrames compliance means
+## Installed packages
 
-### Timelines
+### `@hyperframes/core`
 
-- Every animated clip has exactly one GSAP timeline: `gsap.timeline({ paused: true })`
-- Timelines are registered: `window.__timelines["<id>"] = tl`
-- Playback is driven by `tl.seek(seconds)` — never by React state changes for visual output
-- Timelines are built **synchronously** — no `async`/`await`, `setTimeout`, or Promises inside timeline construction
-- No `Math.random()` or `Date.now()` inside timelines — use a seeded PRNG (mulberry32) for deterministic output
+The data model and HTML utilities. **Always import from here before writing any
+HTML generation, GSAP, or element mutation code.**
 
-### Clips and tracks
+**Types:**
+- `TimelineElement` — the in-memory model for a clip on the timeline
+  - `TimelineMediaElement` — video / image / audio
+  - `TimelineTextElement` — text
+  - `TimelineCompositionElement` — nested sub-composition (e.g. a character)
+- `GsapAnimation`, `GsapMethod`, `ParsedGsap` — GSAP animation data
 
-- Each clip element carries `data-start`, `data-duration`, `data-track-index` attributes
-- `data-track-index = clip.trackIndex * 10 + (clip.laneIndex ?? 0)` — prevents overlap-detection conflicts across lanes
-- Visual layering uses CSS `z-index`, **not** `data-track-index`
-- Character clips are sub-compositions: `data-composition-id`, `data-composition-src`, `data-width`, `data-height`
+**HTML generation — use these to create composition HTML:**
+- `generateHyperframesHtml(elements, duration, opts)` — produces a full composition
+  HTML string including GSAP CDN and `window.__timelines`. **This is the only correct
+  way to create a new composition.** It enables the player's play button.
+- `generateBaseHtml(...)` — scaffold an empty composition (lower-level)
 
-### Coordinate system and scaling (read before touching any position math)
+**HTML parsing and mutation — use these to update a stored HTML string:**
+- `parseHtml(html)` → `{ elements, gsapScript, keyframes, … }`
+- `updateElementInHtml(html, id, updates)` → updated HTML string
+- `addElementToHtml(html, element)` → `{ html, id }`
+- `removeElementFromHtml(html, id)` → updated HTML string
 
-- The project stage is **1920 × 1080**. All clip positions (`x`, `y`, `width`, `height`) are in stage pixels.
-- Character rigs have a logical canvas (e.g. 600 × 900). Parts have positions on that canvas.
-- **Never use CSS `transform: scale()` to fit a character canvas into its clip bounds.**
-  This breaks hit-testing, selection handles, and sub-pixel rendering.
-- Instead, scale all part coordinates explicitly when building the timeline or rendering parts:
-  ```
-  scaleX = clip.width  / character.canvasWidth
-  scaleY = clip.height / character.canvasHeight
-  scaledLeft  = part.x      * scaleX
-  scaledTop   = part.y      * scaleY
-  scaledWidth = part.width  * scaleX
-  scaledHeight= part.height * scaleY
-  ```
-- GSAP `x`/`y` deltas from action presets must also be scaled by the same factors before being added to the timeline.
-- Transform origins are set in CSS per part:
-  `transform-origin: ${part.anchorX * 100}% ${part.anchorY * 100}%`
-  GSAP respects this CSS value when applying `rotation` and `scale`.
+`addElementToHtml` and `updateElementInHtml` use `TimelineElement` field names:
+`startTime` (not `start`), `sourceWidth`/`sourceHeight` (not `width`/`height`),
+`type` is required. Do not invent field names — read the type.
 
-### What GSAP may animate
+**GSAP script editing:**
+- `parseGsapScript(script)` → `GsapAnimation[]`
+- `serializeGsapAnimations(anims)` → script string
+- `updateAnimationInScript(script, id, updates)` → updated script
+- `addAnimationToScript(script, id, anims)` → updated script
+- `keyframesToGsapAnimations(keyframes)` → `GsapAnimation[]`
 
-Only animate visual transform properties:
-`opacity`, `x`, `y`, `scale`, `scaleX`, `scaleY`, `rotation`, `color`, `backgroundColor`, `borderRadius`
-
-Never animate: `display`, `visibility`, `width`, `height`, `left`, `top`.
-Use `tl.set(el, { opacity: 0 }, time)` **inside** the timeline to toggle visibility — not `display: none`.
+**Validation:**
+- `lintHyperframeHtml(html)` → lint findings
 
 ---
 
-## Character animation pipeline
+### `@hyperframes/studio`
 
-### Building a character timeline
+React components and hooks for building HyperFrames editors. **Use these directly —
+do not reimplement player, timeline, or controls.**
 
-`buildCharacterTimeline(clip, character, presets)` in `src/studio/export/timeline-builder.ts`
-is the single source of truth for character animation. It is used by both the Stage preview and the exporter.
+**Components in use:**
+- `PlayerControls` — play/pause/seek bar. Requires `onTogglePlay` and `onSeek`
+  props; reads current time and duration from `usePlayerStore`.
 
-Steps:
-1. `const tl = gsap.timeline({ paused: true })`
-2. Compute `scaleX`, `scaleY` from clip vs character canvas
-3. Collect **critical times**: action keyframe boundaries + viseme times (see `collectCriticalTimes`)
-4. For each slot (non-mouth), at each consecutive critical-time pair:
-   - Call `composeActionsAt(clip, t, presets)` → `deltaFor(composed, slot.role, slot.id)`
-   - Compute **inherited delta** for face-attached parts (eye, eyebrow, mouth) via `transformPointAroundPivot`
-   - Add `tl.to("#<domId>", { x, y, scale, rotation, opacity, duration, ease: "none" }, startTime)`
-5. Mouth viseme events from `clip.visemes` → `tl.set()` opacity toggles
-6. Auto-blink events (seeded by `clip.id`, deterministic) → `tl.set()` opacity toggles on eye variants
+**Hooks in use:**
+- `useTimelinePlayer()` — call once in `Studio.tsx`. Returns `{ iframeRef,
+  togglePlay, seek, … }`. Polls the iframe for `window.__timelines` (GSAP) or
+  `window.__player`; sets `timelineReady = true` when found. **The play button is
+  only enabled when `timelineReady` is true, which requires `generateHyperframesHtml`
+  to have produced the composition HTML.**
+- `usePlayerStore` — Zustand store populated by `useTimelinePlayer`. Exposes
+  `currentTime`, `duration`, `isPlaying`, `timelineReady`.
+- `useElementPicker(iframeRef, opts)` — click-to-select inside the player iframe.
+  Returns `{ pickedElement, enablePick, setStyle }`. `onSyncFiles` callback receives
+  updated file contents when the picker modifies the HTML.
 
-### Face-part inheritance (required — never skip)
+---
 
-Eyes, eyebrows, and mouth inherit the head's motion. When the head nods, all face parts follow.
-At each critical time:
-1. Get the head slot's composed delta
-2. Call `transformPointAroundPivot(facePartPivot, headPivot, headDelta)` to get the transformed pivot
-3. Add `(transformedPivot.x - facePartPivot.x) * scaleX` to the face part's GSAP `x` value
+### `@hyperframes/player`
 
-This mirrors the `inheritedMotionForPart` logic in Stage.tsx.
+The `<hyperframes-player>` web component. Studio Boom uses it through one local
+Stage adapter with `srcdoc`, then bridges its inner iframe with
+`@hyperframes/studio`'s `resolveIframe`. Keep this direct usage isolated to
+`Stage.tsx`; other editor code should talk to `useTimelinePlayer`,
+`usePlayerStore`, `PlayerControls`, or `useElementPicker`.
 
-### Mouth and eye visibility
+---
 
-- All viseme variants are present in the DOM simultaneously, all `opacity: 0` initially
-- The "rest" viseme starts `opacity: 1`
-- At each viseme transition time `t`:
-  ```js
-  tl.set("#mouth-<clipId>-<prevViseme>", { opacity: 0 }, t)
-  tl.set("#mouth-<clipId>-<nextViseme>", { opacity: 1 }, t)
-  ```
-- Eye "open" and "closed" variants work identically for auto-blink
+## Architecture
 
-### DOM element IDs
+### Data
 
-Use `slotDomId(clipId, slotId)` from `timeline-builder.ts` consistently everywhere:
-```ts
-// Returns: `char-${clipId}-${slotId.replace(/[^a-z0-9]/gi, "-")}`
 ```
-The Stage and the exporter must use the exact same IDs so GSAP targets match the DOM.
+Dexie (browser persistence)
+  projects table:  { id, hf: { rootHtml, compositionHtml, assets }, editorMeta }
+  media table:     blobs for video, audio, images
+  characters:      character definitions (parts, layout, rig)
+  motionPresets:   keyframe data for character animation
+  savedVoices:     generated voice audio metadata
+
+Zustand (in-memory UI state)
+  project          ← loaded from Dexie, kept in sync
+  selectedClipId, zoom, drag state
+  characters, motionPresets, mediaAssets  ← hydrated at project open
+```
+
+### Project schema
+
+```typescript
+Project {
+  id: string
+  name: string
+  hf: HyperFramesProject {
+    rootHtml: string                        // index.html — the film
+    compositionHtml: Record<string, string> // sub-composition HTML strings keyed by id
+    assets: HFAsset[]                       // { id, type } registry for export blob lookup
+    width, height, fps, duration
+  }
+  editorMeta: ProjectEditorMeta             // editor-only authoring state (not exported)
+}
+```
+
+`rootHtml` and `compositionHtml` are the film. They are valid HyperFrames composition
+HTML, ready to pass directly to the player or write directly to a ZIP.
+
+### Edit flow
+
+```
+User action (drag clip, change duration, move on stage)
+  → call updateElementInHtml / addElementToHtml / removeElementFromHtml
+    from @hyperframes/core to mutate rootHtml
+  → store dispatches updateRootHtml(newHtml) → Dexie save (debounced)
+  → Stage effect resolves editor asset placeholders → player iframe re-renders
+```
+
+For live drag preview (no reload), use `PlayerAPI` via
+`iframeRef.current.contentWindow.__player.previewElementPosition(id, x, y)`.
+
+### Stage
+
+`Stage.tsx` resolves `asset:ID` placeholders to Dexie blob URLs and passes the
+complete HTML to `<hyperframes-player srcdoc>`. It must bridge the web component's
+inner iframe to the single `useTimelinePlayer()` ref with `resolveIframe` from
+`@hyperframes/studio`. This keeps playback, picking, and source sync attached to
+the real HyperFrames iframe. React does not redraw the film.
+
+Do not use a `blob:` URL as the player's `src`: `@hyperframes/player` appends
+shader query params to `src`, which changes object URLs and can make the iframe
+show a broken-file icon. `srcdoc` avoids that URL rewrite for editor preview.
+
+Shader transition support is deferred. Do not add `shader-capture-scale`,
+`shader-loading`, or shader-specific transition plumbing until Studio Boom has a
+dedicated shader test composition and the standard preview/export path is stable.
+
+`useElementPicker(iframeRef)` handles click-to-select inside the iframe. Its
+`onSyncFiles` callback commits any in-iframe edits back to `rootHtml`.
+
+**No React overlays on top of the player.** Selection, resize, and drag are handled
+through the HyperFrames player API and `useElementPicker`, not React divs.
+
+### Character compositions
+
+Character sub-compositions are stored as HTML strings in `compositionHtml`. The
+character pipeline is being refactored — the old `bake.ts` approach (pre-generating
+static HTML from keyframe data) is being replaced. Do not add new calls to
+`buildCharacterCompositionHtml` or extend the baking pipeline.
+
+The intended direction: characters become first-class HyperFrames compositions,
+authored and mutated through the same `@hyperframes/core` APIs as any other clip.
+
+### Export
+
+Export is: ZIP the HTML strings + fetch and copy each blob in `assets[]`.
+
+```
+rootHtml          → index.html
+compositionHtml   → compositions/<id>.html  (one file per entry)
+assets[]          → fetch blob from Dexie → assets/<id>.<ext>
+```
+
+No serialization. No conversion. The HTML strings are already the output.
+
+### `editorMeta`
+
+Editor-only state. Not exported. Not rendered directly.
+
+```typescript
+ProjectEditorMeta {
+  tracks: TrackMeta[]                      // track names, lock/mute for UI
+  clips: Record<clipId, ClipEditorMeta>
+}
+
+ClipEditorMeta {
+  name?: string
+  kind?: string
+  characterId?: string
+  poses?: Record<slotId, partId>           // character part selections
+  motions?: SelectedMotion[]               // motion preset references + timing
+  visemes?: VisemeEntry[]                  // lip sync timing data
+  autoBlink?: boolean
+  voiceLine?: string                       // text for voice generation
+  lipSyncAudioId?: string                  // generated audio asset id
+  uiTrackIndex?: number                    // editor track row
+  uiLaneIndex?: number                     // editor lane within track
+}
+```
 
 ---
 
-## Adding a new clip type
-
-Any new clip type must:
-1. Have `data-start`, `data-duration`, `data-track-index` on its root element
-2. Have a GSAP timeline registered in `window.__timelines` (or be a plain `<img>`/`<audio>`/`<video>`)
-3. Be fully serializable from project data to HTML — no runtime-only state
-4. Produce identical output when `tl.seek(t)` is called for any `t` in `[0, duration]`
-
----
-
-## Export
-
-Export = serialize the live DOM structure + copy media blobs + bundle GSAP locally from `node_modules`.
-There is **no** separate export renderer. If the studio preview is correct, the export is correct.
-
-- Bundle GSAP from `node_modules/gsap/dist/gsap.min.js` — never use a CDN in exported packages
-- Character sub-compositions use `<template>` wrapper; the root `index.html` does not
-- Asset paths: `assets/<mediaId>.<ext>` at the ZIP root; sub-compositions reference `../assets/`
-
----
-
-## Key source files
+## Important files
 
 | File | Role |
 |------|------|
-| `src/studio/types.ts` | All domain types (Project, Clip, CharacterPreset, ActionPreset…) |
-| `src/studio/store.ts` | Zustand store — project state, playhead, selection |
-| `src/studio/db.ts` | Dexie IndexedDB — projects, characters, presets, media blobs |
-| `src/studio/components/Stage.tsx` | Visual canvas — renders clips, drives GSAP seek |
-| `src/studio/export/timeline-builder.ts` | Builds GSAP timelines from project data (no React) |
-| `src/studio/presets/apply.ts` | `composeActionsAt` — action composition engine |
-| `src/studio/character/character-utils.ts` | `listCharacterSlots`, `pickActivePartForSlot` |
-| `src/studio/lipsync/visemeMap.ts` | `visemeAt`, `visemeStateAt` |
+| `src/studio/types.ts` | `Project`, `HFAsset`, `ProjectEditorMeta`, `ClipEditorMeta`, `deriveEditorClips` |
+| `src/studio/store.ts` | Zustand store: edit actions, HTML mutation, UI state |
+| `src/studio/db.ts` | Dexie: project and blob persistence |
+| `src/studio/character/` | Character builder utilities and rig definitions |
+| `src/studio/lipsync/elevenlabs.ts` | Voice generation; updates `editorMeta` |
+| `src/studio/components/Stage.tsx` | HyperFrames player iframe via `srcdoc`, `resolveIframe`, `useElementPicker`, no React overlays |
+| `src/studio/components/Timeline.tsx` | Timeline UI; `PlayerControls` |
+| `src/studio/Studio.tsx` | Calls `useTimelinePlayer()` once; distributes `iframeRef`, `togglePlay`, `seek` |
+| `src/studio/hyperframes/assets.ts` | Generic `project.hf.assets` registration/pruning helpers |
+| `src/studio/hyperframes/html.ts` | Studio Boom HTML canonicalization and parser adapter |
+| `src/studio/export/exporter.ts` | ZIP assembly |
+| `src/studio/export/bake.ts` | Legacy character composition builder (pending character refactor) |
 
 ---
 
-## What not to do
+## Rules
 
-- Do not call `composeActionsAt()` inside a React render to produce CSS transform strings
-- Do not use CSS `transform: scale()` on character containers
-- Do not use `display: none` / `display: block` via GSAP — use `opacity`
-- Do not build timelines inside `async` functions or event handlers
-- Do not use `repeat: -1` on any timeline — calculate explicit repeat counts from duration
-- Do not add a new animation path that bypasses `timeline-builder.ts`
+- Never use old HTML attributes (`data-end`, `data-layer`, `data-name`). The format
+  is `@hyperframes/core`'s native format: `data-duration`, `data-track-index`, etc.
+- Never call `generateHyperframesHtml` with a shadow element list derived from React
+  state. The source of truth is `rootHtml`.
+- Never create a second `useTimelinePlayer()` call. It is called once in `Studio.tsx`
+  and the returned `iframeRef` / `togglePlay` / `seek` are passed as props.
+- Always use `@hyperframes/core` functions to mutate HTML — never string-splice.
+- `@hyperframes/core` does not load in raw Node.js ESM (extensionless imports). Mock
+  it in Vitest tests using `vi.mock('@hyperframes/core', ...)`.

@@ -1,310 +1,243 @@
 # Studio Boom
 
-Studio Boom is a visual movie-building tool for making animated, HTML-first videos.
+Studio Boom is a browser-based visual editor for building animated, HTML-first videos
+with HyperFrames.
 
-In plain language: it is a browser studio where you can add media, build simple
-puppet-style characters, place them on a timeline, give them motion, add voice lines,
-and export the result as a HyperFrames project.
+In plain language: it is a studio where you can upload media, build layered
+puppet-style characters, place them on a timeline, add motion and voice lines, and
+export the result as a self-contained HyperFrames project.
 
-The larger goal is simple:
+The guiding principle:
 
-> Studio Boom should let people author HyperFrames visually.
+> Studio Boom should not export to HyperFrames. Studio Boom should author HyperFrames.
 
-That means the app should not become a separate video editor that later converts its
-own private format into HyperFrames. The visual editor should work with a project
-model that maps clearly to HyperFrames concepts: clips, assets, compositions, HTML
-elements, timing attributes, styles, and GSAP timelines.
+That means the project you are editing in the studio is already a HyperFrames project.
+The stage preview reads the same HTML the export will write. There is no hidden
+conversion at the end.
+
+---
 
 ## Current Status
 
-Studio Boom is a work in progress. It is useful for exploring the editor, character
-builder, motion presets, local media storage, and HyperFrames export direction, but
-it should not yet be treated as a finished production tool.
+Studio Boom is a work in progress. The core editing loop is functional, but some
+areas are still being shaped.
 
-What works today:
+**What works:**
 
-- A browser-based studio with a stage, timeline, media library, and inspector.
-- Local projects saved in the browser.
+- Browser-based studio with stage, timeline, library, and inspector.
+- Local projects saved in the browser (IndexedDB).
 - Uploading image, audio, and video assets.
 - Building reusable layered characters from image parts.
-- Adding characters and media to a timeline.
-- Applying motion presets such as expressions, gestures, head turns, and camera moves.
-- Generating ElevenLabs voice lines and lip-sync timing when an API key is configured.
-- Exporting a HyperFrames ZIP package from the app.
+- Adding characters and media to the timeline.
+- Applying motion presets: expressions, gestures, head turns, camera moves.
+- Generating ElevenLabs voice lines and lip-sync timing.
+- Stage preview via the local `<hyperframes-player srcdoc>` adapter — the same
+  HTML that export will produce, previewed directly in the browser.
+- Playback controls (play, pause, seek) wired through `useTimelinePlayer`.
+- HyperFrames ZIP export.
 
-What is still being shaped:
+**Still being shaped:**
 
-- The internal project model is being corrected so HyperFrames is the authored model,
-  not just the final export target.
-- In-app MP4 rendering is not the main priority yet. Rendering should come after the
-  project model is properly HyperFrames-native.
-- Local backup/import/export for the browser database still needs work.
+- Character compositions are being refactored away from a static baking step toward
+  native HyperFrames compositions. The character builder works, but the internal
+  representation is in transition.
+- In-app MP4 rendering is not a priority yet. It will come after the character
+  model is stable.
+- Local backup and restore for the browser database still needs work.
 - There is no cloud account, team sync, or hosted backend.
+
+---
 
 ## Why HyperFrames?
 
-HyperFrames treats HTML, CSS, media files, and animation timelines as video source
-material. That is a good fit for Studio Boom because a visual editor can create the
-same pieces a developer or AI agent would write by hand:
+HyperFrames treats HTML, CSS, media, and GSAP animation timelines as video source
+material. That fits Studio Boom well: a visual editor produces the same HTML a
+developer or AI agent would write by hand.
 
-- HTML elements for clips and character parts.
-- `data-start`, `data-duration`, and `data-track-index` timing attributes.
-- CSS styles for position, size, opacity, and layering.
-- GSAP timelines for motion and lip sync.
-- Asset folders for images, audio, and video.
+Every clip, character composition, and audio track is stored as an HTML string.
+The stage preview loads that HTML directly. Export writes it to a ZIP. Nothing is
+converted at export time — the project already is the output.
 
-The intended architecture is:
+---
 
-```text
-Studio Boom visual editor
-  edits
-HyperFrames-native project model
-  serializes to
-index.html + compositions/ + assets/
-  renders with
-HyperFrames CLI
+## Architecture
+
+```
+Dexie (browser storage)
+  rootHtml                   ← the film: a HyperFrames composition HTML string
+  compositionHtml            ← sub-compositions (characters) keyed by id
+  assets[]                   ← { id, type } registry for blob lookup
+  media blobs                ← binary assets (images, audio, video)
+  characters / presets       ← authoring data for the character builder
+
+Zustand (in-memory editor state)
+  project                    ← loaded from Dexie, mutated in place
+  selectedClipId, zoom       ← UI-only state
+
+@hyperframes/studio (playback and interaction)
+  useTimelinePlayer()        ← bridges iframeRef to playback state
+  PlayerControls             ← play / pause / seek bar
+  useElementPicker()         ← click-to-select inside the player iframe
+
+@hyperframes/player (preview iframe)
+  <hyperframes-player srcdoc> ← isolated Stage adapter for generated HTML preview
+
+@hyperframes/core (data and HTML)
+  generateHyperframesHtml()  ← creates a new composition with GSAP wired up
+  addElementToHtml()         ← adds a clip element to rootHtml
+  updateElementInHtml()      ← patches a clip element in rootHtml
+  removeElementFromHtml()    ← removes a clip element from rootHtml
+  parseHtml()                ← reads elements back from rootHtml
 ```
 
-So the guiding rule is:
+### Edit flow
 
-```text
-Studio Boom should not export to HyperFrames.
-Studio Boom should author HyperFrames.
+```
+User action (add clip, drag, resize, change timing)
+  → @hyperframes/core HTML mutation → updated rootHtml
+  → store saves rootHtml to Dexie (debounced)
+  → Stage resolves editor-only asset placeholders → player iframe re-renders
 ```
 
-## Who This Is For
+For live drag preview (no reload), the `PlayerAPI` on
+`iframeRef.current.contentWindow.__player` provides `previewElementPosition` and
+similar methods that update the player without reloading the HTML.
 
-Studio Boom is meant for people who want to build animated videos without writing
-HTML or animation code directly, while still producing a project that developers and
-AI tools can understand.
+### Stage
 
-It is especially aimed at:
+The Stage component resolves `asset:ID` placeholders to Dexie blob URLs and passes
+the resulting complete HTML to `<hyperframes-player srcdoc>`. It bridges the
+player's inner iframe with `@hyperframes/studio`'s `resolveIframe`, so the single
+`useTimelinePlayer` instance and `useElementPicker` still drive the real
+HyperFrames iframe. There are no React overlay divs drawing copies of what the
+player already renders.
 
-- Creators who want a drag-and-drop scene builder.
-- Teams experimenting with HTML-first video workflows.
-- Developers building tools around HyperFrames.
-- AI-assisted video workflows where structured project data matters.
+Shader transition support is intentionally not configured in the Studio Boom
+stage yet. Standard HyperFrames playback, GSAP animation, media, and non-shader
+transitions remain supported. Add shader-specific player attributes only when
+shader transitions are introduced with a dedicated test composition.
+
+---
 
 ## Quick Start
 
-### Requirements
-
-- Node.js 22 is recommended.
-- npm.
-- A modern desktop browser with IndexedDB support.
-
-### Install
+**Requirements:** Node.js 22+, npm, a modern desktop browser with IndexedDB support.
 
 ```bash
 npm install
-```
-
-### Run Locally
-
-```bash
 npm run dev
 ```
 
-The terminal will print a local URL. Open that URL in your browser.
+Open the URL printed in the terminal.
 
-### Build
-
-```bash
-npm run build
-```
-
-### Preview A Production Build
-
-```bash
-npm run preview
-```
-
-### Tests And Formatting
-
-```bash
-npm run test
-npm run lint
-npm run format
-```
-
-## Basic Workflow
-
-1. Start the app with `npm run dev`.
-2. Open the local URL in your browser.
-3. Use the Library panel to upload media or create a character.
-4. Add media or characters to the timeline.
-5. Select a clip on the stage or timeline.
-6. Use the Inspector to change timing, position, size, opacity, layering, motion, or lip sync.
-7. Use Save to store the project locally in your browser.
-8. Use Export HyperFrames to create a HyperFrames ZIP package.
-
-The app autosaves many edits, but Save is still useful as a clear checkpoint.
-
-## Characters
-
-Characters are layered image rigs. You can upload parts such as a head, body, eyes,
-eyebrows, arms, legs, and mouth shapes. Once saved, the character behaves like one
-clip on the main timeline.
-
-A character can include:
-
-- Body and head layers.
-- Eye and eyebrow variants.
-- Mouth shapes for lip sync.
-- Optional limbs and accessories.
-- A transform-based mouth rig for generated mouth movement.
-- Motion settings such as parallax depth and anchor points.
-
-The character builder keeps internal character-part images out of the normal media
-gallery so the library stays focused on reusable user assets.
-
-## Motion Presets
-
-Motion presets are reusable movements. A preset can describe an expression, gesture,
-full-body movement, head turn, or camera move.
-
-Examples include:
-
-- Blink.
-- Happy or surprised expression.
-- Nod.
-- Wave.
-- Idle bob.
-- Jump.
-- Look left or right.
-- Slow zoom.
-- Camera shake.
-
-To apply one, select a character clip, open the motion controls, choose a preset, and
-adjust when it starts, how long it lasts, and how strong it should be.
-
-## Voice And Lip Sync
-
-Voice generation uses ElevenLabs. Lip sync turns speech timing into mouth shapes.
-
-To use it, create a local `.env` file:
-
-```bash
-touch .env
-```
-
-Add:
-
-```env
-ELEVENLABS_API_KEY=your_api_key_here
-```
-
-Do not commit `.env`.
-
-If the key is missing, the rest of the app still works, but voice generation will fail.
-
-## Local Storage
-
-Studio Boom is local-first. It stores data in your browser using IndexedDB.
-
-Stored locally:
-
-- Projects.
-- Uploaded media.
-- Media blobs.
-- Characters.
-- Motion presets.
-- Generated voice audio.
-
-Important:
-
-- Your work is stored in the browser profile you used.
-- A different browser, profile, or local URL may show a different database.
-- Clearing site data can delete projects and media.
-- There is not yet a complete backup/restore workflow, so do not rely on the app for
-  irreplaceable work without keeping your own copies of source assets.
-
-## Technical Overview
-
-The app is built with:
-
-- React for the interface.
-- Vite for local development and builds.
-- TanStack Router for routes.
-- Zustand for current editor state.
-- Dexie and IndexedDB for local persistence.
-- GSAP for timeline animation.
-- JSZip for HyperFrames ZIP export.
-- Tailwind CSS and Radix UI primitives for styling and UI controls.
-
-Important directories:
-
-- `src/studio/Studio.tsx`: main studio shell.
-- `src/studio/components`: stage, timeline, library, inspector, top bar, and lip sync UI.
-- `src/studio/character`: character builder and character utilities.
-- `src/studio/presets`: motion presets and preset recorder.
-- `src/studio/lipsync`: ElevenLabs and viseme mapping.
-- `src/studio/export`: HyperFrames export builders.
-- `src/studio/db.ts`: local database setup and media helpers.
-- `src/studio/store.ts`: current editor actions and state.
-- `src/studio/types.ts`: project, media, character, clip, and motion types.
-
-## Architecture Direction
-
-The project is being corrected toward three clear layers:
-
-```text
-Authoring state
-  Friendly editing data such as selected motions, visemes, track names, and character choices.
-
-HyperFrames render model
-  The actual renderable project: clips, assets, composition elements, timing attrs, styles, and timelines.
-
-Export
-  A thin serializer that writes the HyperFrames render model to files.
-```
-
-This matters because export should not be a large hidden conversion step. If the app
-is authoring HyperFrames correctly, export should mostly copy structured render data
-into `index.html`, `compositions/`, and `assets/`.
+---
 
 ## Development Scripts
 
 ```bash
 npm run dev       # Start local dev server
 npm run build     # Build production bundle
-npm run build:dev # Build in development mode
 npm run preview   # Preview production build
-npm run test      # Run tests
-npm run test:ui   # Run Vitest UI
-npm run lint      # Run ESLint
-npm run format    # Format with Prettier
+npm run test      # Run Vitest tests
+npm run test:ui   # Vitest UI
+npm run lint      # ESLint
+npm run format    # Prettier
 ```
+
+---
+
+## Basic Workflow
+
+1. `npm run dev` → open the local URL.
+2. Use the Library panel to upload media or build a character.
+3. Drag media or characters onto the timeline.
+4. Select a clip on the stage or timeline.
+5. Use the Inspector to adjust timing, position, size, opacity, motion, or lip sync.
+6. Use Save to checkpoint locally.
+
+---
+
+## Characters
+
+Characters are layered image rigs. Upload parts (head, body, eyes, eyebrows, mouth
+shapes, limbs) and arrange them in the character builder. Once saved, the character
+behaves as a single clip on the main timeline.
+
+A character can include:
+
+- Body and head layers.
+- Eye and eyebrow variants (with auto-blink support).
+- Mouth shapes for lip sync visemes.
+- Optional limbs and accessories.
+- A transform-based mouth rig for procedural mouth movement.
+
+The character pipeline is being refactored. The builder and parts work; the internal
+representation is in transition from a static bake step to native HyperFrames
+composition authoring.
+
+---
+
+## Motion Presets
+
+Motion presets are reusable movements — expressions, gestures, full-body animations,
+head turns, and camera moves. Select a character clip, open motion controls, pick a
+preset, and set the offset, duration, and intensity.
+
+---
+
+## Voice and Lip Sync
+
+Voice generation uses ElevenLabs. Create a local `.env` file:
+
+```bash
+ELEVENLABS_API_KEY=your_api_key_here
+```
+
+Do not commit `.env`. The rest of the app works without a key; voice generation will
+fail silently if the key is missing.
+
+---
+
+## Local Storage
+
+Studio Boom is local-first. All data lives in browser IndexedDB.
+
+- Your work is tied to the browser profile and local URL you used.
+- Clearing site data deletes projects and media.
+- There is no complete backup/restore workflow yet. Keep copies of source assets
+  for anything irreplaceable.
+
+---
+
+## Technical Stack
+
+- React — editing UI
+- Vite — dev server and build
+- Zustand — in-memory editor state
+- Dexie / IndexedDB — browser persistence
+- `@hyperframes/core` — HTML data model and mutation APIs
+- `@hyperframes/studio` — PlayerControls, useTimelinePlayer, usePlayerStore, useElementPicker
+- `@hyperframes/player` — isolated Stage preview web component
+- GSAP — animation (embedded in composition HTML via @hyperframes/core)
+- JSZip — export ZIP assembly
+- Tailwind CSS — styling
+
+---
 
 ## Troubleshooting
 
-### The app opens but my old work is gone
+**Old work is gone after opening the app.**
+Studio Boom stores data in browser IndexedDB. Check you are using the same browser,
+profile, and local URL. Clearing site data removes local work.
 
-Studio Boom stores data in browser IndexedDB. Check that you are using the same
-browser, browser profile, and local URL. Clearing site data can remove local work.
+**Voice generation fails.**
+Confirm `ELEVENLABS_API_KEY` is set in `.env` and restart the dev server.
 
-### Voice generation fails
+**Play button is greyed out.**
+The playback controls require the composition HTML to include a GSAP timeline
+(`window.__timelines`). This is produced automatically by `generateHyperframesHtml`.
+If a project was created before this was wired up, create a new project.
 
-Confirm `ELEVENLABS_API_KEY` is set in `.env`, then restart the dev server.
-
-### Character mouth movement looks wrong
-
-Check that the character has the mouth shapes needed for lip sync. Current mouth
-visemes include:
-
-```text
-rest, A, E, O, U, MBP, FV, L, WQ, Smile
-```
-
-### Exported HyperFrames output looks different from the stage
-
-That is exactly the drift the current architecture work is meant to remove. The goal
-is for the stage preview and export to read the same HyperFrames render model.
-
-## Near-Term Priorities
-
-- Finish the HyperFrames-native project model correction.
-- Make export a thin serializer over that model.
-- Add stronger validation for assets, clips, compositions, and timelines.
-- Improve local backup and restore.
-- Add in-app MP4 rendering only after the HyperFrames model is stable.
+**Stage preview and export look different.**
+Both should read the same `rootHtml`. If they diverge, it is a bug — please open an
+issue.

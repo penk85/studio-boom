@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import type { CharacterClip, MediaClip, MouthViseme, SavedVoice } from "../types";
+import { deriveEditorClips } from "../types";
 import { useStudio } from "../store";
 import { db, deleteMediaIfUnused, getSavedVoices, saveVoice, deleteSavedVoice } from "../db";
 import { ELEVENLABS_VOICES, ELEVENLABS_MODELS, DEFAULT_VOICE_ID } from "../lipsync/voices";
@@ -10,7 +11,8 @@ import { generateLipSyncForClip } from "../lipsync/elevenlabs";
 import { MOUTH_VISEMES, MOUTH_VISEME_DESCRIPTIONS } from "../lipsync/viseme-schema";
 
 export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
-  const clips = useStudio((s) => s.clips);
+  const project = useStudio((s) => s.project);
+  const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
   const update = useStudio((s) => s.updateClip);
   const removeClip = useStudio((s) => s.removeClip);
   const saveProject = useStudio((s) => s.saveProject);
@@ -63,7 +65,9 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
         (c.linkedCharacterClipId === clip.id ||
           (!!clip.lipSyncAudioId && c.mediaId === clip.lipSyncAudioId)),
     );
-    const mediaIds = new Set(speechClips.map((speechClip) => speechClip.mediaId).filter((id): id is string => !!id));
+    const mediaIds = new Set(
+      speechClips.map((speechClip) => speechClip.mediaId).filter((id): id is string => !!id),
+    );
     if (clip.lipSyncAudioId) mediaIds.add(clip.lipSyncAudioId);
     for (const speechClip of speechClips) removeClip(speechClip.id);
     update(clip.id, {

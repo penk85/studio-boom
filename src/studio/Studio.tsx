@@ -1,5 +1,6 @@
 // The studio shell — three-pane layout with a timeline at the bottom.
 import { useEffect } from "react";
+import { useTimelinePlayer } from "@hyperframes/studio";
 import { db, garbageCollectUnusedInternalMedia } from "./db";
 import { useStudio } from "./store";
 import { Library } from "./components/Library";
@@ -10,41 +11,18 @@ import { TopBar } from "./components/TopBar";
 
 export function Studio() {
   const project = useStudio((s) => s.project);
+  // useTimelinePlayer owns the single iframeRef that connects the player to
+  // PlayerControls and usePlayerStore. Stage bridges this ref to the
+  // <hyperframes-player> iframe; Timeline passes togglePlay/seek to PlayerControls.
+  const { iframeRef, togglePlay, seek, onIframeLoad } = useTimelinePlayer();
 
   useEffect(() => {
-    // Load most-recent project, or create a new one.
     (async () => {
       const recent = await db.projects.orderBy("updatedAt").reverse().first();
       if (recent) await useStudio.getState().loadProject(recent.id);
       else await useStudio.getState().newProject();
       void garbageCollectUnusedInternalMedia();
     })();
-  }, []);
-
-  useEffect(() => {
-    const isTypingTarget = (target: EventTarget | null) => {
-      if (!(target instanceof HTMLElement)) return false;
-      const tag = target.tagName.toLowerCase();
-      return (
-        target.isContentEditable ||
-        tag === "input" ||
-        tag === "textarea" ||
-        tag === "select" ||
-        tag === "button" ||
-        Boolean(target.closest("input, textarea, select, button, [contenteditable='true']"))
-      );
-    };
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.code !== "Space" || event.repeat || event.metaKey || event.ctrlKey || event.altKey)
-        return;
-      if (isTypingTarget(event.target)) return;
-      event.preventDefault();
-      useStudio.getState().togglePlay();
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
   if (!project) {
@@ -62,12 +40,12 @@ export function Studio() {
         <aside className="w-60 shrink-0 border-r border-border">
           <Library />
         </aside>
-        <main className="flex min-w-0 flex-1 flex-col">
-          <div className="min-h-0 flex-1">
-            <Stage />
+        <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <div className="relative min-h-0 flex-1">
+            <Stage iframeRef={iframeRef} onIframeLoad={onIframeLoad} />
           </div>
           <div className="h-72 shrink-0 border-t border-border">
-            <Timeline />
+            <Timeline togglePlay={togglePlay} seek={seek} />
           </div>
         </main>
         <aside className="w-72 shrink-0 border-l border-border">

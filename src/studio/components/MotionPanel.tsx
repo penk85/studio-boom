@@ -1,6 +1,7 @@
 // Motion panel — apply/configure reusable motion presets on a CharacterClip.
 import { useEffect, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
+import { usePlayerStore } from "@hyperframes/studio";
 import { db, uid } from "../db";
 import { useStudio } from "../store";
 import { ensureMotionPresetsSeeded } from "../presets/seed";
@@ -44,7 +45,8 @@ export function MotionPanel({
   character: CharacterPreset;
 }) {
   const update = useStudio((s) => s.updateClip);
-  const playhead = useStudio((s) => s.playhead);
+  const syncMotionPresets = useStudio((s) => s.syncMotionPresets);
+  const currentTime = usePlayerStore((s) => s.currentTime);
   const [picking, setPicking] = useState(false);
   const [filterCat, setFilterCat] = useState<MotionCategory | "all">("all");
   const [search, setSearch] = useState("");
@@ -59,6 +61,11 @@ export function MotionPanel({
   const queriedPresets = useLiveQuery(() => db.motionPresets.toArray(), []);
   const presets = useMemo(() => queriedPresets ?? [], [queriedPresets]);
   const presetMap = useMemo(() => new Map(presets.map((p) => [p.id, p] as const)), [presets]);
+
+  useEffect(() => {
+    if (!queriedPresets) return;
+    syncMotionPresets(presets);
+  }, [presets, queriedPresets, syncMotionPresets]);
 
   const filteredPresets = presets.filter((p) => {
     if (filterCat !== "all" && p.category !== filterCat) return false;
@@ -82,7 +89,7 @@ export function MotionPanel({
     const motion: AppliedMotion = {
       id: uid(),
       presetId: preset.id,
-      offset: Math.max(0, Math.min(clip.duration, playhead - clip.start)),
+      offset: Math.max(0, Math.min(clip.duration, currentTime - clip.start)),
       intensity: 1,
       loop: EXCLUSIVE_MOTION_CATEGORIES.has(preset.category) ? false : preset.loop,
     };

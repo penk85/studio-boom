@@ -1,18 +1,21 @@
 // Inspector — edits the currently selected clip's properties.
+import { useEffect, useMemo } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db } from "../db";
 import { useStudio } from "../store";
 import type { CharacterClip, CharacterPreset } from "../types";
+import { deriveEditorClips } from "../types";
 import { VoiceLipSyncPanel } from "./VoiceLipSyncPanel";
 import { MotionPanel } from "./MotionPanel";
 
 export function Inspector() {
   const project = useStudio((s) => s.project);
-  const clips = useStudio((s) => s.clips);
+  const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
   const tracks = useStudio((s) => s.tracks);
   const id = useStudio((s) => s.selectedClipId);
   const update = useStudio((s) => s.updateClip);
   const remove = useStudio((s) => s.removeClip);
+  const registerCharacterPreset = useStudio((s) => s.registerCharacterPreset);
   const clip = clips.find((c) => c.id === id);
   const characterId = clip?.kind === "character" ? clip.characterId : undefined;
   const character = useLiveQuery<CharacterPreset | undefined>(
@@ -23,6 +26,10 @@ export function Inspector() {
     clip?.kind === "audio" &&
     !!clip.linkedCharacterClipId &&
     !!clips.some((c) => c.id === clip.linkedCharacterClipId);
+
+  useEffect(() => {
+    if (character) registerCharacterPreset(character);
+  }, [character, registerCharacterPreset]);
 
   if (!project) return null;
 
@@ -132,9 +139,7 @@ export function Inspector() {
                     <input
                       type="checkbox"
                       checked={clip.autoBlink !== false}
-                      onChange={(e) =>
-                        update(clip.id, { autoBlink: e.target.checked })
-                      }
+                      onChange={(e) => update(clip.id, { autoBlink: e.target.checked })}
                     />
                     Auto blink
                   </label>
@@ -142,7 +147,9 @@ export function Inspector() {
                     Adds a subtle regular blink during playback when the eyes are otherwise open.
                   </p>
                 </div>
-                {character && <MotionPanel clip={clip as unknown as CharacterClip} character={character} />}
+                {character && (
+                  <MotionPanel clip={clip as unknown as CharacterClip} character={character} />
+                )}
                 <VoiceLipSyncPanel clip={clip as unknown as CharacterClip} />
               </>
             )}

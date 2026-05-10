@@ -1,9 +1,9 @@
 // Library panel — Media, Characters (with editor), Motion Presets, Blocks (later).
 import { useLiveQuery } from "dexie-react-hooks";
-import { Link } from "@tanstack/react-router";
 import { db, deleteMediaIfUnused, importMediaFile, mediaIdsForCharacter, uid } from "../db";
 import { useStudio } from "../store";
 import type { CharacterClip, CharacterPart, CharacterPreset, MediaAsset } from "../types";
+import { deriveEditorClips } from "../types";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMediaUrl } from "../hooks/useMediaUrl";
 import {
@@ -60,22 +60,34 @@ export function Library() {
 
 function CharactersTab() {
   const project = useStudio((s) => s.project);
-  const clips = useStudio((s) => s.clips);
+  const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
   const tracks = useStudio((s) => s.tracks);
-  const playhead = useStudio((s) => s.playhead);
   const addClip = useStudio((s) => s.addClip);
-  const characters =
-    useLiveQuery(() => db.characters.orderBy("updatedAt").reverse().toArray(), []) ?? [];
+  const registerCharacterPreset = useStudio((s) => s.registerCharacterPreset);
+  const unregisterCharacterPreset = useStudio((s) => s.unregisterCharacterPreset);
+  const syncCharacterPresets = useStudio((s) => s.syncCharacterPresets);
+  const queriedCharacters = useLiveQuery(
+    () => db.characters.orderBy("updatedAt").reverse().toArray(),
+    [],
+  );
+  const characters = useMemo(() => queriedCharacters ?? [], [queriedCharacters]);
 
   useEffect(() => {
     void ensureStarterCharacterSeeded();
   }, []);
 
+  useEffect(() => {
+    if (!queriedCharacters) return;
+    syncCharacterPresets(characters);
+  }, [characters, queriedCharacters, syncCharacterPresets]);
+
+  const openModal = useStudio((s) => s.openModal);
+
   const newCharacter = async () => {
     const c = createBlankCharacter();
     await db.characters.put(c);
-    // Open editor in a new tab so the studio state isn't lost.
-    window.open(`/character/${c.id}`, "_blank");
+    registerCharacterPreset(c);
+    openModal({ type: "character-editor", characterId: c.id });
   };
 
   const placeOnTimeline = (
@@ -104,7 +116,7 @@ function CharactersTab() {
       characterId,
       name,
       trackIndex,
-      start: playhead,
+      start: 0,
       duration: 4,
       x: Math.round((project.hf.width - w) / 2),
       y: Math.round((project.hf.height - h) / 2),
@@ -127,6 +139,7 @@ function CharactersTab() {
     const character = await db.characters.get(id);
     const mediaIds = Array.from(mediaIdsForCharacter(character));
     await db.characters.delete(id);
+    unregisterCharacterPreset(id);
     await Promise.all(
       mediaIds.map((mediaId) =>
         deleteMediaIfUnused(mediaId, {
@@ -188,19 +201,21 @@ function CharactersTab() {
             </div>
             <div className="flex gap-1">
               <button
-                onClick={() => placeOnTimeline(c.id, c.name, c.canvasWidth, c.canvasHeight)}
+                onClick={() => {
+                  registerCharacterPreset(c);
+                  placeOnTimeline(c.id, c.name, c.canvasWidth, c.canvasHeight);
+                }}
                 disabled={!project}
                 className="flex-1 rounded bg-primary/30 px-2 py-1 text-[11px] hover:bg-primary/50 disabled:opacity-50"
               >
                 Add to scene
               </button>
-              <Link
-                to="/character/$id"
-                params={{ id: c.id }}
+              <button
+                onClick={() => openModal({ type: "character-editor", characterId: c.id })}
                 className="rounded border border-border px-2 py-1 text-[11px] hover:bg-panel"
               >
                 Edit
-              </Link>
+              </button>
             </div>
           </li>
         ))}
@@ -277,10 +292,17 @@ function CharacterThumbnailPart({ part }: { part: CharacterPart }) {
 }
 
 function PresetsTab() {
+  const syncMotionPresets = useStudio((s) => s.syncMotionPresets);
   useEffect(() => {
     void ensureMotionPresetsSeeded();
   }, []);
-  const presets = useLiveQuery(() => db.motionPresets.orderBy("category").toArray(), []) ?? [];
+  const queriedPresets = useLiveQuery(() => db.motionPresets.orderBy("category").toArray(), []);
+  const presets = useMemo(() => queriedPresets ?? [], [queriedPresets]);
+
+  useEffect(() => {
+    if (!queriedPresets) return;
+    syncMotionPresets(presets);
+  }, [presets, queriedPresets, syncMotionPresets]);
 
   const grouped = new Map<string, typeof presets>();
   for (const p of presets) {
@@ -296,12 +318,12 @@ function PresetsTab() {
         ("Surprised", "Happy"), gestures ("Wave", "Nod"), full-body ("Idle bob", "Jump") and camera
         moves.
       </div>
-      <Link
-        to="/presets"
+      <button
+        onClick={() => useStudio.getState().openModal({ type: "presets" })}
         className="block w-full rounded border border-border bg-panel-2 px-2 py-1.5 text-center hover:bg-panel"
       >
         Browse all motion presets →
-      </Link>
+      </button>
       {Array.from(grouped.entries()).map(([cat, items]) => (
         <div key={cat}>
           <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
@@ -333,12 +355,20 @@ function ComingSoon({ what, desc }: { what: string; desc: string }) {
 }
 
 function MediaTab() {
-  const allItems = useLiveQuery(() => db.media.orderBy("createdAt").reverse().toArray(), []) ?? [];
+  const queriedItems = useLiveQuery(() => db.media.orderBy("createdAt").reverse().toArray(), []);
+  const allItems = useMemo(() => queriedItems ?? [], [queriedItems]);
   const characters = useLiveQuery(() => db.characters.toArray(), []);
   const project = useStudio((s) => s.project);
-  const clips = useStudio((s) => s.clips);
+  const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
   const inputRef = useRef<HTMLInputElement>(null);
   const addMedia = useStudio((s) => s.addMediaToTimeline);
+  const registerMediaAsset = useStudio((s) => s.registerMediaAsset);
+  const syncMediaAssets = useStudio((s) => s.syncMediaAssets);
+
+  useEffect(() => {
+    if (!queriedItems) return;
+    syncMediaAssets(allItems);
+  }, [allItems, queriedItems, syncMediaAssets]);
 
   const internalMediaIds = useMemo(() => {
     const ids = new Set<string>();
@@ -360,7 +390,8 @@ function MediaTab() {
     if (!files) return;
     for (const f of Array.from(files)) {
       try {
-        await importMediaFile(f);
+        const asset = await importMediaFile(f);
+        registerMediaAsset(asset);
       } catch (e) {
         console.error(e);
       }

@@ -1,11 +1,13 @@
 // Timeline — multi-track strip with draggable clips, ruler, playhead.
-import { ChevronDown, ChevronRight, Lock, Mic2, Minus } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, ChevronRight, Lock, Mic2, Minus, TriangleAlert } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
+import { usePlayerStore, PlayerControls } from "@hyperframes/studio";
 import { db, uid } from "../db";
 import { generateMotionOccurrences } from "../presets/apply";
 import { resolveExclusiveMotionOverlaps } from "../presets/motion-scheduling";
 import { useStudio } from "../store";
+import { useHfMediaHealth } from "../hooks/useHfMediaHealth";
 import type {
   MotionCategory,
   MotionPreset,
@@ -15,6 +17,7 @@ import type {
   EditorClip,
   MediaClip,
 } from "../types";
+import { deriveEditorClips } from "../types";
 import { fmtTime } from "../timeline-utils";
 
 const TRACK_HEIGHT = 44;
@@ -54,15 +57,16 @@ const CATEGORY_DOT_COLORS: Record<MotionCategory, string> = {
   custom: "bg-slate-300",
 };
 
-export function Timeline() {
+interface TimelineProps {
+  togglePlay: () => void;
+  seek: (time: number) => void;
+}
+
+export function Timeline({ togglePlay, seek }: TimelineProps) {
   const project = useStudio((s) => s.project);
-  const clips = useStudio((s) => s.clips);
+  const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
   const tracks = useStudio((s) => s.tracks);
-  const playhead = useStudio((s) => s.playhead);
-  const setPlayhead = useStudio((s) => s.setPlayhead);
-  const playing = useStudio((s) => s.playing);
-  const togglePlay = useStudio((s) => s.togglePlay);
-  const setPlaying = useStudio((s) => s.setPlaying);
+  const currentTime = usePlayerStore((s) => s.currentTime);
   const zoom = useStudio((s) => s.zoom);
   const setZoom = useStudio((s) => s.setZoom);
   const selectedId = useStudio((s) => s.selectedClipId);
@@ -71,45 +75,15 @@ export function Timeline() {
   const removeClip = useStudio((s) => s.removeClip);
   const addLane = useStudio((s) => s.addLane);
   const removeLane = useStudio((s) => s.removeLane);
-  const normalizeTrackOrder = useStudio((s) => s.normalizeTrackOrder);
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const headerTracksRef = useRef<HTMLDivElement>(null);
-  const lastTickRef = useRef<number>(0);
-  const rafRef = useRef<number | undefined>(undefined);
   const [expandedClipIds, setExpandedClipIds] = useState<Set<string>>(new Set());
   const [selectedMotionId, setSelectedMotionId] = useState<string | null>(null);
   const queriedPresets = useLiveQuery(() => db.motionPresets.toArray(), []);
   const presets = useMemo(() => queriedPresets ?? [], [queriedPresets]);
   const presetMap = useMemo(() => new Map(presets.map((p) => [p.id, p] as const)), [presets]);
-  const trackKindOrderKey = tracks.map((track) => track.kind).join("|");
-
-  // Playback loop
-  useEffect(() => {
-    if (!playing || !project) return;
-    lastTickRef.current = performance.now();
-    const loop = (now: number) => {
-      const dt = (now - lastTickRef.current) / 1000;
-      lastTickRef.current = now;
-      const next = useStudio.getState().playhead + dt;
-      if (next >= project.hf.duration) {
-        useStudio.getState().setPlayhead(project.hf.duration);
-        useStudio.getState().setPlaying(false);
-        return;
-      }
-      useStudio.getState().setPlayhead(next);
-      rafRef.current = requestAnimationFrame(loop);
-    };
-    rafRef.current = requestAnimationFrame(loop);
-    return () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    };
-  }, [playing, project]);
-
-  useEffect(() => {
-    if (project) normalizeTrackOrder();
-  }, [normalizeTrackOrder, project, trackKindOrderKey]);
-
+  const mediaHealth = useHfMediaHealth(project?.hf);
   if (!project) return null;
   const totalWidth = Math.max(1200, project.hf.duration * zoom);
   const timelineClips = clips.filter((clip) => !isLinkedSpeechAudioClip(clip));
@@ -154,32 +128,6 @@ export function Timeline() {
     });
   };
 
-  const seekFromClientX = (clientX: number) => {
-    const el = scrollerRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const x = clientX - rect.left + el.scrollLeft;
-    setPlayhead(x / zoom);
-  };
-
-  const beginScrub = (clientX: number) => {
-    setPlaying(false);
-    seekFromClientX(clientX);
-    const move = (ev: PointerEvent) => seekFromClientX(ev.clientX);
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  };
-
-  const onScrubMouseDown = (e: React.MouseEvent) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    beginScrub(e.clientX);
-  };
-
   const syncHeaderScroll = () => {
     const scroller = scrollerRef.current;
     const headerTracks = headerTracksRef.current;
@@ -190,27 +138,12 @@ export function Timeline() {
   return (
     <div className="flex h-full flex-col bg-panel">
       {/* Transport */}
-      <div className="flex items-center gap-2 border-b border-border px-3 py-2 text-xs">
-        <button
-          onClick={() => togglePlay()}
-          className="flex h-7 w-7 items-center justify-center rounded bg-primary text-primary-foreground hover:opacity-90"
-          aria-label={playing ? "Pause" : "Play"}
-        >
-          {playing ? "❚❚" : "▶"}
-        </button>
-        <button
-          onClick={() => {
-            setPlaying(false);
-            setPlayhead(0);
-          }}
-          className="rounded border border-border px-2 py-1 hover:bg-panel-2"
-        >
-          ⏮
-        </button>
-        <div className="ml-2 font-mono text-foreground">
-          {fmtTime(playhead)} / {fmtTime(project.hf.duration)}
-        </div>
-        <div className="ml-auto flex items-center gap-2">
+      <div className="flex items-center gap-2 border-b border-border px-2 py-1 text-xs">
+        <PlayerControls onTogglePlay={togglePlay} onSeek={seek} />
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <span className="text-muted-foreground">
+            {fmtTime(currentTime)} / {fmtTime(project.hf.duration)}
+          </span>
           <span className="text-muted-foreground">Zoom</span>
           <input
             type="range"
@@ -327,8 +260,7 @@ export function Timeline() {
           <div style={{ width: totalWidth, position: "relative" }}>
             {/* Ruler */}
             <div
-              onMouseDown={onScrubMouseDown}
-              className="sticky top-0 z-10 cursor-ew-resize border-b border-border bg-panel-2"
+              className="sticky top-0 z-10 border-b border-border bg-panel-2"
               style={{ height: RULER_HEIGHT }}
             >
               <Ruler duration={project.hf.duration} zoom={zoom} />
@@ -343,9 +275,6 @@ export function Timeline() {
                 <div
                   key={t.id}
                   style={{ height: trackHeight(i) }}
-                  onMouseDown={(e) => {
-                    if (e.target === e.currentTarget) onScrubMouseDown(e);
-                  }}
                   className={`relative border-b border-border ${i % 2 ? "bg-track-alt" : "bg-track"}`}
                 >
                   {/* Grid */}
@@ -371,10 +300,12 @@ export function Timeline() {
                     .map((c) => {
                       const laneIndex = Math.max(0, Math.min(lanes.length - 1, c.laneIndex ?? 0));
                       const laneTop = laneTops[laneIndex] ?? laneIndex * TRACK_HEIGHT;
+                      const missingMediaIds = mediaHealth.missingAssetIdsByClipId.get(c.id) ?? [];
                       return (
                         <ClipBlock
                           key={c.id}
                           clip={c}
+                          missingMediaIds={missingMediaIds}
                           zoom={zoom}
                           selected={c.id === selectedId}
                           tracks={tracks.length}
@@ -417,7 +348,7 @@ export function Timeline() {
             <div
               className="pointer-events-none absolute top-0 z-20"
               style={{
-                left: playhead * zoom,
+                left: currentTime * zoom,
                 top: 0,
                 bottom: 0,
                 width: 2,
@@ -453,6 +384,7 @@ function Ruler({ duration, zoom }: { duration: number; zoom: number }) {
 
 function ClipBlock({
   clip,
+  missingMediaIds,
   zoom,
   selected,
   onSelect,
@@ -466,6 +398,7 @@ function ClipBlock({
   onToggleExpanded,
 }: {
   clip: EditorClip;
+  missingMediaIds: string[];
   zoom: number;
   selected: boolean;
   tracks: number;
@@ -489,9 +422,10 @@ function ClipBlock({
           : "bg-clip-bg";
 
   const lane = clip.laneIndex ?? 0;
-  const linkedAudio =
-    clip.kind === "audio" && !!clip.linkedCharacterClipId;
+  const linkedAudio = clip.kind === "audio" && !!clip.linkedCharacterClipId;
   const clipMotions = clip.kind === "character" ? (clip.motions ?? []) : [];
+  const missingMediaTitle =
+    missingMediaIds.length > 0 ? `Missing media: ${missingMediaIds.join(", ")}` : undefined;
 
   const onMouseDown = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -570,7 +504,7 @@ function ClipBlock({
         top,
         height: TRACK_HEIGHT - 8,
       }}
-      title={clip.name}
+      title={missingMediaTitle ? `${clip.name}\n${missingMediaTitle}` : clip.name}
     >
       <div className="flex h-full items-center gap-1 px-2 text-[11px] font-medium text-foreground/95 mix-blend-luminosity">
         {clip.kind === "character" && (
@@ -590,22 +524,33 @@ function ClipBlock({
         )}
         {linkedAudio && <Lock size={11} className="shrink-0" aria-label="Linked speech audio" />}
         <span className="truncate">{clip.name}</span>
-        {clipMotions.length > 0 && (
-          <span className="ml-auto flex shrink-0 items-center gap-0.5">
-            {clipMotions.slice(0, 4).map((motion) => {
-              const preset = presetMap.get(motion.presetId);
-              return (
-                <span
-                  key={motion.id}
-                  className={`h-1.5 w-3 rounded-full border ${
-                    preset ? CATEGORY_COLORS[preset.category] : CATEGORY_COLORS.custom
-                  }`}
-                  title={preset?.name ?? "Motion"}
-                />
-              );
-            })}
-            {clipMotions.length > 4 && (
-              <span className="text-[9px] text-foreground/80">+{clipMotions.length - 4}</span>
+        {(missingMediaIds.length > 0 || clipMotions.length > 0) && (
+          <span className="ml-auto flex shrink-0 items-center gap-1">
+            {missingMediaIds.length > 0 && (
+              <TriangleAlert
+                size={13}
+                className="text-amber-200 drop-shadow"
+                aria-label={missingMediaTitle}
+              />
+            )}
+            {clipMotions.length > 0 && (
+              <span className="flex shrink-0 items-center gap-0.5">
+                {clipMotions.slice(0, 4).map((motion) => {
+                  const preset = presetMap.get(motion.presetId);
+                  return (
+                    <span
+                      key={motion.id}
+                      className={`h-1.5 w-3 rounded-full border ${
+                        preset ? CATEGORY_COLORS[preset.category] : CATEGORY_COLORS.custom
+                      }`}
+                      title={preset?.name ?? "Motion"}
+                    />
+                  );
+                })}
+                {clipMotions.length > 4 && (
+                  <span className="text-[9px] text-foreground/80">+{clipMotions.length - 4}</span>
+                )}
+              </span>
             )}
           </span>
         )}
@@ -707,13 +652,7 @@ interface ExpandedClipLayout {
   height: number;
 }
 
-function CharacterMotionHeader({
-  clip,
-  layout,
-}: {
-  clip: EditorClip;
-  layout: ExpandedClipLayout;
-}) {
+function CharacterMotionHeader({ clip, layout }: { clip: EditorClip; layout: ExpandedClipLayout }) {
   return (
     <div
       style={{ height: layout.height }}

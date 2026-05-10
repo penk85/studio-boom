@@ -1,15 +1,14 @@
-// Editor state — current project, playhead, selection, transport.
+// Editor state — project, selection, zoom. Playback owned by @hyperframes/studio.
 // Persistence to Dexie happens via explicit save calls (autosave debounced).
 import { create } from "zustand";
-import { db, deleteMediaIfUnused, uid } from "./db";
+import { generateHyperframesHtml } from "@hyperframes/core";
+import type { Keyframe, TimelineElement } from "@hyperframes/core";
+import { db, deleteMediaIfUnused, isCurrentProjectShape, uid } from "./db";
 import type {
   AnyClip,
   CharacterClip,
   CharacterPreset,
   ClipEditorMeta,
-  EditorClip,
-  HFAttrs,
-  HFClip,
   HyperFramesProject,
   MediaAsset,
   MediaClip,
@@ -21,7 +20,8 @@ import type {
   TrackMeta,
 } from "./types";
 import { deriveEditorClips } from "./types";
-import { bakeCharacterClip, syncClipToHF } from "./export/bake";
+import { pruneHfAssets, registerHfAsset } from "./hyperframes/assets";
+import { canonicalizeHyperframesHtml, parseStudioHtml } from "./hyperframes/html";
 
 // ─── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -31,13 +31,6 @@ const DEFAULT_TRACKS: TrackMeta[] = [
   { id: uid(), name: "Background", kind: "background", lanes: 1 },
   { id: uid(), name: "Audio", kind: "audio", lanes: 1 },
 ];
-
-const TRACK_KIND_ORDER: Record<TrackKind, number> = {
-  character: 0,
-  overlay: 1,
-  background: 2,
-  audio: 3,
-};
 
 // ─── Public helpers ───────────────────────────────────────────────────────────
 
@@ -66,6 +59,7 @@ export function createBlankProject(name = "Untitled Movie"): Project {
   const now = Date.now();
   const projectId = uid();
   const tracks = createDefaultTracks();
+  const rootHtml = createProjectRootHtml(projectId, 30);
   const hf: HyperFramesProject = {
     id: projectId,
     name,
@@ -74,8 +68,8 @@ export function createBlankProject(name = "Untitled Movie"): Project {
     fps: 30,
     duration: 30,
     assets: [],
-    clips: [],
-    compositions: [],
+    rootHtml,
+    compositionHtml: {},
   };
   return {
     id: projectId,
@@ -87,34 +81,68 @@ export function createBlankProject(name = "Untitled Movie"): Project {
   };
 }
 
-export function normalizeProjectTrackOrder(project: Project): Project {
-  const editorMeta = project.editorMeta ?? { tracks: createDefaultTracks(), clips: {} };
-  const tracks = editorMeta.tracks.length > 0 ? editorMeta.tracks : createDefaultTracks();
-  const needsShapeRepair = editorMeta !== project.editorMeta || tracks !== editorMeta.tracks;
-  const ordered = tracks
-    .map((track, oldIndex) => ({ track, oldIndex }))
-    .sort(
-      (a, b) =>
-        TRACK_KIND_ORDER[a.track.kind] - TRACK_KIND_ORDER[b.track.kind] || a.oldIndex - b.oldIndex,
-    );
-  const changed = ordered.some((entry, newIndex) => entry.oldIndex !== newIndex);
-  if (!changed && !needsShapeRepair) return project;
-  const indexMap = new Map(ordered.map((entry, newIndex) => [entry.oldIndex, newIndex] as const));
-  const newTracks = ordered.map((entry) => entry.track);
-  // Remap uiTrackIndex in editorMeta.clips
-  const newClipsMeta = Object.fromEntries(
-    Object.entries(editorMeta.clips ?? {}).map(([clipId, meta]) => [
-      clipId,
-      meta.uiTrackIndex !== undefined
-        ? { ...meta, uiTrackIndex: indexMap.get(meta.uiTrackIndex) ?? meta.uiTrackIndex }
-        : meta,
-    ]),
+// ─── DOM helpers ──────────────────────────────────────────────────────────────
+
+function createProjectRootHtml(id: string, duration: number): string {
+  return canonicalizeHyperframesHtml(
+    ensureRootTimelineRegistration(
+      generateHyperframesHtml([], duration, {
+        compositionId: id,
+        resolution: "landscape",
+        includeStyles: true,
+        includeScripts: true,
+      }),
+      id,
+    ),
   );
-  return {
-    ...project,
-    editorMeta: { ...editorMeta, tracks: newTracks, clips: newClipsMeta },
-    updatedAt: Date.now(),
-  };
+}
+
+function regenerateRootHtml(
+  hf: HyperFramesProject,
+  elements: TimelineElement[],
+  keyframes?: Record<string, Keyframe[]>,
+  trackIndexByElementId?: Map<string, number>,
+): string {
+  const resolution = hf.width >= hf.height ? "landscape" : "portrait";
+  return canonicalizeHyperframesHtml(
+    ensureRootTimelineRegistration(
+      generateHyperframesHtml(elements, hf.duration, {
+        compositionId: hf.id,
+        resolution,
+        keyframes,
+        includeStyles: true,
+        includeScripts: true,
+      }),
+      hf.id,
+    ),
+    trackIndexByElementId,
+  );
+}
+
+function ensureRootTimelineRegistration(html: string, compositionId: string): string {
+  if (html.includes("window.__timelines")) return html;
+  if (typeof DOMParser === "undefined") {
+    return html.replace(
+      /(<script>\s*[\s\S]*?gsap\.timeline[\s\S]*?)(\s*<\/script>)/,
+      `$1\nwindow.__timelines = window.__timelines || {};\nwindow.__timelines[${JSON.stringify(compositionId)}] = tl;$2`,
+    );
+  }
+
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  for (const script of doc.querySelectorAll("script:not([src])")) {
+    if (!script.textContent?.includes("gsap.timeline")) continue;
+    script.textContent += `\nwindow.__timelines = window.__timelines || {};\nwindow.__timelines[${JSON.stringify(compositionId)}] = tl;`;
+    return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
+  }
+  return html;
+}
+
+function trackIndexMapFromMeta(clips: Record<string, ClipEditorMeta>): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const [id, meta] of Object.entries(clips)) {
+    if (meta.uiTrackIndex !== undefined) map.set(id, meta.uiTrackIndex);
+  }
+  return map;
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -123,135 +151,73 @@ function createDefaultTracks(): TrackMeta[] {
   return DEFAULT_TRACKS.map((t) => ({ ...t, id: uid() }));
 }
 
-/** Allocate a unique HF data-track-index for a new clip. Single point of track-index allocation. */
-function allocateHfTrackIndex(hf: HyperFramesProject): number {
-  let max = -1;
-  for (const clip of hf.clips) {
-    const ti = clip.attrs["data-track-index"] as number | undefined;
-    if (typeof ti === "number" && ti > max) max = ti;
+function collectReferencedAssetIds(
+  clipsMeta: Record<string, ClipEditorMeta>,
+  characters: Map<string, CharacterPreset>,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const meta of Object.values(clipsMeta)) {
+    if (meta.mediaId) ids.add(meta.mediaId);
+    if (meta.lipSyncAudioId) ids.add(meta.lipSyncAudioId);
+    if (meta.characterId) {
+      const character = characters.get(meta.characterId);
+      for (const part of character?.parts ?? []) ids.add(part.mediaId);
+      for (const variant of character?.headVariants ?? []) ids.add(variant.mediaId);
+    }
   }
-  return max + 1;
+  return ids;
 }
 
-function deriveFromProject(project: Project | null) {
-  if (!project) return { clips: [] as EditorClip[], tracks: [] as TrackMeta[] };
-  return {
-    clips: deriveEditorClips(project),
-    tracks: project.editorMeta.tracks,
-  };
-}
+function refreshProjectAssets(
+  project: Project,
+  characters: Map<string, CharacterPreset>,
+  mediaAssets: Map<string, MediaAsset>,
+): Project {
+  let hf = project.hf;
 
-/** Convert AnyClip to HFClip + ClipEditorMeta for the new data model. */
-function anyClipToHF(
-  clip: AnyClip,
-  hfTrackIndex: number,
-): { hfClip: HFClip; meta: ClipEditorMeta } {
-  const tag: HFClip["tag"] =
-    clip.kind === "audio"
-      ? "audio"
-      : clip.kind === "video"
-        ? "video"
-        : clip.kind === "image"
-          ? "img"
-          : "div";
-
-  const attrs: HFAttrs = {
-    "data-start": clip.start,
-    "data-duration": clip.duration,
-    "data-track-index": hfTrackIndex,
-  };
-  if (clip.kind === "character") {
-    attrs["data-composition-id"] = `comp_${clip.id}`;
-    attrs["data-composition-src"] = `compositions/comp_${clip.id}.html`;
-    attrs["data-width"] = clip.width;
-    attrs["data-height"] = clip.height;
-  }
-  if (clip.opacity !== undefined && clip.opacity !== 1) {
-    attrs["data-opacity"] = clip.opacity;
+  for (const meta of Object.values(project.editorMeta.clips)) {
+    if (meta.mediaId) hf = registerHfAsset(hf, mediaAssets.get(meta.mediaId));
+    if (meta.kind === "character" && meta.characterId) {
+      const character = characters.get(meta.characterId);
+      for (const part of character?.parts ?? []) {
+        hf = registerHfAsset(hf, mediaAssets.get(part.mediaId));
+      }
+      for (const variant of character?.headVariants ?? []) {
+        hf = registerHfAsset(hf, mediaAssets.get(variant.mediaId));
+      }
+    }
+    if (meta.lipSyncAudioId) hf = registerHfAsset(hf, mediaAssets.get(meta.lipSyncAudioId));
   }
 
-  const style: Record<string, string | number> = {
-    position: "absolute",
-    left: clip.x,
-    top: clip.y,
-    width: clip.width,
-    height: clip.height,
-    "z-index": clip.zIndex,
-    opacity: 0, // HF initial state: main timeline reveals clips at data-start
-  };
-
-  const hfClip: HFClip = {
-    id: clip.id,
-    tag,
-    attrs,
-    style,
-    mediaId: clip.kind !== "character" ? (clip as MediaClip).mediaId : undefined,
-  };
-
-  const meta: ClipEditorMeta = {
-    name: clip.name,
-    kind: clip.kind as ClipEditorMeta["kind"],
-    uiTrackIndex: clip.trackIndex,
-    uiLaneIndex: clip.laneIndex ?? 0,
-  };
-
-  if (clip.kind === "character") {
-    const charClip = clip as CharacterClip;
-    meta.characterId = charClip.characterId;
-    meta.poses = charClip.poses;
-    meta.visemes = charClip.visemes;
-    meta.motions = charClip.motions;
-    meta.autoBlink = charClip.autoBlink;
-    meta.lipSyncAudioId = charClip.lipSyncAudioId;
-    meta.voiceLine = charClip.voiceLine;
-  }
-
-  return { hfClip, meta };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isCurrentProjectShape(project: unknown): project is Project {
-  if (!isRecord(project) || !isRecord(project.hf) || !isRecord(project.editorMeta)) {
-    return false;
-  }
-  return (
-    typeof project.id === "string" &&
-    typeof project.name === "string" &&
-    Array.isArray(project.hf.assets) &&
-    Array.isArray(project.hf.clips) &&
-    Array.isArray(project.hf.compositions) &&
-    Array.isArray(project.editorMeta.tracks) &&
-    isRecord(project.editorMeta.clips)
-  );
+  return hf !== project.hf ? { ...project, hf, updatedAt: Date.now() } : project;
 }
 
 // ─── Store ────────────────────────────────────────────────────────────────────
 
+type ModalState =
+  | null
+  | { type: "character-editor"; characterId: string }
+  | { type: "presets" };
+
 interface StudioState {
   project: Project | null;
-  clips: EditorClip[]; // derived: deriveEditorClips(project)
-  tracks: TrackMeta[]; // derived: project.editorMeta.tracks
+  tracks: TrackMeta[];
 
-  // Preloaded at project open — enables synchronous baking
+  // Preloaded reference data (for character editor, asset gallery)
   characters: Map<string, CharacterPreset>;
   motionPresets: Map<string, MotionPreset>;
   mediaAssets: Map<string, MediaAsset>;
 
-  playhead: number;
-  playing: boolean;
   selectedClipId: string | null;
   zoom: number;
+
+  currentModal: ModalState;
+  openModal: (modal: Exclude<ModalState, null>) => void;
+  closeModal: () => void;
 
   loadProject: (id: string) => Promise<void>;
   newProject: () => Promise<void>;
   saveProject: () => Promise<void>;
-
-  setPlayhead: (t: number) => void;
-  togglePlay: () => void;
-  setPlaying: (p: boolean) => void;
 
   selectClip: (id: string | null) => void;
 
@@ -259,11 +225,20 @@ interface StudioState {
   updateClip: (id: string, patch: Partial<AnyClip>) => void;
   removeClip: (id: string) => void;
 
-  addMediaToTimeline: (asset: MediaAsset, trackIndex?: number) => void;
+  /** Directly replace rootHtml (used by Stage's useElementPicker onSyncFiles). */
+  updateRootHtml: (html: string) => void;
+
+  addMediaToTimeline: (asset: MediaAsset, trackIndex?: number, insertAtTime?: number) => void;
+  registerMediaAsset: (asset: MediaAsset) => void;
+  syncMediaAssets: (assets: MediaAsset[]) => void;
+  registerCharacterPreset: (character: CharacterPreset) => void;
+  unregisterCharacterPreset: (id: string) => void;
+  syncCharacterPresets: (characters: CharacterPreset[]) => void;
+  registerMotionPreset: (preset: MotionPreset) => void;
+  syncMotionPresets: (presets: MotionPreset[]) => void;
 
   addLane: (trackIndex: number) => void;
   removeLane: (trackIndex: number, laneIndex: number) => void;
-  normalizeTrackOrder: () => void;
 
   setProjectMeta: (
     patch: Partial<Pick<HyperFramesProject, "name" | "width" | "height" | "fps" | "duration">>,
@@ -288,15 +263,19 @@ const trackIndexFor = (tracks: TrackMeta[], kind: TrackKind) =>
 
 export const useStudio = create<StudioState>((set, get) => ({
   project: null,
-  clips: [],
   tracks: [],
   characters: new Map(),
   motionPresets: new Map(),
   mediaAssets: new Map(),
-  playhead: 0,
-  playing: false,
   selectedClipId: null,
   zoom: 60,
+  currentModal: null,
+  openModal(modal) {
+    set({ currentModal: modal });
+  },
+  closeModal() {
+    set({ currentModal: null });
+  },
 
   async loadProject(id) {
     const storedProject = (await db.projects.get(id)) as unknown;
@@ -316,16 +295,12 @@ export const useStudio = create<StudioState>((set, get) => ({
     const motionPresets = new Map(allPresets.map((p) => [p.id, p]));
     const mediaAssets = new Map(allMedia.map((m) => [m.id, m]));
 
-    const normalized = normalizeProjectTrackOrder(storedProject);
-    if (normalized !== storedProject) await db.projects.put(normalized);
-
     set({
-      project: normalized,
-      ...deriveFromProject(normalized),
+      project: storedProject,
+      tracks: storedProject.editorMeta.tracks,
       characters,
       motionPresets,
       mediaAssets,
-      playhead: 0,
       selectedClipId: null,
     });
   },
@@ -335,11 +310,10 @@ export const useStudio = create<StudioState>((set, get) => ({
     await db.projects.put(project);
     set({
       project,
-      ...deriveFromProject(project),
+      tracks: project.editorMeta.tracks,
       characters: new Map(),
       motionPresets: new Map(),
       mediaAssets: new Map(),
-      playhead: 0,
       selectedClipId: null,
     });
   },
@@ -351,18 +325,6 @@ export const useStudio = create<StudioState>((set, get) => ({
     await db.projects.put(updated);
   },
 
-  setPlayhead(t) {
-    const p = get().project;
-    const max = p?.hf.duration ?? 0;
-    set({ playhead: Math.max(0, Math.min(max, t)) });
-  },
-  togglePlay() {
-    set((s) => ({ playing: !s.playing }));
-  },
-  setPlaying(p) {
-    set({ playing: p });
-  },
-
   selectClip(id) {
     set({ selectedClipId: id });
   },
@@ -372,52 +334,103 @@ export const useStudio = create<StudioState>((set, get) => ({
     const p = state.project;
     if (!p) return;
 
-    // Lane auto-assignment using current derived clips
+    const currentClips = deriveEditorClips(p);
+
+    // Lane auto-assignment
     let nextClip = clip;
     if (clip.laneIndex === undefined) {
       const track = p.editorMeta.tracks[clip.trackIndex];
       const maxLanes = track?.lanes ?? 1;
-      const lane = pickFreeLane(state.clips, clip.trackIndex, clip.start, clip.duration, maxLanes);
+      const lane = pickFreeLane(currentClips, clip.trackIndex, clip.start, clip.duration, maxLanes);
       if (lane >= maxLanes) {
         const newTracks = p.editorMeta.tracks.map((t, i) =>
           i === clip.trackIndex ? { ...t, lanes: lane + 1 } : t,
         );
         const editorMeta: ProjectEditorMeta = { ...p.editorMeta, tracks: newTracks };
-        const partialProject = { ...p, editorMeta };
-        // rebuild state with new tracks before continuing
-        set({ project: partialProject, tracks: newTracks });
+        set({ project: { ...p, editorMeta }, tracks: newTracks });
       }
       nextClip = { ...clip, laneIndex: lane };
     }
 
     const currentProject = get().project!;
-    const hfTrackIndex = allocateHfTrackIndex(currentProject.hf);
-    const { hfClip, meta } = anyClipToHF(nextClip, hfTrackIndex);
+    const zIndex = nextClip.zIndex !== undefined ? nextClip.zIndex : currentClips.length;
 
-    let hf = syncClipToHF(currentProject.hf, hfClip);
+    const compositionHtml = { ...currentProject.hf.compositionHtml };
 
-    // Bake character clips if character is preloaded
+    const meta: ClipEditorMeta = {
+      name: nextClip.name,
+      kind: nextClip.kind as ClipEditorMeta["kind"],
+      uiTrackIndex: nextClip.trackIndex,
+      uiLaneIndex: nextClip.laneIndex ?? 0,
+    };
+
+    let hf = currentProject.hf;
+
+    // Parse existing elements so regeneration preserves them all
+    const { elements: existingElements, keyframes } = parseStudioHtml(hf.rootHtml);
+    let newElement: TimelineElement;
+
     if (nextClip.kind === "character") {
       const charClip = nextClip as CharacterClip;
-      const character = state.characters.get(charClip.characterId);
-      if (character) {
-        hf = bakeCharacterClip(
-          hf,
-          nextClip.id,
-          meta,
-          character,
-          state.motionPresets,
-          state.mediaAssets,
-        );
-      }
+      meta.characterId = charClip.characterId;
+      meta.poses = charClip.poses;
+      meta.visemes = charClip.visemes;
+      meta.motions = charClip.motions;
+      meta.autoBlink = charClip.autoBlink;
+
+      const compId = `comp_${nextClip.id}`;
+      newElement = {
+        id: nextClip.id,
+        type: "composition",
+        name: nextClip.name,
+        startTime: nextClip.start,
+        duration: nextClip.duration,
+        zIndex,
+        x: nextClip.x,
+        y: nextClip.y,
+        src: `compositions/${compId}.html`,
+        compositionId: compId,
+        sourceWidth: nextClip.width,
+        sourceHeight: nextClip.height,
+      };
+    } else {
+      const mediaClip = nextClip as MediaClip;
+      meta.mediaId = mediaClip.mediaId;
+
+      newElement = {
+        id: nextClip.id,
+        type: nextClip.kind as "image" | "video" | "audio",
+        name: nextClip.name,
+        startTime: nextClip.start,
+        duration: nextClip.duration,
+        zIndex,
+        x: nextClip.x,
+        y: nextClip.y,
+        src: `asset:${mediaClip.mediaId}`,
+        sourceWidth: nextClip.width,
+        sourceHeight: nextClip.height,
+        opacity: nextClip.opacity,
+      };
+
+      hf = registerHfAsset(hf, state.mediaAssets.get(mediaClip.mediaId));
     }
+
+    const nextClipsMeta = { ...currentProject.editorMeta.clips, [nextClip.id]: meta };
+    const rootHtml = regenerateRootHtml(
+      hf,
+      [...existingElements, newElement],
+      keyframes,
+      trackIndexMapFromMeta(nextClipsMeta),
+    );
+
+    hf = { ...hf, rootHtml, compositionHtml };
 
     const editorMeta: ProjectEditorMeta = {
       ...currentProject.editorMeta,
-      clips: { ...currentProject.editorMeta.clips, [nextClip.id]: meta },
+      clips: nextClipsMeta,
     };
     const newProject: Project = { ...currentProject, hf, editorMeta, updatedAt: Date.now() };
-    set({ project: newProject, ...deriveFromProject(newProject), selectedClipId: nextClip.id });
+    set({ project: newProject, tracks: newProject.editorMeta.tracks, selectedClipId: nextClip.id });
     scheduleSave(get);
   },
 
@@ -426,10 +439,9 @@ export const useStudio = create<StudioState>((set, get) => ({
     const p = state.project;
     if (!p) return;
 
-    const existingHfClip = p.hf.clips.find((c) => c.id === id);
     const existingMeta = p.editorMeta.clips[id] ?? {};
 
-    // Linked audio clips (audio_<charClipId>) cannot have their timing changed independently
+    // Linked audio clips cannot have their timing changed independently
     const isLinkedAudio = existingMeta.linkedCharacterClipId !== undefined;
     if (isLinkedAudio) {
       const {
@@ -442,94 +454,78 @@ export const useStudio = create<StudioState>((set, get) => ({
       patch = safePatch as Partial<AnyClip>;
     }
 
-    if (!existingHfClip) return;
-
-    // Build updated HFClip
-    const newAttrs = { ...existingHfClip.attrs };
-    const newStyle = { ...existingHfClip.style };
     const newMeta = { ...existingMeta };
-    let needsBake = false;
 
-    if (patch.start !== undefined) newAttrs["data-start"] = patch.start;
-    if (patch.duration !== undefined) newAttrs["data-duration"] = patch.duration;
-    if (patch.x !== undefined) newStyle["left"] = patch.x;
-    if (patch.y !== undefined) newStyle["top"] = patch.y;
-    if (patch.width !== undefined) {
-      newStyle["width"] = patch.width;
-      if (existingMeta.kind === "character") {
-        newAttrs["data-width"] = patch.width;
-        needsBake = true;
-      }
-    }
-    if (patch.height !== undefined) {
-      newStyle["height"] = patch.height;
-      if (existingMeta.kind === "character") {
-        newAttrs["data-height"] = patch.height;
-        needsBake = true;
-      }
-    }
-    if (patch.zIndex !== undefined) newStyle["z-index"] = patch.zIndex;
-    if (patch.opacity !== undefined) newAttrs["data-opacity"] = patch.opacity;
     if (patch.name !== undefined) newMeta.name = patch.name;
     if (patch.trackIndex !== undefined) newMeta.uiTrackIndex = patch.trackIndex;
     if (patch.laneIndex !== undefined) newMeta.uiLaneIndex = patch.laneIndex;
 
-    if (patch.kind === "character" || existingMeta.kind === "character") {
-      const charPatch = patch as Partial<CharacterClip>;
-      if (charPatch.poses !== undefined) {
-        newMeta.poses = charPatch.poses;
-        needsBake = true;
-      }
-      if (charPatch.motions !== undefined) {
-        newMeta.motions = charPatch.motions;
-        needsBake = true;
-      }
-      if (charPatch.visemes !== undefined) {
-        newMeta.visemes = charPatch.visemes;
-        needsBake = true;
-      }
-      if (charPatch.autoBlink !== undefined) {
-        newMeta.autoBlink = charPatch.autoBlink;
-        needsBake = true;
-      }
-      if (charPatch.lipSyncAudioId !== undefined) {
-        newMeta.lipSyncAudioId = charPatch.lipSyncAudioId;
-        needsBake = true;
-      }
-      if (charPatch.voiceLine !== undefined) newMeta.voiceLine = charPatch.voiceLine;
-    }
+    // Parse all elements, apply patch, then regenerate the full HTML so that
+    // CSS positioning and GSAP tweens stay consistent.
+    const { elements: existingElements, keyframes } = parseStudioHtml(p.hf.rootHtml);
 
-    const updatedHfClip: HFClip = { ...existingHfClip, attrs: newAttrs, style: newStyle };
-    let hf = syncClipToHF(p.hf, updatedHfClip);
-
-    // Propagate start changes to sibling audio clip
+    // Propagate start changes to linked audio sibling before patching
+    let audioStartOverride: { id: string; startTime: number } | null = null;
     if (patch.start !== undefined) {
       const audioClipId = `audio_${id}`;
-      const audioHfClip = hf.clips.find((c) => c.id === audioClipId);
-      if (audioHfClip) {
-        const startDelta = patch.start - ((existingHfClip.attrs["data-start"] as number) ?? 0);
-        const oldAudioStart = (audioHfClip.attrs["data-start"] as number) ?? 0;
-        hf = syncClipToHF(hf, {
-          ...audioHfClip,
-          attrs: { ...audioHfClip.attrs, "data-start": Math.max(0, oldAudioStart + startDelta) },
-        });
+      const mainEl = existingElements.find((e) => e.id === id);
+      const audioEl = existingElements.find((e) => e.id === audioClipId);
+      if (mainEl && audioEl) {
+        const startDelta = patch.start - mainEl.startTime;
+        audioStartOverride = {
+          id: audioClipId,
+          startTime: Math.max(0, audioEl.startTime + startDelta),
+        };
       }
     }
 
-    // Bake if character authoring state changed
-    if (needsBake && existingMeta.kind === "character" && existingMeta.characterId) {
-      const character = state.characters.get(existingMeta.characterId);
-      if (character) {
-        hf = bakeCharacterClip(hf, id, newMeta, character, state.motionPresets, state.mediaAssets);
+    const updatedElements = existingElements.map((el) => {
+      if (audioStartOverride && el.id === audioStartOverride.id) {
+        return { ...el, startTime: audioStartOverride.startTime };
       }
+      if (el.id !== id) return el;
+      const updated = { ...el };
+      if (patch.start !== undefined) updated.startTime = patch.start;
+      if (patch.duration !== undefined) updated.duration = patch.duration;
+      if (patch.x !== undefined) updated.x = patch.x;
+      if (patch.y !== undefined) updated.y = patch.y;
+      if (patch.zIndex !== undefined) updated.zIndex = patch.zIndex;
+      if (patch.opacity !== undefined) updated.opacity = patch.opacity;
+      if (patch.name !== undefined) updated.name = patch.name;
+      if (patch.width !== undefined && (updated as { sourceWidth?: number }).sourceWidth !== undefined)
+        (updated as { sourceWidth?: number }).sourceWidth = patch.width;
+      if (patch.height !== undefined && (updated as { sourceHeight?: number }).sourceHeight !== undefined)
+        (updated as { sourceHeight?: number }).sourceHeight = patch.height;
+      return updated;
+    });
+
+    if (patch.kind === "character" || existingMeta.kind === "character") {
+      const charPatch = patch as Partial<CharacterClip>;
+      if ("poses" in charPatch) newMeta.poses = charPatch.poses;
+      if ("motions" in charPatch) newMeta.motions = charPatch.motions;
+      if ("visemes" in charPatch) newMeta.visemes = charPatch.visemes;
+      if ("autoBlink" in charPatch) newMeta.autoBlink = charPatch.autoBlink;
+      if ("lipSyncAudioId" in charPatch) newMeta.lipSyncAudioId = charPatch.lipSyncAudioId;
+      if ("voiceLine" in charPatch) newMeta.voiceLine = charPatch.voiceLine;
     }
 
     const editorMeta: ProjectEditorMeta = {
       ...p.editorMeta,
       clips: { ...p.editorMeta.clips, [id]: newMeta },
     };
-    const newProject: Project = { ...p, hf, editorMeta, updatedAt: Date.now() };
-    set({ project: newProject, ...deriveFromProject(newProject) });
+    const rootHtml = regenerateRootHtml(
+      p.hf,
+      updatedElements,
+      keyframes,
+      trackIndexMapFromMeta(editorMeta.clips),
+    );
+    const newProject: Project = {
+      ...p,
+      hf: { ...p.hf, rootHtml },
+      editorMeta,
+      updatedAt: Date.now(),
+    };
+    set({ project: newProject });
     scheduleSave(get);
   },
 
@@ -540,24 +536,28 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     const existingMeta = p.editorMeta.clips[id];
     const audioSiblingId = `audio_${id}`;
-
-    // Collect media IDs to potentially garbage-collect
-    const removedMediaIds = new Set<string>();
-    const hfClip = p.hf.clips.find((c) => c.id === id);
-    if (hfClip?.mediaId) removedMediaIds.add(hfClip.mediaId);
-    if (existingMeta?.lipSyncAudioId) removedMediaIds.add(existingMeta.lipSyncAudioId);
-
     const idsToRemove = new Set([id, audioSiblingId]);
-
-    const newClips = p.hf.clips.filter((c) => !idsToRemove.has(c.id));
-    const newCompositions = p.hf.compositions.filter((c) => c.sourceClipId !== id);
-    const newHf: HyperFramesProject = { ...p.hf, clips: newClips, compositions: newCompositions };
 
     const newClipsMeta = Object.fromEntries(
       Object.entries(p.editorMeta.clips).filter(([clipId]) => !idsToRemove.has(clipId)),
     );
+    const { elements: existingElements, keyframes } = parseStudioHtml(p.hf.rootHtml);
+    const filteredElements = existingElements.filter((el) => !idsToRemove.has(el.id));
+    const rootHtml = regenerateRootHtml(
+      p.hf,
+      filteredElements,
+      keyframes,
+      trackIndexMapFromMeta(newClipsMeta),
+    );
 
-    const selectedClipId = state.selectedClipId;
+    const compositionHtml = { ...p.hf.compositionHtml };
+    if (existingMeta?.kind === "character") {
+      delete compositionHtml[`comp_${id}`];
+    }
+
+    const referencedIds = collectReferencedAssetIds(newClipsMeta, state.characters);
+    const newHf = pruneHfAssets({ ...p.hf, rootHtml, compositionHtml }, referencedIds);
+
     const newProject: Project = {
       ...p,
       hf: newHf,
@@ -567,31 +567,45 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     set({
       project: newProject,
-      ...deriveFromProject(newProject),
-      selectedClipId: idsToRemove.has(selectedClipId ?? "") ? null : selectedClipId,
+      selectedClipId: idsToRemove.has(state.selectedClipId ?? "") ? null : state.selectedClipId,
     });
     scheduleSave(get);
 
-    if (removedMediaIds.size > 0 && typeof window !== "undefined") {
-      window.setTimeout(() => {
-        void get()
-          .saveProject()
-          .then(() =>
-            Promise.all(
-              Array.from(removedMediaIds).map((mediaId) =>
-                deleteMediaIfUnused(mediaId, { internalOnly: true }),
+    if (typeof window !== "undefined") {
+      const removedMediaIds = new Set<string>();
+      if (existingMeta?.mediaId) removedMediaIds.add(existingMeta.mediaId);
+      if (existingMeta?.lipSyncAudioId) removedMediaIds.add(existingMeta.lipSyncAudioId);
+      const audioMeta = p.editorMeta.clips[audioSiblingId];
+      if (audioMeta?.mediaId) removedMediaIds.add(audioMeta.mediaId);
+
+      if (removedMediaIds.size > 0) {
+        window.setTimeout(() => {
+          void get()
+            .saveProject()
+            .then(() =>
+              Promise.all(
+                Array.from(removedMediaIds).map((mediaId) =>
+                  deleteMediaIfUnused(mediaId, { internalOnly: true }),
+                ),
               ),
-            ),
-          );
-      }, 0);
+            );
+        }, 0);
+      }
     }
   },
 
-  addMediaToTimeline(asset, trackIndex) {
+  updateRootHtml(html) {
+    const p = get().project;
+    if (!p) return;
+    set({ project: { ...p, hf: { ...p.hf, rootHtml: html }, updatedAt: Date.now() } });
+    scheduleSave(get);
+  },
+
+  addMediaToTimeline(asset, trackIndex, insertAtTime = 0) {
     const state = get();
     const p = state.project;
     if (!p) return;
-    const playhead = state.playhead;
+    get().registerMediaAsset(asset);
     let kindForTrack: TrackKind = "overlay";
     if (asset.kind === "audio") kindForTrack = "audio";
     const ti = trackIndex ?? trackIndexFor(p.editorMeta.tracks, kindForTrack);
@@ -608,13 +622,14 @@ export const useStudio = create<StudioState>((set, get) => ({
       cw = Math.round(cw * r);
       ch = Math.round(ch * r);
     }
+    const currentClips = deriveEditorClips(get().project!);
     const clip: MediaClip = {
       id: uid(),
       kind: asset.kind,
       mediaId: asset.id,
       name: asset.name,
       trackIndex: ti,
-      start: playhead,
+      start: insertAtTime,
       duration: dur,
       x: isAudio ? 0 : Math.round((stageW - cw) / 2),
       y: isAudio ? 0 : Math.round((stageH - ch) / 2),
@@ -622,9 +637,119 @@ export const useStudio = create<StudioState>((set, get) => ({
       height: ch,
       rotation: 0,
       opacity: 1,
-      zIndex: state.clips.length,
+      zIndex: currentClips.length,
     };
     get().addClip(clip);
+  },
+
+  registerMediaAsset(asset) {
+    const state = get();
+    const mediaAssets = new Map(state.mediaAssets);
+    mediaAssets.set(asset.id, asset);
+    const project = state.project
+      ? refreshProjectAssets(state.project, state.characters, mediaAssets)
+      : null;
+    set({ mediaAssets, project });
+    if (project && project !== state.project) scheduleSave(get);
+  },
+
+  syncMediaAssets(assets) {
+    const state = get();
+    const mediaAssets = new Map(state.mediaAssets);
+    let changed = false;
+    const incomingIds = new Set(assets.map((a) => a.id));
+
+    for (const asset of assets) {
+      const existing = mediaAssets.get(asset.id);
+      if (
+        !existing ||
+        existing.createdAt !== asset.createdAt ||
+        existing.filename !== asset.filename ||
+        existing.mimeType !== asset.mimeType
+      ) {
+        mediaAssets.set(asset.id, asset);
+        changed = true;
+      }
+    }
+    for (const id of Array.from(mediaAssets.keys())) {
+      if (!incomingIds.has(id)) {
+        mediaAssets.delete(id);
+        changed = true;
+      }
+    }
+
+    if (!changed) return;
+    const project = state.project
+      ? refreshProjectAssets(state.project, state.characters, mediaAssets)
+      : null;
+    set({ mediaAssets, project });
+    if (project && project !== state.project) scheduleSave(get);
+  },
+
+  registerCharacterPreset(character) {
+    const state = get();
+    const characters = new Map(state.characters);
+    characters.set(character.id, character);
+    set({ characters });
+  },
+
+  unregisterCharacterPreset(id) {
+    const state = get();
+    if (!state.characters.has(id)) return;
+    const characters = new Map(state.characters);
+    characters.delete(id);
+    set({ characters });
+  },
+
+  syncCharacterPresets(charactersList) {
+    const state = get();
+    const characters = new Map(state.characters);
+    const incomingIds = new Set(charactersList.map((c) => c.id));
+    let changed = false;
+
+    for (const character of charactersList) {
+      const existing = characters.get(character.id);
+      if (!existing || existing.updatedAt !== character.updatedAt) {
+        characters.set(character.id, character);
+        changed = true;
+      }
+    }
+    for (const id of Array.from(characters.keys())) {
+      if (!incomingIds.has(id)) {
+        characters.delete(id);
+        changed = true;
+      }
+    }
+    if (changed) set({ characters });
+  },
+
+  registerMotionPreset(preset) {
+    const state = get();
+    const motionPresets = new Map(state.motionPresets);
+    motionPresets.set(preset.id, preset);
+    set({ motionPresets });
+  },
+
+  syncMotionPresets(presets) {
+    const state = get();
+    const motionPresets = new Map(state.motionPresets);
+    const incomingIds = new Set(presets.map((p) => p.id));
+    let changed = false;
+
+    for (const preset of presets) {
+      const existing = motionPresets.get(preset.id);
+      if (!existing || existing.updatedAt !== preset.updatedAt) {
+        motionPresets.set(preset.id, preset);
+        changed = true;
+      }
+    }
+    for (const id of Array.from(motionPresets.keys())) {
+      if (!incomingIds.has(id)) {
+        motionPresets.delete(id);
+        changed = true;
+      }
+    }
+    if (changed) set({ motionPresets });
   },
 
   addLane(trackIndex) {
@@ -647,7 +772,8 @@ export const useStudio = create<StudioState>((set, get) => ({
     const laneCount = Math.max(1, track?.lanes ?? 1);
     if (!track || laneCount <= 1) return;
 
-    const laneHasClips = state.clips.some(
+    const currentClips = deriveEditorClips(p);
+    const laneHasClips = currentClips.some(
       (c) =>
         c.trackIndex === trackIndex && (c.laneIndex ?? 0) === laneIndex && !c.linkedCharacterClipId,
     );
@@ -656,15 +782,12 @@ export const useStudio = create<StudioState>((set, get) => ({
     const newTracks = p.editorMeta.tracks.map((t, i) =>
       i === trackIndex ? { ...t, lanes: Math.max(1, laneCount - 1) } : t,
     );
-
-    // Remap clip laneIndex in editorMeta
     const newClipsMeta = Object.fromEntries(
       Object.entries(p.editorMeta.clips).map(([clipId, meta]) => {
         if (meta.uiTrackIndex !== trackIndex) return [clipId, meta];
         const currentLane = meta.uiLaneIndex ?? 0;
-        if (meta.linkedCharacterClipId && currentLane === laneIndex) {
+        if (meta.linkedCharacterClipId && currentLane === laneIndex)
           return [clipId, { ...meta, uiLaneIndex: Math.max(0, laneIndex - 1) }];
-        }
         if (currentLane > laneIndex) return [clipId, { ...meta, uiLaneIndex: currentLane - 1 }];
         return [clipId, meta];
       }),
@@ -672,23 +795,27 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     const editorMeta = { ...p.editorMeta, tracks: newTracks, clips: newClipsMeta };
     const newProject: Project = { ...p, editorMeta, updatedAt: Date.now() };
-    set({ project: newProject, ...deriveFromProject(newProject) });
-    scheduleSave(get);
-  },
-
-  normalizeTrackOrder() {
-    const p = get().project;
-    if (!p) return;
-    const normalized = normalizeProjectTrackOrder(p);
-    if (normalized === p) return;
-    set({ project: normalized, ...deriveFromProject(normalized) });
+    set({ project: newProject, tracks: newTracks });
     scheduleSave(get);
   },
 
   setProjectMeta(patch) {
     const p = get().project;
     if (!p) return;
-    const newHf = { ...p.hf, ...patch };
+
+    let newHf = { ...p.hf, ...patch };
+    if (patch.duration !== undefined || patch.width !== undefined || patch.height !== undefined) {
+      const { elements, keyframes } = parseStudioHtml(p.hf.rootHtml);
+      newHf = {
+        ...newHf,
+        rootHtml: regenerateRootHtml(
+          newHf,
+          elements,
+          keyframes,
+          trackIndexMapFromMeta(p.editorMeta.clips),
+        ),
+      };
+    }
     const newProject: Project = {
       ...p,
       name: patch.name ?? p.name,
