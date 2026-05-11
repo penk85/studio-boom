@@ -1,6 +1,7 @@
 // Browser client for local HyperFrames CLI rendering.
 // The browser builds the real project files, then the Vite dev server writes
-// them to disk and runs `hyperframes render`.
+// them to a temporary project directory and runs `hyperframes render`.
+// This path consumes project.hf only; it must not compile from editorMeta.
 import type { Project } from "../types";
 import { buildHyperframesProjectFiles } from "./project-files";
 

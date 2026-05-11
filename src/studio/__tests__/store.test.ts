@@ -1,9 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  pickFreeLane,
-  createBlankProject,
-  useStudio,
-} from "../store";
+import { pickFreeLane, createBlankProject, useStudio } from "../store";
 
 const coreMock = vi.hoisted(() => ({
   generateCalls: [] as Array<{
@@ -94,11 +90,7 @@ vi.mock("@hyperframes/core", () => {
   };
 });
 import { createBlankCharacter, makePart } from "../character/character-utils";
-import type {
-  CharacterClip,
-  MediaAsset,
-  MotionPreset,
-} from "../types";
+import type { CharacterClip, MediaAsset, MotionPreset } from "../types";
 import { deriveEditorClips } from "../types";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -270,7 +262,7 @@ describe("createBlankProject", () => {
     expect(rootHtml).toContain('src="asset:media-1"');
     expect(rootHtml).toContain('data-start="0"');
     expect(rootHtml).toContain('data-duration="4"');
-    expect(rootHtml).toContain('data-track-index="1"');
+    expect(rootHtml).toContain('data-track-index="0"');
     expect(rootHtml).not.toContain("data-end=");
     expect(rootHtml).not.toContain("data-layer=");
     expect(coreMock.generateCalls.at(-1)?.opts).toMatchObject({

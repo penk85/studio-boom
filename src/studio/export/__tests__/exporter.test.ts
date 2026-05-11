@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertExportBlobsPresent } from "../exporter";
+import { assertExportBlobsPresent } from "../project-files";
 import { resolvePackagedAssetRefs } from "../project-files";
 import type { HFAsset } from "../../types";
 
@@ -21,7 +21,7 @@ describe("assertExportBlobsPresent", () => {
     expect(() => assertExportBlobsPresent(assets, blobs)).not.toThrow();
   });
 
-  it("throws before ZIP assembly when an HF asset has no blob", () => {
+  it("throws before MP4 render staging when an HF asset has no blob", () => {
     const assets = [asset("image-1"), asset("missing", "missing.png")];
     const blobs = new Map([["image-1", new Blob(["one"])]]);
 

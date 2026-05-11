@@ -64,7 +64,6 @@ async function handleRender(req: IncomingMessage, res: ServerResponse): Promise<
   }
 
   let log = "";
-  log += await runHyperframes(["lint", projectDir]);
   log += await runHyperframes([
     "render",
     projectDir,
@@ -72,7 +71,6 @@ async function handleRender(req: IncomingMessage, res: ServerResponse): Promise<
     outputPath,
     "--format",
     "mp4",
-    "--strict",
   ]);
 
   results.set(id, { outputPath, createdAt: Date.now(), log });

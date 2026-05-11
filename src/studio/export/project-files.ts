@@ -1,9 +1,10 @@
-// Builds the real HyperFrames project file tree from project.hf.
-// This is shared by any packaging path: ZIP, local render, or future publish.
+// Builds the real HyperFrames project file tree from project.hf for MP4 rendering.
+// This is an adapter for the HyperFrames CLI, not a second render model.
 import gsapRaw from "gsap/dist/gsap.min.js?raw";
 import { db } from "../db";
 import type { HFAsset, Project } from "../types";
 import { validateHfProject } from "../hyperframes/validate";
+import { normalizeNativeHyperframesHtml } from "../hyperframes/native";
 
 export interface HyperframesTextFile {
   path: string;
@@ -79,7 +80,11 @@ export async function buildHyperframesProjectFiles(
   const compositionTextFiles: HyperframesTextFile[] = Object.entries(hf.compositionHtml).map(
     ([id, html]) => ({
       path: `compositions/${id}.html`,
-      contents: resolvePackagedAssetRefs(html, hf.assets, "../assets"),
+      contents: resolvePackagedAssetRefs(
+        normalizeNativeHyperframesHtml(html),
+        hf.assets,
+        "../assets",
+      ),
       mimeType: "text/html",
     }),
   );
@@ -88,7 +93,11 @@ export async function buildHyperframesProjectFiles(
     textFiles: [
       {
         path: "index.html",
-        contents: resolvePackagedAssetRefs(hf.rootHtml, hf.assets, "assets"),
+        contents: resolvePackagedAssetRefs(
+          normalizeNativeHyperframesHtml(hf.rootHtml, { width: hf.width, height: hf.height }),
+          hf.assets,
+          "assets",
+        ),
         mimeType: "text/html",
       },
       { path: "gsap.min.js", contents: gsapRaw, mimeType: "text/javascript" },

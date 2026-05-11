@@ -58,9 +58,7 @@ export function validateHfProject(hf: HyperFramesProject): void {
   }
 
   if (errors.length > 0) {
-    throw new Error(
-      `HF project is not previewable:\n${errors.map((e) => `- ${e}`).join("\n")}`,
-    );
+    throw new Error(`HF project is not previewable:\n${errors.map((e) => `- ${e}`).join("\n")}`);
   }
 }
 

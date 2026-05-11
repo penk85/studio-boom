@@ -1,6 +1,5 @@
 // HyperFrames asset registry helpers.
-// These are generic project.hf utilities used by preview/export; they are not
-// part of the legacy character baking pipeline.
+// These are generic project.hf utilities used by preview and MP4 rendering.
 import type { HFAsset, HyperFramesProject, MediaAsset } from "../types";
 
 export function toHFAsset(asset: MediaAsset): HFAsset {

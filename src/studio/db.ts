@@ -34,10 +34,13 @@ class StudioDB extends Dexie {
 
 export const db = new StudioDB();
 
-export const uid = () =>
-  typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : Math.random().toString(36).slice(2) + Date.now().toString(36);
+export const uid = () => {
+  const uuid =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2) + Date.now().toString(36);
+  return `e${uuid}`;
+};
 
 /** Get a Blob URL for a media asset, caching by id. */
 const blobUrlCache = new Map<string, string>();

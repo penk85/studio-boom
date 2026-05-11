@@ -1,8 +1,8 @@
 // Timeline — multi-track strip with draggable clips, ruler, playhead.
 import { ChevronDown, ChevronRight, Lock, Mic2, Minus, TriangleAlert } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
-import { usePlayerStore, PlayerControls } from "@hyperframes/studio";
+import { PlayerControls, liveTime, usePlayerStore } from "@hyperframes/studio";
 import { db, uid } from "../db";
 import { generateMotionOccurrences } from "../presets/apply";
 import { resolveExclusiveMotionOverlaps } from "../presets/motion-scheduling";
@@ -66,7 +66,6 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const project = useStudio((s) => s.project);
   const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
   const tracks = useStudio((s) => s.tracks);
-  const currentTime = usePlayerStore((s) => s.currentTime);
   const zoom = useStudio((s) => s.zoom);
   const setZoom = useStudio((s) => s.setZoom);
   const selectedId = useStudio((s) => s.selectedClipId);
@@ -75,6 +74,21 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const removeClip = useStudio((s) => s.removeClip);
   const addLane = useStudio((s) => s.addLane);
   const removeLane = useStudio((s) => s.removeLane);
+
+  const playheadRef = useRef<HTMLDivElement>(null);
+  const timeDisplayRef = useRef<HTMLSpanElement>(null);
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+
+  useEffect(() => {
+    const update = (t: number) => {
+      if (playheadRef.current) playheadRef.current.style.left = `${t * zoomRef.current}px`;
+      if (timeDisplayRef.current) timeDisplayRef.current.textContent = fmtTime(t);
+    };
+    const unsub = liveTime.subscribe(update);
+    update(usePlayerStore.getState().currentTime);
+    return () => { unsub(); };
+  }, []);
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const headerTracksRef = useRef<HTMLDivElement>(null);
@@ -142,7 +156,9 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
         <PlayerControls onTogglePlay={togglePlay} onSeek={seek} />
         <div className="ml-auto flex shrink-0 items-center gap-2">
           <span className="text-muted-foreground">
-            {fmtTime(currentTime)} / {fmtTime(project.hf.duration)}
+            <span ref={timeDisplayRef}>{fmtTime(0)}</span>
+            {" / "}
+            {fmtTime(project.hf.duration)}
           </span>
           <span className="text-muted-foreground">Zoom</span>
           <input
@@ -344,11 +360,12 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
               );
             })}
 
-            {/* Playhead */}
+            {/* Playhead — position updated imperatively via liveTime, not React re-renders */}
             <div
+              ref={playheadRef}
               className="pointer-events-none absolute top-0 z-20"
               style={{
-                left: currentTime * zoom,
+                left: 0,
                 top: 0,
                 bottom: 0,
                 width: 2,

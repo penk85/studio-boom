@@ -29,7 +29,9 @@ export interface GenerateLipSyncArgs {
 export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
   const state = useStudio.getState();
   if (!state.project) throw new Error("No project loaded");
-  const clip = state.project ? deriveEditorClips(state.project).find((c) => c.id === args.clipId) : undefined;
+  const clip = state.project
+    ? deriveEditorClips(state.project).find((c) => c.id === args.clipId)
+    : undefined;
   if (!clip || clip.kind !== "character") {
     throw new Error("Clip is not a character clip");
   }
@@ -60,8 +62,7 @@ export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
     ends.length ? ends[ends.length - 1] + 0.1 : 0,
   );
 
-  // Remove old editor-audio clips from the pre-bake path. The baked `audio_<clipId>`
-  // sibling is kept and updated by updateClip -> bakeCharacterClip.
+  // Remove stale generated-audio clips from earlier voice generations.
   const { project: currentProject } = useStudio.getState();
   const currentClips = currentProject ? deriveEditorClips(currentProject) : [];
   const bakedAudioClipId = `audio_${charClip.id}`;
@@ -85,8 +86,8 @@ export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
     useStudio.getState().removeClip(stale.id);
   }
 
-  // Update the character clip. Baking turns this metadata into mouth timeline calls
-  // and one renderable HF audio clip: audio_<characterClipId>.
+  // Store voice/lip-sync authoring data on the character clip. The native
+  // character composition work will move this into renderable HF HTML directly.
   useStudio.getState().updateClip(charClip.id, {
     lipSyncAudioId: asset.id,
     visemes,

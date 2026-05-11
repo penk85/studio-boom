@@ -1,60 +1,45 @@
 import { parseHtml } from "@hyperframes/core";
+import type { ParsedHtml, TimelineElement } from "@hyperframes/core";
 
-export type TrackIndexByElementId = Map<string, number>;
-
-// Studio Boom stores canonical studio-facing attrs (`data-duration`,
-// `data-track-index`) even while the current core parser still reads the older
-// `data-end` shape. The parser expansion below is in-memory only.
-export function parseStudioHtml(html: string): ReturnType<typeof parseHtml> {
-  return parseHtml(expandDurationForCoreParser(html));
-}
-
-export function canonicalizeHyperframesHtml(
-  html: string,
-  trackIndexByElementId: TrackIndexByElementId = new Map(),
-): string {
-  if (typeof DOMParser === "undefined") return html;
+/**
+ * Boundary adapter for @hyperframes/core@0.5.3.
+ * Studio Boom stores native HyperFrames attrs; this patches the current parser
+ * result until the upstream parser reads data-duration/data-track-index itself.
+ */
+export function parseStudioHtml(html: string): ParsedHtml {
+  const parsed = parseHtml(html);
+  if (!html || typeof DOMParser === "undefined") return parsed;
 
   const doc = new DOMParser().parseFromString(html, "text/html");
-  for (const el of doc.querySelectorAll<HTMLElement>("[data-start]")) {
-    const start = Number.parseFloat(el.getAttribute("data-start") ?? "0");
-    const end = Number.parseFloat(el.getAttribute("data-end") ?? "");
-    if (!el.hasAttribute("data-duration") && Number.isFinite(start) && Number.isFinite(end)) {
-      el.setAttribute("data-duration", String(Math.max(0, end - start)));
-    }
-    el.removeAttribute("data-end");
-
-    const trackIndex = trackIndexByElementId.get(el.id);
-    const layer = el.getAttribute("data-layer");
-    if (trackIndex !== undefined) {
-      el.setAttribute("data-track-index", String(trackIndex));
-    } else if (!el.hasAttribute("data-track-index") && layer !== null) {
-      el.setAttribute("data-track-index", layer);
-    }
-
-    if (layer !== null && !el.style.zIndex) {
-      el.style.zIndex = layer;
-    }
-    el.removeAttribute("data-layer");
-    el.removeAttribute("data-name");
-  }
-
-  return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
+  return {
+    ...parsed,
+    elements: parsed.elements
+      .filter((element) => !isCompositionRootMarker(element, doc))
+      .map((element) => patchElementFromNativeAttrs(element, doc)),
+  };
 }
 
-function expandDurationForCoreParser(html: string): string {
-  if (typeof DOMParser === "undefined") return html;
+function isCompositionRootMarker(element: TimelineElement, doc: Document): boolean {
+  const el = doc.getElementById(element.id);
+  return element.id === "stage" && el?.hasAttribute("data-composition-id") === true;
+}
 
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  let changed = false;
-  for (const el of doc.querySelectorAll<HTMLElement>("[data-start][data-duration]")) {
-    if (el.hasAttribute("data-end")) continue;
-    const start = Number.parseFloat(el.getAttribute("data-start") ?? "0");
-    const duration = Number.parseFloat(el.getAttribute("data-duration") ?? "");
-    if (!Number.isFinite(start) || !Number.isFinite(duration)) continue;
-    el.setAttribute("data-end", String(start + duration));
-    changed = true;
-  }
+function patchElementFromNativeAttrs(element: TimelineElement, doc: Document): TimelineElement {
+  const el = doc.getElementById(element.id);
+  if (!el) return element;
 
-  return changed ? "<!DOCTYPE html>\n" + doc.documentElement.outerHTML : html;
+  const duration = parseFiniteNumber(el.getAttribute("data-duration"));
+  const trackIndex = parseFiniteNumber(el.getAttribute("data-track-index"));
+
+  return {
+    ...element,
+    duration: duration ?? element.duration,
+    zIndex: trackIndex ?? element.zIndex,
+  };
+}
+
+function parseFiniteNumber(value: string | null): number | null {
+  if (value === null || value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }

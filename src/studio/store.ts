@@ -21,7 +21,8 @@ import type {
 } from "./types";
 import { deriveEditorClips } from "./types";
 import { pruneHfAssets, registerHfAsset } from "./hyperframes/assets";
-import { canonicalizeHyperframesHtml, parseStudioHtml } from "./hyperframes/html";
+import { normalizeNativeHyperframesHtml } from "./hyperframes/native";
+import { parseStudioHtml } from "./hyperframes/html";
 
 // ─── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -84,7 +85,7 @@ export function createBlankProject(name = "Untitled Movie"): Project {
 // ─── DOM helpers ──────────────────────────────────────────────────────────────
 
 function createProjectRootHtml(id: string, duration: number): string {
-  return canonicalizeHyperframesHtml(
+  return normalizeNativeHyperframesHtml(
     ensureRootTimelineRegistration(
       generateHyperframesHtml([], duration, {
         compositionId: id,
@@ -94,6 +95,7 @@ function createProjectRootHtml(id: string, duration: number): string {
       }),
       id,
     ),
+    { width: 1920, height: 1080 },
   );
 }
 
@@ -101,10 +103,13 @@ function regenerateRootHtml(
   hf: HyperFramesProject,
   elements: TimelineElement[],
   keyframes?: Record<string, Keyframe[]>,
-  trackIndexByElementId?: Map<string, number>,
 ): string {
+  // Temporary bridge: the installed @hyperframes/core mutation helpers do not
+  // yet preserve every field Studio Boom edits (position, size, composition
+  // hosts, and generated GSAP visibility). Keep this centralized until those
+  // ordinary edits can move to direct HyperFrames mutations safely.
   const resolution = hf.width >= hf.height ? "landscape" : "portrait";
-  return canonicalizeHyperframesHtml(
+  return normalizeNativeHyperframesHtml(
     ensureRootTimelineRegistration(
       generateHyperframesHtml(elements, hf.duration, {
         compositionId: hf.id,
@@ -115,7 +120,7 @@ function regenerateRootHtml(
       }),
       hf.id,
     ),
-    trackIndexByElementId,
+    { width: hf.width, height: hf.height },
   );
 }
 
@@ -135,14 +140,6 @@ function ensureRootTimelineRegistration(html: string, compositionId: string): st
     return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
   }
   return html;
-}
-
-function trackIndexMapFromMeta(clips: Record<string, ClipEditorMeta>): Map<string, number> {
-  const map = new Map<string, number>();
-  for (const [id, meta] of Object.entries(clips)) {
-    if (meta.uiTrackIndex !== undefined) map.set(id, meta.uiTrackIndex);
-  }
-  return map;
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -194,10 +191,7 @@ function refreshProjectAssets(
 
 // ─── Store ────────────────────────────────────────────────────────────────────
 
-type ModalState =
-  | null
-  | { type: "character-editor"; characterId: string }
-  | { type: "presets" };
+type ModalState = null | { type: "character-editor"; characterId: string } | { type: "presets" };
 
 interface StudioState {
   project: Project | null;
@@ -416,12 +410,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     }
 
     const nextClipsMeta = { ...currentProject.editorMeta.clips, [nextClip.id]: meta };
-    const rootHtml = regenerateRootHtml(
-      hf,
-      [...existingElements, newElement],
-      keyframes,
-      trackIndexMapFromMeta(nextClipsMeta),
-    );
+    const rootHtml = regenerateRootHtml(hf, [...existingElements, newElement], keyframes);
 
     hf = { ...hf, rootHtml, compositionHtml };
 
@@ -492,9 +481,15 @@ export const useStudio = create<StudioState>((set, get) => ({
       if (patch.zIndex !== undefined) updated.zIndex = patch.zIndex;
       if (patch.opacity !== undefined) updated.opacity = patch.opacity;
       if (patch.name !== undefined) updated.name = patch.name;
-      if (patch.width !== undefined && (updated as { sourceWidth?: number }).sourceWidth !== undefined)
+      if (
+        patch.width !== undefined &&
+        (updated as { sourceWidth?: number }).sourceWidth !== undefined
+      )
         (updated as { sourceWidth?: number }).sourceWidth = patch.width;
-      if (patch.height !== undefined && (updated as { sourceHeight?: number }).sourceHeight !== undefined)
+      if (
+        patch.height !== undefined &&
+        (updated as { sourceHeight?: number }).sourceHeight !== undefined
+      )
         (updated as { sourceHeight?: number }).sourceHeight = patch.height;
       return updated;
     });
@@ -513,12 +508,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       ...p.editorMeta,
       clips: { ...p.editorMeta.clips, [id]: newMeta },
     };
-    const rootHtml = regenerateRootHtml(
-      p.hf,
-      updatedElements,
-      keyframes,
-      trackIndexMapFromMeta(editorMeta.clips),
-    );
+    const rootHtml = regenerateRootHtml(p.hf, updatedElements, keyframes);
     const newProject: Project = {
       ...p,
       hf: { ...p.hf, rootHtml },
@@ -543,12 +533,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     );
     const { elements: existingElements, keyframes } = parseStudioHtml(p.hf.rootHtml);
     const filteredElements = existingElements.filter((el) => !idsToRemove.has(el.id));
-    const rootHtml = regenerateRootHtml(
-      p.hf,
-      filteredElements,
-      keyframes,
-      trackIndexMapFromMeta(newClipsMeta),
-    );
+    const rootHtml = regenerateRootHtml(p.hf, filteredElements, keyframes);
 
     const compositionHtml = { ...p.hf.compositionHtml };
     if (existingMeta?.kind === "character") {
@@ -597,7 +582,19 @@ export const useStudio = create<StudioState>((set, get) => ({
   updateRootHtml(html) {
     const p = get().project;
     if (!p) return;
-    set({ project: { ...p, hf: { ...p.hf, rootHtml: html }, updatedAt: Date.now() } });
+    set({
+      project: {
+        ...p,
+        hf: {
+          ...p.hf,
+          rootHtml: normalizeNativeHyperframesHtml(html, {
+            width: p.hf.width,
+            height: p.hf.height,
+          }),
+        },
+        updatedAt: Date.now(),
+      },
+    });
     scheduleSave(get);
   },
 
@@ -808,12 +805,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       const { elements, keyframes } = parseStudioHtml(p.hf.rootHtml);
       newHf = {
         ...newHf,
-        rootHtml: regenerateRootHtml(
-          newHf,
-          elements,
-          keyframes,
-          trackIndexMapFromMeta(p.editorMeta.clips),
-        ),
+        rootHtml: regenerateRootHtml(newHf, elements, keyframes),
       };
     }
     const newProject: Project = {

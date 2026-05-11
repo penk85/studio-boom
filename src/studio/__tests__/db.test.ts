@@ -3,14 +3,14 @@ import { collectProjectMediaUsages, isCurrentProjectShape } from "../db";
 import type { Project } from "../types";
 
 describe("isCurrentProjectShape", () => {
-  it("rejects incompatible old project rows at the load guard boundary", () => {
-    const oldProject = {
-      id: "old-project",
-      name: "Old Project",
-      clips: [{ id: "legacy-clip", mediaId: "legacy-media" }],
+  it("rejects non-current project rows at the load guard boundary", () => {
+    const incompatibleProject = {
+      id: "incompatible-project",
+      name: "Incompatible Project",
+      clips: [{ id: "clip", mediaId: "media" }],
     };
 
-    expect(isCurrentProjectShape(oldProject)).toBe(false);
+    expect(isCurrentProjectShape(incompatibleProject)).toBe(false);
   });
 });
 

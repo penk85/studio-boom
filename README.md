@@ -5,15 +5,15 @@ with HyperFrames.
 
 In plain language: it is a studio where you can upload media, build layered
 puppet-style characters, place them on a timeline, add motion and voice lines, and
-export the result as a self-contained HyperFrames project.
+download the result as an MP4 rendered from a native HyperFrames project.
 
 The guiding principle:
 
 > Studio Boom should not export to HyperFrames. Studio Boom should author HyperFrames.
 
 That means the project you are editing in the studio is already a HyperFrames project.
-The stage preview reads the same HTML the export will write. There is no hidden
-conversion at the end.
+The stage preview reads the same HTML the MP4 renderer receives. There is no
+hidden conversion at the end.
 
 ---
 
@@ -32,17 +32,15 @@ areas are still being shaped.
 - Applying motion presets: expressions, gestures, head turns, camera moves.
 - Generating ElevenLabs voice lines and lip-sync timing.
 - Stage preview via the local `<hyperframes-player srcdoc>` adapter — the same
-  HTML that export will produce, previewed directly in the browser.
+  HTML staged for MP4 rendering, previewed directly in the browser.
 - Playback controls (play, pause, seek) wired through `useTimelinePlayer`.
-- HyperFrames ZIP export.
+- MP4 download via the HyperFrames CLI render path.
 
 **Still being shaped:**
 
 - Character compositions are being refactored away from a static baking step toward
   native HyperFrames compositions. The character builder works, but the internal
   representation is in transition.
-- In-app MP4 rendering is not a priority yet. It will come after the character
-  model is stable.
 - Local backup and restore for the browser database still needs work.
 - There is no cloud account, team sync, or hosted backend.
 
@@ -55,8 +53,9 @@ material. That fits Studio Boom well: a visual editor produces the same HTML a
 developer or AI agent would write by hand.
 
 Every clip, character composition, and audio track is stored as an HTML string.
-The stage preview loads that HTML directly. Export writes it to a ZIP. Nothing is
-converted at export time — the project already is the output.
+The stage preview loads that HTML directly. MP4 rendering stages those same files
+for the HyperFrames CLI. Nothing is converted at render time — the project already
+is the output.
 
 ---
 
@@ -219,7 +218,6 @@ Studio Boom is local-first. All data lives in browser IndexedDB.
 - `@hyperframes/studio` — PlayerControls, useTimelinePlayer, usePlayerStore, useElementPicker
 - `@hyperframes/player` — isolated Stage preview web component
 - GSAP — animation (embedded in composition HTML via @hyperframes/core)
-- JSZip — export ZIP assembly
 - Tailwind CSS — styling
 
 ---
@@ -238,6 +236,6 @@ The playback controls require the composition HTML to include a GSAP timeline
 (`window.__timelines`). This is produced automatically by `generateHyperframesHtml`.
 If a project was created before this was wired up, create a new project.
 
-**Stage preview and export look different.**
+**Stage preview and MP4 render look different.**
 Both should read the same `rootHtml`. If they diverge, it is a bug — please open an
 issue.

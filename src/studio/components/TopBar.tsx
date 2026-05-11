@@ -1,4 +1,4 @@
-// Top bar — project name, render action, save.
+// Top bar — project name, MP4 download action, save.
 import { Save } from "lucide-react";
 import { useState } from "react";
 import { useStudio } from "../store";
@@ -63,7 +63,7 @@ export function TopBar() {
         <span>{project.hf.duration}s</span>
         <button
           disabled={rendering}
-          title={rendering ? "Rendering…" : "Render MP4 with HyperFrames"}
+          title={rendering ? "Rendering…" : "Download MP4 with HyperFrames"}
           className="ml-3 rounded-md bg-secondary px-3 py-1.5 text-xs font-medium text-secondary-foreground hover:bg-secondary/80 disabled:cursor-not-allowed disabled:opacity-60"
           onClick={async () => {
             setRendering(true);
@@ -78,7 +78,7 @@ export function TopBar() {
             }
           }}
         >
-          {rendering ? "Rendering…" : "Render MP4"}
+          {rendering ? "Rendering…" : "Download MP4"}
         </button>
       </div>
     </header>
