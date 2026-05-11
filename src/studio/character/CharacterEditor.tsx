@@ -560,7 +560,10 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <header className="flex items-center gap-3 border-b border-border bg-panel px-4 py-2">
-        <button onClick={onClose} className="rounded border border-border px-2 py-1 text-xs hover:bg-panel-2">
+        <button
+          onClick={onClose}
+          className="rounded border border-border px-2 py-1 text-xs hover:bg-panel-2"
+        >
           ← Studio
         </button>
         <input

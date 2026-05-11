@@ -19,7 +19,7 @@ movie. `editorMeta` is editor-only intent and UI state.
 - Necessary adapter: `render-plugin.ts` writes staged files to `/tmp` and invokes `hyperframes render`.
 - Upstream boundary adapter: `normalizeNativeHyperframesHtml` normalizes HTML from current `@hyperframes/core` helpers into the native shape expected by the CLI/runtime without reading editor state.
 - Upstream boundary adapter: `parseStudioHtml` patches current parser output from native `data-duration`/`data-track-index` attrs until `@hyperframes/core` reads those attrs directly.
-- Transitional authoring bridge: `regenerateRootHtml` rebuilds the root composition from parsed HyperFrames elements because the installed core mutation helpers do not yet cover position/size updates, composition hosts, or GSAP timeline rewrites.
+- Root composition boundary: `root-composition.ts` owns creation, parsing, and serialization of root HyperFrames HTML so editor actions mutate `project.hf` without carrying generator/parser details inline.
 - Transitional character bridge: `export/bake.ts` remains isolated for the current character pipeline and must not grow.
 - Removable extra surface: ZIP download support has been removed; MP4 download is the only user-facing export path.
 

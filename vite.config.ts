@@ -36,7 +36,13 @@ export default defineConfig(() => {
           "node:fs": fileURLToPath(new URL("./src/shims/node-fs.ts", import.meta.url)),
           esbuild: fileURLToPath(new URL("./src/shims/esbuild.ts", import.meta.url)),
         },
-        dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime", "@hyperframes/core"],
+        dedupe: [
+          "react",
+          "react-dom",
+          "react/jsx-runtime",
+          "react/jsx-dev-runtime",
+          "@hyperframes/core",
+        ],
       },
     },
   );

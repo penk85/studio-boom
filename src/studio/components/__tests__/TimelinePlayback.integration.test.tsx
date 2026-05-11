@@ -7,15 +7,12 @@ import { Timeline } from "../Timeline";
 import { createBlankProject, useStudio } from "../../store";
 
 vi.mock("@hyperframes/studio", async () => {
-  const controls = await import(
-    "../../../../node_modules/@hyperframes/studio/src/player/components/PlayerControls"
-  );
-  const playerStore = await import(
-    "../../../../node_modules/@hyperframes/studio/src/player/store/playerStore"
-  );
-  const timelinePlayer = await import(
-    "../../../../node_modules/@hyperframes/studio/src/player/hooks/useTimelinePlayer"
-  );
+  const controls =
+    await import("../../../../node_modules/@hyperframes/studio/src/player/components/PlayerControls");
+  const playerStore =
+    await import("../../../../node_modules/@hyperframes/studio/src/player/store/playerStore");
+  const timelinePlayer =
+    await import("../../../../node_modules/@hyperframes/studio/src/player/hooks/useTimelinePlayer");
   return {
     PlayerControls: controls.PlayerControls,
     usePlayerStore: playerStore.usePlayerStore,
@@ -28,8 +25,9 @@ let container: HTMLDivElement | null = null;
 
 beforeAll(() => {
   (globalThis as typeof globalThis & { React: typeof React }).React = React;
-  (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
-    true;
+  (
+    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
 });
 
 beforeEach(() => {

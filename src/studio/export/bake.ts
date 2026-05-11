@@ -2,12 +2,7 @@
 // This file originally turned character rigs, visemes, and motion intent into a
 // standalone HyperFrames sub-composition. It is intentionally isolated while the
 // character architecture is refactored; remove or reuse it during that work.
-import type {
-  ClipEditorMeta,
-  CharacterPreset,
-  MouthViseme,
-  CharacterPart,
-} from "../types";
+import type { ClipEditorMeta, CharacterPreset, MouthViseme, CharacterPart } from "../types";
 import { listCharacterSlots, roleEnabledByManifest } from "../character/character-utils";
 import { eyeVariantsForSlot } from "../character/eye-state";
 import { MOUTH_VIEWBOX, RIG_STYLES } from "../character/mouth-libraries";

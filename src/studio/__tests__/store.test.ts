@@ -244,7 +244,7 @@ describe("createBlankProject", () => {
     });
   });
 
-  it("keeps regenerated clip HTML canonical when adding clips", () => {
+  it("keeps serialized clip HTML canonical when adding clips", () => {
     const project = createBlankProject("Clip add");
     const asset = makeMediaAsset("media-1", "Image");
     useStudio.setState({
@@ -427,7 +427,7 @@ describe.skip("Studio cache sync", () => {
     });
 
     const after = useStudio.getState().project!.hf.compositionHtml[compId];
-    // Composition HTML is regenerated when motion preset changes
+    // Composition HTML is serialized when motion preset changes
     expect(after).toBeDefined();
     // The composition is the same since buildCharacterCompositionHtml doesn't process motion presets directly
     // but the rebake was triggered — this verifies the machinery ran without error

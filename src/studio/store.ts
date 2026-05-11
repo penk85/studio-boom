@@ -1,8 +1,7 @@
 // Editor state — project, selection, zoom. Playback owned by @hyperframes/studio.
 // Persistence to Dexie happens via explicit save calls (autosave debounced).
 import { create } from "zustand";
-import { generateHyperframesHtml } from "@hyperframes/core";
-import type { Keyframe, TimelineElement } from "@hyperframes/core";
+import type { TimelineElement } from "@hyperframes/core";
 import { db, deleteMediaIfUnused, isCurrentProjectShape, uid } from "./db";
 import type {
   AnyClip,
@@ -22,7 +21,11 @@ import type {
 import { deriveEditorClips } from "./types";
 import { pruneHfAssets, registerHfAsset } from "./hyperframes/assets";
 import { normalizeNativeHyperframesHtml } from "./hyperframes/native";
-import { parseStudioHtml } from "./hyperframes/html";
+import {
+  createRootCompositionHtml,
+  parseRootComposition,
+  serializeRootCompositionHtml,
+} from "./hyperframes/root-composition";
 
 // ─── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -60,7 +63,7 @@ export function createBlankProject(name = "Untitled Movie"): Project {
   const now = Date.now();
   const projectId = uid();
   const tracks = createDefaultTracks();
-  const rootHtml = createProjectRootHtml(projectId, 30);
+  const rootHtml = createRootCompositionHtml(projectId, 30);
   const hf: HyperFramesProject = {
     id: projectId,
     name,
@@ -80,66 +83,6 @@ export function createBlankProject(name = "Untitled Movie"): Project {
     hf,
     editorMeta: { tracks, clips: {} },
   };
-}
-
-// ─── DOM helpers ──────────────────────────────────────────────────────────────
-
-function createProjectRootHtml(id: string, duration: number): string {
-  return normalizeNativeHyperframesHtml(
-    ensureRootTimelineRegistration(
-      generateHyperframesHtml([], duration, {
-        compositionId: id,
-        resolution: "landscape",
-        includeStyles: true,
-        includeScripts: true,
-      }),
-      id,
-    ),
-    { width: 1920, height: 1080 },
-  );
-}
-
-function regenerateRootHtml(
-  hf: HyperFramesProject,
-  elements: TimelineElement[],
-  keyframes?: Record<string, Keyframe[]>,
-): string {
-  // Temporary bridge: the installed @hyperframes/core mutation helpers do not
-  // yet preserve every field Studio Boom edits (position, size, composition
-  // hosts, and generated GSAP visibility). Keep this centralized until those
-  // ordinary edits can move to direct HyperFrames mutations safely.
-  const resolution = hf.width >= hf.height ? "landscape" : "portrait";
-  return normalizeNativeHyperframesHtml(
-    ensureRootTimelineRegistration(
-      generateHyperframesHtml(elements, hf.duration, {
-        compositionId: hf.id,
-        resolution,
-        keyframes,
-        includeStyles: true,
-        includeScripts: true,
-      }),
-      hf.id,
-    ),
-    { width: hf.width, height: hf.height },
-  );
-}
-
-function ensureRootTimelineRegistration(html: string, compositionId: string): string {
-  if (html.includes("window.__timelines")) return html;
-  if (typeof DOMParser === "undefined") {
-    return html.replace(
-      /(<script>\s*[\s\S]*?gsap\.timeline[\s\S]*?)(\s*<\/script>)/,
-      `$1\nwindow.__timelines = window.__timelines || {};\nwindow.__timelines[${JSON.stringify(compositionId)}] = tl;$2`,
-    );
-  }
-
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  for (const script of doc.querySelectorAll("script:not([src])")) {
-    if (!script.textContent?.includes("gsap.timeline")) continue;
-    script.textContent += `\nwindow.__timelines = window.__timelines || {};\nwindow.__timelines[${JSON.stringify(compositionId)}] = tl;`;
-    return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
-  }
-  return html;
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -360,8 +303,8 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     let hf = currentProject.hf;
 
-    // Parse existing elements so regeneration preserves them all
-    const { elements: existingElements, keyframes } = parseStudioHtml(hf.rootHtml);
+    // Parse existing HF elements so the root composition remains the source of truth.
+    const { elements: existingElements, keyframes } = parseRootComposition(hf.rootHtml);
     let newElement: TimelineElement;
 
     if (nextClip.kind === "character") {
@@ -410,7 +353,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     }
 
     const nextClipsMeta = { ...currentProject.editorMeta.clips, [nextClip.id]: meta };
-    const rootHtml = regenerateRootHtml(hf, [...existingElements, newElement], keyframes);
+    const rootHtml = serializeRootCompositionHtml(hf, [...existingElements, newElement], keyframes);
 
     hf = { ...hf, rootHtml, compositionHtml };
 
@@ -449,9 +392,9 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (patch.trackIndex !== undefined) newMeta.uiTrackIndex = patch.trackIndex;
     if (patch.laneIndex !== undefined) newMeta.uiLaneIndex = patch.laneIndex;
 
-    // Parse all elements, apply patch, then regenerate the full HTML so that
-    // CSS positioning and GSAP tweens stay consistent.
-    const { elements: existingElements, keyframes } = parseStudioHtml(p.hf.rootHtml);
+    // Parse all HF elements, apply the editor command, then serialize the root
+    // composition through the HyperFrames boundary.
+    const { elements: existingElements, keyframes } = parseRootComposition(p.hf.rootHtml);
 
     // Propagate start changes to linked audio sibling before patching
     let audioStartOverride: { id: string; startTime: number } | null = null;
@@ -508,7 +451,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       ...p.editorMeta,
       clips: { ...p.editorMeta.clips, [id]: newMeta },
     };
-    const rootHtml = regenerateRootHtml(p.hf, updatedElements, keyframes);
+    const rootHtml = serializeRootCompositionHtml(p.hf, updatedElements, keyframes);
     const newProject: Project = {
       ...p,
       hf: { ...p.hf, rootHtml },
@@ -531,9 +474,9 @@ export const useStudio = create<StudioState>((set, get) => ({
     const newClipsMeta = Object.fromEntries(
       Object.entries(p.editorMeta.clips).filter(([clipId]) => !idsToRemove.has(clipId)),
     );
-    const { elements: existingElements, keyframes } = parseStudioHtml(p.hf.rootHtml);
+    const { elements: existingElements, keyframes } = parseRootComposition(p.hf.rootHtml);
     const filteredElements = existingElements.filter((el) => !idsToRemove.has(el.id));
-    const rootHtml = regenerateRootHtml(p.hf, filteredElements, keyframes);
+    const rootHtml = serializeRootCompositionHtml(p.hf, filteredElements, keyframes);
 
     const compositionHtml = { ...p.hf.compositionHtml };
     if (existingMeta?.kind === "character") {
@@ -802,10 +745,10 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     let newHf = { ...p.hf, ...patch };
     if (patch.duration !== undefined || patch.width !== undefined || patch.height !== undefined) {
-      const { elements, keyframes } = parseStudioHtml(p.hf.rootHtml);
+      const { elements, keyframes } = parseRootComposition(p.hf.rootHtml);
       newHf = {
         ...newHf,
-        rootHtml: regenerateRootHtml(newHf, elements, keyframes),
+        rootHtml: serializeRootCompositionHtml(newHf, elements, keyframes),
       };
     }
     const newProject: Project = {

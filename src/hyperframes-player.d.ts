@@ -3,7 +3,6 @@ export interface HyperframesPlayerElement extends HTMLElement {
 }
 
 declare module "react" {
-  // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace JSX {
     interface IntrinsicElements {
       "hyperframes-player": React.HTMLAttributes<HTMLElement> & {

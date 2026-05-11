@@ -64,14 +64,7 @@ async function handleRender(req: IncomingMessage, res: ServerResponse): Promise<
   }
 
   let log = "";
-  log += await runHyperframes([
-    "render",
-    projectDir,
-    "--output",
-    outputPath,
-    "--format",
-    "mp4",
-  ]);
+  log += await runHyperframes(["render", projectDir, "--output", outputPath, "--format", "mp4"]);
 
   results.set(id, { outputPath, createdAt: Date.now(), log });
   sendJson(res, { url: `/api/hyperframes/result/${id}`, log });

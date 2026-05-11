@@ -8,7 +8,9 @@ describe("Stage HyperFrames Studio integration", () => {
   it("uses srcdoc and resolves the inner iframe for @hyperframes/studio hooks", () => {
     const source = readFileSync(stagePath, "utf8");
 
-    expect(source).toContain('import { resolveIframe, useElementPicker } from "@hyperframes/studio"');
+    expect(source).toContain(
+      'import { resolveIframe, useElementPicker } from "@hyperframes/studio"',
+    );
     expect(source).toContain("resolveIframe(playerRef.current)");
     expect(source).toContain("<hyperframes-player");
     expect(source).toContain("srcdoc={resolvedHtml}");

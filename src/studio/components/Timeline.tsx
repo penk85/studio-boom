@@ -87,7 +87,9 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
     };
     const unsub = liveTime.subscribe(update);
     update(usePlayerStore.getState().currentTime);
-    return () => { unsub(); };
+    return () => {
+      unsub();
+    };
   }, []);
 
   const scrollerRef = useRef<HTMLDivElement>(null);
