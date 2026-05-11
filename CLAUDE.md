@@ -116,7 +116,7 @@ Project {
 ```
 
 `rootHtml` and `compositionHtml` are the film. They are valid HyperFrames composition
-HTML, ready to pass directly to the player or write directly to a ZIP.
+HTML, ready to pass directly to the player or stage directly for MP4 rendering.
 
 ### Edit flow
 
@@ -165,7 +165,8 @@ authored and mutated through the same `@hyperframes/core` APIs as any other clip
 
 ### Export
 
-Export is: ZIP the HTML strings + fetch and copy each blob in `assets[]`.
+Export is: stage the HTML strings as a temporary HyperFrames project + fetch and
+copy each blob in `assets[]`.
 
 ```
 rootHtml          → index.html
@@ -215,8 +216,8 @@ ClipEditorMeta {
 | `src/studio/components/Timeline.tsx` | Timeline UI; `PlayerControls` |
 | `src/studio/Studio.tsx` | Calls `useTimelinePlayer()` once; distributes `iframeRef`, `togglePlay`, `seek` |
 | `src/studio/hyperframes/assets.ts` | Generic `project.hf.assets` registration/pruning helpers |
-| `src/studio/hyperframes/html.ts` | Studio Boom HTML canonicalization and parser adapter |
-| `src/studio/export/exporter.ts` | ZIP assembly |
+| `src/studio/hyperframes/html.ts` | Parser adapter for current `@hyperframes/core` boundary behavior |
+| `src/studio/hyperframes/root-composition.ts` | Root composition creation and root metadata updates |
 | `src/studio/export/bake.ts` | Legacy character composition builder (pending character refactor) |
 
 ---
