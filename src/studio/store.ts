@@ -1,6 +1,7 @@
 // Editor state — project, selection, zoom. Playback owned by @hyperframes/studio.
 // Persistence to Dexie happens via explicit save calls (autosave debounced).
 import { create } from "zustand";
+import { addElementToHtml, removeElementFromHtml, updateElementInHtml } from "@hyperframes/core";
 import type { TimelineElement } from "@hyperframes/core";
 import { db, deleteMediaIfUnused, isCurrentProjectShape, uid } from "./db";
 import type {
@@ -20,11 +21,11 @@ import type {
 } from "./types";
 import { deriveEditorClips } from "./types";
 import { pruneHfAssets, registerHfAsset } from "./hyperframes/assets";
+import { parseStudioHtml } from "./hyperframes/html";
 import { normalizeNativeHyperframesHtml } from "./hyperframes/native";
 import {
   createRootCompositionHtml,
-  parseRootComposition,
-  serializeRootCompositionHtml,
+  updateRootCompositionHtml,
 } from "./hyperframes/root-composition";
 
 // ─── Defaults ──────────────────────────────────────────────────────────────────
@@ -130,6 +131,63 @@ function refreshProjectAssets(
   }
 
   return hf !== project.hf ? { ...project, hf, updatedAt: Date.now() } : project;
+}
+
+function normalizeProjectRootHtml(hf: HyperFramesProject, html: string): string {
+  return normalizeNativeHyperframesHtml(html, {
+    width: hf.width,
+    height: hf.height,
+  });
+}
+
+function buildTimelineElement(clip: AnyClip, zIndex: number): TimelineElement {
+  if (clip.kind === "character") {
+    return {
+      id: clip.id,
+      type: "composition",
+      name: clip.name,
+      startTime: clip.start,
+      duration: clip.duration,
+      zIndex,
+      x: clip.x,
+      y: clip.y,
+      src: `compositions/comp_${clip.id}.html`,
+      compositionId: `comp_${clip.id}`,
+      sourceWidth: clip.width,
+      sourceHeight: clip.height,
+    };
+  }
+
+  return {
+    id: clip.id,
+    type: clip.kind,
+    name: clip.name,
+    startTime: clip.start,
+    duration: clip.duration,
+    zIndex,
+    x: clip.x,
+    y: clip.y,
+    src: `asset:${clip.mediaId}`,
+    sourceWidth: clip.width,
+    sourceHeight: clip.height,
+    opacity: clip.opacity,
+  };
+}
+
+function buildElementUpdates(patch: Partial<AnyClip>): Partial<TimelineElement> {
+  const updates: Partial<TimelineElement> = {};
+
+  if (patch.start !== undefined) updates.startTime = patch.start;
+  if (patch.duration !== undefined) updates.duration = patch.duration;
+  if (patch.x !== undefined) updates.x = patch.x;
+  if (patch.y !== undefined) updates.y = patch.y;
+  if (patch.zIndex !== undefined) updates.zIndex = patch.zIndex;
+  if (patch.opacity !== undefined) updates.opacity = patch.opacity;
+  if (patch.name !== undefined) updates.name = patch.name;
+  if (patch.width !== undefined) updates.sourceWidth = patch.width;
+  if (patch.height !== undefined) updates.sourceHeight = patch.height;
+
+  return updates;
 }
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -303,10 +361,6 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     let hf = currentProject.hf;
 
-    // Parse existing HF elements so the root composition remains the source of truth.
-    const { elements: existingElements, keyframes } = parseRootComposition(hf.rootHtml);
-    let newElement: TimelineElement;
-
     if (nextClip.kind === "character") {
       const charClip = nextClip as CharacterClip;
       meta.characterId = charClip.characterId;
@@ -314,46 +368,19 @@ export const useStudio = create<StudioState>((set, get) => ({
       meta.visemes = charClip.visemes;
       meta.motions = charClip.motions;
       meta.autoBlink = charClip.autoBlink;
-
-      const compId = `comp_${nextClip.id}`;
-      newElement = {
-        id: nextClip.id,
-        type: "composition",
-        name: nextClip.name,
-        startTime: nextClip.start,
-        duration: nextClip.duration,
-        zIndex,
-        x: nextClip.x,
-        y: nextClip.y,
-        src: `compositions/${compId}.html`,
-        compositionId: compId,
-        sourceWidth: nextClip.width,
-        sourceHeight: nextClip.height,
-      };
     } else {
       const mediaClip = nextClip as MediaClip;
       meta.mediaId = mediaClip.mediaId;
 
-      newElement = {
-        id: nextClip.id,
-        type: nextClip.kind as "image" | "video" | "audio",
-        name: nextClip.name,
-        startTime: nextClip.start,
-        duration: nextClip.duration,
-        zIndex,
-        x: nextClip.x,
-        y: nextClip.y,
-        src: `asset:${mediaClip.mediaId}`,
-        sourceWidth: nextClip.width,
-        sourceHeight: nextClip.height,
-        opacity: nextClip.opacity,
-      };
-
       hf = registerHfAsset(hf, state.mediaAssets.get(mediaClip.mediaId));
     }
 
-    const nextClipsMeta = { ...currentProject.editorMeta.clips, [nextClip.id]: meta };
-    const rootHtml = serializeRootCompositionHtml(hf, [...existingElements, newElement], keyframes);
+    const { html: nextRootHtml, id: insertedId } = addElementToHtml(
+      hf.rootHtml,
+      buildTimelineElement(nextClip, zIndex),
+    );
+    const nextClipsMeta = { ...currentProject.editorMeta.clips, [insertedId]: meta };
+    const rootHtml = normalizeProjectRootHtml(hf, nextRootHtml);
 
     hf = { ...hf, rootHtml, compositionHtml };
 
@@ -362,7 +389,11 @@ export const useStudio = create<StudioState>((set, get) => ({
       clips: nextClipsMeta,
     };
     const newProject: Project = { ...currentProject, hf, editorMeta, updatedAt: Date.now() };
-    set({ project: newProject, tracks: newProject.editorMeta.tracks, selectedClipId: nextClip.id });
+    set({
+      project: newProject,
+      tracks: newProject.editorMeta.tracks,
+      selectedClipId: insertedId,
+    });
     scheduleSave(get);
   },
 
@@ -392,50 +423,20 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (patch.trackIndex !== undefined) newMeta.uiTrackIndex = patch.trackIndex;
     if (patch.laneIndex !== undefined) newMeta.uiLaneIndex = patch.laneIndex;
 
-    // Parse all HF elements, apply the editor command, then serialize the root
-    // composition through the HyperFrames boundary.
-    const { elements: existingElements, keyframes } = parseRootComposition(p.hf.rootHtml);
+    let rootHtml = updateElementInHtml(p.hf.rootHtml, id, buildElementUpdates(patch));
 
-    // Propagate start changes to linked audio sibling before patching
-    let audioStartOverride: { id: string; startTime: number } | null = null;
     if (patch.start !== undefined) {
+      const { elements } = parseStudioHtml(p.hf.rootHtml);
       const audioClipId = `audio_${id}`;
-      const mainEl = existingElements.find((e) => e.id === id);
-      const audioEl = existingElements.find((e) => e.id === audioClipId);
+      const mainEl = elements.find((element) => element.id === id);
+      const audioEl = elements.find((element) => element.id === audioClipId);
       if (mainEl && audioEl) {
         const startDelta = patch.start - mainEl.startTime;
-        audioStartOverride = {
-          id: audioClipId,
+        rootHtml = updateElementInHtml(rootHtml, audioClipId, {
           startTime: Math.max(0, audioEl.startTime + startDelta),
-        };
+        });
       }
     }
-
-    const updatedElements = existingElements.map((el) => {
-      if (audioStartOverride && el.id === audioStartOverride.id) {
-        return { ...el, startTime: audioStartOverride.startTime };
-      }
-      if (el.id !== id) return el;
-      const updated = { ...el };
-      if (patch.start !== undefined) updated.startTime = patch.start;
-      if (patch.duration !== undefined) updated.duration = patch.duration;
-      if (patch.x !== undefined) updated.x = patch.x;
-      if (patch.y !== undefined) updated.y = patch.y;
-      if (patch.zIndex !== undefined) updated.zIndex = patch.zIndex;
-      if (patch.opacity !== undefined) updated.opacity = patch.opacity;
-      if (patch.name !== undefined) updated.name = patch.name;
-      if (
-        patch.width !== undefined &&
-        (updated as { sourceWidth?: number }).sourceWidth !== undefined
-      )
-        (updated as { sourceWidth?: number }).sourceWidth = patch.width;
-      if (
-        patch.height !== undefined &&
-        (updated as { sourceHeight?: number }).sourceHeight !== undefined
-      )
-        (updated as { sourceHeight?: number }).sourceHeight = patch.height;
-      return updated;
-    });
 
     if (patch.kind === "character" || existingMeta.kind === "character") {
       const charPatch = patch as Partial<CharacterClip>;
@@ -451,10 +452,9 @@ export const useStudio = create<StudioState>((set, get) => ({
       ...p.editorMeta,
       clips: { ...p.editorMeta.clips, [id]: newMeta },
     };
-    const rootHtml = serializeRootCompositionHtml(p.hf, updatedElements, keyframes);
     const newProject: Project = {
       ...p,
-      hf: { ...p.hf, rootHtml },
+      hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
       editorMeta,
       updatedAt: Date.now(),
     };
@@ -474,9 +474,11 @@ export const useStudio = create<StudioState>((set, get) => ({
     const newClipsMeta = Object.fromEntries(
       Object.entries(p.editorMeta.clips).filter(([clipId]) => !idsToRemove.has(clipId)),
     );
-    const { elements: existingElements, keyframes } = parseRootComposition(p.hf.rootHtml);
-    const filteredElements = existingElements.filter((el) => !idsToRemove.has(el.id));
-    const rootHtml = serializeRootCompositionHtml(p.hf, filteredElements, keyframes);
+    let rootHtml = p.hf.rootHtml;
+    for (const clipId of idsToRemove) {
+      rootHtml = removeElementFromHtml(rootHtml, clipId);
+    }
+    rootHtml = normalizeProjectRootHtml(p.hf, rootHtml);
 
     const compositionHtml = { ...p.hf.compositionHtml };
     if (existingMeta?.kind === "character") {
@@ -745,10 +747,9 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     let newHf = { ...p.hf, ...patch };
     if (patch.duration !== undefined || patch.width !== undefined || patch.height !== undefined) {
-      const { elements, keyframes } = parseRootComposition(p.hf.rootHtml);
       newHf = {
         ...newHf,
-        rootHtml: serializeRootCompositionHtml(newHf, elements, keyframes),
+        rootHtml: updateRootCompositionHtml(p.hf.rootHtml, patch),
       };
     }
     const newProject: Project = {

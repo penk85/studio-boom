@@ -1,7 +1,5 @@
 import { generateHyperframesHtml } from "@hyperframes/core";
-import type { Keyframe, TimelineElement } from "@hyperframes/core";
 import type { HyperFramesProject } from "../types";
-import { parseStudioHtml } from "./html";
 import { normalizeNativeHyperframesHtml } from "./native";
 
 export function createRootCompositionHtml(
@@ -10,23 +8,16 @@ export function createRootCompositionHtml(
   width = 1920,
   height = 1080,
 ): string {
-  return serializeRootCompositionHtml({ id, width, height, duration }, []);
-}
-
-export function parseRootComposition(html: string) {
-  return parseStudioHtml(html);
-}
-
-export function serializeRootCompositionHtml(
-  hf: Pick<HyperFramesProject, "id" | "width" | "height" | "duration">,
-  elements: TimelineElement[],
-  keyframes?: Record<string, Keyframe[]>,
-): string {
+  const hf: Pick<HyperFramesProject, "id" | "width" | "height" | "duration"> = {
+    id,
+    width,
+    height,
+    duration,
+  };
   const resolution = hf.width >= hf.height ? "landscape" : "portrait";
-  const html = generateHyperframesHtml(elements, hf.duration, {
+  const html = generateHyperframesHtml([], hf.duration, {
     compositionId: hf.id,
     resolution,
-    keyframes,
     includeStyles: true,
     includeScripts: true,
   });
@@ -34,6 +25,37 @@ export function serializeRootCompositionHtml(
   return normalizeNativeHyperframesHtml(ensureTimelineRegistration(html, hf.id), {
     width: hf.width,
     height: hf.height,
+  });
+}
+
+export function updateRootCompositionHtml(
+  html: string,
+  patch: Partial<Pick<HyperFramesProject, "duration" | "width" | "height">>,
+): string {
+  if (!html || typeof DOMParser === "undefined") return html;
+
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const root = doc.documentElement;
+  const stage = doc.getElementById("stage");
+
+  if (patch.duration !== undefined) {
+    root.setAttribute("data-composition-duration", String(patch.duration));
+    if (stage) stage.setAttribute("data-duration", String(patch.duration));
+  }
+
+  if (patch.width !== undefined) {
+    root.setAttribute("data-composition-width", String(patch.width));
+    if (stage) stage.setAttribute("data-width", String(patch.width));
+  }
+
+  if (patch.height !== undefined) {
+    root.setAttribute("data-composition-height", String(patch.height));
+    if (stage) stage.setAttribute("data-height", String(patch.height));
+  }
+
+  return normalizeNativeHyperframesHtml("<!DOCTYPE html>\n" + root.outerHTML, {
+    width: patch.width,
+    height: patch.height,
   });
 }
 

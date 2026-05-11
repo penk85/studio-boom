@@ -12,9 +12,62 @@ const coreMock = vi.hoisted(() => ({
       resolution?: string;
     };
   }>,
+  addCalls: 0,
+  updateCalls: 0,
+  removeCalls: 0,
 }));
 
 vi.mock("@hyperframes/core", () => {
+  const createClipNode = (
+    doc: Document,
+    element: {
+      id?: string;
+      type?: string;
+      src?: string;
+      name?: string;
+      startTime?: number;
+      duration?: number;
+      zIndex?: number;
+      x?: number;
+      y?: number;
+      sourceWidth?: number;
+      sourceHeight?: number;
+      opacity?: number;
+      compositionId?: string;
+    },
+  ) => {
+    const tagName =
+      element.type === "audio"
+        ? "audio"
+        : element.type === "video"
+          ? "video"
+          : element.type === "composition"
+            ? "div"
+            : "img";
+    const node = doc.createElement(tagName);
+    node.setAttribute("id", element.id ?? "generated-id");
+    node.setAttribute("data-start", String(element.startTime ?? 0));
+    node.setAttribute("data-duration", String(element.duration ?? 5));
+    node.setAttribute("data-track-index", String(element.zIndex ?? 0));
+    node.setAttribute("data-name", element.name ?? element.id ?? "");
+    if (element.src) node.setAttribute("src", element.src);
+    if (element.x !== undefined) node.setAttribute("data-x", String(element.x));
+    if (element.y !== undefined) node.setAttribute("data-y", String(element.y));
+    if (element.sourceWidth !== undefined)
+      node.setAttribute("data-source-width", String(element.sourceWidth));
+    if (element.sourceHeight !== undefined)
+      node.setAttribute("data-source-height", String(element.sourceHeight));
+    if (element.opacity !== undefined) node.setAttribute("data-opacity", String(element.opacity));
+    if (element.type === "composition") {
+      node.setAttribute("data-type", "composition");
+      node.setAttribute("data-composition-id", element.compositionId ?? "");
+      if (element.src) node.setAttribute("data-composition-src", element.src);
+    }
+    return node;
+  };
+
+  const serializeDoc = (doc: Document) => "<!DOCTYPE html>" + doc.documentElement.outerHTML;
+
   const makeHtml = (
     elements: Array<{
       id: string;
@@ -61,29 +114,111 @@ vi.mock("@hyperframes/core", () => {
       coreMock.generateCalls.push({ elements, duration, opts });
       return makeHtml(elements, opts.compositionId ?? "proj-1", duration, opts);
     },
-    addElementToHtml: (html: string, el: { id: string }) => ({
-      html: html.replace("</div></body>", `<div id="${el.id}"></div></div></body>`),
-      id: el.id,
-    }),
-    updateElementInHtml: (html: string) => html,
-    removeElementFromHtml: (html: string) => html,
+    addElementToHtml: (
+      html: string,
+      el: {
+        id?: string;
+        type?: string;
+        src?: string;
+        name?: string;
+        startTime?: number;
+        duration?: number;
+        zIndex?: number;
+        x?: number;
+        y?: number;
+        sourceWidth?: number;
+        sourceHeight?: number;
+        opacity?: number;
+        compositionId?: string;
+      },
+    ) => {
+      coreMock.addCalls += 1;
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      doc.getElementById("stage")?.appendChild(createClipNode(doc, el));
+      return { html: serializeDoc(doc), id: el.id ?? "generated-id" };
+    },
+    updateElementInHtml: (
+      html: string,
+      elementId: string,
+      updates: {
+        startTime?: number;
+        duration?: number;
+        zIndex?: number;
+        name?: string;
+        src?: string;
+        sourceWidth?: number;
+        sourceHeight?: number;
+        x?: number;
+        y?: number;
+        opacity?: number;
+      },
+    ) => {
+      coreMock.updateCalls += 1;
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const node = doc.getElementById(elementId);
+      if (!node) return html;
+      if (updates.startTime !== undefined)
+        node.setAttribute("data-start", String(updates.startTime));
+      if (updates.duration !== undefined)
+        node.setAttribute("data-duration", String(updates.duration));
+      if (updates.zIndex !== undefined)
+        node.setAttribute("data-track-index", String(updates.zIndex));
+      if (updates.name !== undefined) node.setAttribute("data-name", updates.name);
+      if (updates.src !== undefined) node.setAttribute("src", updates.src);
+      if (updates.sourceWidth !== undefined)
+        node.setAttribute("data-source-width", String(updates.sourceWidth));
+      if (updates.sourceHeight !== undefined)
+        node.setAttribute("data-source-height", String(updates.sourceHeight));
+      if (updates.x !== undefined) node.setAttribute("data-x", String(updates.x));
+      if (updates.y !== undefined) node.setAttribute("data-y", String(updates.y));
+      if (updates.opacity !== undefined) node.setAttribute("data-opacity", String(updates.opacity));
+      return serializeDoc(doc);
+    },
+    removeElementFromHtml: (html: string, elementId: string) => {
+      coreMock.removeCalls += 1;
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      doc.getElementById(elementId)?.remove();
+      return serializeDoc(doc);
+    },
     parseHtml: (html: string) => {
-      // Match only standalone id= attributes (space or < before "id="), not data-*-id=
-      const ids = [...html.matchAll(/(?:^|[\s<])id="([^"]+)"/g)]
-        .map((m) => m[1])
-        .filter((id) => id !== "stage");
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const stage = doc.getElementById("stage");
+      const elements = Array.from(stage?.children ?? []).map((node) => {
+        const element = node as HTMLElement;
+        const start = Number(element.getAttribute("data-start") ?? 0);
+        const durationAttr = element.getAttribute("data-duration");
+        const duration = durationAttr ? Number(durationAttr) : 5;
+        const zIndex = Number(
+          element.getAttribute("data-track-index") ?? element.getAttribute("data-layer") ?? 0,
+        );
+        const type =
+          element.getAttribute("data-type") === "composition"
+            ? "composition"
+            : element.tagName.toLowerCase() === "audio"
+              ? "audio"
+              : element.tagName.toLowerCase() === "video"
+                ? "video"
+                : "image";
+        return {
+          id: element.id,
+          type,
+          name: element.getAttribute("data-name") ?? element.id,
+          startTime: start,
+          duration,
+          zIndex,
+          src:
+            element.getAttribute("src") ??
+            element.getAttribute("data-composition-src") ??
+            `asset:${element.id}`,
+          sourceWidth: Number(element.getAttribute("data-source-width") ?? 300),
+          sourceHeight: Number(element.getAttribute("data-source-height") ?? 450),
+          x: Number(element.getAttribute("data-x") ?? 0),
+          y: Number(element.getAttribute("data-y") ?? 0),
+          opacity: Number(element.getAttribute("data-opacity") ?? 1),
+        };
+      });
       return {
-        elements: ids.map((id) => ({
-          id,
-          type: "image",
-          name: id,
-          startTime: 0,
-          duration: 5,
-          zIndex: 0,
-          src: `asset:${id}`,
-          sourceWidth: 300,
-          sourceHeight: 450,
-        })),
+        elements,
         keyframes: {},
       };
     },
@@ -133,6 +268,9 @@ function resetStudioStore() {
 beforeEach(() => {
   vi.useFakeTimers();
   coreMock.generateCalls.length = 0;
+  coreMock.addCalls = 0;
+  coreMock.updateCalls = 0;
+  coreMock.removeCalls = 0;
   resetStudioStore();
 });
 
@@ -269,6 +407,32 @@ describe("createBlankProject", () => {
       includeStyles: true,
       includeScripts: true,
     });
+  });
+
+  it("mutates root HTML through core helpers instead of regenerating the composition", () => {
+    const project = createBlankProject("Direct mutation");
+    const asset = makeMediaAsset("media-2", "Image");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([[asset.id, asset]]),
+    });
+
+    useStudio.getState().addMediaToTimeline(asset);
+    const clipId = useStudio.getState().selectedClipId!;
+    useStudio.getState().updateClip(clipId, { start: 2, duration: 6, x: 24, y: 12 });
+    useStudio.getState().setProjectMeta({ duration: 45, width: 1280, height: 720 });
+    useStudio.getState().removeClip(clipId);
+
+    const rootHtml = useStudio.getState().project!.hf.rootHtml;
+    expect(coreMock.generateCalls).toHaveLength(1);
+    expect(coreMock.addCalls).toBe(1);
+    expect(coreMock.updateCalls).toBeGreaterThanOrEqual(1);
+    expect(coreMock.removeCalls).toBe(2);
+    expect(rootHtml).toContain('data-composition-duration="45"');
+    expect(rootHtml).toContain('data-width="1280"');
+    expect(rootHtml).toContain('data-height="720"');
+    expect(rootHtml).not.toContain(clipId);
   });
 });
 
