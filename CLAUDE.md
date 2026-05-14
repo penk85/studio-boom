@@ -225,6 +225,7 @@ ClipEditorMeta {
 | `src/studio/Studio.tsx` | Calls `useTimelinePlayer()` once; distributes `iframeRef`, `togglePlay`, `seek` |
 | `src/studio/hyperframes/assets.ts` | Generic `project.hf.assets` registration/pruning helpers |
 | `src/studio/hyperframes/html.ts` | Parser adapter for current `@hyperframes/core` boundary behavior |
+| `src/studio/hyperframes/native.ts` | Native HTML normalization boundary for root/stage/viewport metadata and export parity |
 | `src/studio/hyperframes/player-editing.ts` | Live player edit boundary for real iframe elements during stage manipulation |
 | `src/studio/hyperframes/root-composition.ts` | Root composition creation and root metadata updates |
 | `src/studio/export/bake.ts` | Legacy character composition builder (pending character refactor) |

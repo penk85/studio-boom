@@ -90,6 +90,11 @@ Zustand (in-memory editor state)
   updateElementInHtml()      ← patches a clip element in rootHtml
   removeElementFromHtml()    ← removes a clip element from rootHtml
   parseHtml()                ← reads elements back from rootHtml
+
+Studio HyperFrames boundaries
+  parseStudioHtml()                 ← reads native/rootHtml clip data for the editor
+  normalizeNativeHyperframesHtml()  ← keeps root, stage, and viewport metadata aligned
+  player-editing                    ← previews live drag/resize on real iframe elements
 ```
 
 ### Edit flow

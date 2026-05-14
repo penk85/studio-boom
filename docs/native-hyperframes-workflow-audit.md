@@ -20,13 +20,14 @@ movie. `editorMeta` is editor-only intent and UI state.
 - Stage interaction adapter: `player-editing.ts` previews drag/resize on the real
   player iframe element, using `PlayerAPI` first and a direct DOM fallback when
   the package API does not expose a size preview.
-- Upstream boundary adapter: `normalizeNativeHyperframesHtml` normalizes HTML from
-  current `@hyperframes/core` helpers into the native shape expected by the
-  CLI/runtime without reading editor state. It also keeps root composition
-  dimensions, stage dimensions, and viewport metadata aligned for export.
-- Upstream boundary adapter: `parseStudioHtml` patches current parser output from
-  native `data-duration`/`data-track-index`/sizing attrs until `@hyperframes/core`
-  reads those attrs directly.
+- Upstream boundary adapter: `native.ts` / `normalizeNativeHyperframesHtml`
+  normalizes HTML from current `@hyperframes/core` helpers into the native shape
+  expected by the CLI/runtime without reading editor state. It also keeps root
+  composition dimensions, stage dimensions, and viewport metadata aligned for
+  export.
+- Upstream boundary adapter: `html.ts` / `parseStudioHtml` patches current parser
+  output from native `data-duration`/`data-track-index`/sizing attrs until
+  `@hyperframes/core` reads those attrs directly.
 - Root composition boundary: `root-composition.ts` owns new root composition creation and direct root metadata updates without rebuilding the whole composition.
 - Transitional character bridge: `export/bake.ts` remains isolated for the current character pipeline and must not grow.
 - Removable extra surface: ZIP download support has been removed; MP4 download is the only user-facing export path.
