@@ -1,7 +1,7 @@
 // Editor state — project, selection, zoom. Playback owned by @hyperframes/studio.
 // Persistence to Dexie happens via explicit save calls (autosave debounced).
 import { create } from "zustand";
-import { addElementToHtml, removeElementFromHtml, updateElementInHtml } from "@hyperframes/core";
+import { removeElementFromHtml } from "@hyperframes/core";
 import type { TimelineElement } from "@hyperframes/core";
 import { db, deleteMediaIfUnused, isCurrentProjectShape, uid } from "./db";
 import type {
@@ -21,7 +21,11 @@ import type {
 } from "./types";
 import { deriveEditorClips } from "./types";
 import { pruneHfAssets, registerHfAsset } from "./hyperframes/assets";
-import { parseStudioHtml } from "./hyperframes/html";
+import {
+  addStudioElementToHtml,
+  parseStudioHtml,
+  updateStudioElementInHtml,
+} from "./hyperframes/html";
 import { normalizeNativeHyperframesHtml } from "./hyperframes/native";
 import {
   createRootCompositionHtml,
@@ -375,7 +379,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       hf = registerHfAsset(hf, state.mediaAssets.get(mediaClip.mediaId));
     }
 
-    const { html: nextRootHtml, id: insertedId } = addElementToHtml(
+    const { html: nextRootHtml, id: insertedId } = addStudioElementToHtml(
       hf.rootHtml,
       buildTimelineElement(nextClip, zIndex),
     );
@@ -423,7 +427,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (patch.trackIndex !== undefined) newMeta.uiTrackIndex = patch.trackIndex;
     if (patch.laneIndex !== undefined) newMeta.uiLaneIndex = patch.laneIndex;
 
-    let rootHtml = updateElementInHtml(p.hf.rootHtml, id, buildElementUpdates(patch));
+    let rootHtml = updateStudioElementInHtml(p.hf.rootHtml, id, buildElementUpdates(patch));
 
     if (patch.start !== undefined) {
       const { elements } = parseStudioHtml(p.hf.rootHtml);
@@ -432,7 +436,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       const audioEl = elements.find((element) => element.id === audioClipId);
       if (mainEl && audioEl) {
         const startDelta = patch.start - mainEl.startTime;
-        rootHtml = updateElementInHtml(rootHtml, audioClipId, {
+        rootHtml = updateStudioElementInHtml(rootHtml, audioClipId, {
           startTime: Math.max(0, audioEl.startTime + startDelta),
         });
       }

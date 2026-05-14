@@ -8,6 +8,11 @@ interface NativeHtmlOptions {
   height?: number;
 }
 
+interface NativeDimensions {
+  width: number;
+  height: number;
+}
+
 export function normalizeNativeHyperframesHtml(
   html: string,
   options: NativeHtmlOptions = {},
@@ -53,32 +58,78 @@ function normalizeCompositionRoot(
     stage.setAttribute("data-duration", duration);
   }
 
-  const dimensions = resolveDimensions(root, options);
+  const dimensions = resolveDimensions(root, stage, options);
   if (dimensions) {
-    stage.setAttribute("data-width", stage.getAttribute("data-width") || String(dimensions.width));
-    stage.setAttribute(
-      "data-height",
-      stage.getAttribute("data-height") || String(dimensions.height),
-    );
+    syncRootDimensions(root, dimensions);
+    syncStageDimensions(stage, dimensions);
+    syncViewportMeta(doc, dimensions);
   }
 }
 
 function resolveDimensions(
   root: HTMLElement,
+  stage: HTMLElement,
   options: NativeHtmlOptions,
-): { width: number; height: number } | null {
-  if (options.width && options.height) {
-    return { width: options.width, height: options.height };
-  }
+): NativeDimensions | null {
+  const fallback = resolveResolutionDimensions(root);
+  const width =
+    parsePositiveNumber(options.width) ??
+    parseFiniteNumber(root.getAttribute("data-width")) ??
+    parseFiniteNumber(root.getAttribute("data-composition-width")) ??
+    parseFiniteNumber(stage.getAttribute("data-width")) ??
+    fallback?.width ??
+    null;
+  const height =
+    parsePositiveNumber(options.height) ??
+    parseFiniteNumber(root.getAttribute("data-height")) ??
+    parseFiniteNumber(root.getAttribute("data-composition-height")) ??
+    parseFiniteNumber(stage.getAttribute("data-height")) ??
+    fallback?.height ??
+    null;
 
-  const width = parseFiniteNumber(root.getAttribute("data-composition-width"));
-  const height = parseFiniteNumber(root.getAttribute("data-composition-height"));
   if (width !== null && height !== null) return { width, height };
+  return null;
+}
 
+function resolveResolutionDimensions(root: HTMLElement): NativeDimensions | null {
   const resolution = root.getAttribute("data-resolution");
   if (resolution === "landscape") return { width: 1920, height: 1080 };
   if (resolution === "portrait") return { width: 1080, height: 1920 };
   return null;
+}
+
+function syncRootDimensions(root: HTMLElement, dimensions: NativeDimensions): void {
+  root.setAttribute("data-width", String(dimensions.width));
+  root.setAttribute("data-height", String(dimensions.height));
+  root.setAttribute("data-composition-width", String(dimensions.width));
+  root.setAttribute("data-composition-height", String(dimensions.height));
+  root.setAttribute(
+    "data-resolution",
+    dimensions.width >= dimensions.height ? "landscape" : "portrait",
+  );
+}
+
+function syncStageDimensions(stage: HTMLElement, dimensions: NativeDimensions): void {
+  stage.setAttribute("data-width", String(dimensions.width));
+  stage.setAttribute("data-height", String(dimensions.height));
+  stage.style.width = `${dimensions.width}px`;
+  stage.style.height = `${dimensions.height}px`;
+}
+
+function syncViewportMeta(doc: Document, dimensions: NativeDimensions): void {
+  let head = doc.head;
+  if (!head) {
+    head = doc.createElement("head");
+    doc.documentElement.insertBefore(head, doc.body ?? null);
+  }
+
+  let viewport = head.querySelector<HTMLMetaElement>('meta[name="viewport"]');
+  if (!viewport) {
+    viewport = doc.createElement("meta");
+    viewport.setAttribute("name", "viewport");
+    head.appendChild(viewport);
+  }
+  viewport.setAttribute("content", `width=${dimensions.width}, height=${dimensions.height}`);
 }
 
 function normalizeTimedElement(el: HTMLElement): void {
@@ -121,4 +172,8 @@ function parseFiniteNumber(value: string | null): number | null {
   if (value === null || value.trim() === "") return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parsePositiveNumber(value: number | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }

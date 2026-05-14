@@ -24,6 +24,7 @@ const TRACK_HEIGHT = 44;
 const MOTION_ROW_HEIGHT = 28;
 const MOTION_PARENT_HEIGHT = 24;
 const RULER_HEIGHT = 28;
+const CLIP_DRAG_THRESHOLD_PX = 4;
 const MOTION_CATEGORY_ORDER: MotionCategory[] = [
   "expression",
   "headTurn",
@@ -456,10 +457,14 @@ function ClipBlock({
     const ostart = clip.start;
     const olane = lane;
     const oLaneTop = laneTops[olane] ?? olane * TRACK_HEIGHT;
+    let dragging = false;
     const move = (ev: MouseEvent) => {
+      const dx = ev.clientX - sx;
+      const dy = ev.clientY - sy;
+      if (!dragging && Math.hypot(dx, dy) < CLIP_DRAG_THRESHOLD_PX) return;
+      dragging = true;
       const ns = Math.max(0, Math.min(duration - clip.duration, ostart + (ev.clientX - sx) / zoom));
       // Snap vertical drag to nearest lane within the track.
-      const dy = ev.clientY - sy;
       const newLane = nearestLaneIndex(laneTops, oLaneTop + dy + TRACK_HEIGHT / 2);
       onChange({ start: ns, laneIndex: newLane });
     };
@@ -510,7 +515,12 @@ function ClipBlock({
 
   return (
     <div
+      data-timeline-clip-id={clip.id}
       onMouseDown={onMouseDown}
+      onClick={(e) => {
+        e.stopPropagation();
+        onSelect();
+      }}
       onKeyDown={(e) => {
         if (linkedAudio) return;
         if (e.key === "Delete" || e.key === "Backspace") onDelete();

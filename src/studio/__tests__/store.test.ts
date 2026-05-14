@@ -401,6 +401,11 @@ describe("createBlankProject", () => {
     expect(rootHtml).toContain('data-start="0"');
     expect(rootHtml).toContain('data-duration="4"');
     expect(rootHtml).toContain('data-track-index="0"');
+    expect(rootHtml).toContain('data-x="910"');
+    expect(rootHtml).toContain('data-y="490"');
+    expect(rootHtml).toContain('data-width="100"');
+    expect(rootHtml).toContain('data-height="100"');
+    expect(rootHtml).toContain("translate(910px, 490px)");
     expect(rootHtml).not.toContain("data-end=");
     expect(rootHtml).not.toContain("data-layer=");
     expect(coreMock.generateCalls.at(-1)?.opts).toMatchObject({
@@ -433,6 +438,48 @@ describe("createBlankProject", () => {
     expect(rootHtml).toContain('data-width="1280"');
     expect(rootHtml).toContain('data-height="720"');
     expect(rootHtml).not.toContain(clipId);
+  });
+
+  it("persists x and y edits through updateElementInHtml", () => {
+    const project = createBlankProject("Position update");
+    const asset = makeMediaAsset("media-xy", "Sprite");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([[asset.id, asset]]),
+    });
+
+    useStudio.getState().addMediaToTimeline(asset);
+    const clipId = useStudio.getState().selectedClipId!;
+
+    useStudio.getState().updateClip(clipId, { x: 128, y: 96 });
+
+    const rootHtml = useStudio.getState().project!.hf.rootHtml;
+    expect(coreMock.updateCalls).toBeGreaterThanOrEqual(1);
+    expect(rootHtml).toContain('data-x="128"');
+    expect(rootHtml).toContain('data-y="96"');
+  });
+
+  it("persists width and height edits through updateElementInHtml", () => {
+    const project = createBlankProject("Size update");
+    const asset = makeMediaAsset("media-size", "Sprite");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([[asset.id, asset]]),
+    });
+
+    useStudio.getState().addMediaToTimeline(asset);
+    const clipId = useStudio.getState().selectedClipId!;
+
+    useStudio.getState().updateClip(clipId, { width: 320, height: 180 });
+
+    const rootHtml = useStudio.getState().project!.hf.rootHtml;
+    expect(coreMock.updateCalls).toBeGreaterThanOrEqual(1);
+    expect(rootHtml).toContain('data-source-width="320"');
+    expect(rootHtml).toContain('data-source-height="180"');
+    expect(rootHtml).toContain('data-width="320"');
+    expect(rootHtml).toContain('data-height="180"');
   });
 });
 

@@ -101,4 +101,31 @@ describe("buildHyperframesProjectFiles", () => {
     );
     expect(files.binaryFiles.map((file) => file.path)).toEqual(["assets/image-1.png"]);
   });
+
+  it("stages root composition dimensions where the HyperFrames renderer reads them", async () => {
+    mediaRows.set("image-1", new Blob(["png"], { type: "image/png" }));
+    const { buildHyperframesProjectFiles } = await import("../project-files");
+    const project = makeProject();
+    project.hf.width = 1080;
+    project.hf.height = 1920;
+    project.hf.rootHtml = project.hf.rootHtml.replace(
+      "<html data-composition-id",
+      '<html data-resolution="landscape" data-width="1920" data-height="1080" data-composition-id',
+    );
+
+    const files = await buildHyperframesProjectFiles(project);
+    const indexHtml = files.textFiles.find((file) => file.path === "index.html")?.contents ?? "";
+    const doc = new DOMParser().parseFromString(indexHtml, "text/html");
+    const root = doc.documentElement;
+    const stage = doc.getElementById("stage")!;
+
+    expect(root.getAttribute("data-width")).toBe("1080");
+    expect(root.getAttribute("data-height")).toBe("1920");
+    expect(root.getAttribute("data-resolution")).toBe("portrait");
+    expect(stage.getAttribute("data-width")).toBe("1080");
+    expect(stage.getAttribute("data-height")).toBe("1920");
+    expect(doc.querySelector('meta[name="viewport"]')?.getAttribute("content")).toBe(
+      "width=1080, height=1920",
+    );
+  });
 });
