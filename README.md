@@ -33,6 +33,9 @@ areas are still being shaped.
 - Generating ElevenLabs voice lines and lip-sync timing.
 - Stage preview via the local `<hyperframes-player srcdoc>` adapter — the same
   HTML staged for MP4 rendering, previewed directly in the browser.
+- Stage selection, drag, and resize for visual clips. React draws editor chrome
+  only; the selected object remains the real HyperFrames element inside the
+  player iframe, and commits persist back to `project.hf.rootHtml`.
 - Playback controls (play, pause, seek) wired through `useTimelinePlayer`.
 - MP4 download via the HyperFrames CLI render path.
 
@@ -93,14 +96,16 @@ Zustand (in-memory editor state)
 
 ```
 User action (add clip, drag, resize, change timing)
-  → @hyperframes/core HTML mutation → updated rootHtml
+  → @hyperframes/core HTML mutation / Studio boundary adapter → updated rootHtml
   → store saves rootHtml to Dexie (debounced)
   → Stage resolves editor-only asset placeholders → player iframe re-renders
 ```
 
-For live drag preview (no reload), the `PlayerAPI` on
-`iframeRef.current.contentWindow.__player` provides `previewElementPosition` and
-similar methods that update the player without reloading the HTML.
+For live stage manipulation, Studio Boom talks to the real player iframe through a
+small `player-editing` boundary. It uses HyperFrames `PlayerAPI` methods where
+available, and falls back to updating the real iframe DOM element for editor-time
+preview. On release, `updateClip` persists the final position and size into
+canonical `rootHtml`.
 
 ### Stage
 
@@ -108,8 +113,12 @@ The Stage component resolves `asset:ID` placeholders to Dexie blob URLs and pass
 the resulting complete HTML to `<hyperframes-player srcdoc>`. It bridges the
 player's inner iframe with `@hyperframes/studio`'s `resolveIframe`, so the single
 `useTimelinePlayer` instance and `useElementPicker` still drive the real
-HyperFrames iframe. There are no React overlay divs drawing copies of what the
-player already renders.
+HyperFrames iframe.
+
+React may draw editor chrome on top of the player — selection outlines, resize
+handles, and the small move control — but it must not draw duplicate media or
+content. The selected and edited object remains the real HyperFrames element
+inside `project.hf.rootHtml`.
 
 Shader transition support is intentionally not configured in the Studio Boom
 stage yet. Standard HyperFrames playback, GSAP animation, media, and non-shader
@@ -151,7 +160,8 @@ npm run format    # Prettier
 2. Use the Library panel to upload media or build a character.
 3. Drag media or characters onto the timeline.
 4. Select a clip on the stage or timeline.
-5. Use the Inspector to adjust timing, position, size, opacity, motion, or lip sync.
+5. Drag or resize selected visual clips on the stage, or use the Inspector to
+   adjust timing, position, size, opacity, motion, or lip sync.
 6. Use Save to checkpoint locally.
 
 ---

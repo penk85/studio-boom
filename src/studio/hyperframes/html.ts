@@ -159,6 +159,10 @@ function patchElementVisualStyle(el: HTMLElement, updates: StudioElementUpdates)
 
   if (el.tagName === "IMG" || el.tagName === "VIDEO") {
     el.style.objectFit = el.style.objectFit || "contain";
+    if (updates.sourceWidth !== undefined || updates.sourceHeight !== undefined) {
+      el.style.maxWidth = "none";
+      el.style.maxHeight = "none";
+    }
   }
 
   const x = updates.x ?? parseFiniteNumber(el.getAttribute("data-x"));

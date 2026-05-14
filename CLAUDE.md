@@ -121,15 +121,19 @@ HTML, ready to pass directly to the player or stage directly for MP4 rendering.
 ### Edit flow
 
 ```
-User action (drag clip, change duration, move on stage)
+User action (add clip, drag, resize, change timing)
   → call updateElementInHtml / addElementToHtml / removeElementFromHtml
-    from @hyperframes/core to mutate rootHtml
+    from @hyperframes/core through Studio boundary adapters to mutate rootHtml
   → store dispatches updateRootHtml(newHtml) → Dexie save (debounced)
   → Stage effect resolves editor asset placeholders → player iframe re-renders
 ```
 
-For live drag preview (no reload), use `PlayerAPI` via
-`iframeRef.current.contentWindow.__player.previewElementPosition(id, x, y)`.
+For live stage preview without reloading, use the local player-editing boundary.
+It tries `PlayerAPI` first, then falls back to updating the real element in the
+player iframe. Do not draw a React copy of the clip to fake movement or resize.
+On release, commit through `updateClip`, which persists `x`/`y` and
+`width`/`height` into `rootHtml` using `TimelineElement` fields
+(`sourceWidth`/`sourceHeight`).
 
 ### Stage
 
@@ -150,8 +154,12 @@ dedicated shader test composition and the standard preview/export path is stable
 `useElementPicker(iframeRef)` handles click-to-select inside the iframe. Its
 `onSyncFiles` callback commits any in-iframe edits back to `rootHtml`.
 
-**No React overlays on top of the player.** Selection, resize, and drag are handled
-through the HyperFrames player API and `useElementPicker`, not React divs.
+React overlays are allowed only as editor chrome: selection outlines, resize
+handles, move controls, labels, and other non-rendered affordances. They must not
+draw duplicate media/content or become a second preview renderer. The selected and
+edited object remains the real HyperFrames element inside the player iframe.
+Stage drag/resize should preview through the player-editing boundary and commit
+through `updateClip`.
 
 ### Character compositions
 
@@ -212,11 +220,12 @@ ClipEditorMeta {
 | `src/studio/db.ts` | Dexie: project and blob persistence |
 | `src/studio/character/` | Character builder utilities and rig definitions |
 | `src/studio/lipsync/elevenlabs.ts` | Voice generation; updates `editorMeta` |
-| `src/studio/components/Stage.tsx` | HyperFrames player iframe via `srcdoc`, `resolveIframe`, `useElementPicker`, no React overlays |
+| `src/studio/components/Stage.tsx` | HyperFrames player iframe via `srcdoc`, `resolveIframe`, `useElementPicker`, editor chrome only |
 | `src/studio/components/Timeline.tsx` | Timeline UI; `PlayerControls` |
 | `src/studio/Studio.tsx` | Calls `useTimelinePlayer()` once; distributes `iframeRef`, `togglePlay`, `seek` |
 | `src/studio/hyperframes/assets.ts` | Generic `project.hf.assets` registration/pruning helpers |
 | `src/studio/hyperframes/html.ts` | Parser adapter for current `@hyperframes/core` boundary behavior |
+| `src/studio/hyperframes/player-editing.ts` | Live player edit boundary for real iframe elements during stage manipulation |
 | `src/studio/hyperframes/root-composition.ts` | Root composition creation and root metadata updates |
 | `src/studio/export/bake.ts` | Legacy character composition builder (pending character refactor) |
 
@@ -224,8 +233,9 @@ ClipEditorMeta {
 
 ## Rules
 
-- Never use old HTML attributes (`data-end`, `data-layer`, `data-name`). The format
-  is `@hyperframes/core`'s native format: `data-duration`, `data-track-index`, etc.
+- Never persist old timing/layer attributes (`data-end`, `data-layer`) as the
+  canonical format. Normalize to `data-duration`, `data-track-index`, etc.
+  `data-name` is allowed for clip labels.
 - Never call `generateHyperframesHtml` with a shadow element list derived from React
   state. The source of truth is `rootHtml`.
 - Never create a second `useTimelinePlayer()` call. It is called once in `Studio.tsx`

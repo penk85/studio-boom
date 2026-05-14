@@ -12,6 +12,13 @@ export type PlayerWindow = Window & {
   };
 };
 
+export interface ElementRectPatch {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export function getPlayerApi(iframe: HTMLIFrameElement | null): PlayerAPI | undefined {
   return (iframe?.contentWindow as PlayerWindow | null)?.__player;
 }
@@ -38,6 +45,24 @@ export function commitElementPosition(
 ): boolean {
   const usedNativeApi = callNativePositionCommit(iframe, elementId, x, y);
   return setElementPositionInPlayerDom(iframe, elementId, x, y, true) || usedNativeApi;
+}
+
+export function previewElementRect(
+  iframe: HTMLIFrameElement | null,
+  elementId: string,
+  rect: ElementRectPatch,
+): boolean {
+  const usedPositionPreview = previewElementPosition(iframe, elementId, rect.x, rect.y);
+  return setElementSizeInPlayerDom(iframe, elementId, rect, false) || usedPositionPreview;
+}
+
+export function commitElementRect(
+  iframe: HTMLIFrameElement | null,
+  elementId: string,
+  rect: ElementRectPatch,
+): boolean {
+  const usedPositionCommit = commitElementPosition(iframe, elementId, rect.x, rect.y);
+  return setElementSizeInPlayerDom(iframe, elementId, rect, true) || usedPositionCommit;
 }
 
 function callNativePositionPreview(
@@ -118,4 +143,39 @@ function setElementPositionInPlayerDom(
   }
 
   return false;
+}
+
+function setElementSizeInPlayerDom(
+  iframe: HTMLIFrameElement | null,
+  elementId: string,
+  rect: ElementRectPatch,
+  persistAttrs: boolean,
+): boolean {
+  if (!iframe) return false;
+
+  try {
+    const element = iframe.contentDocument?.getElementById(elementId);
+    if (!element) return false;
+
+    const width = Math.max(1, rect.width);
+    const height = Math.max(1, rect.height);
+
+    if (persistAttrs) {
+      element.setAttribute("data-source-width", String(width));
+      element.setAttribute("data-source-height", String(height));
+      element.setAttribute("data-width", String(width));
+      element.setAttribute("data-height", String(height));
+    }
+
+    const style = (element as HTMLElement).style;
+    if (!style) return false;
+
+    style.width = `${width}px`;
+    style.height = `${height}px`;
+    style.maxWidth = "none";
+    style.maxHeight = "none";
+    return true;
+  } catch {
+    return false;
+  }
 }

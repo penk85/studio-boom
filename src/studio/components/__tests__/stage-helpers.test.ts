@@ -6,8 +6,10 @@ import {
   pointerDeltaToComposition,
   pixelBoundsToRenderedRect,
   resizeCompositionRect,
+  roundCompositionRect,
   resolvePickedClipId,
   resolveTargetClipId,
+  scaleCompositionRectFromHandleRect,
 } from "../stage-helpers";
 
 describe("stage helpers", () => {
@@ -166,6 +168,25 @@ describe("stage helpers", () => {
         preserveAspect: true,
       }),
     ).toEqual({ x: 120, y: 110, width: 60, height: 30 });
+  });
+
+  it("scales the full clip box from a visible-pixel handle rect", () => {
+    expect(
+      scaleCompositionRectFromHandleRect(
+        { x: 100, y: 100, width: 200, height: 200 },
+        { x: 150, y: 150, width: 100, height: 100 },
+        { x: 150, y: 150, width: 150, height: 150 },
+      ),
+    ).toEqual({ x: 75, y: 75, width: 300, height: 300 });
+  });
+
+  it("rounds committed resize values to composition pixels", () => {
+    expect(roundCompositionRect({ x: 10.2, y: 20.7, width: 99.5, height: 0.2 })).toEqual({
+      x: 10,
+      y: 21,
+      width: 100,
+      height: 1,
+    });
   });
 
   it("resolves nested picked nodes back to the owning clip id", () => {

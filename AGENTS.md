@@ -16,8 +16,8 @@ Protect this flow:
 editorMeta
   editable creative intent
 
-bake helpers
-  convert intent into renderable HyperFrames data
+bake / boundary helpers
+  convert intent into renderable HyperFrames data where still needed
 
 project.hf
   preview and export source of truth
@@ -25,3 +25,7 @@ project.hf
 
 Do not add a second preview/export renderer, and do not make export a late compiler
 from React UI state into HyperFrames.
+
+React editor chrome is allowed for selection outlines, handles, and controls, but
+it must not draw duplicate media or preview content. Stage edits should manipulate
+the real HyperFrames element and persist through `project.hf.rootHtml`.

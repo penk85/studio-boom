@@ -31,6 +31,8 @@ describe("parseStudioHtml", () => {
     expect(html).toContain('data-width="320"');
     expect(html).toContain('data-height="180"');
     expect(html).toContain("translate(128px, 96px)");
+    expect(html).toContain("max-width: none");
+    expect(html).toContain("max-height: none");
 
     expect(parseStudioHtml(html).elements[0]).toMatchObject({
       id: "image-1",
@@ -135,6 +137,8 @@ describe("parseStudioHtml", () => {
     expect(updated).toContain('data-height="180"');
     expect(updated).toContain('data-opacity="0.75"');
     expect(updated).toContain("translate(128px, 96px)");
+    expect(updated).toContain("max-width: none");
+    expect(updated).toContain("max-height: none");
 
     expect(parseStudioHtml(updated).elements[0]).toMatchObject({
       x: 128,

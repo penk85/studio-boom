@@ -23,6 +23,8 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(source).toContain('from "../hyperframes/player-editing"');
     expect(source).toContain("previewElementPosition(iframeRef.current");
     expect(source).toContain("commitElementPosition(iframeRef.current");
+    expect(source).toContain("previewElementRect(iframeRef.current");
+    expect(source).toContain("commitElementRect(iframeRef.current");
     expect(source).toContain("updateClip(currentDrag.clipId, { x: nextX, y: nextY })");
     expect(source).toContain('data-stage-selection-overlay=""');
     expect(source).toContain("const { pickedElement, enablePick, isPickMode } = useElementPicker");
@@ -33,8 +35,10 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(source).toContain("compositionDomRectToCss(renderedElementRect, stageGeometry)");
     expect(source).toContain('data-stage-move-handle=""');
     expect(source).toContain("resizeCompositionRect({");
-    expect(source).toContain("width: previewClip.width");
-    expect(source).toContain("height: previewClip.height");
+    expect(source).toContain("scaleCompositionRectFromHandleRect(");
+    expect(source).toContain("roundCompositionRect(previewClip)");
+    expect(source).toContain("width: finalClip.width");
+    expect(source).toContain("height: finalClip.height");
     expect(source).toContain("<SelectionCorner");
   });
 

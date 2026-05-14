@@ -19,8 +19,10 @@ import { getMediaUrl } from "../db";
 import type { HyperframesPlayerElement } from "../../hyperframes-player";
 import { deriveEditorClips, type EditorClip } from "../types";
 import {
+  commitElementRect,
   commitElementPosition,
   hasPickerApi,
+  previewElementRect,
   previewElementPosition,
 } from "../hyperframes/player-editing";
 import {
@@ -29,9 +31,11 @@ import {
   getRenderedPixelRect,
   getStageGeometry,
   pointerDeltaToComposition,
+  roundCompositionRect,
   resizeCompositionRect,
   resolvePickedClipId,
   resolveTargetClipId,
+  scaleCompositionRectFromHandleRect,
   type CompositionRect,
   type ResizeHandle,
   type StageGeometry,
@@ -399,6 +403,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       }
 
       const preview = getResizePreview(currentDrag, delta.x, delta.y, event.shiftKey);
+      previewElementRect(iframeRef.current, currentDrag.clipId, preview.previewClip);
       queueDragPreview({ ...currentDrag, ...preview });
     };
 
@@ -421,39 +426,55 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       }
 
       const { previewClip } = getResizePreview(currentDrag, delta.x, delta.y, event.shiftKey);
+      const finalClip = roundCompositionRect(previewClip);
+      commitElementRect(iframeRef.current, currentDrag.clipId, finalClip);
       updateClip(currentDrag.clipId, {
-        x: previewClip.x,
-        y: previewClip.y,
-        width: previewClip.width,
-        height: previewClip.height,
+        x: finalClip.x,
+        y: finalClip.y,
+        width: finalClip.width,
+        height: finalClip.height,
       });
       setRenderedElementRect(null);
       clearDrag();
     };
 
-    const cancelDrag = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      const currentDrag = dragRef.current;
-      if (currentDrag?.type === "move") {
+    const restoreDrag = (currentDrag: NonNullable<StageDrag>) => {
+      if (currentDrag.type === "move") {
         commitElementPosition(
           iframeRef.current,
           currentDrag.clipId,
           currentDrag.startX,
           currentDrag.startY,
         );
+        return;
       }
+
+      commitElementRect(iframeRef.current, currentDrag.clipId, currentDrag.startClip);
+    };
+
+    const cancelKeyboardDrag = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const currentDrag = dragRef.current;
+      if (currentDrag) restoreDrag(currentDrag);
+      clearDrag();
+    };
+
+    const cancelPointerDrag = (event: PointerEvent) => {
+      const currentDrag = dragRef.current;
+      if (!currentDrag || event.pointerId !== currentDrag.pointerId) return;
+      restoreDrag(currentDrag);
       clearDrag();
     };
 
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", commitDrag);
-    window.addEventListener("pointercancel", commitDrag);
-    window.addEventListener("keydown", cancelDrag);
+    window.addEventListener("pointercancel", cancelPointerDrag);
+    window.addEventListener("keydown", cancelKeyboardDrag);
     return () => {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", commitDrag);
-      window.removeEventListener("pointercancel", commitDrag);
-      window.removeEventListener("keydown", cancelDrag);
+      window.removeEventListener("pointercancel", cancelPointerDrag);
+      window.removeEventListener("keydown", cancelKeyboardDrag);
     };
   }, [activeDragKey, clearDrag, iframeRef, queueDragPreview, updateClip]);
 
@@ -652,30 +673,12 @@ function getResizePreview(
   });
   return {
     previewHandleRect,
-    previewClip: scaleClipFromHandleRect(drag.startClip, drag.startHandleRect, previewHandleRect),
-  };
-}
-
-function scaleClipFromHandleRect(
-  startClip: CompositionRect,
-  startHandleRect: CompositionRect,
-  previewHandleRect: CompositionRect,
-): CompositionRect {
-  const startClipBounds = toBounds(startClip);
-  const startHandleBounds = toBounds(startHandleRect);
-  const previewHandleBounds = toBounds(previewHandleRect);
-  const scaleX = previewHandleRect.width / Math.max(1, startHandleRect.width);
-  const scaleY = previewHandleRect.height / Math.max(1, startHandleRect.height);
-  const left = previewHandleBounds.left - (startHandleBounds.left - startClipBounds.left) * scaleX;
-  const top = previewHandleBounds.top - (startHandleBounds.top - startClipBounds.top) * scaleY;
-  const width = Math.max(MIN_STAGE_RESIZE_SIZE, startClip.width * scaleX);
-  const height = Math.max(MIN_STAGE_RESIZE_SIZE, startClip.height * scaleY);
-
-  return {
-    x: left,
-    y: top,
-    width,
-    height,
+    previewClip: scaleCompositionRectFromHandleRect(
+      drag.startClip,
+      drag.startHandleRect,
+      previewHandleRect,
+      MIN_STAGE_RESIZE_SIZE,
+    ),
   };
 }
 
@@ -694,15 +697,6 @@ function domRectToCompositionRect(rect: DOMRect): CompositionRect {
     y: rect.top,
     width: rect.width,
     height: rect.height,
-  };
-}
-
-function toBounds(rect: CompositionRect) {
-  return {
-    left: rect.x,
-    top: rect.y,
-    right: rect.x + rect.width,
-    bottom: rect.y + rect.height,
   };
 }
 

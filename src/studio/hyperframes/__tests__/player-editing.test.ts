@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { commitElementPosition, previewElementPosition } from "../player-editing";
+import {
+  commitElementPosition,
+  commitElementRect,
+  previewElementPosition,
+  previewElementRect,
+} from "../player-editing";
 
 describe("player editing boundary", () => {
   it("previews movement on the real iframe element when player position APIs are unavailable", () => {
@@ -37,6 +42,40 @@ describe("player editing boundary", () => {
     const element = iframe.contentDocument?.getElementById("clip-1");
     expect(element?.getAttribute("data-x")).toBe("42");
     expect(element?.getAttribute("data-y")).toBe("24");
+
+    iframe.remove();
+  });
+
+  it("previews resize on the real iframe element without persisting attrs", () => {
+    const iframe = createIframeWithClip();
+
+    expect(previewElementRect(iframe, "clip-1", { x: 64, y: 32, width: 320, height: 180 })).toBe(
+      true,
+    );
+    const element = iframe.contentDocument?.getElementById("clip-1") as HTMLElement | null;
+    expect(element?.style.transform).toContain("translate(64px, 32px)");
+    expect(element?.style.width).toBe("320px");
+    expect(element?.style.height).toBe("180px");
+    expect(element?.getAttribute("data-width")).toBeNull();
+
+    iframe.remove();
+  });
+
+  it("commits resize attrs and styles on the real iframe element", () => {
+    const iframe = createIframeWithClip();
+
+    expect(commitElementRect(iframe, "clip-1", { x: 64, y: 32, width: 320, height: 180 })).toBe(
+      true,
+    );
+    const element = iframe.contentDocument?.getElementById("clip-1") as HTMLElement | null;
+    expect(element?.getAttribute("data-x")).toBe("64");
+    expect(element?.getAttribute("data-y")).toBe("32");
+    expect(element?.getAttribute("data-source-width")).toBe("320");
+    expect(element?.getAttribute("data-source-height")).toBe("180");
+    expect(element?.getAttribute("data-width")).toBe("320");
+    expect(element?.getAttribute("data-height")).toBe("180");
+    expect(element?.style.maxWidth).toBe("none");
+    expect(element?.style.maxHeight).toBe("none");
 
     iframe.remove();
   });

@@ -136,6 +136,37 @@ export function resizeCompositionRect({
   };
 }
 
+export function scaleCompositionRectFromHandleRect(
+  startClip: CompositionRect,
+  startHandleRect: CompositionRect,
+  previewHandleRect: CompositionRect,
+  minSize = 16,
+): CompositionRect {
+  const startClipBounds = rectToBounds(startClip);
+  const startHandleBounds = rectToBounds(startHandleRect);
+  const previewHandleBounds = rectToBounds(previewHandleRect);
+  const scaleX = previewHandleRect.width / Math.max(1, startHandleRect.width);
+  const scaleY = previewHandleRect.height / Math.max(1, startHandleRect.height);
+  const left = previewHandleBounds.left - (startHandleBounds.left - startClipBounds.left) * scaleX;
+  const top = previewHandleBounds.top - (startHandleBounds.top - startClipBounds.top) * scaleY;
+
+  return {
+    x: left,
+    y: top,
+    width: Math.max(minSize, startClip.width * scaleX),
+    height: Math.max(minSize, startClip.height * scaleY),
+  };
+}
+
+export function roundCompositionRect(rect: CompositionRect): CompositionRect {
+  return {
+    x: Math.round(rect.x),
+    y: Math.round(rect.y),
+    width: Math.max(1, Math.round(rect.width)),
+    height: Math.max(1, Math.round(rect.height)),
+  };
+}
+
 export function compositionRectToCss(
   clip: Pick<EditorClip, "x" | "y" | "width" | "height">,
   geometry: StageGeometry,
@@ -247,6 +278,15 @@ function resolveElementClipId(node: Element | null, clipIds: Set<string>): strin
     current = current.parentElement;
   }
   return null;
+}
+
+function rectToBounds(rect: CompositionRect) {
+  return {
+    left: rect.x,
+    top: rect.y,
+    right: rect.x + rect.width,
+    bottom: rect.y + rect.height,
+  };
 }
 
 function measureImagePixelBounds(image: HTMLImageElement): PixelBounds | null {
