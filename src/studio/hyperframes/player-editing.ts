@@ -1,4 +1,10 @@
 import type { PlayerAPI } from "@hyperframes/core";
+import {
+  STUDIO_ROTATION_ATTR,
+  composeStudioTransform,
+  readStudioTransform,
+  toGsapTransformVars,
+} from "./transform";
 
 export type PlayerWindow = Window & {
   __player?: PlayerAPI;
@@ -65,6 +71,22 @@ export function commitElementRect(
   return setElementSizeInPlayerDom(iframe, elementId, rect, true) || usedPositionCommit;
 }
 
+export function previewElementRotation(
+  iframe: HTMLIFrameElement | null,
+  elementId: string,
+  rotation: number,
+): boolean {
+  return setElementRotationInPlayerDom(iframe, elementId, rotation, false);
+}
+
+export function commitElementRotation(
+  iframe: HTMLIFrameElement | null,
+  elementId: string,
+  rotation: number,
+): boolean {
+  return setElementRotationInPlayerDom(iframe, elementId, rotation, true);
+}
+
 function callNativePositionPreview(
   iframe: HTMLIFrameElement | null,
   elementId: string,
@@ -128,14 +150,16 @@ function setElementPositionInPlayerDom(
       element.setAttribute("data-y", String(y));
     }
 
+    const transform = readStudioTransform(element, { x, y });
     if (win?.gsap?.set) {
-      win.gsap.set(element, { x, y });
+      win.gsap.set(element, toGsapTransformVars(transform));
       return true;
     }
 
     const style = (element as HTMLElement).style;
     if (style) {
-      style.transform = `translate(${x}px, ${y}px)`;
+      style.transform = composeStudioTransform(transform);
+      style.transformOrigin = style.transformOrigin || "center center";
       return true;
     }
   } catch {
@@ -143,6 +167,40 @@ function setElementPositionInPlayerDom(
   }
 
   return false;
+}
+
+function setElementRotationInPlayerDom(
+  iframe: HTMLIFrameElement | null,
+  elementId: string,
+  rotation: number,
+  persistAttrs: boolean,
+): boolean {
+  if (!iframe) return false;
+
+  try {
+    const win = iframe.contentWindow as PlayerWindow | null;
+    const element = iframe.contentDocument?.getElementById(elementId);
+    if (!element) return false;
+
+    if (persistAttrs) {
+      element.setAttribute(STUDIO_ROTATION_ATTR, String(rotation));
+    }
+
+    const transform = readStudioTransform(element, { rotation });
+    if (win?.gsap?.set) {
+      win.gsap.set(element, toGsapTransformVars(transform, ["rotation"]));
+      return true;
+    }
+
+    const style = (element as HTMLElement).style;
+    if (!style) return false;
+
+    style.transform = composeStudioTransform(transform);
+    style.transformOrigin = style.transformOrigin || "center center";
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function setElementSizeInPlayerDom(

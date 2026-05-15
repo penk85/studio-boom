@@ -11,6 +11,8 @@ import { TopBar } from "./components/TopBar";
 
 export function Studio() {
   const project = useStudio((s) => s.project);
+  const undo = useStudio((s) => s.undo);
+  const redo = useStudio((s) => s.redo);
   // useTimelinePlayer owns the single iframeRef that connects the player to
   // PlayerControls and usePlayerStore. Stage bridges this ref to the
   // <hyperframes-player> iframe; Timeline passes togglePlay/seek to PlayerControls.
@@ -24,6 +26,29 @@ export function Studio() {
       void garbageCollectUnusedInternalMedia();
     })();
   }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if ((!event.metaKey && !event.ctrlKey) || event.altKey) return;
+      if (isTextEditingTarget(event.target)) return;
+
+      const key = event.key.toLowerCase();
+      if (key === "z" && !event.shiftKey) {
+        event.preventDefault();
+        undo();
+        return;
+      }
+      if (key === "y" || (key === "z" && event.shiftKey)) {
+        event.preventDefault();
+        redo();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [redo, undo]);
 
   if (!project) {
     return (
@@ -54,4 +79,10 @@ export function Studio() {
       </div>
     </div>
   );
+}
+
+function isTextEditingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
 }

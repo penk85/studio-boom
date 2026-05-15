@@ -9,6 +9,7 @@ import type {
   CharacterClip,
   CharacterPreset,
   ClipEditorMeta,
+  EditorClip,
   HyperFramesProject,
   MediaAsset,
   MediaClip,
@@ -25,6 +26,7 @@ import {
   addStudioElementToHtml,
   parseStudioHtml,
   updateStudioElementInHtml,
+  type StudioTimelineElement,
 } from "./hyperframes/html";
 import { normalizeNativeHyperframesHtml } from "./hyperframes/native";
 import {
@@ -144,7 +146,7 @@ function normalizeProjectRootHtml(hf: HyperFramesProject, html: string): string 
   });
 }
 
-function buildTimelineElement(clip: AnyClip, zIndex: number): TimelineElement {
+function buildTimelineElement(clip: AnyClip, zIndex: number): StudioTimelineElement {
   if (clip.kind === "character") {
     return {
       id: clip.id,
@@ -159,6 +161,7 @@ function buildTimelineElement(clip: AnyClip, zIndex: number): TimelineElement {
       compositionId: `comp_${clip.id}`,
       sourceWidth: clip.width,
       sourceHeight: clip.height,
+      rotation: clip.rotation,
     };
   }
 
@@ -174,12 +177,15 @@ function buildTimelineElement(clip: AnyClip, zIndex: number): TimelineElement {
     src: `asset:${clip.mediaId}`,
     sourceWidth: clip.width,
     sourceHeight: clip.height,
+    rotation: clip.rotation,
     opacity: clip.opacity,
   };
 }
 
-function buildElementUpdates(patch: Partial<AnyClip>): Partial<TimelineElement> {
-  const updates: Partial<TimelineElement> = {};
+function buildElementUpdates(
+  patch: Partial<AnyClip>,
+): Partial<TimelineElement> & { rotation?: number } {
+  const updates: Partial<TimelineElement> & { rotation?: number } = {};
 
   if (patch.start !== undefined) updates.startTime = patch.start;
   if (patch.duration !== undefined) updates.duration = patch.duration;
@@ -187,6 +193,7 @@ function buildElementUpdates(patch: Partial<AnyClip>): Partial<TimelineElement> 
   if (patch.y !== undefined) updates.y = patch.y;
   if (patch.zIndex !== undefined) updates.zIndex = patch.zIndex;
   if (patch.opacity !== undefined) updates.opacity = patch.opacity;
+  if (patch.rotation !== undefined) updates.rotation = patch.rotation;
   if (patch.name !== undefined) updates.name = patch.name;
   if (patch.width !== undefined) updates.sourceWidth = patch.width;
   if (patch.height !== undefined) updates.sourceHeight = patch.height;
@@ -194,9 +201,69 @@ function buildElementUpdates(patch: Partial<AnyClip>): Partial<TimelineElement> 
   return updates;
 }
 
+type LayerPlacement = "forward" | "backward" | "front" | "back";
+
+function resolveLayerAssignments(
+  project: Project,
+  clipId: string,
+  placement: LayerPlacement,
+): Map<string, number> | null {
+  const orderedClips = deriveEditorClips(project)
+    .filter(isVisualLayerClip)
+    .sort((a, b) => a.zIndex - b.zIndex || a.start - b.start || a.id.localeCompare(b.id));
+  const currentIndex = orderedClips.findIndex((clip) => clip.id === clipId);
+  if (currentIndex < 0) return null;
+
+  const nextIndex = resolveNextLayerIndex(currentIndex, orderedClips.length, placement);
+  if (nextIndex === currentIndex) return null;
+
+  const [clip] = orderedClips.splice(currentIndex, 1);
+  if (!clip) return null;
+  orderedClips.splice(nextIndex, 0, clip);
+
+  const assignments = new Map<string, number>();
+  let changed = false;
+  orderedClips.forEach((orderedClip, zIndex) => {
+    assignments.set(orderedClip.id, zIndex);
+    if (orderedClip.zIndex !== zIndex) changed = true;
+  });
+
+  return changed ? assignments : null;
+}
+
+function isVisualLayerClip(clip: EditorClip): boolean {
+  return clip.kind !== "audio";
+}
+
+function resolveNextLayerIndex(
+  currentIndex: number,
+  layerCount: number,
+  placement: LayerPlacement,
+): number {
+  switch (placement) {
+    case "front":
+      return layerCount - 1;
+    case "back":
+      return 0;
+    case "forward":
+      return Math.min(layerCount - 1, currentIndex + 1);
+    case "backward":
+      return Math.max(0, currentIndex - 1);
+  }
+}
+
 // ─── Store ────────────────────────────────────────────────────────────────────
 
 type ModalState = null | { type: "character-editor"; characterId: string } | { type: "presets" };
+
+interface HistoryEntry {
+  project: Project;
+  selectedClipId: string | null;
+}
+
+export interface ProjectMutationOptions {
+  history?: boolean;
+}
 
 interface StudioState {
   project: Project | null;
@@ -209,6 +276,8 @@ interface StudioState {
 
   selectedClipId: string | null;
   zoom: number;
+  historyPast: HistoryEntry[];
+  historyFuture: HistoryEntry[];
 
   currentModal: ModalState;
   openModal: (modal: Exclude<ModalState, null>) => void;
@@ -219,13 +288,20 @@ interface StudioState {
   saveProject: () => Promise<void>;
 
   selectClip: (id: string | null) => void;
+  checkpointHistory: () => void;
+  undo: () => void;
+  redo: () => void;
 
   addClip: (clip: AnyClip) => void;
-  updateClip: (id: string, patch: Partial<AnyClip>) => void;
+  updateClip: (id: string, patch: Partial<AnyClip>, options?: ProjectMutationOptions) => void;
   removeClip: (id: string) => void;
+  bringClipForward: (id: string) => void;
+  sendClipBackward: (id: string) => void;
+  bringClipToFront: (id: string) => void;
+  sendClipToBack: (id: string) => void;
 
   /** Directly replace rootHtml (used by Stage's useElementPicker onSyncFiles). */
-  updateRootHtml: (html: string) => void;
+  updateRootHtml: (html: string, options?: ProjectMutationOptions) => void;
 
   addMediaToTimeline: (asset: MediaAsset, trackIndex?: number, insertAtTime?: number) => void;
   registerMediaAsset: (asset: MediaAsset) => void;
@@ -241,10 +317,12 @@ interface StudioState {
 
   setProjectMeta: (
     patch: Partial<Pick<HyperFramesProject, "name" | "width" | "height" | "fps" | "duration">>,
+    options?: ProjectMutationOptions,
   ) => void;
   setZoom: (z: number) => void;
 }
 
+const HISTORY_LIMIT = 50;
 let saveTimer: number | undefined;
 const scheduleSave = (get: () => StudioState) => {
   if (typeof window === "undefined") return;
@@ -254,11 +332,59 @@ const scheduleSave = (get: () => StudioState) => {
   }, 500);
 };
 
+function applyClipLayerMove(
+  id: string,
+  placement: LayerPlacement,
+  get: () => StudioState,
+  set: (partial: Partial<StudioState>) => void,
+): void {
+  const p = get().project;
+  if (!p) return;
+
+  const assignments = resolveLayerAssignments(p, id, placement);
+  if (!assignments) return;
+
+  get().checkpointHistory();
+
+  let rootHtml = p.hf.rootHtml;
+  for (const [clipId, zIndex] of assignments) {
+    rootHtml = updateStudioElementInHtml(rootHtml, clipId, { zIndex });
+  }
+
+  const newProject: Project = {
+    ...p,
+    hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
+    updatedAt: Date.now(),
+  };
+  set({ project: newProject });
+  scheduleSave(get);
+}
+
 const trackIndexFor = (tracks: TrackMeta[], kind: TrackKind) =>
   Math.max(
     0,
     tracks.findIndex((t) => t.kind === kind),
   );
+
+function cloneProject(project: Project): Project {
+  return JSON.parse(JSON.stringify(project)) as Project;
+}
+
+function createHistoryEntry(state: StudioState): HistoryEntry | null {
+  if (!state.project) return null;
+  return {
+    project: cloneProject(state.project),
+    selectedClipId: state.selectedClipId,
+  };
+}
+
+function trimHistory(entries: HistoryEntry[]): HistoryEntry[] {
+  return entries.slice(-HISTORY_LIMIT);
+}
+
+function restoreHistoryProject(entry: HistoryEntry): Project {
+  return { ...cloneProject(entry.project), updatedAt: Date.now() };
+}
 
 export const useStudio = create<StudioState>((set, get) => ({
   project: null,
@@ -268,6 +394,8 @@ export const useStudio = create<StudioState>((set, get) => ({
   mediaAssets: new Map(),
   selectedClipId: null,
   zoom: 60,
+  historyPast: [],
+  historyFuture: [],
   currentModal: null,
   openModal(modal) {
     set({ currentModal: modal });
@@ -301,6 +429,8 @@ export const useStudio = create<StudioState>((set, get) => ({
       motionPresets,
       mediaAssets,
       selectedClipId: null,
+      historyPast: [],
+      historyFuture: [],
     });
   },
 
@@ -314,6 +444,8 @@ export const useStudio = create<StudioState>((set, get) => ({
       motionPresets: new Map(),
       mediaAssets: new Map(),
       selectedClipId: null,
+      historyPast: [],
+      historyFuture: [],
     });
   },
 
@@ -328,10 +460,55 @@ export const useStudio = create<StudioState>((set, get) => ({
     set({ selectedClipId: id });
   },
 
+  checkpointHistory() {
+    const state = get();
+    const entry = createHistoryEntry(state);
+    if (!entry) return;
+    set({
+      historyPast: trimHistory([...state.historyPast, entry]),
+      historyFuture: [],
+    });
+  },
+
+  undo() {
+    const state = get();
+    const current = createHistoryEntry(state);
+    const previous = state.historyPast.at(-1);
+    if (!current || !previous) return;
+
+    const project = restoreHistoryProject(previous);
+    set({
+      project,
+      tracks: project.editorMeta.tracks,
+      selectedClipId: previous.selectedClipId,
+      historyPast: state.historyPast.slice(0, -1),
+      historyFuture: trimHistory([...state.historyFuture, current]),
+    });
+    scheduleSave(get);
+  },
+
+  redo() {
+    const state = get();
+    const current = createHistoryEntry(state);
+    const next = state.historyFuture.at(-1);
+    if (!current || !next) return;
+
+    const project = restoreHistoryProject(next);
+    set({
+      project,
+      tracks: project.editorMeta.tracks,
+      selectedClipId: next.selectedClipId,
+      historyPast: trimHistory([...state.historyPast, current]),
+      historyFuture: state.historyFuture.slice(0, -1),
+    });
+    scheduleSave(get);
+  },
+
   addClip(clip) {
     const state = get();
     const p = state.project;
     if (!p) return;
+    get().checkpointHistory();
 
     const currentClips = deriveEditorClips(p);
 
@@ -401,10 +578,11 @@ export const useStudio = create<StudioState>((set, get) => ({
     scheduleSave(get);
   },
 
-  updateClip(id, patch) {
+  updateClip(id, patch, options) {
     const state = get();
     const p = state.project;
     if (!p) return;
+    if (options?.history !== false) get().checkpointHistory();
 
     const existingMeta = p.editorMeta.clips[id] ?? {};
 
@@ -470,6 +648,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     const state = get();
     const p = state.project;
     if (!p) return;
+    get().checkpointHistory();
 
     const existingMeta = p.editorMeta.clips[id];
     const audioSiblingId = `audio_${id}`;
@@ -528,9 +707,26 @@ export const useStudio = create<StudioState>((set, get) => ({
     }
   },
 
-  updateRootHtml(html) {
+  bringClipForward(id) {
+    applyClipLayerMove(id, "forward", get, set);
+  },
+
+  sendClipBackward(id) {
+    applyClipLayerMove(id, "backward", get, set);
+  },
+
+  bringClipToFront(id) {
+    applyClipLayerMove(id, "front", get, set);
+  },
+
+  sendClipToBack(id) {
+    applyClipLayerMove(id, "back", get, set);
+  },
+
+  updateRootHtml(html, options) {
     const p = get().project;
     if (!p) return;
+    if (options?.history !== false) get().checkpointHistory();
     set({
       project: {
         ...p,
@@ -701,6 +897,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   addLane(trackIndex) {
     const p = get().project;
     if (!p) return;
+    get().checkpointHistory();
     const newTracks = p.editorMeta.tracks.map((t, i) =>
       i === trackIndex ? { ...t, lanes: (t.lanes ?? 1) + 1 } : t,
     );
@@ -724,6 +921,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         c.trackIndex === trackIndex && (c.laneIndex ?? 0) === laneIndex && !c.linkedCharacterClipId,
     );
     if (laneHasClips) return;
+    get().checkpointHistory();
 
     const newTracks = p.editorMeta.tracks.map((t, i) =>
       i === trackIndex ? { ...t, lanes: Math.max(1, laneCount - 1) } : t,
@@ -745,9 +943,10 @@ export const useStudio = create<StudioState>((set, get) => ({
     scheduleSave(get);
   },
 
-  setProjectMeta(patch) {
+  setProjectMeta(patch, options) {
     const p = get().project;
     if (!p) return;
+    if (options?.history !== false) get().checkpointHistory();
 
     let newHf = { ...p.hf, ...patch };
     if (patch.duration !== undefined || patch.width !== undefined || patch.height !== undefined) {

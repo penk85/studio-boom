@@ -3,6 +3,10 @@
 Before making architecture or export/render changes in Studio Boom, read
 `CLAUDE.md`.
 
+Before implementing AI-generated clips, custom HyperFrames blocks, source editing,
+or nested composition timeline work, also read
+`docs/ai-generated-hyperframes-clips-roadmap.md`.
+
 The important rule is:
 
 ```text

@@ -19,6 +19,7 @@ describe("parseStudioHtml", () => {
         zIndex: 2,
         x: 128,
         y: 96,
+        rotation: 12,
         sourceWidth: 320,
         sourceHeight: 180,
       },
@@ -26,11 +27,13 @@ describe("parseStudioHtml", () => {
 
     expect(html).toContain('data-x="128"');
     expect(html).toContain('data-y="96"');
+    expect(html).toContain('data-rotation="12"');
     expect(html).toContain('data-source-width="320"');
     expect(html).toContain('data-source-height="180"');
     expect(html).toContain('data-width="320"');
     expect(html).toContain('data-height="180"');
-    expect(html).toContain("translate(128px, 96px)");
+    expect(html).toContain("z-index: 2");
+    expect(html).toContain("translate(128px, 96px) rotate(12deg)");
     expect(html).toContain("max-width: none");
     expect(html).toContain("max-height: none");
 
@@ -38,6 +41,7 @@ describe("parseStudioHtml", () => {
       id: "image-1",
       x: 128,
       y: 96,
+      rotation: 12,
       sourceWidth: 320,
       sourceHeight: 180,
     });
@@ -84,6 +88,8 @@ describe("parseStudioHtml", () => {
         data-start="0"
         data-duration="5"
         data-track-index="2"
+        style="z-index: 8"
+        data-rotation="22"
         data-source-width="640"
         data-source-height="360"
       />
@@ -95,7 +101,8 @@ describe("parseStudioHtml", () => {
     expect(parsed.elements[0]).toMatchObject({
       id: "image-1",
       duration: 5,
-      zIndex: 2,
+      zIndex: 8,
+      rotation: 22,
       sourceWidth: 640,
       sourceHeight: 360,
     });
@@ -123,6 +130,7 @@ describe("parseStudioHtml", () => {
       {
         x: 128,
         y: 96,
+        rotation: -15,
         sourceWidth: 320,
         sourceHeight: 180,
         opacity: 0.75,
@@ -131,18 +139,21 @@ describe("parseStudioHtml", () => {
 
     expect(updated).toContain('data-x="128"');
     expect(updated).toContain('data-y="96"');
+    expect(updated).toContain('data-rotation="-15"');
     expect(updated).toContain('data-source-width="320"');
     expect(updated).toContain('data-source-height="180"');
     expect(updated).toContain('data-width="320"');
     expect(updated).toContain('data-height="180"');
     expect(updated).toContain('data-opacity="0.75"');
-    expect(updated).toContain("translate(128px, 96px)");
+    expect(updated).toContain("z-index: 2");
+    expect(updated).toContain("translate(128px, 96px) rotate(-15deg)");
     expect(updated).toContain("max-width: none");
     expect(updated).toContain("max-height: none");
 
     expect(parseStudioHtml(updated).elements[0]).toMatchObject({
       x: 128,
       y: 96,
+      rotation: -15,
       sourceWidth: 320,
       sourceHeight: 180,
       opacity: 0.75,

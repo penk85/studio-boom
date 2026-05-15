@@ -527,6 +527,7 @@ export function deriveEditorClips(project: Project): EditorClip[] {
             : "image");
     const scale = el.scale ?? 1;
     const mediaEl = el as { sourceWidth?: number; sourceHeight?: number };
+    const studioEl = el as TimelineElement & { rotation?: number };
     const width = (mediaEl.sourceWidth ?? 0) * scale;
     const height = (mediaEl.sourceHeight ?? 0) * scale;
 
@@ -542,7 +543,7 @@ export function deriveEditorClips(project: Project): EditorClip[] {
       y: el.y ?? 0,
       width,
       height,
-      rotation: 0,
+      rotation: studioEl.rotation ?? 0,
       opacity: el.opacity ?? 1,
       zIndex: el.zIndex,
       characterId: meta.characterId,

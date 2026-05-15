@@ -33,6 +33,7 @@ vi.mock("@hyperframes/core", () => {
       sourceWidth?: number;
       sourceHeight?: number;
       opacity?: number;
+      rotation?: number;
       compositionId?: string;
     },
   ) => {
@@ -58,6 +59,8 @@ vi.mock("@hyperframes/core", () => {
     if (element.sourceHeight !== undefined)
       node.setAttribute("data-source-height", String(element.sourceHeight));
     if (element.opacity !== undefined) node.setAttribute("data-opacity", String(element.opacity));
+    if (element.rotation !== undefined)
+      node.setAttribute("data-rotation", String(element.rotation));
     if (element.type === "composition") {
       node.setAttribute("data-type", "composition");
       node.setAttribute("data-composition-id", element.compositionId ?? "");
@@ -130,6 +133,7 @@ vi.mock("@hyperframes/core", () => {
         sourceHeight?: number;
         opacity?: number;
         compositionId?: string;
+        rotation?: number;
       },
     ) => {
       coreMock.addCalls += 1;
@@ -151,6 +155,7 @@ vi.mock("@hyperframes/core", () => {
         x?: number;
         y?: number;
         opacity?: number;
+        rotation?: number;
       },
     ) => {
       coreMock.updateCalls += 1;
@@ -172,6 +177,8 @@ vi.mock("@hyperframes/core", () => {
       if (updates.x !== undefined) node.setAttribute("data-x", String(updates.x));
       if (updates.y !== undefined) node.setAttribute("data-y", String(updates.y));
       if (updates.opacity !== undefined) node.setAttribute("data-opacity", String(updates.opacity));
+      if (updates.rotation !== undefined)
+        node.setAttribute("data-rotation", String(updates.rotation));
       return serializeDoc(doc);
     },
     removeElementFromHtml: (html: string, elementId: string) => {
@@ -215,6 +222,7 @@ vi.mock("@hyperframes/core", () => {
           x: Number(element.getAttribute("data-x") ?? 0),
           y: Number(element.getAttribute("data-y") ?? 0),
           opacity: Number(element.getAttribute("data-opacity") ?? 1),
+          rotation: Number(element.getAttribute("data-rotation") ?? 0),
         };
       });
       return {
@@ -262,6 +270,8 @@ function resetStudioStore() {
     mediaAssets: new Map(),
     selectedClipId: null,
     zoom: 60,
+    historyPast: [],
+    historyFuture: [],
   });
 }
 
@@ -405,6 +415,7 @@ describe("createBlankProject", () => {
     expect(rootHtml).toContain('data-y="490"');
     expect(rootHtml).toContain('data-width="100"');
     expect(rootHtml).toContain('data-height="100"');
+    expect(rootHtml).toContain("z-index: 0");
     expect(rootHtml).toContain("translate(910px, 490px)");
     expect(rootHtml).not.toContain("data-end=");
     expect(rootHtml).not.toContain("data-layer=");
@@ -480,6 +491,115 @@ describe("createBlankProject", () => {
     expect(rootHtml).toContain('data-source-height="180"');
     expect(rootHtml).toContain('data-width="320"');
     expect(rootHtml).toContain('data-height="180"');
+  });
+
+  it("persists base rotation edits through updateElementInHtml", () => {
+    const project = createBlankProject("Rotation update");
+    const asset = makeMediaAsset("media-rotation", "Sprite");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([[asset.id, asset]]),
+    });
+
+    useStudio.getState().addMediaToTimeline(asset);
+    const clipId = useStudio.getState().selectedClipId!;
+
+    useStudio.getState().updateClip(clipId, { rotation: 18 });
+
+    const rootHtml = useStudio.getState().project!.hf.rootHtml;
+    const clip = deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clipId);
+    expect(coreMock.updateCalls).toBeGreaterThanOrEqual(1);
+    expect(rootHtml).toContain('data-rotation="18"');
+    expect(rootHtml).toContain("rotate(18deg)");
+    expect(clip?.rotation).toBe(18);
+  });
+
+  it("reorders visual layers through canonical rootHtml", () => {
+    const project = createBlankProject("Layer update");
+    const backAsset = makeMediaAsset("media-back", "Back");
+    const frontAsset = makeMediaAsset("media-front", "Front");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([
+        [backAsset.id, backAsset],
+        [frontAsset.id, frontAsset],
+      ]),
+    });
+
+    useStudio.getState().addMediaToTimeline(backAsset);
+    const backClipId = useStudio.getState().selectedClipId!;
+    useStudio.getState().addMediaToTimeline(frontAsset);
+    const frontClipId = useStudio.getState().selectedClipId!;
+
+    useStudio.getState().bringClipToFront(backClipId);
+
+    const clips = deriveEditorClips(useStudio.getState().project!);
+    const backClip = clips.find((clip) => clip.id === backClipId);
+    const frontClip = clips.find((clip) => clip.id === frontClipId);
+    const rootHtml = useStudio.getState().project!.hf.rootHtml;
+
+    expect(backClip?.zIndex).toBe(1);
+    expect(frontClip?.zIndex).toBe(0);
+    expect(rootHtml).toContain(`id="${backClipId}"`);
+    expect(rootHtml).toContain("z-index: 1");
+    expect(rootHtml).toContain("z-index: 0");
+
+    useStudio.getState().undo();
+    const undone = deriveEditorClips(useStudio.getState().project!);
+    expect(undone.find((clip) => clip.id === backClipId)?.zIndex).toBe(0);
+    expect(undone.find((clip) => clip.id === frontClipId)?.zIndex).toBe(1);
+  });
+
+  it("undoes and redoes canonical rootHtml clip edits", () => {
+    const project = createBlankProject("Undo update");
+    const asset = makeMediaAsset("media-undo", "Sprite");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([[asset.id, asset]]),
+    });
+
+    useStudio.getState().addMediaToTimeline(asset);
+    const clipId = useStudio.getState().selectedClipId!;
+    const beforeUpdate = useStudio.getState().project!.hf.rootHtml;
+
+    useStudio.getState().updateClip(clipId, { x: 128, y: 96 });
+    expect(useStudio.getState().project!.hf.rootHtml).toContain('data-x="128"');
+    expect(useStudio.getState().project!.hf.rootHtml).toContain('data-y="96"');
+
+    useStudio.getState().undo();
+    expect(useStudio.getState().project!.hf.rootHtml).toBe(beforeUpdate);
+
+    useStudio.getState().redo();
+    expect(useStudio.getState().project!.hf.rootHtml).toContain('data-x="128"');
+    expect(useStudio.getState().project!.hf.rootHtml).toContain('data-y="96"');
+  });
+
+  it("groups interactive timeline updates behind one explicit checkpoint", () => {
+    const project = createBlankProject("Grouped update");
+    const asset = makeMediaAsset("media-grouped", "Sprite");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([[asset.id, asset]]),
+    });
+
+    useStudio.getState().addMediaToTimeline(asset);
+    const clipId = useStudio.getState().selectedClipId!;
+    const beforeDrag = useStudio.getState().project!.hf.rootHtml;
+    const initialHistoryCount = useStudio.getState().historyPast.length;
+
+    useStudio.getState().checkpointHistory();
+    useStudio.getState().updateClip(clipId, { start: 1 }, { history: false });
+    useStudio.getState().updateClip(clipId, { start: 2 }, { history: false });
+
+    expect(useStudio.getState().historyPast).toHaveLength(initialHistoryCount + 1);
+    expect(useStudio.getState().project!.hf.rootHtml).toContain('data-start="2"');
+
+    useStudio.getState().undo();
+    expect(useStudio.getState().project!.hf.rootHtml).toBe(beforeDrag);
   });
 });
 

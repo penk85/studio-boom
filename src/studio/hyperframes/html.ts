@@ -1,9 +1,23 @@
 import { addElementToHtml, parseHtml, updateElementInHtml } from "@hyperframes/core";
 import type { ParsedHtml, TimelineElement } from "@hyperframes/core";
+import {
+  STUDIO_ROTATION_ATTR,
+  composeStudioTransform,
+  hasStudioTransform,
+  parseFiniteNumber,
+  readStudioTransform,
+} from "./transform";
 
-type StudioElementUpdates = Partial<TimelineElement> & {
+export type StudioTimelineElement = TimelineElement & {
   sourceWidth?: number;
   sourceHeight?: number;
+  rotation?: number;
+};
+
+type StudioElementUpdates = Partial<StudioTimelineElement> & {
+  sourceWidth?: number;
+  sourceHeight?: number;
+  rotation?: number;
 };
 
 /**
@@ -31,7 +45,7 @@ export function parseStudioHtml(html: string): ParsedHtml {
  */
 export function addStudioElementToHtml(
   html: string,
-  element: TimelineElement,
+  element: StudioTimelineElement,
 ): { html: string; id: string } {
   const result = addElementToHtml(html, element);
   return {
@@ -75,6 +89,7 @@ function patchStudioElementInHtml(
   setNumericAttr(el, "data-x", updates.x);
   setNumericAttr(el, "data-y", updates.y);
   setNumericAttr(el, "data-scale", updates.scale);
+  setNumericAttr(el, STUDIO_ROTATION_ATTR, updates.rotation);
   setNumericAttr(el, "data-opacity", updates.opacity);
   setNumericAttr(el, "data-source-width", updates.sourceWidth);
   setNumericAttr(el, "data-source-height", updates.sourceHeight);
@@ -107,8 +122,12 @@ function patchElementFromNativeAttrs(element: TimelineElement, doc: Document): T
 
   const duration = parseFiniteNumber(el.getAttribute("data-duration"));
   const trackIndex = parseFiniteNumber(el.getAttribute("data-track-index"));
+  const visualZIndex = parseFiniteNumber(el.style.zIndex);
   const x = parseFiniteNumber(el.getAttribute("data-x"));
   const y = parseFiniteNumber(el.getAttribute("data-y"));
+  const rotation =
+    parseFiniteNumber(el.getAttribute(STUDIO_ROTATION_ATTR)) ??
+    parseRotationFromInlineTransform(el.style.transform);
   const sourceWidth =
     parseFiniteNumber(el.getAttribute("data-source-width")) ??
     parseFiniteNumber(el.getAttribute("data-width"));
@@ -119,18 +138,13 @@ function patchElementFromNativeAttrs(element: TimelineElement, doc: Document): T
   return {
     ...element,
     duration: duration ?? element.duration,
-    zIndex: trackIndex ?? element.zIndex,
+    zIndex: visualZIndex ?? trackIndex ?? element.zIndex,
     x: x ?? element.x,
     y: y ?? element.y,
+    rotation: rotation ?? getElementRotation(element),
     sourceWidth: sourceWidth ?? getElementSourceWidth(element),
     sourceHeight: sourceHeight ?? getElementSourceHeight(element),
-  };
-}
-
-function parseFiniteNumber(value: string | null): number | null {
-  if (value === null || value.trim() === "") return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
+  } as TimelineElement;
 }
 
 function getElementSourceWidth(element: TimelineElement): number | undefined {
@@ -139,6 +153,12 @@ function getElementSourceWidth(element: TimelineElement): number | undefined {
 
 function getElementSourceHeight(element: TimelineElement): number | undefined {
   return "sourceHeight" in element ? element.sourceHeight : undefined;
+}
+
+function getElementRotation(element: TimelineElement): number | undefined {
+  return "rotation" in element && typeof element.rotation === "number"
+    ? element.rotation
+    : undefined;
 }
 
 function setNumericAttr(el: Element, attr: string, value: number | undefined): void {
@@ -153,6 +173,8 @@ function patchElementVisualStyle(el: HTMLElement, updates: StudioElementUpdates)
   if (!el.style.left) el.style.left = "0px";
   if (!el.style.top) el.style.top = "0px";
 
+  const zIndex = updates.zIndex ?? parseFiniteNumber(el.getAttribute("data-track-index"));
+  if (zIndex !== null && zIndex !== undefined) el.style.zIndex = String(zIndex);
   if (updates.sourceWidth !== undefined) el.style.width = `${updates.sourceWidth}px`;
   if (updates.sourceHeight !== undefined) el.style.height = `${updates.sourceHeight}px`;
   if (updates.opacity !== undefined) el.style.opacity = String(updates.opacity);
@@ -165,11 +187,17 @@ function patchElementVisualStyle(el: HTMLElement, updates: StudioElementUpdates)
     }
   }
 
-  const x = updates.x ?? parseFiniteNumber(el.getAttribute("data-x"));
-  const y = updates.y ?? parseFiniteNumber(el.getAttribute("data-y"));
-  if (x !== null || y !== null) {
-    el.style.transform = `translate(${x ?? 0}px, ${y ?? 0}px)`;
+  if (hasStudioTransform(el, updates)) {
+    el.style.transform = composeStudioTransform(readStudioTransform(el, updates));
+    el.style.transformOrigin = el.style.transformOrigin || "center center";
   }
+}
+
+function parseRotationFromInlineTransform(transform: string): number | null {
+  const match = transform.match(/rotate\(\s*(-?\d+(?:\.\d+)?)deg\s*\)/i);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function ensureCompositionIframe(doc: Document, el: HTMLElement, src: string): void {

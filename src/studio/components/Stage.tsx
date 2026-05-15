@@ -2,7 +2,7 @@
 // React hosts the editor shell; HyperFrames owns the movie preview.
 import "@hyperframes/player";
 import gsapRaw from "gsap/dist/gsap.min.js?raw";
-import { Move } from "lucide-react";
+import { Move, RotateCw } from "lucide-react";
 import {
   useEffect,
   useCallback,
@@ -21,21 +21,28 @@ import { deriveEditorClips, type EditorClip } from "../types";
 import {
   commitElementRect,
   commitElementPosition,
+  commitElementRotation,
   hasPickerApi,
   previewElementRect,
   previewElementPosition,
+  previewElementRotation,
 } from "../hyperframes/player-editing";
 import {
   compositionDomRectToCss,
   compositionRectToCss,
-  getRenderedPixelRect,
+  getRenderedPixelCompositionRect,
   getStageGeometry,
+  keyboardNudgeDelta,
+  pointerAngleDegrees,
   pointerDeltaToComposition,
+  rotationDeltaDegrees,
+  roundRotationDegrees,
   roundCompositionRect,
   resizeCompositionRect,
   resolvePickedClipId,
   resolveTargetClipId,
   scaleCompositionRectFromHandleRect,
+  snapRotationDegrees,
   type CompositionRect,
   type ResizeHandle,
   type StageGeometry,
@@ -44,6 +51,10 @@ import {
 const GSAP_SCRIPT_RE =
   /<script\s+src=["'](?:https:\/\/cdn\.jsdelivr\.net\/npm\/gsap@[^"']+\/dist\/gsap\.min\.js|\.\.\/gsap\.min\.js)["']\s*><\/script>/gi;
 const MIN_STAGE_RESIZE_SIZE = 16;
+const STAGE_NUDGE_RESET_MS = 400;
+const STAGE_NUDGE_STEP = 1;
+const STAGE_FAST_NUDGE_STEP = 10;
+const STAGE_ROTATION_SNAP_DEGREES = 15;
 
 function inlinePreviewScripts(html: string): string {
   return html.replace(GSAP_SCRIPT_RE, `<script>${gsapRaw}</script>`);
@@ -117,7 +128,19 @@ type StageDrag =
       startHandleRect: CompositionRect;
       previewClip: CompositionRect;
       previewHandleRect: CompositionRect;
+      rotation: number;
       geometry: StageGeometry;
+    }
+  | {
+      type: "rotate";
+      clipId: string;
+      pointerId: number;
+      centerClientX: number;
+      centerClientY: number;
+      lastPointerAngle: number;
+      startRotation: number;
+      rawRotation: number;
+      previewRotation: number;
     };
 
 export function Stage({ iframeRef, onIframeLoad }: StageProps) {
@@ -126,12 +149,21 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const selectedClipId = useStudio((s) => s.selectedClipId);
   const updateClip = useStudio((s) => s.updateClip);
   const updateRootHtml = useStudio((s) => s.updateRootHtml);
+  const checkpointHistory = useStudio((s) => s.checkpointHistory);
+  const bringClipForward = useStudio((s) => s.bringClipForward);
+  const sendClipBackward = useStudio((s) => s.sendClipBackward);
+  const bringClipToFront = useStudio((s) => s.bringClipToFront);
+  const sendClipToBack = useStudio((s) => s.sendClipToBack);
 
   const playerRef = useRef<HyperframesPlayerElement>(null);
   const stageShellRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<StageDrag>(null);
   const queuedDragRef = useRef<StageDrag>(null);
   const dragFrameRef = useRef<number | null>(null);
+  const nudgeResetTimerRef = useRef<number | null>(null);
+  const nudgeCheckpointedRef = useRef(false);
+  const stageEditableClipRef = useRef<EditorClip | null>(null);
+  const moveHandleRef = useRef<HTMLButtonElement>(null);
   const [resolvedHtml, setResolvedHtml] = useState<string | null>(null);
   const [drag, setDrag] = useState<StageDrag>(null);
   const [renderedElementRect, setRenderedElementRect] = useState<DOMRect | null>(null);
@@ -180,9 +212,20 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
             )
           : compositionRectToCss(outlinedClip, stageGeometry)
       : null;
+  const previewRotation =
+    drag?.type === "rotate" && stageEditableClip && drag.clipId === stageEditableClip.id
+      ? drag.previewRotation
+      : (stageEditableClip?.rotation ?? 0);
   const moveHandleStyle = outlineRect
     ? getMoveHandleStyle(outlineRect, stageShellRef.current)
     : null;
+  const rotateHandleStyle = outlineRect
+    ? getRotateHandleStyle(outlineRect, previewRotation, stageShellRef.current)
+    : null;
+  const rotationPillStyle =
+    outlineRect && drag?.type === "rotate"
+      ? getRotationPillStyle(outlineRect, previewRotation, stageShellRef.current)
+      : null;
   const activeDragKey = drag ? `${drag.pointerId}:${drag.clipId}` : null;
 
   const beginDrag = useCallback((nextDrag: NonNullable<StageDrag>) => {
@@ -273,7 +316,11 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     let stopped = false;
     const measure = async () => {
       if (stopped) return;
-      const nextRect = await getRenderedPixelRect(iframeRef.current, clipId);
+      const nextRect = await getRenderedPixelCompositionRect(
+        iframeRef.current,
+        clipId,
+        toCompositionRect(stageEditableClip),
+      );
       if (stopped) return;
       setRenderedElementRect((currentRect) =>
         sameRect(currentRect, nextRect) ? currentRect : nextRect,
@@ -377,10 +424,29 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   }, [drag]);
 
   useEffect(() => {
+    stageEditableClipRef.current = stageEditableClip;
+  }, [stageEditableClip]);
+
+  useEffect(() => {
     return () => {
       if (dragFrameRef.current !== null) window.cancelAnimationFrame(dragFrameRef.current);
+      if (nudgeResetTimerRef.current !== null) window.clearTimeout(nudgeResetTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    nudgeCheckpointedRef.current = false;
+    if (nudgeResetTimerRef.current !== null) {
+      window.clearTimeout(nudgeResetTimerRef.current);
+      nudgeResetTimerRef.current = null;
+    }
+  }, [selectedClipId]);
+
+  useEffect(() => {
+    if (!stageEditableClip || !outlineRect || drag) return;
+    if (shouldPreserveKeyboardFocus(document.activeElement)) return;
+    moveHandleRef.current?.focus({ preventScroll: true });
+  }, [drag, outlineRect, selectedClipId, stageEditableClip]);
 
   useEffect(() => {
     if (!activeDragKey) return;
@@ -388,6 +454,18 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     const handlePointerMove = (event: PointerEvent) => {
       const currentDrag = dragRef.current;
       if (!currentDrag || event.pointerId !== currentDrag.pointerId) return;
+      if (currentDrag.type === "rotate") {
+        const preview = getRotationPreview(
+          currentDrag,
+          event.clientX,
+          event.clientY,
+          event.shiftKey,
+        );
+        previewElementRotation(iframeRef.current, currentDrag.clipId, preview.previewRotation);
+        queueDragPreview({ ...currentDrag, ...preview });
+        return;
+      }
+
       const delta = pointerDeltaToComposition(
         event.clientX - currentDrag.startClientX,
         event.clientY - currentDrag.startClientY,
@@ -402,7 +480,8 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         return;
       }
 
-      const preview = getResizePreview(currentDrag, delta.x, delta.y, event.shiftKey);
+      const localDelta = compositionDeltaToLocal(delta.x, delta.y, currentDrag.rotation);
+      const preview = getResizePreview(currentDrag, localDelta.x, localDelta.y, event.shiftKey);
       previewElementRect(iframeRef.current, currentDrag.clipId, preview.previewClip);
       queueDragPreview({ ...currentDrag, ...preview });
     };
@@ -410,6 +489,21 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     const commitDrag = (event: PointerEvent) => {
       const currentDrag = dragRef.current;
       if (!currentDrag || event.pointerId !== currentDrag.pointerId) return;
+      if (currentDrag.type === "rotate") {
+        const preview = getRotationPreview(
+          currentDrag,
+          event.clientX,
+          event.clientY,
+          event.shiftKey,
+        );
+        const finalRotation = roundRotationDegrees(preview.previewRotation);
+        commitElementRotation(iframeRef.current, currentDrag.clipId, finalRotation);
+        updateClip(currentDrag.clipId, { rotation: finalRotation });
+        setRenderedElementRect(null);
+        clearDrag();
+        return;
+      }
+
       const delta = pointerDeltaToComposition(
         event.clientX - currentDrag.startClientX,
         event.clientY - currentDrag.startClientY,
@@ -425,7 +519,13 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         return;
       }
 
-      const { previewClip } = getResizePreview(currentDrag, delta.x, delta.y, event.shiftKey);
+      const localDelta = compositionDeltaToLocal(delta.x, delta.y, currentDrag.rotation);
+      const { previewClip } = getResizePreview(
+        currentDrag,
+        localDelta.x,
+        localDelta.y,
+        event.shiftKey,
+      );
       const finalClip = roundCompositionRect(previewClip);
       commitElementRect(iframeRef.current, currentDrag.clipId, finalClip);
       updateClip(currentDrag.clipId, {
@@ -446,6 +546,11 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           currentDrag.startX,
           currentDrag.startY,
         );
+        return;
+      }
+
+      if (currentDrag.type === "rotate") {
+        commitElementRotation(iframeRef.current, currentDrag.clipId, currentDrag.startRotation);
         return;
       }
 
@@ -506,20 +611,118 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       startHandleRect,
       previewClip: startClip,
       previewHandleRect: startHandleRect,
+      rotation: stageEditableClip.rotation,
       geometry,
+    });
+  };
+
+  const startRotate = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (!stageEditableClip || !stageShellRef.current || !outlineRect) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+
+    const shellRect = stageShellRef.current.getBoundingClientRect();
+    const centerClientX = shellRect.left + outlineRect.left + outlineRect.width / 2;
+    const centerClientY = shellRect.top + outlineRect.top + outlineRect.height / 2;
+    const pointerAngle = pointerAngleDegrees(
+      centerClientX,
+      centerClientY,
+      event.clientX,
+      event.clientY,
+    );
+
+    beginDrag({
+      type: "rotate",
+      clipId: stageEditableClip.id,
+      pointerId: event.pointerId,
+      centerClientX,
+      centerClientY,
+      lastPointerAngle: pointerAngle,
+      startRotation: stageEditableClip.rotation,
+      rawRotation: stageEditableClip.rotation,
+      previewRotation: stageEditableClip.rotation,
     });
   };
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") selectClip(null);
+      if (event.key === "Escape") {
+        selectClip(null);
+        return;
+      }
+
+      const layerShortcut = getLayerShortcut(event);
+      if (layerShortcut) {
+        if (!isStageNudgeEventTarget(event.target)) return;
+        const currentClip = stageEditableClipRef.current;
+        if (!currentClip || dragRef.current) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+
+        if (layerShortcut === "front") bringClipToFront(currentClip.id);
+        else if (layerShortcut === "back") sendClipToBack(currentClip.id);
+        else if (layerShortcut === "forward") bringClipForward(currentClip.id);
+        else sendClipBackward(currentClip.id);
+        return;
+      }
+
+      const delta = keyboardNudgeDelta(
+        event.key,
+        event.shiftKey ? STAGE_FAST_NUDGE_STEP : STAGE_NUDGE_STEP,
+      );
+      if (!delta) return;
+
+      if (
+        !isStageNudgeEventTarget(event.target) ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey
+      ) {
+        return;
+      }
+
+      const currentClip = stageEditableClipRef.current;
+      if (!currentClip || dragRef.current) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      if (!nudgeCheckpointedRef.current) {
+        checkpointHistory();
+        nudgeCheckpointedRef.current = true;
+      }
+
+      const nextX = Math.round(currentClip.x + delta.x);
+      const nextY = Math.round(currentClip.y + delta.y);
+      commitElementPosition(iframeRef.current, currentClip.id, nextX, nextY);
+      updateClip(currentClip.id, { x: nextX, y: nextY }, { history: false });
+      stageEditableClipRef.current = { ...currentClip, x: nextX, y: nextY };
+      setRenderedElementRect(null);
+
+      if (nudgeResetTimerRef.current !== null) window.clearTimeout(nudgeResetTimerRef.current);
+      nudgeResetTimerRef.current = window.setTimeout(() => {
+        nudgeCheckpointedRef.current = false;
+        nudgeResetTimerRef.current = null;
+      }, STAGE_NUDGE_RESET_MS);
     };
 
-    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown, true);
     return () => {
-      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keydown", handleKeyDown, true);
     };
-  }, [selectClip]);
+  }, [
+    bringClipForward,
+    bringClipToFront,
+    checkpointHistory,
+    iframeRef,
+    selectClip,
+    sendClipBackward,
+    sendClipToBack,
+    updateClip,
+  ]);
 
   if (!project) return null;
 
@@ -544,12 +747,14 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       {outlineRect && (
         <div
           data-stage-selection-overlay=""
-          className="pointer-events-none absolute z-30"
+          className="pointer-events-none absolute z-30 border border-primary/75"
           style={{
             left: outlineRect.left,
             top: outlineRect.top,
             width: Math.max(1, outlineRect.width),
             height: Math.max(1, outlineRect.height),
+            transform: `rotate(${previewRotation}deg)`,
+            transformOrigin: "center center",
           }}
         >
           <SelectionCorner handle="nw" onPointerDown={startResize} />
@@ -558,10 +763,37 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           <SelectionCorner handle="se" onPointerDown={startResize} />
         </div>
       )}
-      {outlineRect && moveHandleStyle && stageEditableClip && (
+      {outlineRect && rotateHandleStyle && stageEditableClip && (
         <button
           type="button"
+          data-stage-rotate-handle=""
+          data-stage-keyboard-nudge=""
+          title="Rotate selected clip"
+          aria-label="Rotate selected clip"
+          className="absolute z-40 flex h-7 w-7 items-center justify-center rounded-full border border-primary/70 bg-panel/95 text-foreground shadow-[0_2px_10px_rgba(0,0,0,0.35)] backdrop-blur hover:bg-panel-2"
+          style={{
+            ...rotateHandleStyle,
+            cursor: drag?.type === "rotate" ? "grabbing" : "grab",
+          }}
+          onPointerDown={startRotate}
+        >
+          <RotateCw size={15} strokeWidth={2.2} />
+        </button>
+      )}
+      {rotationPillStyle && (
+        <div
+          className="pointer-events-none absolute z-40 rounded-full border border-border bg-panel/95 px-2 py-0.5 text-[11px] font-medium text-foreground shadow-[0_2px_10px_rgba(0,0,0,0.28)]"
+          style={rotationPillStyle}
+        >
+          {Math.round(previewRotation)}°
+        </div>
+      )}
+      {outlineRect && moveHandleStyle && stageEditableClip && (
+        <button
+          ref={moveHandleRef}
+          type="button"
           data-stage-move-handle=""
+          data-stage-keyboard-nudge=""
           title="Move selected clip"
           aria-label="Move selected clip"
           className="absolute z-40 flex h-7 w-7 items-center justify-center rounded-md border border-primary/70 bg-panel/95 text-foreground shadow-[0_2px_10px_rgba(0,0,0,0.35)] backdrop-blur hover:bg-panel-2"
@@ -682,6 +914,28 @@ function getResizePreview(
   };
 }
 
+function getRotationPreview(
+  drag: Extract<StageDrag, { type: "rotate" }>,
+  clientX: number,
+  clientY: number,
+  snap: boolean,
+) {
+  const pointerAngle = pointerAngleDegrees(
+    drag.centerClientX,
+    drag.centerClientY,
+    clientX,
+    clientY,
+  );
+  const rawRotation = drag.rawRotation + rotationDeltaDegrees(drag.lastPointerAngle, pointerAngle);
+  return {
+    lastPointerAngle: pointerAngle,
+    rawRotation,
+    previewRotation: snap
+      ? snapRotationDegrees(rawRotation, STAGE_ROTATION_SNAP_DEGREES)
+      : rawRotation,
+  };
+}
+
 function toCompositionRect(clip: Pick<EditorClip, "x" | "y" | "width" | "height">) {
   return {
     x: clip.x,
@@ -725,6 +979,17 @@ function shiftRectForDrag(
   };
 }
 
+function compositionDeltaToLocal(deltaX: number, deltaY: number, rotation: number) {
+  if (rotation === 0) return { x: deltaX, y: deltaY };
+  const radians = (-rotation * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  return {
+    x: deltaX * cos - deltaY * sin,
+    y: deltaX * sin + deltaY * cos,
+  };
+}
+
 function getMoveHandleStyle(
   rect: ReturnType<typeof compositionDomRectToCss>,
   container: HTMLElement | null,
@@ -762,6 +1027,117 @@ function getMoveHandleStyle(
   };
 }
 
+function getRotateHandleStyle(
+  rect: ReturnType<typeof compositionDomRectToCss>,
+  rotation: number,
+  container: HTMLElement | null,
+): CSSProperties {
+  const handleSize = 28;
+  const gap = 14;
+  const padding = 4;
+  const stageWidth = container?.clientWidth ?? rect.left + rect.width;
+  const stageHeight = container?.clientHeight ?? rect.top + rect.height;
+  const maxLeft = Math.max(padding, stageWidth - handleSize - padding);
+  const maxTop = Math.max(padding, stageHeight - handleSize - padding);
+  const topCenter = rotatedRectPoint(rect, 0.5, 0, rotation);
+  const outward = rotateUnitVector(0, -1, rotation);
+  const left = clamp(
+    topCenter.x + outward.x * (handleSize / 2 + gap) - handleSize / 2,
+    padding,
+    maxLeft,
+  );
+  const top = clamp(
+    topCenter.y + outward.y * (handleSize / 2 + gap) - handleSize / 2,
+    padding,
+    maxTop,
+  );
+
+  return { left, top };
+}
+
+function getRotationPillStyle(
+  rect: ReturnType<typeof compositionDomRectToCss>,
+  rotation: number,
+  container: HTMLElement | null,
+): CSSProperties {
+  const pillWidth = 48;
+  const padding = 4;
+  const stageWidth = container?.clientWidth ?? rect.left + rect.width;
+  const stageHeight = container?.clientHeight ?? rect.top + rect.height;
+  const maxLeft = Math.max(padding, stageWidth - pillWidth - padding);
+  const maxTop = Math.max(padding, stageHeight - 22 - padding);
+  const bottomCenter = rotatedRectPoint(rect, 0.5, 1, rotation);
+  const outward = rotateUnitVector(0, 1, rotation);
+  const left = clamp(bottomCenter.x + outward.x * 18 - pillWidth / 2, padding, maxLeft);
+  const top = clamp(bottomCenter.y + outward.y * 18, padding, maxTop);
+
+  return { left, top, minWidth: pillWidth, textAlign: "center" };
+}
+
+function rotatedRectPoint(
+  rect: ReturnType<typeof compositionDomRectToCss>,
+  xRatio: number,
+  yRatio: number,
+  rotation: number,
+) {
+  const centerX = rect.left + rect.width / 2;
+  const centerY = rect.top + rect.height / 2;
+  const x = rect.left + rect.width * xRatio;
+  const y = rect.top + rect.height * yRatio;
+  const rotated = rotateUnitVector(x - centerX, y - centerY, rotation);
+  return {
+    x: centerX + rotated.x,
+    y: centerY + rotated.y,
+  };
+}
+
+function rotateUnitVector(x: number, y: number, rotation: number) {
+  if (rotation === 0) return { x, y };
+  const radians = (rotation * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  return {
+    x: x * cos - y * sin,
+    y: x * sin + y * cos,
+  };
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
+}
+
+type LayerShortcut = "forward" | "backward" | "front" | "back";
+
+function getLayerShortcut(event: KeyboardEvent): LayerShortcut | null {
+  if ((!event.metaKey && !event.ctrlKey) || event.altKey) return null;
+  if (event.key === "ArrowUp") return event.shiftKey ? "front" : "forward";
+  if (event.key === "ArrowDown") return event.shiftKey ? "back" : "backward";
+  return null;
+}
+
+function isTextEditingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+}
+
+function isStageNudgeEventTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return true;
+  if (isTextEditingTarget(target)) return false;
+  if (target.closest("[data-stage-keyboard-nudge], [data-timeline-clip-id]")) return true;
+  return !target.closest(
+    "button, a[href], [role='button'], [role='slider'], [role='spinbutton'], [role='textbox']",
+  );
+}
+
+function shouldPreserveKeyboardFocus(activeElement: Element | null) {
+  if (!(activeElement instanceof HTMLElement)) return false;
+  if (activeElement.closest("[data-stage-keyboard-nudge]")) return false;
+  if (activeElement.closest("[data-timeline-clip-id]")) return true;
+  return Boolean(
+    isTextEditingTarget(activeElement) ||
+    activeElement.closest(
+      "button, a[href], [role='button'], [role='slider'], [role='spinbutton'], [role='textbox']",
+    ),
+  );
 }

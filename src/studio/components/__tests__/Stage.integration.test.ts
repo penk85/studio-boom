@@ -25,13 +25,24 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(source).toContain("commitElementPosition(iframeRef.current");
     expect(source).toContain("previewElementRect(iframeRef.current");
     expect(source).toContain("commitElementRect(iframeRef.current");
+    expect(source).toContain("previewElementRotation(iframeRef.current");
+    expect(source).toContain("commitElementRotation(iframeRef.current");
     expect(source).toContain("updateClip(currentDrag.clipId, { x: nextX, y: nextY })");
+    expect(source).toContain("updateClip(currentDrag.clipId, { rotation: finalRotation })");
+    expect(source).toContain("keyboardNudgeDelta(");
+    expect(source).toContain(
+      "updateClip(currentClip.id, { x: nextX, y: nextY }, { history: false })",
+    );
+    expect(source).toContain("nudgeCheckpointedRef");
+    expect(source).toContain('window.addEventListener("keydown", handleKeyDown, true)');
+    expect(source).toContain("event.stopImmediatePropagation()");
+    expect(source).toContain("isStageNudgeEventTarget(event.target)");
     expect(source).toContain('data-stage-selection-overlay=""');
     expect(source).toContain("const { pickedElement, enablePick, isPickMode } = useElementPicker");
     expect(source).toContain("if (!resolvedHtml || drag || isPickMode) return;");
     expect(source).toContain('doc.addEventListener("click", handleClick, true)');
     expect(source).toContain("resolveTargetClipId(");
-    expect(source).toContain("getRenderedPixelRect(iframeRef.current, clipId)");
+    expect(source).toContain("getRenderedPixelCompositionRect(");
     expect(source).toContain("compositionDomRectToCss(renderedElementRect, stageGeometry)");
     expect(source).toContain('data-stage-move-handle=""');
     expect(source).toContain("resizeCompositionRect({");
@@ -40,6 +51,14 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(source).toContain("width: finalClip.width");
     expect(source).toContain("height: finalClip.height");
     expect(source).toContain("<SelectionCorner");
+    expect(source).toContain('data-stage-rotate-handle=""');
+    expect(source).toContain("getRotationPreview(");
+    expect(source).toContain("snapRotationDegrees(");
+    expect(source).toContain("transform: `rotate(${previewRotation}deg)`");
+    expect(source).toContain("compositionDeltaToLocal(");
+    expect(source).toContain("getLayerShortcut(event)");
+    expect(source).toContain("bringClipForward(currentClip.id)");
+    expect(source).toContain("sendClipBackward(currentClip.id)");
   });
 
   it("inlines GSAP for srcdoc previews so timeline registration is not CDN-dependent", () => {

@@ -33,9 +33,12 @@ areas are still being shaped.
 - Generating ElevenLabs voice lines and lip-sync timing.
 - Stage preview via the local `<hyperframes-player srcdoc>` adapter — the same
   HTML staged for MP4 rendering, previewed directly in the browser.
-- Stage selection, drag, and resize for visual clips. React draws editor chrome
-  only; the selected object remains the real HyperFrames element inside the
-  player iframe, and commits persist back to `project.hf.rootHtml`.
+- Stage selection, drag, resize, rotate, visual layer ordering, and keyboard
+  nudging for visual clips.
+  React draws editor chrome only; the selected object remains the real
+  HyperFrames element inside the player iframe, and commits persist back to
+  `project.hf.rootHtml`.
+- Undo/redo for project edits, including stage and timeline manipulation.
 - Playback controls (play, pause, seek) wired through `useTimelinePlayer`.
 - MP4 download via the HyperFrames CLI render path.
 
@@ -44,6 +47,10 @@ areas are still being shaped.
 - Character compositions are being refactored away from a static baking step toward
   native HyperFrames compositions. The character builder works, but the internal
   representation is in transition.
+- AI-generated clips and custom HyperFrames blocks are planned around native
+  `text` and `composition` clip support, source-visible composition editing, and
+  the same `project.hf` source-of-truth flow. See
+  [`docs/ai-generated-hyperframes-clips-roadmap.md`](docs/ai-generated-hyperframes-clips-roadmap.md).
 - Local backup and restore for the browser database still needs work.
 - There is no cloud account, team sync, or hosted backend.
 
@@ -94,13 +101,14 @@ Zustand (in-memory editor state)
 Studio HyperFrames boundaries
   parseStudioHtml()                 ← reads native/rootHtml clip data for the editor
   normalizeNativeHyperframesHtml()  ← keeps root, stage, and viewport metadata aligned
-  player-editing                    ← previews live drag/resize on real iframe elements
+  player-editing                    ← previews live drag/resize/rotate on real iframe elements
 ```
 
 ### Edit flow
 
 ```
-User action (add clip, drag, resize, change timing)
+User action (add clip, drag, resize, rotate, reorder layers, change timing)
+  → store records an undo checkpoint for the current project
   → @hyperframes/core HTML mutation / Studio boundary adapter → updated rootHtml
   → store saves rootHtml to Dexie (debounced)
   → Stage resolves editor-only asset placeholders → player iframe re-renders
@@ -109,8 +117,13 @@ User action (add clip, drag, resize, change timing)
 For live stage manipulation, Studio Boom talks to the real player iframe through a
 small `player-editing` boundary. It uses HyperFrames `PlayerAPI` methods where
 available, and falls back to updating the real iframe DOM element for editor-time
-preview. On release, `updateClip` persists the final position and size into
-canonical `rootHtml`.
+preview. On release, `updateClip` persists the final position, size, and base
+rotation into canonical `rootHtml`. Rotation is stored as a Studio boundary
+attribute (`data-rotation`) until HyperFrames core exposes base rotation as a
+native element field. The stage rotate handle previews on the real iframe
+element and commits the final angle through `updateClip`. Visual layer order is
+stored in the real HTML as CSS `z-index` through the Studio HyperFrames boundary;
+timeline tracks and lanes remain editor-only layout metadata.
 
 ### Stage
 
@@ -121,9 +134,10 @@ player's inner iframe with `@hyperframes/studio`'s `resolveIframe`, so the singl
 HyperFrames iframe.
 
 React may draw editor chrome on top of the player — selection outlines, resize
-handles, and the small move control — but it must not draw duplicate media or
-content. The selected and edited object remains the real HyperFrames element
-inside `project.hf.rootHtml`.
+handles, and the small move/rotate controls — but it must not draw duplicate
+media or content. Selection chrome follows the selected clip's rotation, while
+the selected and edited object remains the real HyperFrames element inside
+`project.hf.rootHtml`.
 
 Shader transition support is intentionally not configured in the Studio Boom
 stage yet. Standard HyperFrames playback, GSAP animation, media, and non-shader
@@ -165,8 +179,9 @@ npm run format    # Prettier
 2. Use the Library panel to upload media or build a character.
 3. Drag media or characters onto the timeline.
 4. Select a clip on the stage or timeline.
-5. Drag or resize selected visual clips on the stage, or use the Inspector to
-   adjust timing, position, size, opacity, motion, or lip sync.
+5. Drag, resize, rotate, or arrow-key nudge selected visual clips on the stage.
+   Use `Ctrl/⌘ + ArrowUp/ArrowDown` to move a clip forward/backward in the visual
+   stack, or add `Shift` to send it to the front/back.
 6. Use Save to checkpoint locally.
 
 ---

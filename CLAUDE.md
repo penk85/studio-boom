@@ -95,7 +95,7 @@ Dexie (browser persistence)
 
 Zustand (in-memory UI state)
   project          ← loaded from Dexie, kept in sync
-  selectedClipId, zoom, drag state
+  selectedClipId, zoom, undo/redo history, drag state
   characters, motionPresets, mediaAssets  ← hydrated at project open
 ```
 
@@ -121,7 +121,8 @@ HTML, ready to pass directly to the player or stage directly for MP4 rendering.
 ### Edit flow
 
 ```
-User action (add clip, drag, resize, change timing)
+User action (add clip, drag, resize, rotate, nudge, reorder layers, change timing)
+  → record an undo checkpoint for the current Project snapshot
   → call updateElementInHtml / addElementToHtml / removeElementFromHtml
     from @hyperframes/core through Studio boundary adapters to mutate rootHtml
   → store dispatches updateRootHtml(newHtml) → Dexie save (debounced)
@@ -130,10 +131,16 @@ User action (add clip, drag, resize, change timing)
 
 For live stage preview without reloading, use the local player-editing boundary.
 It tries `PlayerAPI` first, then falls back to updating the real element in the
-player iframe. Do not draw a React copy of the clip to fake movement or resize.
-On release, commit through `updateClip`, which persists `x`/`y` and
-`width`/`height` into `rootHtml` using `TimelineElement` fields
-(`sourceWidth`/`sourceHeight`).
+player iframe. Do not draw a React copy of the clip to fake movement, resize, or
+rotation. On release, commit through `updateClip`, which persists `x`/`y`,
+`width`/`height`, and base `rotation` into `rootHtml`. Width and height map to
+`TimelineElement` fields (`sourceWidth`/`sourceHeight`); base rotation is
+persisted by the Studio HTML boundary as `data-rotation` until
+`@hyperframes/core` exposes it as a native base element field.
+
+Visual layer order is `EditorClip.zIndex` persisted into `rootHtml` as CSS
+`z-index` by the Studio HTML boundary. Editor timeline tracks and lanes stay in
+`editorMeta`; do not make React track rows the render stack.
 
 ### Stage
 
@@ -158,8 +165,17 @@ React overlays are allowed only as editor chrome: selection outlines, resize
 handles, move controls, labels, and other non-rendered affordances. They must not
 draw duplicate media/content or become a second preview renderer. The selected and
 edited object remains the real HyperFrames element inside the player iframe.
-Stage drag/resize should preview through the player-editing boundary and commit
-through `updateClip`.
+Stage drag/resize/rotate/nudge should preview through the player-editing boundary
+and commit through `updateClip`. The rotate handle uses the selected visible
+bounds center as its editor pivot and persists only base `rotation`, not
+animation keyframes. Selection chrome may rotate with the selected clip, but it
+must remain editor-only chrome. Visual layer shortcuts should mutate canonical
+`rootHtml` layer fields, not reorder React-rendered previews.
+
+Undo/redo restores stored `Project` snapshots, including `project.hf` and
+`editorMeta`. It must not reconstruct output from React UI state. Interactive
+mousemove-style edits should create one explicit checkpoint at interaction start,
+then call mutation actions with history disabled until the interaction ends.
 
 ### Character compositions
 
@@ -229,6 +245,7 @@ ClipEditorMeta {
 | `src/studio/hyperframes/player-editing.ts` | Live player edit boundary for real iframe elements during stage manipulation |
 | `src/studio/hyperframes/root-composition.ts` | Root composition creation and root metadata updates |
 | `src/studio/export/bake.ts` | Legacy character composition builder (pending character refactor) |
+| `docs/ai-generated-hyperframes-clips-roadmap.md` | Roadmap for AI-generated clips, source-visible custom HyperFrames blocks, native text/composition clip support, and nested composition editing |
 
 ---
 

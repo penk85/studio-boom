@@ -69,6 +69,44 @@ export function pointerDeltaToComposition(dx: number, dy: number, geometry: Stag
   };
 }
 
+export function keyboardNudgeDelta(key: string, step: number): { x: number; y: number } | null {
+  switch (key) {
+    case "ArrowLeft":
+      return { x: -step, y: 0 };
+    case "ArrowRight":
+      return { x: step, y: 0 };
+    case "ArrowUp":
+      return { x: 0, y: -step };
+    case "ArrowDown":
+      return { x: 0, y: step };
+    default:
+      return null;
+  }
+}
+
+export function pointerAngleDegrees(
+  centerClientX: number,
+  centerClientY: number,
+  clientX: number,
+  clientY: number,
+): number {
+  return (Math.atan2(clientY - centerClientY, clientX - centerClientX) * 180) / Math.PI;
+}
+
+export function rotationDeltaDegrees(previousAngle: number, nextAngle: number): number {
+  const delta = ((nextAngle - previousAngle + 540) % 360) - 180;
+  return Object.is(delta, -0) ? 0 : delta;
+}
+
+export function snapRotationDegrees(rotation: number, step = 15): number {
+  const snapStep = Math.max(1, step);
+  return Math.round(rotation / snapStep) * snapStep;
+}
+
+export function roundRotationDegrees(rotation: number): number {
+  return Math.round(rotation * 10) / 10;
+}
+
 export function resizeCompositionRect({
   handle,
   startX,
@@ -224,6 +262,37 @@ export async function getRenderedPixelRect(
     return pixelBounds ? pixelBoundsToRenderedRect(pixelBounds, elementRect) : elementRect;
   } catch {
     return getRenderedElementRect(iframe, elementId);
+  }
+}
+
+export async function getRenderedPixelCompositionRect(
+  iframe: HTMLIFrameElement | null,
+  elementId: string | null | undefined,
+  elementRect: CompositionRect,
+): Promise<DOMRect | null> {
+  if (!iframe || !elementId) return null;
+
+  const fallbackRect = new DOMRect(
+    elementRect.x,
+    elementRect.y,
+    elementRect.width,
+    elementRect.height,
+  );
+
+  try {
+    const element = iframe.contentDocument?.getElementById(elementId);
+    if (!element) return null;
+    if (element.tagName.toLowerCase() !== "img") return fallbackRect;
+
+    const image = element as HTMLImageElement;
+    if (!image.complete || image.naturalWidth <= 0 || image.naturalHeight <= 0) {
+      return fallbackRect;
+    }
+
+    const pixelBounds = measureImagePixelBounds(image);
+    return pixelBounds ? pixelBoundsToRenderedRect(pixelBounds, fallbackRect) : fallbackRect;
+  } catch {
+    return fallbackRect;
   }
 }
 

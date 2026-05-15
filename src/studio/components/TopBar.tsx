@@ -1,5 +1,5 @@
 // Top bar — project name, MP4 download action, save.
-import { Save } from "lucide-react";
+import { Redo2, Save, Undo2 } from "lucide-react";
 import { useState } from "react";
 import { useStudio } from "../store";
 import { renderProjectToMp4 } from "../export/render-client";
@@ -7,6 +7,10 @@ import { renderProjectToMp4 } from "../export/render-client";
 export function TopBar() {
   const project = useStudio((s) => s.project);
   const saveProject = useStudio((s) => s.saveProject);
+  const undo = useStudio((s) => s.undo);
+  const redo = useStudio((s) => s.redo);
+  const canUndo = useStudio((s) => s.historyPast.length > 0);
+  const canRedo = useStudio((s) => s.historyFuture.length > 0);
   const [saved, setSaved] = useState(false);
   const [rendering, setRendering] = useState(false);
   const [renderError, setRenderError] = useState<string | null>(null);
@@ -39,6 +43,28 @@ export function TopBar() {
         className="rounded border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-panel-2 hover:text-foreground"
       >
         Motion presets
+      </button>
+      <button
+        type="button"
+        onClick={undo}
+        disabled={!canUndo}
+        className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-panel-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+        title="Undo"
+        aria-label="Undo"
+      >
+        <Undo2 size={13} />
+        Undo
+      </button>
+      <button
+        type="button"
+        onClick={redo}
+        disabled={!canRedo}
+        className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-panel-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+        title="Redo"
+        aria-label="Redo"
+      >
+        <Redo2 size={13} />
+        Redo
       </button>
       <button
         onClick={saveNow}

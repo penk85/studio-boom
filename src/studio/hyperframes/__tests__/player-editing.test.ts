@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  commitElementRotation,
   commitElementPosition,
   commitElementRect,
   previewElementPosition,
   previewElementRect,
+  previewElementRotation,
 } from "../player-editing";
 
 describe("player editing boundary", () => {
@@ -31,6 +33,21 @@ describe("player editing boundary", () => {
     expect(previewElementPosition(iframe, "clip-1", 128, 96)).toBe(true);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toEqual([iframe.contentDocument?.getElementById("clip-1"), { x: 128, y: 96 }]);
+
+    iframe.remove();
+  });
+
+  it("previews and commits rotation on the real iframe element", () => {
+    const iframe = createIframeWithClip();
+
+    expect(previewElementRotation(iframe, "clip-1", 15)).toBe(true);
+    const element = iframe.contentDocument?.getElementById("clip-1") as HTMLElement | null;
+    expect(element?.style.transform).toContain("rotate(15deg)");
+    expect(element?.getAttribute("data-rotation")).toBeNull();
+
+    expect(commitElementRotation(iframe, "clip-1", 0)).toBe(true);
+    expect(element?.getAttribute("data-rotation")).toBe("0");
+    expect(element?.style.transform).not.toContain("rotate(");
 
     iframe.remove();
   });

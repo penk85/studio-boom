@@ -15,6 +15,7 @@ vi.mock("@hyperframes/studio", async () => {
     await import("../../../../node_modules/@hyperframes/studio/src/player/hooks/useTimelinePlayer");
   return {
     PlayerControls: controls.PlayerControls,
+    liveTime: playerStore.liveTime,
     usePlayerStore: playerStore.usePlayerStore,
     useTimelinePlayer: timelinePlayer.useTimelinePlayer,
   };
@@ -58,6 +59,8 @@ function resetStudio() {
     mediaAssets: new Map(),
     selectedClipId: null,
     zoom: 60,
+    historyPast: [],
+    historyFuture: [],
   });
 }
 

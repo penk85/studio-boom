@@ -6,7 +6,7 @@ import { PlayerControls, liveTime, usePlayerStore } from "@hyperframes/studio";
 import { db, uid } from "../db";
 import { generateMotionOccurrences } from "../presets/apply";
 import { resolveExclusiveMotionOverlaps } from "../presets/motion-scheduling";
-import { useStudio } from "../store";
+import { useStudio, type ProjectMutationOptions } from "../store";
 import { useHfMediaHealth } from "../hooks/useHfMediaHealth";
 import type {
   MotionCategory,
@@ -75,6 +75,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const removeClip = useStudio((s) => s.removeClip);
   const addLane = useStudio((s) => s.addLane);
   const removeLane = useStudio((s) => s.removeLane);
+  const checkpointHistory = useStudio((s) => s.checkpointHistory);
 
   const playheadRef = useRef<HTMLDivElement>(null);
   const timeDisplayRef = useRef<HTMLSpanElement>(null);
@@ -335,7 +336,8 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                           expanded={expandedClipIds.has(c.id)}
                           onToggleExpanded={() => toggleExpandedClip(c.id)}
                           onSelect={() => selectClip(c.id)}
-                          onChange={(p) => updateClip(c.id, p)}
+                          onChange={(p, options) => updateClip(c.id, p, options)}
+                          onHistoryCheckpoint={checkpointHistory}
                           onDelete={() => removeClip(c.id)}
                         />
                       );
@@ -409,6 +411,7 @@ function ClipBlock({
   selected,
   onSelect,
   onChange,
+  onHistoryCheckpoint,
   onDelete,
   duration,
   laneTops,
@@ -426,7 +429,8 @@ function ClipBlock({
   laneTops: number[];
   top: number;
   onSelect: () => void;
-  onChange: (p: Partial<AnyClip>) => void;
+  onChange: (p: Partial<AnyClip>, options?: ProjectMutationOptions) => void;
+  onHistoryCheckpoint: () => void;
   onDelete: () => void;
   presetMap: Map<string, MotionPreset>;
   expanded: boolean;
@@ -458,15 +462,20 @@ function ClipBlock({
     const olane = lane;
     const oLaneTop = laneTops[olane] ?? olane * TRACK_HEIGHT;
     let dragging = false;
+    let checkpointed = false;
     const move = (ev: MouseEvent) => {
       const dx = ev.clientX - sx;
       const dy = ev.clientY - sy;
       if (!dragging && Math.hypot(dx, dy) < CLIP_DRAG_THRESHOLD_PX) return;
       dragging = true;
+      if (!checkpointed) {
+        onHistoryCheckpoint();
+        checkpointed = true;
+      }
       const ns = Math.max(0, Math.min(duration - clip.duration, ostart + (ev.clientX - sx) / zoom));
       // Snap vertical drag to nearest lane within the track.
       const newLane = nearestLaneIndex(laneTops, oLaneTop + dy + TRACK_HEIGHT / 2);
-      onChange({ start: ns, laneIndex: newLane });
+      onChange({ start: ns, laneIndex: newLane }, { history: false });
     };
     const up = () => {
       window.removeEventListener("mousemove", move);
@@ -481,9 +490,14 @@ function ClipBlock({
     if (linkedAudio) return;
     const sx = e.clientX,
       od = clip.duration;
+    let checkpointed = false;
     const move = (ev: MouseEvent) => {
+      if (!checkpointed) {
+        onHistoryCheckpoint();
+        checkpointed = true;
+      }
       const nd = Math.max(0.1, Math.min(duration - clip.start, od + (ev.clientX - sx) / zoom));
-      onChange({ duration: nd });
+      onChange({ duration: nd }, { history: false });
     };
     const up = () => {
       window.removeEventListener("mousemove", move);
@@ -499,11 +513,16 @@ function ClipBlock({
     const sx = e.clientX,
       ostart = clip.start,
       od = clip.duration;
+    let checkpointed = false;
     const move = (ev: MouseEvent) => {
+      if (!checkpointed) {
+        onHistoryCheckpoint();
+        checkpointed = true;
+      }
       const dx = (ev.clientX - sx) / zoom;
       const ns = Math.max(0, Math.min(ostart + od - 0.1, ostart + dx));
       const nd = od - (ns - ostart);
-      onChange({ start: ns, duration: nd });
+      onChange({ start: ns, duration: nd }, { history: false });
     };
     const up = () => {
       window.removeEventListener("mousemove", move);
@@ -516,6 +535,8 @@ function ClipBlock({
   return (
     <div
       data-timeline-clip-id={clip.id}
+      role="button"
+      aria-label={`Select ${clip.name}`}
       onMouseDown={onMouseDown}
       onClick={(e) => {
         e.stopPropagation();

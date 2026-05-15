@@ -3,13 +3,18 @@ import {
   compositionDomRectToCss,
   compositionRectToCss,
   getStageGeometry,
+  keyboardNudgeDelta,
   pointerDeltaToComposition,
+  pointerAngleDegrees,
   pixelBoundsToRenderedRect,
   resizeCompositionRect,
+  rotationDeltaDegrees,
   roundCompositionRect,
+  roundRotationDegrees,
   resolvePickedClipId,
   resolveTargetClipId,
   scaleCompositionRectFromHandleRect,
+  snapRotationDegrees,
 } from "../stage-helpers";
 
 describe("stage helpers", () => {
@@ -63,6 +68,35 @@ describe("stage helpers", () => {
       width: 200,
       height: 150,
     });
+  });
+
+  it("maps arrow keys to composition-pixel nudge deltas", () => {
+    expect(keyboardNudgeDelta("ArrowLeft", 10)).toEqual({ x: -10, y: 0 });
+    expect(keyboardNudgeDelta("ArrowRight", 1)).toEqual({ x: 1, y: 0 });
+    expect(keyboardNudgeDelta("ArrowUp", 10)).toEqual({ x: 0, y: -10 });
+    expect(keyboardNudgeDelta("ArrowDown", 1)).toEqual({ x: 0, y: 1 });
+    expect(keyboardNudgeDelta("Enter", 1)).toBeNull();
+  });
+
+  it("computes pointer rotation angles in viewport coordinates", () => {
+    expect(pointerAngleDegrees(100, 100, 200, 100)).toBeCloseTo(0);
+    expect(pointerAngleDegrees(100, 100, 100, 200)).toBeCloseTo(90);
+    expect(pointerAngleDegrees(100, 100, 100, 0)).toBeCloseTo(-90);
+    expect(pointerAngleDegrees(100, 100, 0, 100)).toBeCloseTo(180);
+  });
+
+  it("accumulates rotation deltas across the 180 degree boundary", () => {
+    expect(rotationDeltaDegrees(170, -170)).toBeCloseTo(20);
+    expect(rotationDeltaDegrees(-170, 170)).toBeCloseTo(-20);
+    expect(rotationDeltaDegrees(10, 40)).toBeCloseTo(30);
+  });
+
+  it("snaps and rounds rotation values", () => {
+    expect(snapRotationDegrees(22, 15)).toBe(15);
+    expect(snapRotationDegrees(23, 15)).toBe(30);
+    expect(snapRotationDegrees(-22, 15)).toBe(-15);
+    expect(roundRotationDegrees(12.34)).toBe(12.3);
+    expect(roundRotationDegrees(12.36)).toBe(12.4);
   });
 
   it("maps measured pixel bounds into rendered element coordinates", () => {
