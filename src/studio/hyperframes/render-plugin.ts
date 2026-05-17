@@ -1,12 +1,13 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { build as buildWithEsbuild, transformSync } from "esbuild";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { parseHTML } from "linkedom";
 import type { Plugin } from "vite";
 
 interface RenderResult {
@@ -58,8 +59,12 @@ export function hyperframesRenderPlugin(): Plugin {
 
 async function handlePreviewBundle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const projectDir = await writePostedProjectFiles(req);
+  const scaleHints = await readCompositionScaleHints(projectDir);
   const bundleToSingleHtml = await loadHyperframesBundler();
-  const html = await bundleToSingleHtml(projectDir, { runtime: "inline" });
+  const html = applyCompositionScaleWrappers(
+    await bundleToSingleHtml(projectDir, { runtime: "inline" }),
+    scaleHints,
+  );
   assertNoTrackOverlaps(html);
   assertInlineScriptSyntax(html);
   res.statusCode = 200;
@@ -112,10 +117,15 @@ async function handleRender(req: IncomingMessage, res: ServerResponse): Promise<
   const projectDir = path.join(rootDir, "project");
   const outputPath = path.join(rootDir, "studio-boom.mp4");
   await writePostedProjectFiles(req, projectDir);
+  const scaleHints = await readCompositionScaleHints(projectDir);
   const bundleToSingleHtml = await loadHyperframesBundler();
-  const bundledHtml = await bundleToSingleHtml(projectDir, { runtime: "inline" });
+  const bundledHtml = applyCompositionScaleWrappers(
+    await bundleToSingleHtml(projectDir, { runtime: "inline" }),
+    scaleHints,
+  );
   assertNoTrackOverlaps(bundledHtml);
   assertInlineScriptSyntax(bundledHtml);
+  await writeFile(path.join(projectDir, "index.html"), bundledHtml);
 
   let log = "";
   log += await runHyperframes(["render", projectDir, "--output", outputPath, "--format", "mp4"]);
@@ -193,6 +203,121 @@ function safeRelativeFilePath(filename: string): string {
     throw new Error(`Render request included an unsafe filename: ${filename}`);
   }
   return path.join(...parts);
+}
+
+interface CompositionScaleHint {
+  hostId: string;
+  naturalWidth: number;
+  naturalHeight: number;
+}
+
+async function readCompositionScaleHints(projectDir: string): Promise<CompositionScaleHint[]> {
+  const rootHtml = await readFile(path.join(projectDir, "index.html"), "utf8");
+  const { document } = parseHTML(rootHtml);
+  const hints: CompositionScaleHint[] = [];
+
+  for (const host of Array.from(document.querySelectorAll("[data-composition-src]"))) {
+    const hostId = host.getAttribute("id")?.trim();
+    const src = host.getAttribute("data-composition-src")?.trim();
+    const compositionId = host.getAttribute("data-composition-id")?.trim();
+    if (!hostId || !src) continue;
+
+    const compPath = safeProjectPath(projectDir, src);
+    if (!compPath) continue;
+
+    let compHtml = "";
+    try {
+      compHtml = await readFile(compPath, "utf8");
+    } catch {
+      continue;
+    }
+
+    const dimensions = readCompositionNaturalDimensions(compHtml, compositionId);
+    if (!dimensions) continue;
+    hints.push({ hostId, ...dimensions });
+  }
+
+  return hints;
+}
+
+function readCompositionNaturalDimensions(
+  html: string,
+  compositionId: string | undefined,
+): { naturalWidth: number; naturalHeight: number } | null {
+  const { document } = parseHTML(html);
+  const selector = compositionId
+    ? `[data-composition-id="${escapeCssAttributeValue(compositionId)}"]`
+    : "[data-composition-id]";
+  const root = document.querySelector(selector) ?? document.querySelector("[data-composition-id]");
+  const width =
+    parsePositiveNumber(root?.getAttribute("data-width")) ??
+    parsePositiveNumber(document.documentElement.getAttribute("data-width")) ??
+    parsePositiveNumber(document.documentElement.getAttribute("data-composition-width"));
+  const height =
+    parsePositiveNumber(root?.getAttribute("data-height")) ??
+    parsePositiveNumber(document.documentElement.getAttribute("data-height")) ??
+    parsePositiveNumber(document.documentElement.getAttribute("data-composition-height"));
+  if (!width || !height) return null;
+  return { naturalWidth: width, naturalHeight: height };
+}
+
+function applyCompositionScaleWrappers(html: string, hints: CompositionScaleHint[]): string {
+  if (hints.length === 0) return html;
+  const hintByHostId = new Map(hints.map((hint) => [hint.hostId, hint] as const));
+  const { document } = parseHTML(html);
+
+  for (const host of Array.from(document.querySelectorAll<HTMLElement>("[data-type='composition']"))) {
+    const hostId = host.getAttribute("id")?.trim();
+    const hint = hostId ? hintByHostId.get(hostId) : undefined;
+    if (!hint) continue;
+
+    const width =
+      parsePositiveNumber(host.getAttribute("data-width")) ??
+      parsePositiveNumber(host.getAttribute("data-source-width")) ??
+      hint.naturalWidth;
+    const height =
+      parsePositiveNumber(host.getAttribute("data-height")) ??
+      parsePositiveNumber(host.getAttribute("data-source-height")) ??
+      hint.naturalHeight;
+
+    host.setAttribute("data-studio-composition-natural-width", String(hint.naturalWidth));
+    host.setAttribute("data-studio-composition-natural-height", String(hint.naturalHeight));
+    host.style.overflow = "hidden";
+
+    let wrapper = host.querySelector<HTMLElement>("[data-studio-composition-scale-root]");
+    if (!wrapper) {
+      wrapper = document.createElement("div");
+      wrapper.setAttribute("data-studio-composition-scale-root", "");
+      const children = Array.from(host.childNodes);
+      for (const child of children) wrapper.appendChild(child);
+      host.appendChild(wrapper);
+    }
+
+    wrapper.style.width = `${hint.naturalWidth}px`;
+    wrapper.style.height = `${hint.naturalHeight}px`;
+    wrapper.style.transformOrigin = "0 0";
+    wrapper.style.transform = `scale(${width / hint.naturalWidth}, ${height / hint.naturalHeight})`;
+  }
+
+  return "<!DOCTYPE html>\n" + document.documentElement.outerHTML;
+}
+
+function safeProjectPath(projectDir: string, relativePath: string): string | null {
+  const normalized = relativePath.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length === 0) return null;
+  if (parts.some((part) => part === "." || part === ".." || part.includes("\0"))) return null;
+  return path.join(projectDir, ...parts);
+}
+
+function escapeCssAttributeValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function parsePositiveNumber(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 interface TimedHtmlClip {

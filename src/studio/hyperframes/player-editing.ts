@@ -232,8 +232,41 @@ function setElementSizeInPlayerDom(
     style.height = `${height}px`;
     style.maxWidth = "none";
     style.maxHeight = "none";
+    updateCompositionScaleWrapper(element, width, height);
     return true;
   } catch {
     return false;
   }
+}
+
+function updateCompositionScaleWrapper(element: Element, width: number, height: number): void {
+  if (!isCompositionHost(element)) return;
+  const wrapper = element.querySelector<HTMLElement>("[data-studio-composition-scale-root]");
+  if (!wrapper) return;
+
+  const naturalWidth = parsePositiveNumber(
+    element.getAttribute("data-studio-composition-natural-width"),
+  );
+  const naturalHeight = parsePositiveNumber(
+    element.getAttribute("data-studio-composition-natural-height"),
+  );
+  if (!naturalWidth || !naturalHeight) return;
+
+  wrapper.style.width = `${naturalWidth}px`;
+  wrapper.style.height = `${naturalHeight}px`;
+  wrapper.style.transformOrigin = "0 0";
+  wrapper.style.transform = `scale(${width / naturalWidth}, ${height / naturalHeight})`;
+}
+
+function isCompositionHost(element: Element): boolean {
+  return (
+    element.getAttribute("data-type") === "composition" ||
+    element.hasAttribute("data-composition-id")
+  );
+}
+
+function parsePositiveNumber(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }

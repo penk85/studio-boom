@@ -96,6 +96,24 @@ describe("player editing boundary", () => {
 
     iframe.remove();
   });
+
+  it("scales bundled composition content when resizing a composition host", () => {
+    const iframe = createIframeWithCompositionClip();
+
+    expect(previewElementRect(iframe, "comp-1", { x: 0, y: 0, width: 960, height: 540 })).toBe(
+      true,
+    );
+
+    const element = iframe.contentDocument?.getElementById("comp-1") as HTMLElement | null;
+    const wrapper = element?.querySelector<HTMLElement>("[data-studio-composition-scale-root]");
+    expect(element?.style.width).toBe("960px");
+    expect(element?.style.height).toBe("540px");
+    expect(wrapper?.style.width).toBe("1920px");
+    expect(wrapper?.style.height).toBe("1080px");
+    expect(wrapper?.style.transform).toBe("scale(0.5, 0.5)");
+
+    iframe.remove();
+  });
 });
 
 function createIframeWithClip(): HTMLIFrameElement {
@@ -104,6 +122,27 @@ function createIframeWithClip(): HTMLIFrameElement {
   iframe.contentDocument?.open();
   iframe.contentDocument?.write(`<!DOCTYPE html><html><body>
     <img id="clip-1" src="asset:clip-1" />
+  </body></html>`);
+  iframe.contentDocument?.close();
+  return iframe;
+}
+
+function createIframeWithCompositionClip(): HTMLIFrameElement {
+  const iframe = document.createElement("iframe");
+  document.body.appendChild(iframe);
+  iframe.contentDocument?.open();
+  iframe.contentDocument?.write(`<!DOCTYPE html><html><body>
+    <div
+      id="comp-1"
+      data-type="composition"
+      data-composition-id="ai-card"
+      data-studio-composition-natural-width="1920"
+      data-studio-composition-natural-height="1080"
+    >
+      <div data-studio-composition-scale-root="">
+        <div class="card">AI Card</div>
+      </div>
+    </div>
   </body></html>`);
   iframe.contentDocument?.close();
   return iframe;

@@ -143,6 +143,9 @@ export function Inspector() {
                 onApply={(html) => updateCompositionHtml(clip.compositionId!, html)}
               />
             )}
+            {isPrimitiveSourceClip(clip) && (
+              <RootElementSourceInspector clip={clip} rootHtml={project.hf.rootHtml} />
+            )}
             <button
               onClick={() => {
                 if (!linkedSpeechAudio) remove(clip.id);
@@ -215,6 +218,37 @@ export function Inspector() {
           </Field>
         </div>
       </div>
+    </div>
+  );
+}
+
+function RootElementSourceInspector({ clip, rootHtml }: { clip: EditorClip; rootHtml: string }) {
+  const source = useMemo(() => readRootElementSource(rootHtml, clip.id), [rootHtml, clip.id]);
+
+  return (
+    <div className="rounded border border-border bg-panel-2 p-3">
+      <div className="mb-2 flex items-center gap-2">
+        <div className="font-semibold uppercase tracking-wider text-muted-foreground">Source</div>
+        <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
+          rootHtml element
+        </span>
+      </div>
+      <textarea
+        value={source ?? `Element "${clip.id}" was not found in project.hf.rootHtml.`}
+        readOnly
+        rows={6}
+        spellCheck={false}
+        className="w-full resize-y rounded border border-border bg-input px-2 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground"
+      />
+      {source && (
+        <button
+          type="button"
+          onClick={() => void navigator.clipboard?.writeText(source)}
+          className="mt-2 rounded border border-border px-2 py-1 text-[10px] text-foreground hover:bg-panel"
+        >
+          Copy source
+        </button>
+      )}
     </div>
   );
 }
@@ -356,6 +390,21 @@ function CompositionSourceInspector({
       </div>
     </div>
   );
+}
+
+function isPrimitiveSourceClip(clip: EditorClip): boolean {
+  return (
+    clip.kind === "image" ||
+    clip.kind === "video" ||
+    clip.kind === "audio" ||
+    clip.kind === "text"
+  );
+}
+
+function readRootElementSource(rootHtml: string, elementId: string): string | null {
+  if (typeof DOMParser === "undefined") return null;
+  const doc = new DOMParser().parseFromString(rootHtml, "text/html");
+  return doc.getElementById(elementId)?.outerHTML ?? null;
 }
 
 function TextInspector({

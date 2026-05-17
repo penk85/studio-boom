@@ -4,12 +4,13 @@ import { db, deleteMediaIfUnused, importMediaFile, mediaIdsForCharacter, uid } f
 import { useStudio } from "../store";
 import type { CharacterClip, CharacterPart, CharacterPreset, MediaAsset, TextClip } from "../types";
 import { deriveEditorClips } from "../types";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMediaUrl } from "../hooks/useMediaUrl";
 import {
   buildCompositionRepairPrompt,
   validateCompositionSourceHtml,
 } from "../hyperframes/composition-source";
+import { buildCompositionPreviewProject } from "../hyperframes/composition-preview-project";
 import {
   createBlankCharacter,
   listCharacterSlots,
@@ -18,6 +19,7 @@ import {
 } from "../character/character-utils";
 import { ensureStarterCharacterSeeded } from "../character/starter";
 import { ensureMotionPresetsSeeded } from "../presets/seed";
+import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
 
 const TABS = [
   { id: "media", label: "Media" },
@@ -453,9 +455,25 @@ function BlocksTab() {
   const [validated, setValidated] = useState<ReturnType<typeof validateCompositionSourceHtml> | null>(
     null,
   );
-  const canAddBlock = Boolean(
+  const [previewProject, setPreviewProject] = useState<ReturnType<
+    typeof buildCompositionPreviewProject
+  > | null>(null);
+  const [previewStatus, setPreviewStatus] = useState<"idle" | "loading" | "ready" | "error">(
+    "idle",
+  );
+  const canPreviewBlock = Boolean(
     project && source.trim() && validated?.ok && validated.html && validated.compositionId,
   );
+  const canAddBlock = Boolean(
+    project &&
+      source.trim() &&
+      validated?.ok &&
+      validated.html &&
+      validated.compositionId &&
+      previewStatus === "ready",
+  );
+  const previewWidth = validated?.width ?? project?.hf.width ?? 1920;
+  const previewHeight = validated?.height ?? project?.hf.height ?? 1080;
 
   const validateSource = () => {
     if (!project) return null;
@@ -467,8 +485,21 @@ function BlocksTab() {
     });
     setErrors(result.errors);
     setValidated(result);
+    setPreviewProject(null);
+    setPreviewStatus("idle");
     return result;
   };
+
+  const previewBlock = () => {
+    if (!project || !validated?.ok || !validated.html) return;
+    setPreviewStatus("loading");
+    setPreviewProject(buildCompositionPreviewProject(project, validated));
+  };
+
+  const handlePreviewStatusChange = useCallback(
+    (status: "idle" | "loading" | "ready" | "error") => setPreviewStatus(status),
+    [],
+  );
 
   const addBlock = () => {
     if (!project) return;
@@ -501,10 +532,15 @@ function BlocksTab() {
         opacity: 1,
         zIndex: clips.filter((clip) => clip.kind !== "audio").length,
       });
+      setSource("");
       setValidated(null);
+      setPreviewProject(null);
+      setPreviewStatus("idle");
     } catch (error) {
       setErrors([error instanceof Error ? error.message : String(error)]);
       setValidated(null);
+      setPreviewProject(null);
+      setPreviewStatus("idle");
     }
   };
 
@@ -520,6 +556,8 @@ function BlocksTab() {
           setSource(event.target.value);
           if (errors.length > 0) setErrors([]);
           setValidated(null);
+          setPreviewProject(null);
+          setPreviewStatus("idle");
         }}
         rows={12}
         spellCheck={false}
@@ -547,10 +585,20 @@ function BlocksTab() {
       )}
       {validated?.ok && (
         <div className="rounded border border-primary/50 bg-primary/10 px-2 py-1 text-[11px] text-foreground">
-          Source is valid. Add block is now enabled.
+          Source is valid. Preview it before adding it to the timeline.
         </div>
       )}
-      <div className="flex gap-2">
+      {previewProject && (
+        <HyperFramesPreviewPanel
+          project={previewProject}
+          width={previewWidth}
+          height={previewHeight}
+          seekTime={Math.min((validated?.duration ?? 4) * 0.35, 1)}
+          title="Sandboxed HyperFrames block preview"
+          onStatusChange={handlePreviewStatusChange}
+        />
+      )}
+      <div className="grid grid-cols-3 gap-2">
         <button
           type="button"
           onClick={validateSource}
@@ -558,6 +606,14 @@ function BlocksTab() {
           className="flex-1 rounded border border-border px-2 py-1.5 text-xs text-foreground hover:bg-panel-2 disabled:cursor-not-allowed disabled:opacity-50"
         >
           Validate
+        </button>
+        <button
+          type="button"
+          onClick={previewBlock}
+          disabled={!canPreviewBlock}
+          className="rounded border border-border px-2 py-1.5 text-xs text-foreground hover:bg-panel-2 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Preview
         </button>
         <button
           type="button"
