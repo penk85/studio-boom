@@ -257,5 +257,6 @@ Start here:
 - Built-in API generation can be added later after import/source/validation
   works.
 - No broad AI draft JSON schema is introduced in the first roadmap.
-- The legacy `bake.ts` character pipeline should not be extended.
+- The legacy `bake.ts` character pipeline has been removed; character rigs are
+  native composition clips with generated `project.hf.compositionHtml` source.
 - `project.hf` remains the durable movie format.

@@ -3,8 +3,14 @@ import { useEffect, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db } from "../db";
 import { useStudio } from "../store";
-import type { CharacterClip, CharacterPreset, EditorClip, TextClip } from "../types";
-import { deriveEditorClips } from "../types";
+import type {
+  CharacterCompositionClip,
+  CharacterPreset,
+  CompositionClip,
+  EditorClip,
+  TextClip,
+} from "../types";
+import { deriveEditorClips, isCharacterCompositionClip } from "../types";
 import { VoiceLipSyncPanel } from "./VoiceLipSyncPanel";
 import { MotionPanel } from "./MotionPanel";
 import {
@@ -22,15 +28,12 @@ export function Inspector() {
   const remove = useStudio((s) => s.removeClip);
   const registerCharacterPreset = useStudio((s) => s.registerCharacterPreset);
   const clip = clips.find((c) => c.id === id);
-  const characterId = clip?.kind === "character" ? clip.characterId : undefined;
+  const characterClip = isCharacterCompositionClip(clip) ? clip : null;
+  const characterId = characterClip?.character.characterId;
   const character = useLiveQuery<CharacterPreset | undefined>(
     () => (characterId ? db.characters.get(characterId) : Promise.resolve(undefined)),
     [characterId],
   );
-  const linkedSpeechAudio =
-    clip?.kind === "audio" &&
-    !!clip.linkedCharacterClipId &&
-    !!clips.some((c) => c.id === clip.linkedCharacterClipId);
 
   useEffect(() => {
     if (character) registerCharacterPreset(character);
@@ -63,7 +66,6 @@ export function Inspector() {
                 <NumberInput
                   value={clip.start}
                   step={0.1}
-                  disabled={linkedSpeechAudio}
                   onChange={(v) => update(clip.id, { start: Math.max(0, v) })}
                 />
               </Field>
@@ -71,7 +73,6 @@ export function Inspector() {
                 <NumberInput
                   value={clip.duration}
                   step={0.1}
-                  disabled={linkedSpeechAudio}
                   onChange={(v) => update(clip.id, { duration: Math.max(0.1, v) })}
                 />
               </Field>
@@ -110,7 +111,6 @@ export function Inspector() {
               <Field label="Track">
                 <select
                   value={clip.trackIndex}
-                  disabled={linkedSpeechAudio}
                   onChange={(e) => update(clip.id, { trackIndex: Number(e.target.value) })}
                   className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
                 >
@@ -122,47 +122,49 @@ export function Inspector() {
                 </select>
               </Field>
             </div>
-            {linkedSpeechAudio && (
-              <p className="rounded border border-border bg-panel-2 px-2 py-1 text-[11px] text-muted-foreground">
-                This speech audio is locked to its character. Move the character clip to move the
-                voice line.
-              </p>
-            )}
             {clip.kind === "text" && (
               <TextInspector
                 clip={clip as TextClip}
                 update={(patch) => update(clip.id, patch as Partial<TextClip>)}
               />
             )}
-            {clip.kind === "composition" && clip.compositionId && (
-              <CompositionSourceInspector
-                clip={clip}
-                source={project.hf.compositionHtml[clip.compositionId] ?? ""}
-                projectWidth={project.hf.width}
-                projectHeight={project.hf.height}
-                onApply={(html) => updateCompositionHtml(clip.compositionId!, html)}
-              />
-            )}
+            {clip.kind === "composition" &&
+              clip.compositionId &&
+              !isCharacterCompositionClip(clip) && (
+                <CompositionSourceInspector
+                  clip={clip}
+                  source={project.hf.compositionHtml[clip.compositionId] ?? ""}
+                  projectWidth={project.hf.width}
+                  projectHeight={project.hf.height}
+                  onApply={(html) => updateCompositionHtml(clip.compositionId!, html)}
+                />
+              )}
             {isPrimitiveSourceClip(clip) && (
               <RootElementSourceInspector clip={clip} rootHtml={project.hf.rootHtml} />
             )}
             <button
               onClick={() => {
-                if (!linkedSpeechAudio) remove(clip.id);
+                remove(clip.id);
               }}
-              disabled={linkedSpeechAudio}
-              className="w-full rounded bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+              className="w-full rounded bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground hover:opacity-90"
             >
               Delete clip
             </button>
-            {clip.kind === "character" && (
+            {characterClip && (
               <>
                 <div className="rounded border border-border bg-panel-2 p-3">
                   <label className="flex items-center gap-2 text-xs">
                     <input
                       type="checkbox"
-                      checked={clip.autoBlink !== false}
-                      onChange={(e) => update(clip.id, { autoBlink: e.target.checked })}
+                      checked={characterClip.character.autoBlink !== false}
+                      onChange={(e) =>
+                        update(characterClip.id, {
+                          character: {
+                            ...characterClip.character,
+                            autoBlink: e.target.checked,
+                          },
+                        } as Partial<CompositionClip>)
+                      }
                     />
                     Auto blink
                   </label>
@@ -171,9 +173,12 @@ export function Inspector() {
                   </p>
                 </div>
                 {character && (
-                  <MotionPanel clip={clip as unknown as CharacterClip} character={character} />
+                  <MotionPanel
+                    clip={characterClip as CharacterCompositionClip}
+                    character={character}
+                  />
                 )}
-                <VoiceLipSyncPanel clip={clip as unknown as CharacterClip} />
+                <VoiceLipSyncPanel clip={characterClip as CharacterCompositionClip} />
               </>
             )}
           </div>
@@ -394,10 +399,7 @@ function CompositionSourceInspector({
 
 function isPrimitiveSourceClip(clip: EditorClip): boolean {
   return (
-    clip.kind === "image" ||
-    clip.kind === "video" ||
-    clip.kind === "audio" ||
-    clip.kind === "text"
+    clip.kind === "image" || clip.kind === "video" || clip.kind === "audio" || clip.kind === "text"
   );
 }
 

@@ -169,15 +169,34 @@ export function isCurrentProjectShape(project: unknown): project is Project {
   if (!isRecord(project) || !isRecord(project.hf) || !isRecord(project.editorMeta)) {
     return false;
   }
-  return (
+  const hasCurrentEnvelope =
     typeof project.id === "string" &&
     typeof project.name === "string" &&
     Array.isArray(project.hf.assets) &&
     typeof project.hf.rootHtml === "string" &&
     isRecord(project.hf.compositionHtml) &&
     Array.isArray(project.editorMeta.tracks) &&
-    isRecord(project.editorMeta.clips)
-  );
+    isRecord(project.editorMeta.clips);
+  if (!hasCurrentEnvelope) return false;
+
+  for (const meta of Object.values(project.editorMeta.clips)) {
+    if (!isRecord(meta)) return false;
+    if (meta.kind === "character") return false;
+    if (
+      "characterId" in meta ||
+      "linkedCharacterClipId" in meta ||
+      "motions" in meta ||
+      "visemes" in meta ||
+      "poses" in meta ||
+      "autoBlink" in meta ||
+      "lipSyncAudioId" in meta ||
+      "voiceLine" in meta
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 export function collectProjectMediaUsages(project: Project, onlyMediaId?: string): MediaUsage[] {

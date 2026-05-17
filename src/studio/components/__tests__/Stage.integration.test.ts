@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const stagePath = join(process.cwd(), "src/studio/components/Stage.tsx");
+const previewPath = join(process.cwd(), "src/studio/hyperframes/preview.ts");
 const renderPluginPath = join(process.cwd(), "src/studio/hyperframes/render-plugin.ts");
 
 describe("Stage HyperFrames Studio integration", () => {
@@ -64,19 +65,21 @@ describe("Stage HyperFrames Studio integration", () => {
 
   it("stages srcdoc previews through the same HyperFrames project-file bundling contract", () => {
     const source = readFileSync(stagePath, "utf8");
+    const previewSource = readFileSync(previewPath, "utf8");
     const pluginSource = readFileSync(renderPluginPath, "utf8");
 
-    expect(source).toContain("buildHyperframesProjectFiles(project)");
-    expect(source).toContain('fetch("/api/hyperframes/preview-bundle"');
-    expect(source).toContain("assertPreviewBundleResponseHtml(html)");
-    expect(source).toContain("Preview bundle endpoint returned the Studio app shell");
-    expect(source).toContain("resolvePreviewAssetPaths(html, assets, assetUrls)");
+    expect(source).toContain("resolvePreviewHtml(project)");
     expect(source).toContain("HyperFrames preview failed");
+    expect(previewSource).toContain("buildHyperframesProjectFiles(project)");
+    expect(previewSource).toContain('fetch("/api/hyperframes/preview-bundle"');
+    expect(previewSource).toContain("assertPreviewBundleResponseHtml(html)");
+    expect(previewSource).toContain("Preview bundle endpoint returned the Studio app shell");
+    expect(previewSource).toContain("resolvePreviewAssetPaths(html, assets, assetUrls)");
     expect(source).not.toContain("inlinePreviewScripts(");
-    expect(source).not.toContain('gsap/dist/gsap.min.js?raw');
-    expect(pluginSource).toContain("new URL(req.url ?? \"/\", \"http://localhost\").pathname");
+    expect(source).not.toContain("gsap/dist/gsap.min.js?raw");
+    expect(pluginSource).toContain('new URL(req.url ?? "/", "http://localhost").pathname');
     expect(pluginSource).toContain('pathname === "/api/hyperframes/preview-bundle"');
     expect(pluginSource).toContain("loadHyperframesBundler()");
-    expect(pluginSource).toContain("bundleToSingleHtml(projectDir, { runtime: \"inline\" })");
+    expect(pluginSource).toContain('bundleToSingleHtml(projectDir, { runtime: "inline" })');
   });
 });

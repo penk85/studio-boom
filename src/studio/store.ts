@@ -6,7 +6,7 @@ import type { TimelineElement } from "@hyperframes/core";
 import { db, deleteMediaIfUnused, isCurrentProjectShape, uid } from "./db";
 import type {
   AnyClip,
-  CharacterClip,
+  CharacterClipMeta,
   CompositionClip,
   CharacterPreset,
   ClipEditorMeta,
@@ -36,6 +36,11 @@ import {
   createRootCompositionHtml,
   updateRootCompositionHtml,
 } from "./hyperframes/root-composition";
+import {
+  buildCharacterCompositionHtml,
+  characterAssetIds,
+  defaultCharacterCompositionId,
+} from "./character/composition";
 
 // ─── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -108,14 +113,25 @@ function collectReferencedAssetIds(
   const ids = new Set<string>();
   for (const meta of Object.values(clipsMeta)) {
     if (meta.mediaId) ids.add(meta.mediaId);
-    if (meta.lipSyncAudioId) ids.add(meta.lipSyncAudioId);
-    if (meta.characterId) {
-      const character = characters.get(meta.characterId);
-      for (const part of character?.parts ?? []) ids.add(part.mediaId);
-      for (const variant of character?.headVariants ?? []) ids.add(variant.mediaId);
+    if (meta.character) {
+      const character = characters.get(meta.character.characterId);
+      for (const id of characterAssetIds(character, meta.character)) ids.add(id);
     }
   }
   return ids;
+}
+
+function registerCharacterAssets(
+  hf: HyperFramesProject,
+  character: CharacterPreset | undefined,
+  characterMeta: CharacterClipMeta | undefined,
+  mediaAssets: Map<string, MediaAsset>,
+): HyperFramesProject {
+  let nextHf = hf;
+  for (const assetId of characterAssetIds(character, characterMeta)) {
+    nextHf = registerHfAsset(nextHf, mediaAssets.get(assetId));
+  }
+  return nextHf;
 }
 
 function refreshProjectAssets(
@@ -127,16 +143,14 @@ function refreshProjectAssets(
 
   for (const meta of Object.values(project.editorMeta.clips)) {
     if (meta.mediaId) hf = registerHfAsset(hf, mediaAssets.get(meta.mediaId));
-    if (meta.kind === "character" && meta.characterId) {
-      const character = characters.get(meta.characterId);
-      for (const part of character?.parts ?? []) {
-        hf = registerHfAsset(hf, mediaAssets.get(part.mediaId));
-      }
-      for (const variant of character?.headVariants ?? []) {
-        hf = registerHfAsset(hf, mediaAssets.get(variant.mediaId));
-      }
+    if (meta.compositionKind === "character" && meta.character) {
+      hf = registerCharacterAssets(
+        hf,
+        characters.get(meta.character.characterId),
+        meta.character,
+        mediaAssets,
+      );
     }
-    if (meta.lipSyncAudioId) hf = registerHfAsset(hf, mediaAssets.get(meta.lipSyncAudioId));
   }
 
   return hf !== project.hf ? { ...project, hf, updatedAt: Date.now() } : project;
@@ -167,6 +181,84 @@ function assertValidCompositionHtml(
   return result.html;
 }
 
+function normalizeCharacterClipMeta(meta: CharacterClipMeta): CharacterClipMeta {
+  return {
+    ...meta,
+    poses: meta.poses ?? {},
+  };
+}
+
+function isCharacterMeta(meta: ClipEditorMeta | undefined): meta is ClipEditorMeta & {
+  kind: "composition";
+  compositionKind: "character";
+  compositionId: string;
+  character: CharacterClipMeta;
+} {
+  return (
+    meta?.kind === "composition" &&
+    meta.compositionKind === "character" &&
+    typeof meta.compositionId === "string" &&
+    !!meta.character?.characterId
+  );
+}
+
+function rebuildCharacterCompositionInProject(
+  project: Project,
+  clipId: string,
+  characters: Map<string, CharacterPreset>,
+  mediaAssets: Map<string, MediaAsset>,
+  motionPresets: Map<string, MotionPreset>,
+): Project {
+  const meta = project.editorMeta.clips[clipId];
+  if (!isCharacterMeta(meta)) return project;
+  const clip = deriveEditorClips(project).find((candidate) => candidate.id === clipId);
+  if (!clip) return project;
+  const character = characters.get(meta.character.characterId);
+  if (!character) return project;
+
+  const html = buildCharacterCompositionHtml({
+    compositionId: meta.compositionId,
+    clipId,
+    duration: clip.duration,
+    width: clip.width || project.hf.width,
+    height: clip.height || project.hf.height,
+    character,
+    meta: meta.character,
+    motionPresets,
+  });
+  let hf: HyperFramesProject = {
+    ...project.hf,
+    compositionHtml: {
+      ...project.hf.compositionHtml,
+      [meta.compositionId]: html,
+    },
+  };
+  hf = registerCharacterAssets(hf, character, meta.character, mediaAssets);
+  return { ...project, hf, updatedAt: Date.now() };
+}
+
+function rebuildCharacterCompositions(
+  project: Project,
+  characters: Map<string, CharacterPreset>,
+  mediaAssets: Map<string, MediaAsset>,
+  motionPresets: Map<string, MotionPreset>,
+  filterCharacterId?: string,
+): Project {
+  let nextProject = project;
+  for (const [clipId, meta] of Object.entries(project.editorMeta.clips)) {
+    if (!isCharacterMeta(meta)) continue;
+    if (filterCharacterId && meta.character.characterId !== filterCharacterId) continue;
+    nextProject = rebuildCharacterCompositionInProject(
+      nextProject,
+      clipId,
+      characters,
+      mediaAssets,
+      motionPresets,
+    );
+  }
+  return refreshProjectAssets(nextProject, characters, mediaAssets);
+}
+
 function renderTrackIndexFor(uiTrackIndex = 0, uiLaneIndex = 0): number {
   return Math.max(0, uiTrackIndex) * 1000 + Math.max(0, uiLaneIndex);
 }
@@ -185,7 +277,10 @@ function repairProjectTimelineLanes(project: Project): Project {
   const nextLaneCounts = new Map<number, number>();
   let changed = false;
 
-  const maxTrackIndex = Math.max(project.editorMeta.tracks.length - 1, ...clips.map((c) => c.trackIndex));
+  const maxTrackIndex = Math.max(
+    project.editorMeta.tracks.length - 1,
+    ...clips.map((c) => c.trackIndex),
+  );
   for (let trackIndex = 0; trackIndex <= maxTrackIndex; trackIndex += 1) {
     const trackClips = clips.filter((clip) => clip.trackIndex === trackIndex);
     if (trackClips.length === 0) continue;
@@ -293,25 +388,6 @@ function buildTimelineElement(
   zIndex: number,
   renderTrackIndex: number,
 ): StudioTimelineElement {
-  if (clip.kind === "character") {
-    return {
-      id: clip.id,
-      type: "composition",
-      name: clip.name,
-      startTime: clip.start,
-      duration: clip.duration,
-      zIndex,
-      renderTrackIndex,
-      x: clip.x,
-      y: clip.y,
-      src: `compositions/comp_${clip.id}.html`,
-      compositionId: `comp_${clip.id}`,
-      sourceWidth: clip.width,
-      sourceHeight: clip.height,
-      rotation: clip.rotation,
-    };
-  }
-
   if (clip.kind === "composition") {
     const compositionId = clip.compositionId ?? `comp_${clip.id}`;
     return {
@@ -631,7 +707,12 @@ export const useStudio = create<StudioState>((set, get) => ({
     const motionPresets = new Map(allPresets.map((p) => [p.id, p]));
     const mediaAssets = new Map(allMedia.map((m) => [m.id, m]));
 
-    let project = syncProjectRenderTrackIndices(storedProject);
+    let project = rebuildCharacterCompositions(
+      syncProjectRenderTrackIndices(storedProject),
+      characters,
+      mediaAssets,
+      motionPresets,
+    );
     if (project !== storedProject) {
       project = { ...project, updatedAt: Date.now() };
       await db.projects.put(project);
@@ -723,7 +804,11 @@ export const useStudio = create<StudioState>((set, get) => ({
     const p = state.project;
     if (!p) return;
 
-    if (clip.kind === "composition" && clip.compositionHtml !== undefined) {
+    if (
+      clip.kind === "composition" &&
+      clip.compositionKind !== "character" &&
+      clip.compositionHtml !== undefined
+    ) {
       const compositionId = clip.compositionId ?? `comp_${clip.id}`;
       assertValidCompositionHtml(clip.compositionHtml, {
         compositionId,
@@ -767,26 +852,47 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     let hf = currentProject.hf;
 
-    if (nextClip.kind === "character") {
-      const charClip = nextClip as CharacterClip;
-      meta.characterId = charClip.characterId;
-      meta.compositionKind = "character";
-      meta.poses = charClip.poses;
-      meta.visemes = charClip.visemes;
-      meta.motions = charClip.motions;
-      meta.autoBlink = charClip.autoBlink;
-    } else if (nextClip.kind === "composition") {
+    if (nextClip.kind === "composition") {
       const compositionClip = nextClip as CompositionClip;
-      const compositionId = compositionClip.compositionId ?? `comp_${compositionClip.id}`;
+      const compositionId =
+        compositionClip.compositionId ??
+        (compositionClip.compositionKind === "character"
+          ? defaultCharacterCompositionId(compositionClip.id)
+          : `comp_${compositionClip.id}`);
       meta.compositionId = compositionId;
       meta.compositionKind = compositionClip.compositionKind ?? "user-composition";
-      if (compositionClip.compositionHtml !== undefined) {
-        compositionHtml[compositionId] = assertValidCompositionHtml(compositionClip.compositionHtml, {
+      nextClip = { ...compositionClip, compositionId };
+
+      if (meta.compositionKind === "character") {
+        if (!compositionClip.character?.characterId) {
+          throw new Error("Character composition clips require character metadata.");
+        }
+        meta.character = normalizeCharacterClipMeta(compositionClip.character);
+        const character = state.characters.get(meta.character.characterId);
+        if (!character) {
+          throw new Error(`Character preset "${meta.character.characterId}" is not available.`);
+        }
+        compositionHtml[compositionId] = buildCharacterCompositionHtml({
           compositionId,
+          clipId: compositionClip.id,
           duration: compositionClip.duration,
           width: compositionClip.width || currentProject.hf.width,
           height: compositionClip.height || currentProject.hf.height,
+          character,
+          meta: meta.character,
+          motionPresets: state.motionPresets,
         });
+        hf = registerCharacterAssets(hf, character, meta.character, state.mediaAssets);
+      } else if (compositionClip.compositionHtml !== undefined) {
+        compositionHtml[compositionId] = assertValidCompositionHtml(
+          compositionClip.compositionHtml,
+          {
+            compositionId,
+            duration: compositionClip.duration,
+            width: compositionClip.width || currentProject.hf.width,
+            height: compositionClip.height || currentProject.hf.height,
+          },
+        );
       }
     } else if (nextClip.kind === "text") {
       const textClip = nextClip as TextClip;
@@ -835,19 +941,6 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     const existingMeta = p.editorMeta.clips[id] ?? {};
 
-    // Linked audio clips cannot have their timing changed independently
-    const isLinkedAudio = existingMeta.linkedCharacterClipId !== undefined;
-    if (isLinkedAudio) {
-      const {
-        start: _s,
-        duration: _d,
-        trackIndex: _ti,
-        laneIndex: _li,
-        ...safePatch
-      } = patch as Partial<MediaClip>;
-      patch = safePatch as Partial<AnyClip>;
-    }
-
     const newMeta = { ...existingMeta };
 
     if (patch.name !== undefined) newMeta.name = patch.name;
@@ -863,30 +956,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       );
     }
 
-    let rootHtml = updateStudioElementInHtml(p.hf.rootHtml, id, elementUpdates);
-
-    if (patch.start !== undefined) {
-      const { elements } = parseStudioHtml(p.hf.rootHtml);
-      const audioClipId = `audio_${id}`;
-      const mainEl = elements.find((element) => element.id === id);
-      const audioEl = elements.find((element) => element.id === audioClipId);
-      if (mainEl && audioEl) {
-        const startDelta = patch.start - mainEl.startTime;
-        rootHtml = updateStudioElementInHtml(rootHtml, audioClipId, {
-          startTime: Math.max(0, audioEl.startTime + startDelta),
-        });
-      }
-    }
-
-    if (patch.kind === "character" || existingMeta.kind === "character") {
-      const charPatch = patch as Partial<CharacterClip>;
-      if ("poses" in charPatch) newMeta.poses = charPatch.poses;
-      if ("motions" in charPatch) newMeta.motions = charPatch.motions;
-      if ("visemes" in charPatch) newMeta.visemes = charPatch.visemes;
-      if ("autoBlink" in charPatch) newMeta.autoBlink = charPatch.autoBlink;
-      if ("lipSyncAudioId" in charPatch) newMeta.lipSyncAudioId = charPatch.lipSyncAudioId;
-      if ("voiceLine" in charPatch) newMeta.voiceLine = charPatch.voiceLine;
-    }
+    const rootHtml = updateStudioElementInHtml(p.hf.rootHtml, id, elementUpdates);
 
     if (patch.kind === "composition" || existingMeta.kind === "composition") {
       const compositionPatch = patch as Partial<CompositionClip>;
@@ -895,18 +965,37 @@ export const useStudio = create<StudioState>((set, get) => ({
       if ("compositionKind" in compositionPatch) {
         newMeta.compositionKind = compositionPatch.compositionKind;
       }
+      if ("character" in compositionPatch) {
+        newMeta.character = compositionPatch.character
+          ? normalizeCharacterClipMeta({
+              ...(newMeta.character ?? {
+                characterId: compositionPatch.character.characterId,
+                poses: {},
+              }),
+              ...compositionPatch.character,
+              poses: compositionPatch.character.poses ?? newMeta.character?.poses ?? {},
+            })
+          : undefined;
+      }
     }
 
     const editorMeta: ProjectEditorMeta = {
       ...p.editorMeta,
       clips: { ...p.editorMeta.clips, [id]: newMeta },
     };
-    const newProject: Project = syncProjectRenderTrackIndices({
+    let newProject: Project = syncProjectRenderTrackIndices({
       ...p,
       hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
       editorMeta,
       updatedAt: Date.now(),
     });
+    newProject = rebuildCharacterCompositionInProject(
+      newProject,
+      id,
+      state.characters,
+      state.mediaAssets,
+      state.motionPresets,
+    );
     set({ project: newProject, tracks: newProject.editorMeta.tracks });
     scheduleSave(get);
   },
@@ -929,20 +1018,15 @@ export const useStudio = create<StudioState>((set, get) => ({
     get().checkpointHistory();
 
     const existingMeta = p.editorMeta.clips[id];
-    const audioSiblingId = `audio_${id}`;
-    const idsToRemove = new Set([id, audioSiblingId]);
 
     const newClipsMeta = Object.fromEntries(
-      Object.entries(p.editorMeta.clips).filter(([clipId]) => !idsToRemove.has(clipId)),
+      Object.entries(p.editorMeta.clips).filter(([clipId]) => clipId !== id),
     );
-    let rootHtml = p.hf.rootHtml;
-    for (const clipId of idsToRemove) {
-      rootHtml = removeElementFromHtml(rootHtml, clipId);
-    }
+    let rootHtml = removeElementFromHtml(p.hf.rootHtml, id);
     rootHtml = normalizeProjectRootHtml(p.hf, rootHtml);
 
     const compositionHtml = { ...p.hf.compositionHtml };
-    if (existingMeta?.kind === "character" || existingMeta?.kind === "composition") {
+    if (existingMeta?.kind === "composition") {
       delete compositionHtml[existingMeta.compositionId ?? `comp_${id}`];
     }
 
@@ -958,16 +1042,16 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     set({
       project: newProject,
-      selectedClipId: idsToRemove.has(state.selectedClipId ?? "") ? null : state.selectedClipId,
+      selectedClipId: state.selectedClipId === id ? null : state.selectedClipId,
     });
     scheduleSave(get);
 
     if (typeof window !== "undefined") {
       const removedMediaIds = new Set<string>();
       if (existingMeta?.mediaId) removedMediaIds.add(existingMeta.mediaId);
-      if (existingMeta?.lipSyncAudioId) removedMediaIds.add(existingMeta.lipSyncAudioId);
-      const audioMeta = p.editorMeta.clips[audioSiblingId];
-      if (audioMeta?.mediaId) removedMediaIds.add(audioMeta.mediaId);
+      if (existingMeta?.character?.lipSyncAudioId) {
+        removedMediaIds.add(existingMeta.character.lipSyncAudioId);
+      }
 
       if (removedMediaIds.size > 0) {
         window.setTimeout(() => {
@@ -1024,7 +1108,9 @@ export const useStudio = create<StudioState>((set, get) => ({
   updateCompositionHtml(compositionId, html, options) {
     const p = get().project;
     if (!p) return;
-    const clip = deriveEditorClips(p).find((candidate) => candidate.compositionId === compositionId);
+    const clip = deriveEditorClips(p).find(
+      (candidate) => candidate.compositionId === compositionId,
+    );
     const normalizedHtml = assertValidCompositionHtml(html, {
       compositionId,
       duration: clip?.duration ?? p.hf.duration,
@@ -1137,7 +1223,17 @@ export const useStudio = create<StudioState>((set, get) => ({
     const state = get();
     const characters = new Map(state.characters);
     characters.set(character.id, character);
-    set({ characters });
+    const project = state.project
+      ? rebuildCharacterCompositions(
+          state.project,
+          characters,
+          state.mediaAssets,
+          state.motionPresets,
+          character.id,
+        )
+      : null;
+    set({ characters, project });
+    if (project && project !== state.project) scheduleSave(get);
   },
 
   unregisterCharacterPreset(id) {
@@ -1167,14 +1263,34 @@ export const useStudio = create<StudioState>((set, get) => ({
         changed = true;
       }
     }
-    if (changed) set({ characters });
+    if (changed) {
+      const project = state.project
+        ? rebuildCharacterCompositions(
+            state.project,
+            characters,
+            state.mediaAssets,
+            state.motionPresets,
+          )
+        : null;
+      set({ characters, project });
+      if (project && project !== state.project) scheduleSave(get);
+    }
   },
 
   registerMotionPreset(preset) {
     const state = get();
     const motionPresets = new Map(state.motionPresets);
     motionPresets.set(preset.id, preset);
-    set({ motionPresets });
+    const project = state.project
+      ? rebuildCharacterCompositions(
+          state.project,
+          state.characters,
+          state.mediaAssets,
+          motionPresets,
+        )
+      : null;
+    set({ motionPresets, project });
+    if (project && project !== state.project) scheduleSave(get);
   },
 
   syncMotionPresets(presets) {
@@ -1196,7 +1312,18 @@ export const useStudio = create<StudioState>((set, get) => ({
         changed = true;
       }
     }
-    if (changed) set({ motionPresets });
+    if (changed) {
+      const project = state.project
+        ? rebuildCharacterCompositions(
+            state.project,
+            state.characters,
+            state.mediaAssets,
+            motionPresets,
+          )
+        : null;
+      set({ motionPresets, project });
+      if (project && project !== state.project) scheduleSave(get);
+    }
   },
 
   addLane(trackIndex) {
@@ -1222,8 +1349,7 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     const currentClips = deriveEditorClips(p);
     const laneHasClips = currentClips.some(
-      (c) =>
-        c.trackIndex === trackIndex && (c.laneIndex ?? 0) === laneIndex && !c.linkedCharacterClipId,
+      (c) => c.trackIndex === trackIndex && (c.laneIndex ?? 0) === laneIndex,
     );
     if (laneHasClips) return;
     get().checkpointHistory();
@@ -1235,8 +1361,6 @@ export const useStudio = create<StudioState>((set, get) => ({
       Object.entries(p.editorMeta.clips).map(([clipId, meta]) => {
         if (meta.uiTrackIndex !== trackIndex) return [clipId, meta];
         const currentLane = meta.uiLaneIndex ?? 0;
-        if (meta.linkedCharacterClipId && currentLane === laneIndex)
-          return [clipId, { ...meta, uiLaneIndex: Math.max(0, laneIndex - 1) }];
         if (currentLane > laneIndex) return [clipId, { ...meta, uiLaneIndex: currentLane - 1 }];
         return [clipId, meta];
       }),
@@ -1276,7 +1400,6 @@ export const useStudio = create<StudioState>((set, get) => ({
 }));
 
 export type { StudioState };
-export type CharacterClipT = CharacterClip;
 
 // Re-export Track for files that still import it from store
 export type { Track };

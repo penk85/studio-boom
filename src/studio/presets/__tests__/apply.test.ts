@@ -10,7 +10,7 @@ import {
   deltaFor,
   type ComposedDelta,
 } from "../apply";
-import type { MotionKeyframe, MotionPreset, CharacterClip, AppliedMotion } from "../../types";
+import type { MotionKeyframe, MotionPreset, AppliedMotion } from "../../types";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -32,23 +32,12 @@ function makePreset(overrides: Partial<MotionPreset> = {}): MotionPreset {
   };
 }
 
-function makeClip(overrides: Partial<CharacterClip> = {}): CharacterClip {
+function makeClip(overrides: Partial<{ duration: number; motions: AppliedMotion[] }> = {}): {
+  duration: number;
+  motions: AppliedMotion[];
+} {
   return {
-    id: "c1",
-    kind: "character",
-    name: "Character",
-    characterId: "char1",
-    trackIndex: 0,
-    start: 0,
     duration: 5,
-    x: 0,
-    y: 0,
-    width: 600,
-    height: 900,
-    rotation: 0,
-    opacity: 1,
-    zIndex: 0,
-    poses: {},
     motions: [],
     ...overrides,
   };

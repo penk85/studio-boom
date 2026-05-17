@@ -4,7 +4,6 @@ import type {
   MotionKeyframe,
   MotionPreset,
   AppliedMotion,
-  CharacterClip,
   HeadDirection,
   PartRole,
   RecordedKeypose,
@@ -205,7 +204,10 @@ function overrideTargetKey(override: { partRole: PartRole; slotId?: string }) {
 }
 
 export function composeMotionsAt(
-  clip: CharacterClip,
+  clip: {
+    duration: number;
+    motions?: AppliedMotion[];
+  },
   tInClip: number,
   presets: Map<string, MotionPreset>,
 ): ComposedMotions {

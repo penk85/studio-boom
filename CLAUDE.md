@@ -179,13 +179,34 @@ then call mutation actions with history disabled until the interaction ends.
 
 ### Character compositions
 
-Character sub-compositions are stored as HTML strings in `compositionHtml`. The
-character pipeline is being refactored — the old `bake.ts` approach (pre-generating
-static HTML from keyframe data) is being replaced. Do not add new calls to
-`buildCharacterCompositionHtml` or extend the baking pipeline.
+Characters are first-class HyperFrames composition clips. A root character clip
+uses `kind: "composition"` and `compositionKind: "character"` with a
+`compositionId`; the renderable puppet rig lives in
+`project.hf.compositionHtml[compositionId]`.
 
-The intended direction: characters become first-class HyperFrames compositions,
-authored and mutated through the same `@hyperframes/core` APIs as any other clip.
+Reusable library identity stays in nested metadata:
+
+```typescript
+character: {
+  characterId: string
+  poses: Record<slotId, partId>
+  motions?: AppliedMotion[]
+  visemes?: VisemeEntry[]
+  autoBlink?: boolean
+  lipSyncAudioId?: string
+  voiceLine?: VoiceLineMeta
+}
+```
+
+Generated speech audio is serialized inside the character sub-composition as a
+HyperFrames `<audio>` clip that references `asset:<lipSyncAudioId>`. Do not add a
+locked root audio sibling for character speech.
+
+The generated character source must contain explicit puppet DOM, stable
+`data-character-*` attrs, `asset:<id>` media refs, base transforms/pivots, and a
+finite paused GSAP timeline registered on `window.__timelines[compositionId]`.
+Character source is generated from rig tools for v1; generic composition source
+editing is for non-character compositions.
 
 ### Export
 
@@ -212,14 +233,11 @@ ProjectEditorMeta {
 
 ClipEditorMeta {
   name?: string
-  kind?: string
-  characterId?: string
-  poses?: Record<slotId, partId>           // character part selections
-  motions?: SelectedMotion[]               // motion preset references + timing
-  visemes?: VisemeEntry[]                  // lip sync timing data
-  autoBlink?: boolean
-  voiceLine?: string                       // text for voice generation
-  lipSyncAudioId?: string                  // generated audio asset id
+  kind?: "image" | "audio" | "video" | "text" | "composition"
+  compositionId?: string
+  compositionKind?: "ai-block" | "registry-block" | "character" | "user-composition"
+  character?: CharacterClipMeta            // only for compositionKind: "character"
+  mediaId?: string
   uiTrackIndex?: number                    // editor track row
   uiLaneIndex?: number                     // editor lane within track
 }
@@ -244,7 +262,7 @@ ClipEditorMeta {
 | `src/studio/hyperframes/native.ts` | Native HTML normalization boundary for root/stage/viewport metadata and export parity |
 | `src/studio/hyperframes/player-editing.ts` | Live player edit boundary for real iframe elements during stage manipulation |
 | `src/studio/hyperframes/root-composition.ts` | Root composition creation and root metadata updates |
-| `src/studio/export/bake.ts` | Legacy character composition builder (pending character refactor) |
+| `src/studio/character/composition.ts` | Native character composition builder for puppet DOM, speech audio, visemes, blink, and motion timelines |
 | `docs/ai-generated-hyperframes-clips-roadmap.md` | Roadmap for AI-generated clips, source-visible custom HyperFrames blocks, native text/composition clip support, and nested composition editing |
 
 ---

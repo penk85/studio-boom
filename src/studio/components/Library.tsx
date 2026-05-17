@@ -2,8 +2,14 @@
 import { useLiveQuery } from "dexie-react-hooks";
 import { db, deleteMediaIfUnused, importMediaFile, mediaIdsForCharacter, uid } from "../db";
 import { useStudio } from "../store";
-import type { CharacterClip, CharacterPart, CharacterPreset, MediaAsset, TextClip } from "../types";
-import { deriveEditorClips } from "../types";
+import type {
+  CharacterPart,
+  CharacterPreset,
+  CompositionClip,
+  MediaAsset,
+  TextClip,
+} from "../types";
+import { deriveEditorClips, isCharacterCompositionClip } from "../types";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMediaUrl } from "../hooks/useMediaUrl";
 import {
@@ -210,10 +216,15 @@ function CharactersTab() {
       w = maxW;
       h = Math.round(w / Math.max(0.1, aspect));
     }
-    const clip: CharacterClip = {
+    const clip: CompositionClip = {
       id: uid(),
-      kind: "character",
-      characterId,
+      kind: "composition",
+      compositionKind: "character",
+      character: {
+        characterId,
+        poses: {},
+        autoBlink: true,
+      },
       name,
       trackIndex,
       start: 0,
@@ -225,8 +236,6 @@ function CharactersTab() {
       rotation: 0,
       opacity: 1,
       zIndex: clips.length,
-      poses: {},
-      autoBlink: true,
     };
     addClip(clip);
   };
@@ -452,9 +461,9 @@ function BlocksTab() {
   const addClip = useStudio((s) => s.addClip);
   const [source, setSource] = useState("");
   const [errors, setErrors] = useState<string[]>([]);
-  const [validated, setValidated] = useState<ReturnType<typeof validateCompositionSourceHtml> | null>(
-    null,
-  );
+  const [validated, setValidated] = useState<ReturnType<
+    typeof validateCompositionSourceHtml
+  > | null>(null);
   const [previewProject, setPreviewProject] = useState<ReturnType<
     typeof buildCompositionPreviewProject
   > | null>(null);
@@ -466,11 +475,11 @@ function BlocksTab() {
   );
   const canAddBlock = Boolean(
     project &&
-      source.trim() &&
-      validated?.ok &&
-      validated.html &&
-      validated.compositionId &&
-      previewStatus === "ready",
+    source.trim() &&
+    validated?.ok &&
+    validated.html &&
+    validated.compositionId &&
+    previewStatus === "ready",
   );
   const previewWidth = validated?.width ?? project?.hf.width ?? 1920;
   const previewHeight = validated?.height ?? project?.hf.height ?? 1080;
@@ -660,7 +669,9 @@ function MediaTab() {
       for (const variant of character.headVariants ?? []) ids.add(variant.mediaId);
     }
     for (const clip of clips) {
-      if (clip.kind === "character" && clip.lipSyncAudioId) ids.add(clip.lipSyncAudioId);
+      if (isCharacterCompositionClip(clip) && clip.character.lipSyncAudioId) {
+        ids.add(clip.character.lipSyncAudioId);
+      }
     }
     return ids;
   }, [characters, clips]);

@@ -1,4 +1,4 @@
-// Motion panel — apply/configure reusable motion presets on a CharacterClip.
+// Motion panel — apply/configure reusable motion presets on a character composition clip.
 import { useEffect, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { usePlayerStore } from "@hyperframes/studio";
@@ -12,8 +12,9 @@ import {
 } from "../presets/motion-scheduling";
 import type {
   AppliedMotion,
-  CharacterClip,
+  CharacterCompositionClip,
   CharacterPreset,
+  CompositionClip,
   MotionCategory,
   MotionPreset,
 } from "../types";
@@ -41,7 +42,7 @@ export function MotionPanel({
   clip,
   character,
 }: {
-  clip: CharacterClip;
+  clip: CharacterCompositionClip;
   character: CharacterPreset;
 }) {
   const update = useStudio((s) => s.updateClip);
@@ -73,7 +74,7 @@ export function MotionPanel({
     return true;
   });
 
-  const appliedMotions = useMemo(() => clip.motions ?? [], [clip.motions]);
+  const appliedMotions = useMemo(() => clip.character.motions ?? [], [clip.character.motions]);
   const selectedMotion = appliedMotions.find((motion) => motion.id === selectedMotionId) ?? null;
   const selectedPreset = selectedMotion ? presetMap.get(selectedMotion.presetId) : undefined;
   const selectedIsExclusive =
@@ -100,7 +101,7 @@ export function MotionPanel({
       clipDuration: clip.duration,
       createId: uid,
     });
-    update(clip.id, { motions } as Partial<CharacterClip>);
+    update(clip.id, { character: { ...clip.character, motions } } as Partial<CompositionClip>);
     setSelectedMotionId(motion.id);
     setPicking(false);
   };
@@ -109,21 +110,23 @@ export function MotionPanel({
     const nextMotions = appliedMotions.map((motion) =>
       motion.id === id ? { ...motion, ...patch } : motion,
     );
-    update(clip.id, {
-      motions: resolveExclusiveMotionOverlaps({
-        motions: nextMotions,
-        editedMotionId: id,
-        presetMap,
-        clipDuration: clip.duration,
-        createId: uid,
-      }),
-    } as Partial<CharacterClip>);
+    const motions = resolveExclusiveMotionOverlaps({
+      motions: nextMotions,
+      editedMotionId: id,
+      presetMap,
+      clipDuration: clip.duration,
+      createId: uid,
+    });
+    update(clip.id, { character: { ...clip.character, motions } } as Partial<CompositionClip>);
   };
 
   const removeMotion = (id: string) => {
     update(clip.id, {
-      motions: appliedMotions.filter((motion) => motion.id !== id),
-    } as Partial<CharacterClip>);
+      character: {
+        ...clip.character,
+        motions: appliedMotions.filter((motion) => motion.id !== id),
+      },
+    } as Partial<CompositionClip>);
     if (selectedMotionId === id) setSelectedMotionId(null);
   };
 

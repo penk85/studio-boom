@@ -266,7 +266,9 @@ function applyCompositionScaleWrappers(html: string, hints: CompositionScaleHint
   const hintByHostId = new Map(hints.map((hint) => [hint.hostId, hint] as const));
   const { document } = parseHTML(html);
 
-  for (const host of Array.from(document.querySelectorAll<HTMLElement>("[data-type='composition']"))) {
+  for (const host of Array.from(
+    document.querySelectorAll<HTMLElement>("[data-type='composition']"),
+  )) {
     const hostId = host.getAttribute("id")?.trim();
     const hint = hostId ? hintByHostId.get(hostId) : undefined;
     if (!hint) continue;

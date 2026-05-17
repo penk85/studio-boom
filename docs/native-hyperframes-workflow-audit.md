@@ -31,7 +31,9 @@ movie. `editorMeta` is editor-only intent and UI state.
   `data-rotation` base-transform seam until core exposes base rotation natively,
   and persists visual clip layer order as CSS `z-index` in `rootHtml`.
 - Root composition boundary: `root-composition.ts` owns new root composition creation and direct root metadata updates without rebuilding the whole composition.
-- Transitional character bridge: `export/bake.ts` remains isolated for the current character pipeline and must not grow.
+- Character composition builder: `character/composition.ts` generates native
+  HyperFrames sub-composition HTML for Studio Boom puppet rigs. Root character
+  clips are regular composition clips with `compositionKind: "character"`.
 - Removable extra surface: ZIP download support has been removed; MP4 download is the only user-facing export path.
 
 ## Guardrails
@@ -66,5 +68,7 @@ movie. `editorMeta` is editor-only intent and UI state.
 - Crop and mirror only after confirming the native HyperFrames representation; do
   not fake them with a second renderer.
 - Timeline control polish: reset to start and draggable seek needle.
-- Audio alignment cleanup so linked audio behavior follows the same canonical HTML-first architecture.
-- Character refactor only after the stage and audio boundaries are clearer.
+- Audio alignment cleanup for generic audio clips; character speech audio now
+  lives inside the character sub-composition.
+- Character rig tool polish: richer rig editing, drag/drop motion authoring, and
+  lip-sync inspection on top of the native character composition contract.

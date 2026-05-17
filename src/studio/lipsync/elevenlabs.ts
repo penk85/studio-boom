@@ -1,10 +1,6 @@
-// Legacy character lip-sync helper.
-// This originally generated voice audio plus viseme metadata for the character
-// baking path. It is isolated until the character refactor decides whether to
-// reuse it as authoring metadata or remove it.
 import { deleteMediaIfUnused, importMediaFile } from "../db";
-import type { CharacterClip } from "../types";
-import { deriveEditorClips } from "../types";
+import type { CompositionClip } from "../types";
+import { deriveEditorClips, isCharacterCompositionClip } from "../types";
 import { useStudio } from "../store";
 import { generateTtsWithTimestamps } from "./tts.functions";
 import { alignmentToVisemes } from "./visemeMap";
@@ -32,10 +28,9 @@ export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
   const clip = state.project
     ? deriveEditorClips(state.project).find((c) => c.id === args.clipId)
     : undefined;
-  if (!clip || clip.kind !== "character") {
+  if (!isCharacterCompositionClip(clip)) {
     throw new Error("Clip is not a character clip");
   }
-  const charClip = clip as unknown as CharacterClip;
 
   const result = await generateTtsWithTimestamps({
     text: args.text,
@@ -47,7 +42,7 @@ export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
 
   // Persist audio as a MediaAsset
   const blob = base64ToBlob(result.audioBase64, result.mimeType);
-  const filename = `voice-${charClip.name || "line"}-${Date.now()}.mp3`;
+  const filename = `voice-${clip.name || "line"}-${Date.now()}.mp3`;
   const file = new File([blob], filename, { type: result.mimeType });
   const asset = await importMediaFile(file, { scope: "generated-audio" });
   useStudio.getState().registerMediaAsset(asset);
@@ -62,46 +57,28 @@ export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
     ends.length ? ends[ends.length - 1] + 0.1 : 0,
   );
 
-  // Remove stale generated-audio clips from earlier voice generations.
-  const { project: currentProject } = useStudio.getState();
-  const currentClips = currentProject ? deriveEditorClips(currentProject) : [];
-  const bakedAudioClipId = `audio_${charClip.id}`;
-  const staleEditorAudioClips = currentClips.filter(
-    (c) =>
-      c.kind === "audio" &&
-      c.id !== bakedAudioClipId &&
-      (c.linkedCharacterClipId === charClip.id ||
-        (!!charClip.lipSyncAudioId && c.mediaId === charClip.lipSyncAudioId) ||
-        c.name === `🎙 ${charClip.name}`),
-  );
-  const staleMediaIds = new Set(
-    staleEditorAudioClips
-      .map((c) => c.mediaId)
-      .filter((id): id is string => !!id && id !== asset.id),
-  );
-  if (charClip.lipSyncAudioId && charClip.lipSyncAudioId !== asset.id) {
-    staleMediaIds.add(charClip.lipSyncAudioId);
-  }
-  for (const stale of staleEditorAudioClips) {
-    useStudio.getState().removeClip(stale.id);
+  const staleMediaIds = new Set<string>();
+  if (clip.character.lipSyncAudioId && clip.character.lipSyncAudioId !== asset.id) {
+    staleMediaIds.add(clip.character.lipSyncAudioId);
   }
 
-  // Store voice/lip-sync authoring data on the character clip. The native
-  // character composition work will move this into renderable HF HTML directly.
-  useStudio.getState().updateClip(charClip.id, {
-    lipSyncAudioId: asset.id,
-    visemes,
-    voiceLine: {
-      text: args.text,
-      voiceId: args.voiceId,
-      modelId: args.modelId ?? "eleven_multilingual_v2",
-      stability: args.stability ?? 0.5,
-      similarityBoost: args.similarityBoost ?? 0.75,
+  useStudio.getState().updateClip(clip.id, {
+    character: {
+      ...clip.character,
+      lipSyncAudioId: asset.id,
+      visemes,
+      voiceLine: {
+        text: args.text,
+        voiceId: args.voiceId,
+        modelId: args.modelId ?? "eleven_multilingual_v2",
+        stability: args.stability ?? 0.5,
+        similarityBoost: args.similarityBoost ?? 0.75,
+      },
     },
-    duration: Math.max(charClip.duration, audioDuration),
-  } as Partial<CharacterClip>);
+    duration: Math.max(clip.duration, audioDuration),
+  } as Partial<CompositionClip>);
 
-  useStudio.getState().selectClip(charClip.id);
+  useStudio.getState().selectClip(clip.id);
 
   await useStudio.getState().saveProject();
   await Promise.all(

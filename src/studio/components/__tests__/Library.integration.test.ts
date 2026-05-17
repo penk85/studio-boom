@@ -24,7 +24,7 @@ describe("Library Blocks integration", () => {
     expect(panelSource).toContain("timeline.seek(nextTime)");
     expect(panelSource).toContain("postMessage");
     expect(panelSource).toContain('action: "play"');
-    expect(panelSource).toContain("hasStartedRef.current ? \"play\" : \"restart\"");
+    expect(panelSource).toContain('hasStartedRef.current ? "play" : "restart"');
     expect(panelSource).toContain("timeline.play()");
     expect(panelSource).toContain("timeline.restart()");
     expect(panelSource).toContain("new ResizeObserver(updateScale)");

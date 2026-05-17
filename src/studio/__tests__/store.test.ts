@@ -291,7 +291,7 @@ vi.mock("@hyperframes/core", () => {
   };
 });
 import { createBlankCharacter, makePart } from "../character/character-utils";
-import type { CharacterClip, CompositionClip, MediaAsset, MotionPreset, TextClip } from "../types";
+import type { CompositionClip, MediaAsset, MotionPreset, TextClip } from "../types";
 import { deriveEditorClips } from "../types";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -752,15 +752,22 @@ describe("createBlankProject", () => {
 
   it("preserves character clips as specialized compositions", () => {
     const project = createBlankProject("Character derivation");
+    const character = { ...createBlankCharacter("Actor"), id: "character-source-1" };
     useStudio.setState({
       project,
       tracks: project.editorMeta.tracks,
+      characters: new Map([[character.id, character]]),
     });
 
-    const clip: CharacterClip = {
+    const clip: CompositionClip = {
       id: "character-1",
-      kind: "character",
-      characterId: "character-source-1",
+      kind: "composition",
+      compositionKind: "character",
+      character: {
+        characterId: "character-source-1",
+        poses: {},
+        autoBlink: false,
+      },
       name: "Actor",
       trackIndex: 0,
       start: 0,
@@ -772,8 +779,6 @@ describe("createBlankProject", () => {
       rotation: 0,
       opacity: 1,
       zIndex: 0,
-      poses: {},
-      autoBlink: false,
     };
 
     useStudio.getState().addClip(clip);
@@ -781,11 +786,17 @@ describe("createBlankProject", () => {
     const added = deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clip.id);
     expect(added).toMatchObject({
       id: "character-1",
-      kind: "character",
-      characterId: "character-source-1",
-      compositionId: "comp_character-1",
+      kind: "composition",
+      compositionId: "char_character-1",
       compositionKind: "character",
+      character: {
+        characterId: "character-source-1",
+        autoBlink: false,
+      },
     });
+    expect(useStudio.getState().project!.hf.compositionHtml["char_character-1"]).toContain(
+      'window.__timelines["char_character-1"]',
+    );
   });
 
   it("mutates root HTML through core helpers instead of regenerating the composition", () => {
@@ -807,7 +818,7 @@ describe("createBlankProject", () => {
     expect(coreMock.generateCalls).toHaveLength(1);
     expect(coreMock.addCalls).toBe(1);
     expect(coreMock.updateCalls).toBeGreaterThanOrEqual(1);
-    expect(coreMock.removeCalls).toBe(2);
+    expect(coreMock.removeCalls).toBe(1);
     expect(rootHtml).toContain('data-composition-duration="45"');
     expect(rootHtml).toContain('data-width="1280"');
     expect(rootHtml).toContain('data-height="720"');
@@ -967,10 +978,7 @@ describe("createBlankProject", () => {
 });
 
 // ─── Store cache sync ─────────────────────────────────────────────────────────
-// NOTE: Character composition generation is being refactored. Cache sync tests
-// will be rewritten once the new character pipeline is in place.
-
-describe.skip("Studio cache sync", () => {
+describe("Studio cache sync", () => {
   it("rebakes character clips when a cached character changes", () => {
     const project = createBlankProject("Cache sync");
     const mediaA = makeMediaAsset("asset-a", "body-a");
@@ -991,10 +999,15 @@ describe.skip("Studio cache sync", () => {
       ],
       updatedAt: 1,
     };
-    const clip: CharacterClip = {
+    const clip: CompositionClip = {
       id: "clip-1",
-      kind: "character",
-      characterId: character.id,
+      kind: "composition",
+      compositionKind: "character",
+      character: {
+        characterId: character.id,
+        poses: {},
+        autoBlink: false,
+      },
       name: "Actor",
       trackIndex: 0,
       start: 0,
@@ -1006,8 +1019,6 @@ describe.skip("Studio cache sync", () => {
       rotation: 0,
       opacity: 1,
       zIndex: 0,
-      poses: {},
-      autoBlink: false,
     };
 
     useStudio.setState({
@@ -1021,7 +1032,7 @@ describe.skip("Studio cache sync", () => {
     });
     useStudio.getState().addClip(clip);
 
-    const compId = `comp_${clip.id}`;
+    const compId = `char_${clip.id}`;
     const before = useStudio.getState().project!.hf.compositionHtml[compId];
     expect(before).toBeDefined();
 
@@ -1047,7 +1058,8 @@ describe.skip("Studio cache sync", () => {
     const state = useStudio.getState();
     const newCompHtml = state.project!.hf.compositionHtml[compId];
     expect(newCompHtml).not.toBe(before);
-    expect(newCompHtml).toContain("Head B");
+    expect(newCompHtml).toContain('data-character-part-id="part-b"');
+    expect(newCompHtml).toContain("asset:asset-b");
     expect(state.project!.hf.assets.map((asset) => asset.id)).toEqual(
       expect.arrayContaining([mediaA.id, mediaB.id]),
     );
@@ -1078,14 +1090,28 @@ describe.skip("Studio cache sync", () => {
       category: "gesture",
       duration: 1,
       loop: false,
-      tracks: [],
+      tracks: [
+        {
+          partRole: "body",
+          keyframes: [
+            { t: 0, dy: 0 },
+            { t: 1, dy: 24 },
+          ],
+        },
+      ],
       createdAt: 1,
       updatedAt: 1,
     };
-    const clip: CharacterClip = {
+    const clip: CompositionClip = {
       id: "clip-1",
-      kind: "character",
-      characterId: character.id,
+      kind: "composition",
+      compositionKind: "character",
+      character: {
+        characterId: character.id,
+        poses: {},
+        motions: [{ id: "motion-1", presetId: preset.id, offset: 0, intensity: 1 }],
+        autoBlink: false,
+      },
       name: "Actor",
       trackIndex: 0,
       start: 0,
@@ -1097,9 +1123,6 @@ describe.skip("Studio cache sync", () => {
       rotation: 0,
       opacity: 1,
       zIndex: 0,
-      poses: {},
-      motions: [{ id: "motion-1", presetId: preset.id, offset: 0, intensity: 1 }],
-      autoBlink: false,
     };
 
     useStudio.setState({
@@ -1111,7 +1134,7 @@ describe.skip("Studio cache sync", () => {
     });
     useStudio.getState().addClip(clip);
 
-    const compId = `comp_${clip.id}`;
+    const compId = `char_${clip.id}`;
     const before = useStudio.getState().project!.hf.compositionHtml[compId];
 
     useStudio.getState().registerMotionPreset({
@@ -1121,10 +1144,8 @@ describe.skip("Studio cache sync", () => {
     });
 
     const after = useStudio.getState().project!.hf.compositionHtml[compId];
-    // Composition HTML is serialized when motion preset changes
     expect(after).toBeDefined();
-    // The composition is the same since buildCharacterCompositionHtml doesn't process motion presets directly
-    // but the rebake was triggered — this verifies the machinery ran without error
     expect(typeof after).toBe("string");
+    expect(after).not.toBe(before);
   });
 });

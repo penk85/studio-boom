@@ -2,21 +2,17 @@
 // Generates ElevenLabs TTS + character timestamps and applies as visemes.
 import { useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
-import type { CharacterClip, MediaClip, MouthViseme, SavedVoice } from "../types";
-import { deriveEditorClips } from "../types";
+import type { CharacterCompositionClip, CompositionClip, MouthViseme, SavedVoice } from "../types";
 import { useStudio } from "../store";
 import { db, deleteMediaIfUnused, getSavedVoices, saveVoice, deleteSavedVoice } from "../db";
 import { ELEVENLABS_VOICES, ELEVENLABS_MODELS, DEFAULT_VOICE_ID } from "../lipsync/voices";
 import { generateLipSyncForClip } from "../lipsync/elevenlabs";
 import { MOUTH_VISEMES, MOUTH_VISEME_DESCRIPTIONS } from "../lipsync/viseme-schema";
 
-export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
-  const project = useStudio((s) => s.project);
-  const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
+export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) {
   const update = useStudio((s) => s.updateClip);
-  const removeClip = useStudio((s) => s.removeClip);
   const saveProject = useStudio((s) => s.saveProject);
-  const initial = clip.voiceLine;
+  const initial = clip.character.voiceLine;
   const [text, setText] = useState(initial?.text ?? "");
   const [voiceId, setVoiceId] = useState(initial?.voiceId ?? DEFAULT_VOICE_ID);
   const [customId, setCustomId] = useState("");
@@ -26,10 +22,13 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
   const [similarity, setSimilarity] = useState(initial?.similarityBoost ?? 0.75);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const character = useLiveQuery(() => db.characters.get(clip.characterId), [clip.characterId]);
+  const character = useLiveQuery(
+    () => db.characters.get(clip.character.characterId),
+    [clip.character.characterId],
+  );
   const savedVoices = useLiveQuery(() => getSavedVoices(), []) ?? [];
 
-  const visemeCount = clip.visemes?.length ?? 0;
+  const visemeCount = clip.character.visemes?.length ?? 0;
   const availableMouthShapes = useMemo(() => {
     const shapes = new Set<MouthViseme>();
     for (const part of character?.parts ?? []) {
@@ -59,22 +58,16 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterClip }) {
   };
 
   const onClear = async () => {
-    const speechClips = clips.filter(
-      (c) =>
-        c.kind === "audio" &&
-        (c.linkedCharacterClipId === clip.id ||
-          (!!clip.lipSyncAudioId && c.mediaId === clip.lipSyncAudioId)),
-    );
-    const mediaIds = new Set(
-      speechClips.map((speechClip) => speechClip.mediaId).filter((id): id is string => !!id),
-    );
-    if (clip.lipSyncAudioId) mediaIds.add(clip.lipSyncAudioId);
-    for (const speechClip of speechClips) removeClip(speechClip.id);
+    const mediaIds = new Set<string>();
+    if (clip.character.lipSyncAudioId) mediaIds.add(clip.character.lipSyncAudioId);
     update(clip.id, {
-      visemes: undefined,
-      lipSyncAudioId: undefined,
-      voiceLine: undefined,
-    } as Partial<CharacterClip>);
+      character: {
+        ...clip.character,
+        visemes: undefined,
+        lipSyncAudioId: undefined,
+        voiceLine: undefined,
+      },
+    } as Partial<CompositionClip>);
     await saveProject();
     await Promise.all(
       Array.from(mediaIds).map((id) => deleteMediaIfUnused(id, { internalOnly: true })),

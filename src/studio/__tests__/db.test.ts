@@ -12,6 +12,30 @@ describe("isCurrentProjectShape", () => {
 
     expect(isCurrentProjectShape(incompatibleProject)).toBe(false);
   });
+
+  it("rejects legacy flat character clip metadata", () => {
+    const legacyProject = {
+      id: "legacy-character-project",
+      name: "Legacy Character Project",
+      hf: {
+        assets: [],
+        rootHtml: "<html></html>",
+        compositionHtml: {},
+      },
+      editorMeta: {
+        tracks: [],
+        clips: {
+          "char-1": {
+            kind: "character",
+            characterId: "actor",
+            lipSyncAudioId: "voice-media",
+          },
+        },
+      },
+    };
+
+    expect(isCurrentProjectShape(legacyProject)).toBe(false);
+  });
 });
 
 describe("collectProjectMediaUsages", () => {
@@ -50,9 +74,15 @@ describe("collectProjectMediaUsages", () => {
         clips: {
           "image-clip": { kind: "image", name: "Image" },
           "char-clip": {
-            kind: "character",
+            kind: "composition",
+            compositionKind: "character",
+            compositionId: "char-clip",
             name: "Character",
-            lipSyncAudioId: "voice-media",
+            character: {
+              characterId: "character-1",
+              poses: {},
+              lipSyncAudioId: "voice-media",
+            },
           },
         },
       },

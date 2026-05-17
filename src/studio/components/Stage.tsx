@@ -839,12 +839,6 @@ function SelectionCorner({
 function getStageEditableClip(selectedClip: EditorClip | null, clips: EditorClip[]) {
   if (!selectedClip) return null;
   if (selectedClip.kind === "audio") return null;
-  if (
-    selectedClip.linkedCharacterClipId &&
-    clips.some((clip) => clip.id === selectedClip.linkedCharacterClipId)
-  ) {
-    return null;
-  }
   return selectedClip;
 }
 

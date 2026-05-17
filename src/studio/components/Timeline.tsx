@@ -1,5 +1,5 @@
 // Timeline — multi-track strip with draggable clips, ruler, playhead.
-import { ChevronDown, ChevronRight, Lock, Mic2, Minus, TriangleAlert } from "lucide-react";
+import { ChevronDown, ChevronRight, Mic2, Minus, TriangleAlert } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { PlayerControls, liveTime, usePlayerStore } from "@hyperframes/studio";
@@ -14,12 +14,12 @@ import type {
   MotionPreset,
   AnyClip,
   AppliedMotion,
-  CharacterClip,
+  CharacterCompositionClip,
+  CompositionClip,
   EditorClip,
-  MediaClip,
   Project,
 } from "../types";
-import { deriveEditorClips } from "../types";
+import { deriveEditorClips, isCharacterCompositionClip } from "../types";
 import { fmtTime } from "../timeline-utils";
 
 const TRACK_HEIGHT = 44;
@@ -106,24 +106,14 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const mediaHealth = useHfMediaHealth(project?.hf);
   if (!project) return null;
   const totalWidth = Math.max(1200, project.hf.duration * zoom);
-  const timelineClips = clips.filter((clip) => !isLinkedSpeechAudioClip(clip));
+  const timelineClips = clips;
   const compositionSourceErrorsByClipId = buildCompositionSourceErrors(project, timelineClips);
-  const linkedSpeechByCharacterId = new Map<string, EditorClip>(
-    clips
-      .filter(isLinkedSpeechAudioClip)
-      .map((clip) => [clip.linkedCharacterClipId!, clip] as const),
-  );
   const expandedCharacters = clips.filter(
-    (clip) => clip.kind === "character" && expandedClipIds.has(clip.id),
+    (clip): clip is CharacterCompositionClip =>
+      isCharacterCompositionClip(clip) && expandedClipIds.has(clip.id),
   );
   const expandedLayouts = new Map<string, ExpandedClipLayout>(
-    expandedCharacters.map(
-      (clip) =>
-        [
-          clip.id,
-          buildExpandedClipLayout(clip, presetMap, linkedSpeechByCharacterId.get(clip.id)),
-        ] as const,
-    ),
+    expandedCharacters.map((clip) => [clip.id, buildExpandedClipLayout(clip, presetMap)] as const),
   );
   const trackLayouts = tracks.map((track, trackIndex) =>
     buildTrackLayout({
@@ -360,7 +350,9 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                         onSelect={() => selectClip(row.clip.id)}
                         onSelectMotion={setSelectedMotionId}
                         onChange={(motions) =>
-                          updateClip(row.clip.id, { motions } as Partial<CharacterClip>)
+                          updateClip(row.clip.id, {
+                            character: { ...row.clip.character, motions },
+                          } as Partial<CompositionClip>)
                         }
                         createMotionId={uid}
                         presetMap={presetMap}
@@ -410,7 +402,10 @@ function Ruler({ duration, zoom }: { duration: number; zoom: number }) {
   );
 }
 
-function buildCompositionSourceErrors(project: Project, clips: EditorClip[]): Map<string, string[]> {
+function buildCompositionSourceErrors(
+  project: Project,
+  clips: EditorClip[],
+): Map<string, string[]> {
   const errorsByClipId = new Map<string, string[]>();
   for (const clip of clips) {
     if (clip.kind !== "composition" || !clip.compositionId) continue;
@@ -464,10 +459,11 @@ function ClipBlock({
   expanded: boolean;
   onToggleExpanded: () => void;
 }) {
+  const isCharacterClip = isCharacterCompositionClip(clip);
   const color =
     clip.kind === "audio"
       ? "bg-clip-audio"
-      : clip.kind === "character"
+      : isCharacterClip
         ? "bg-clip-character"
         : clip.kind === "text"
           ? "bg-fuchsia-500"
@@ -478,8 +474,7 @@ function ClipBlock({
               : "bg-clip-bg";
 
   const lane = clip.laneIndex ?? 0;
-  const linkedAudio = clip.kind === "audio" && !!clip.linkedCharacterClipId;
-  const clipMotions = clip.kind === "character" ? (clip.motions ?? []) : [];
+  const clipMotions = isCharacterClip ? (clip.character.motions ?? []) : [];
   const missingMediaTitle =
     missingMediaIds.length > 0 ? `Missing media: ${missingMediaIds.join(", ")}` : undefined;
   const malformedCompositionTitle =
@@ -494,7 +489,6 @@ function ClipBlock({
     e.stopPropagation();
     onSelect();
     if (e.button !== 0) return;
-    if (linkedAudio) return;
     const sx = e.clientX,
       sy = e.clientY;
     const ostart = clip.start;
@@ -526,7 +520,6 @@ function ClipBlock({
 
   const onResizeRight = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (linkedAudio) return;
     const sx = e.clientX,
       od = clip.duration;
     let checkpointed = false;
@@ -548,7 +541,6 @@ function ClipBlock({
 
   const onResizeLeft = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (linkedAudio) return;
     const sx = e.clientX,
       ostart = clip.start,
       od = clip.duration;
@@ -582,11 +574,12 @@ function ClipBlock({
         onSelect();
       }}
       onKeyDown={(e) => {
-        if (linkedAudio) return;
         if (e.key === "Delete" || e.key === "Backspace") onDelete();
       }}
       tabIndex={0}
-      className={`group absolute overflow-hidden rounded ${linkedAudio ? "cursor-not-allowed opacity-90" : "cursor-grab"} ${color} ${selected ? "ring-2 ring-primary" : "ring-1 ring-black/30"}`}
+      className={`group absolute cursor-grab overflow-hidden rounded ${color} ${
+        selected ? "ring-2 ring-primary" : "ring-1 ring-black/30"
+      }`}
       style={{
         left: clip.start * zoom,
         width: Math.max(8, clip.duration * zoom),
@@ -596,7 +589,7 @@ function ClipBlock({
       title={clipTitle}
     >
       <div className="flex h-full items-center gap-1 px-2 text-[11px] font-medium text-foreground/95 mix-blend-luminosity">
-        {clip.kind === "character" && (
+        {isCharacterClip && (
           <button
             type="button"
             onMouseDown={(e) => e.stopPropagation()}
@@ -611,7 +604,6 @@ function ClipBlock({
             {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           </button>
         )}
-        {linkedAudio && <Lock size={11} className="shrink-0" aria-label="Linked speech audio" />}
         <span className="truncate">{clip.name}</span>
         {(missingMediaIds.length > 0 ||
           compositionSourceErrors.length > 0 ||
@@ -653,24 +645,20 @@ function ClipBlock({
           </span>
         )}
       </div>
-      {!linkedAudio && (
-        <>
-          <div
-            onMouseDown={onResizeLeft}
-            className="absolute left-0 top-0 h-full w-1.5 cursor-ew-resize bg-black/30 opacity-0 group-hover:opacity-100"
-          />
-          <div
-            onMouseDown={onResizeRight}
-            className="absolute right-0 top-0 h-full w-1.5 cursor-ew-resize bg-black/30 opacity-0 group-hover:opacity-100"
-          />
-        </>
-      )}
+      <div
+        onMouseDown={onResizeLeft}
+        className="absolute left-0 top-0 h-full w-1.5 cursor-ew-resize bg-black/30 opacity-0 group-hover:opacity-100"
+      />
+      <div
+        onMouseDown={onResizeRight}
+        className="absolute right-0 top-0 h-full w-1.5 cursor-ew-resize bg-black/30 opacity-0 group-hover:opacity-100"
+      />
     </div>
   );
 }
 
 interface ExpandedClipRow {
-  clip: EditorClip;
+  clip: CharacterCompositionClip;
   layout: ExpandedClipLayout;
   top: number;
 }
@@ -694,7 +682,7 @@ function buildTrackLayout({
 }: {
   trackIndex: number;
   laneCount: number;
-  expandedCharacters: EditorClip[];
+  expandedCharacters: CharacterCompositionClip[];
   expandedLayouts: Map<string, ExpandedClipLayout>;
 }): TrackLayout {
   let top = 0;
@@ -745,12 +733,23 @@ interface MotionGroupLayout {
 }
 
 interface ExpandedClipLayout {
-  voice?: EditorClip;
+  voice?: VoiceLaneSummary;
   groups: MotionGroupLayout[];
   height: number;
 }
 
-function CharacterMotionHeader({ clip, layout }: { clip: EditorClip; layout: ExpandedClipLayout }) {
+interface VoiceLaneSummary {
+  name: string;
+  duration: number;
+}
+
+function CharacterMotionHeader({
+  clip,
+  layout,
+}: {
+  clip: CharacterCompositionClip;
+  layout: ExpandedClipLayout;
+}) {
   return (
     <div
       style={{ height: layout.height }}
@@ -803,7 +802,7 @@ function MotionLaneSet({
   createMotionId,
   presetMap,
 }: {
-  clip: EditorClip;
+  clip: CharacterCompositionClip;
   zoom: number;
   top: number;
   layout: ExpandedClipLayout;
@@ -814,7 +813,7 @@ function MotionLaneSet({
   createMotionId: () => string;
   presetMap: Map<string, MotionPreset>;
 }) {
-  const motions = clip.motions ?? [];
+  const motions = clip.character.motions ?? [];
   const updateMotion = (id: string, patch: Partial<AppliedMotion>) => {
     const nextMotions = motions.map((motion) =>
       motion.id === id ? { ...motion, ...patch } : motion,
@@ -854,7 +853,7 @@ function MotionLaneSet({
           className="absolute left-0 right-0 border-t border-border/40"
           style={{ top: voiceTop, height: MOTION_ROW_HEIGHT }}
         >
-          <VoiceBlock clip={clip} audioClip={layout.voice} zoom={zoom} />
+          <VoiceBlock clip={clip} voice={layout.voice} zoom={zoom} />
         </div>
       )}
       {layout.groups.map((group) => {
@@ -1001,17 +1000,17 @@ function MotionBlock({
 
 function VoiceBlock({
   clip,
-  audioClip,
+  voice,
   zoom,
 }: {
-  clip: EditorClip;
-  audioClip: EditorClip;
+  clip: CharacterCompositionClip;
+  voice: VoiceLaneSummary;
   zoom: number;
 }) {
-  const offset = Math.max(0, audioClip.start - clip.start);
-  const end = Math.min(clip.duration, offset + audioClip.duration);
+  const offset = 0;
+  const end = Math.min(clip.duration, voice.duration);
   const width = Math.max(8, Math.max(0.05, end - offset) * zoom);
-  const trimmed = audioClip.duration > Math.max(0, clip.duration - offset) + 0.01;
+  const trimmed = voice.duration > Math.max(0, clip.duration - offset) + 0.01;
   return (
     <div
       className="absolute top-1 flex h-5 items-center gap-1 overflow-hidden rounded border border-cyan-300/80 bg-cyan-500/70 px-1.5 text-[10px] text-foreground shadow-sm"
@@ -1019,21 +1018,21 @@ function VoiceBlock({
         left: (clip.start + offset) * zoom,
         width,
       }}
-      title={`${audioClip.name}${trimmed ? " (trimmed by character clip)" : ""}`}
+      title={`${voice.name}${trimmed ? " (trimmed by character clip)" : ""}`}
     >
-      <Lock size={10} className="shrink-0" />
-      <span className="min-w-0 truncate">{audioClip.name.replace(/^🎙\s*/, "")}</span>
+      <Mic2 size={10} className="shrink-0" />
+      <span className="min-w-0 truncate">{voice.name.replace(/^Voice:\s*/, "")}</span>
       {trimmed && <span className="ml-auto shrink-0 text-[9px]">trim</span>}
     </div>
   );
 }
 
 function buildExpandedClipLayout(
-  clip: EditorClip,
+  clip: CharacterCompositionClip,
   presetMap: Map<string, MotionPreset>,
-  voice?: EditorClip,
 ): ExpandedClipLayout {
-  const motions = clip.motions ?? [];
+  const motions = clip.character.motions ?? [];
+  const voice = voiceSummaryForCharacterClip(clip);
   if (motions.length === 0) {
     if (voice) {
       return {
@@ -1079,7 +1078,27 @@ function buildExpandedClipLayout(
   };
 }
 
-function packMotionsForRows(motions: PackedMotion[], clip: EditorClip): PackedMotion[][] {
+function voiceSummaryForCharacterClip(
+  clip: CharacterCompositionClip,
+): VoiceLaneSummary | undefined {
+  if (
+    !clip.character.lipSyncAudioId &&
+    !clip.character.voiceLine &&
+    !clip.character.visemes?.length
+  ) {
+    return undefined;
+  }
+  const line = clip.character.voiceLine?.text?.trim();
+  return {
+    name: line ? `Voice: ${line}` : "Voice / lip sync",
+    duration: clip.duration,
+  };
+}
+
+function packMotionsForRows(
+  motions: PackedMotion[],
+  clip: CharacterCompositionClip,
+): PackedMotion[][] {
   const sorted = [...motions].sort((a, b) => {
     const aDur = motionDuration(a.motion, a.preset);
     const bDur = motionDuration(b.motion, b.preset);
@@ -1141,12 +1160,6 @@ function intervalsOverlapAny(intervals: TimeSpan[], existing: TimeSpan[]) {
   return intervals.some((next) =>
     existing.some((current) => next.start < current.end && current.start < next.end),
   );
-}
-
-function isLinkedSpeechAudioClip(
-  clip: EditorClip,
-): clip is EditorClip & { linkedCharacterClipId: string } {
-  return clip.kind === "audio" && !!clip.linkedCharacterClipId;
 }
 
 function formatSeconds(value: number) {

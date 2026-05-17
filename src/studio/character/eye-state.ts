@@ -1,4 +1,4 @@
-import type { CharacterClip, CharacterPart, EyeState } from "../types";
+import type { CharacterPart, EyeState } from "../types";
 import type { CharacterSlotRef } from "./character-utils";
 
 export const EYE_STATES: EyeState[] = ["open", "half", "closed", "wink"];
@@ -46,7 +46,11 @@ export function slotHasEyeState(slot: CharacterSlotRef, state: EyeState) {
   return eyeStateSetForSlot(slot).has(state);
 }
 
-export function blinkWindowsForClip(clip: CharacterClip): BlinkWindow[] {
+export function blinkWindowsForClip(clip: {
+  id: string;
+  duration: number;
+  autoBlink?: boolean;
+}): BlinkWindow[] {
   if (clip.autoBlink === false) return [];
 
   const hash = hashString(clip.id);

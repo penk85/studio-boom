@@ -5,13 +5,19 @@ import { visemeAt } from "../lipsync/visemeMap";
 import { composeMotionsAt, deltaFor, poseSwapFor } from "../presets/apply";
 import { DEFAULT_PARALLAX_CONFIG, DEFAULT_PART_MANIFEST } from "../types";
 import type {
-  CharacterClip,
+  AppliedMotion,
   CharacterPart,
   CharacterPreset,
   MotionPreset,
   MouthViseme,
   PartRole,
 } from "../types";
+
+interface TestCharacterClip {
+  duration: number;
+  motions?: AppliedMotion[];
+  visemes?: { t: number; v: MouthViseme }[];
+}
 
 const MOUTH_SLOT_ID = "role:mouth";
 const EYE_SLOT_ID = "slot:left-eye";
@@ -57,25 +63,10 @@ function makeCharacter(parts: CharacterPart[]): CharacterPreset {
   };
 }
 
-function makeClip(overrides: Partial<CharacterClip> = {}): CharacterClip {
+function makeClip(overrides: Partial<TestCharacterClip> = {}): TestCharacterClip {
   return {
-    id: "clip-1",
-    kind: "character",
-    name: "Character",
-    characterId: "character-1",
-    trackIndex: 0,
-    start: 0,
     duration: 4,
-    x: 0,
-    y: 0,
-    width: 600,
-    height: 900,
-    rotation: 0,
-    opacity: 1,
-    zIndex: 0,
-    poses: {},
     motions: [],
-    autoBlink: true,
     ...overrides,
   };
 }
@@ -132,7 +123,7 @@ function resolveAppliedState({
   t,
 }: {
   character: CharacterPreset;
-  clip: CharacterClip;
+  clip: TestCharacterClip;
   presets: Map<string, MotionPreset>;
   t: number;
 }) {

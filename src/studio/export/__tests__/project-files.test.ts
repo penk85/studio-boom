@@ -61,14 +61,19 @@ function makeProject(): Project {
       tracks: [{ id: "track-1", name: "Characters", kind: "character" }],
       clips: {
         "char-1": {
-          kind: "character",
-          characterId: "editor-only-character",
-          voiceLine: {
-            text: "this must not render",
-            voiceId: "voice",
-            modelId: "model",
-            stability: 0.5,
-            similarityBoost: 0.75,
+          kind: "composition",
+          compositionKind: "character",
+          compositionId: "comp_char-1",
+          character: {
+            characterId: "editor-only-character",
+            poses: {},
+            voiceLine: {
+              text: "this must not render",
+              voiceId: "voice",
+              modelId: "model",
+              stability: 0.5,
+              similarityBoost: 0.75,
+            },
           },
         },
       },

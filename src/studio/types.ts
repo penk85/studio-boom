@@ -409,36 +409,43 @@ export interface AppliedMotion {
   loopGapMax?: number;
 }
 
-/** Per-clip authoring state — drives re-baking for character clips. */
+export type NativeClipKind = "image" | "audio" | "video" | "text" | "composition";
+
+export type CompositionKind = "ai-block" | "registry-block" | "character" | "user-composition";
+
+export interface VoiceLineMeta {
+  text: string;
+  voiceId: string;
+  modelId: string;
+  stability: number;
+  similarityBoost: number;
+}
+
+export interface CharacterClipMeta {
+  characterId: ID;
+  poses: Record<string, string>;
+  motions?: AppliedMotion[];
+  visemes?: { t: number; v: MouthViseme }[];
+  autoBlink?: boolean;
+  /** Editor authoring reference for generated voice audio. */
+  lipSyncAudioId?: ID;
+  voiceLine?: VoiceLineMeta;
+}
+
+/** Per-clip authoring state — character clips generate native sub-compositions. */
 export interface ClipEditorMeta {
   // Display / editor UI
   name?: string;
-  kind?: "image" | "audio" | "video" | "text" | "composition" | "character";
-  compositionKind?: "ai-block" | "registry-block" | "character" | "user-composition";
+  kind?: NativeClipKind;
+  compositionKind?: CompositionKind;
   uiTrackIndex?: number; // which editor track (0-based, maps to editorMeta.tracks[i])
   uiLaneIndex?: number; // which lane within the track
-  // Character clips
-  characterId?: string;
   // Composition clips
   compositionId?: string;
+  // Character sub-composition metadata
+  character?: CharacterClipMeta;
   // Media clips — id in Dexie mediaBlobs for blob copy on export
   mediaId?: string;
-  // Audio clips linked to character clips.
-  linkedCharacterClipId?: string;
-  // Character animation authoring
-  motions?: AppliedMotion[];
-  visemes?: { t: number; v: MouthViseme }[];
-  poses?: Record<string, string>;
-  autoBlink?: boolean;
-  /** Editor authoring reference for generated voice audio. */
-  lipSyncAudioId?: string;
-  voiceLine?: {
-    text: string;
-    voiceId: string;
-    modelId: string;
-    stability: number;
-    similarityBoost: number;
-  };
 }
 
 /** UI track metadata — names, kinds, lock/mute state. */
@@ -477,7 +484,7 @@ export interface Project {
 export interface EditorClip {
   id: string;
   name: string;
-  kind: "image" | "audio" | "video" | "text" | "composition" | "character";
+  kind: NativeClipKind;
   start: number;
   duration: number;
   trackIndex: number;
@@ -498,24 +505,28 @@ export interface EditorClip {
   fitToBounds?: boolean;
   // Composition-specific
   compositionId?: string;
-  compositionKind?: ClipEditorMeta["compositionKind"];
-  // Character-specific
-  characterId?: string;
-  poses?: Record<string, string>;
-  motions?: AppliedMotion[];
-  visemes?: { t: number; v: MouthViseme }[];
-  autoBlink?: boolean;
-  lipSyncAudioId?: string;
-  voiceLine?: {
-    text: string;
-    voiceId: string;
-    modelId: string;
-    stability: number;
-    similarityBoost: number;
-  };
+  compositionKind?: CompositionKind;
+  character?: CharacterClipMeta;
   // Media-specific
   mediaId?: string;
-  linkedCharacterClipId?: string;
+}
+
+export type CharacterCompositionClip = EditorClip & {
+  kind: "composition";
+  compositionKind: "character";
+  compositionId: string;
+  character: CharacterClipMeta;
+};
+
+export function isCharacterCompositionClip(
+  clip: EditorClip | null | undefined,
+): clip is CharacterCompositionClip {
+  return (
+    clip?.kind === "composition" &&
+    clip.compositionKind === "character" &&
+    typeof clip.compositionId === "string" &&
+    !!clip.character?.characterId
+  );
 }
 
 /** Derive the flat editor view of all clips from the canonical HF + editorMeta. */
@@ -524,11 +535,6 @@ export function deriveEditorClips(project: Project): EditorClip[] {
   const { elements } = parseStudioHtml(project.hf.rootHtml);
   return elements.map((el: TimelineElement) => {
     const meta = project.editorMeta.clips[el.id] ?? {};
-    const linkedCharacterClipId =
-      meta.linkedCharacterClipId ??
-      (el.type === "audio" && el.id.startsWith("audio_")
-        ? el.id.slice("audio_".length)
-        : undefined);
     const compositionId =
       "compositionId" in el && typeof el.compositionId === "string"
         ? el.compositionId
@@ -536,9 +542,7 @@ export function deriveEditorClips(project: Project): EditorClip[] {
     const kind: EditorClip["kind"] =
       meta.kind ??
       (el.type === "composition"
-        ? meta.characterId || meta.compositionKind === "character"
-          ? "character"
-          : "composition"
+        ? "composition"
         : el.type === "audio"
           ? "audio"
           : el.type === "video"
@@ -562,7 +566,7 @@ export function deriveEditorClips(project: Project): EditorClip[] {
 
     return {
       id: el.id,
-      name: meta.name ?? (linkedCharacterClipId ? "Voice" : (el.name ?? "")),
+      name: meta.name ?? el.name ?? "",
       kind,
       start: el.startTime,
       duration: el.duration,
@@ -583,15 +587,8 @@ export function deriveEditorClips(project: Project): EditorClip[] {
       fitToBounds: textEl.fitToBounds,
       compositionId,
       compositionKind: meta.compositionKind,
-      characterId: meta.characterId,
-      poses: meta.poses,
-      motions: meta.motions,
-      visemes: meta.visemes,
-      autoBlink: meta.autoBlink,
-      lipSyncAudioId: meta.lipSyncAudioId,
-      voiceLine: meta.voiceLine,
+      character: meta.character,
       mediaId: meta.mediaId,
-      linkedCharacterClipId,
     };
   });
 }
@@ -619,7 +616,6 @@ export interface BaseClip {
 export interface MediaClip extends BaseClip {
   kind: "image" | "video" | "audio";
   mediaId: ID;
-  linkedCharacterClipId?: ID;
 }
 
 export interface TextClip extends BaseClip {
@@ -635,28 +631,12 @@ export interface TextClip extends BaseClip {
 export interface CompositionClip extends BaseClip {
   kind: "composition";
   compositionId?: ID;
-  compositionKind?: Exclude<ClipEditorMeta["compositionKind"], "character">;
+  compositionKind?: CompositionKind;
   compositionHtml?: string;
+  character?: CharacterClipMeta;
 }
 
-export interface CharacterClip extends BaseClip {
-  kind: "character";
-  characterId: ID;
-  poses: Record<string, string>;
-  lipSyncAudioId?: ID;
-  visemes?: { t: number; v: MouthViseme }[];
-  motions?: AppliedMotion[];
-  autoBlink?: boolean;
-  voiceLine?: {
-    text: string;
-    voiceId: string;
-    modelId: string;
-    stability: number;
-    similarityBoost: number;
-  };
-}
-
-export type AnyClip = MediaClip | TextClip | CompositionClip | CharacterClip;
+export type AnyClip = MediaClip | TextClip | CompositionClip;
 
 export interface Track {
   id: ID;
