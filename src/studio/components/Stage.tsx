@@ -1,7 +1,6 @@
 // Stage — renders project.hf.rootHtml through the HyperFrames player iframe.
 // React hosts the editor shell; HyperFrames owns the movie preview.
 import "@hyperframes/player";
-import gsapRaw from "gsap/dist/gsap.min.js?raw";
 import { Move, RotateCw } from "lucide-react";
 import {
   useEffect,
@@ -17,7 +16,8 @@ import { resolveIframe, useElementPicker, type PickedElement } from "@hyperframe
 import { useStudio } from "../store";
 import { getMediaUrl } from "../db";
 import type { HyperframesPlayerElement } from "../../hyperframes-player";
-import { deriveEditorClips, type EditorClip } from "../types";
+import { deriveEditorClips, type EditorClip, type HFAsset, type Project } from "../types";
+import { buildHyperframesProjectFiles, extFromAsset } from "../export/project-files";
 import {
   commitElementRect,
   commitElementPosition,
@@ -48,54 +48,148 @@ import {
   type StageGeometry,
 } from "./stage-helpers";
 
-const GSAP_SCRIPT_RE =
-  /<script\s+src=["'](?:https:\/\/cdn\.jsdelivr\.net\/npm\/gsap@[^"']+\/dist\/gsap\.min\.js|\.\.\/gsap\.min\.js)["']\s*><\/script>/gi;
 const MIN_STAGE_RESIZE_SIZE = 16;
 const STAGE_NUDGE_RESET_MS = 400;
 const STAGE_NUDGE_STEP = 1;
 const STAGE_FAST_NUDGE_STEP = 10;
 const STAGE_ROTATION_SNAP_DEGREES = 15;
 
-function inlinePreviewScripts(html: string): string {
-  return html.replace(GSAP_SCRIPT_RE, `<script>${gsapRaw}</script>`);
-}
-
 interface ResolvedPreviewHtml {
   html: string;
   revoke: () => void;
 }
 
-async function resolvePreviewHtml(
-  rootHtml: string,
-  compositionHtml: Record<string, string>,
-  assets: { id: string }[],
-): Promise<ResolvedPreviewHtml> {
+async function resolvePreviewHtml(project: Project): Promise<ResolvedPreviewHtml> {
+  const { assets } = project.hf;
   const assetEntries = await Promise.all(
     assets.map(async (a) => [a.id, await getMediaUrl(a.id)] as const),
   );
   const assetUrls = new Map(assetEntries.filter((e): e is [string, string] => Boolean(e[1])));
-
-  const blobUrls: string[] = [];
-  const compBlobUrls = new Map<string, string>();
-  for (const [compId, compHtml] of Object.entries(compositionHtml)) {
-    let resolved = inlinePreviewScripts(compHtml);
-    for (const [id, url] of assetUrls) resolved = resolved.replaceAll(`asset:${id}`, url);
-    const blobUrl = URL.createObjectURL(new Blob([resolved], { type: "text/html" }));
-    blobUrls.push(blobUrl);
-    compBlobUrls.set(compId, blobUrl);
-  }
-
-  let html = inlinePreviewScripts(rootHtml);
-  for (const [id, url] of assetUrls) html = html.replaceAll(`asset:${id}`, url);
-  for (const [compId, blobUrl] of compBlobUrls)
-    html = html.replaceAll(`compositions/${compId}.html`, blobUrl);
+  let html = await bundlePreviewProject(project);
+  html = resolvePreviewAssetPaths(html, assets, assetUrls);
+  assertPreviewScriptSyntax(html);
 
   return {
     html,
-    revoke: () => {
-      for (const url of blobUrls) URL.revokeObjectURL(url);
-    },
+    revoke: () => {},
   };
+}
+
+async function bundlePreviewProject(project: Project): Promise<string> {
+  const files = await buildHyperframesProjectFiles(project);
+  const form = new FormData();
+  for (const file of files.textFiles) {
+    form.append("file", new File([file.contents], file.path, { type: file.mimeType }));
+  }
+  for (const file of files.binaryFiles) {
+    form.append("file", new File([file.blob], file.path, { type: file.mimeType }));
+  }
+
+  const response = await fetch("/api/hyperframes/preview-bundle", {
+    method: "POST",
+    body: form,
+  });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  const html = await response.text();
+  assertPreviewBundleResponseHtml(html);
+  return html;
+}
+
+function assertPreviewBundleResponseHtml(html: string): void {
+  const looksLikeStudioShell =
+    /<title>\s*Studio Boom\s*<\/title>/i.test(html) ||
+    (/<div\s+id=["']root["']\s*><\/div>/i.test(html) &&
+      /<script\b[^>]+src=["'][^"']*(?:\/src\/main\.tsx|\/assets\/index-)/i.test(html));
+
+  if (looksLikeStudioShell) {
+    throw new Error(
+      "Preview bundle endpoint returned the Studio app shell instead of HyperFrames HTML. Restart the dev server and make sure the HyperFrames preview-bundle API is active.",
+    );
+  }
+
+  if (!/\bdata-composition-id\s*=/.test(html)) {
+    throw new Error(
+      "Preview bundle endpoint returned HTML without a HyperFrames composition. The preview was blocked so the Studio app cannot render recursively inside the stage.",
+    );
+  }
+}
+
+function resolvePreviewAssetPaths(
+  html: string,
+  assets: HFAsset[],
+  assetUrls: Map<string, string>,
+): string {
+  let resolved = html;
+  for (const asset of assets) {
+    const url = assetUrls.get(asset.id);
+    if (!url) continue;
+    const ext = extFromAsset(asset.filename, asset.mimeType);
+    resolved = resolved.replaceAll(`asset:${asset.id}`, url);
+    resolved = resolved.replaceAll(`assets/${asset.id}${ext}`, url);
+    resolved = resolved.replaceAll(`../assets/${asset.id}${ext}`, url);
+  }
+  return resolved;
+}
+
+function assertPreviewScriptSyntax(html: string): void {
+  let scriptIndex = 0;
+  for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+    const attrs = match[1] ?? "";
+    const source = match[2] ?? "";
+    if (readHtmlAttr(attrs, "src") !== null) continue;
+    if (!isClassicJavaScriptType(readHtmlAttr(attrs, "type"))) continue;
+
+    scriptIndex += 1;
+    try {
+      // Parse only. This does not execute the preview script.
+      new Function(source);
+    } catch (error) {
+      if (error instanceof EvalError) continue;
+      const htmlLine = html.slice(0, match.index ?? 0).split(/\r\n|\r|\n/).length;
+      throw new Error(formatPreviewScriptSyntaxError(error, scriptIndex, htmlLine, source));
+    }
+  }
+}
+
+function readHtmlAttr(attrs: string, attr: string): string | null {
+  const escaped = attr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = attrs.match(new RegExp(`\\s${escaped}\\s*=\\s*("[^"]*"|'[^']*'|[^\\s>]+)`, "i"));
+  if (!match?.[1]) return null;
+  return match[1].replace(/^["']|["']$/g, "");
+}
+
+function isClassicJavaScriptType(type: string | null): boolean {
+  if (type === null || type.trim() === "") return true;
+  const normalized = type.trim().toLowerCase();
+  return (
+    normalized === "text/javascript" ||
+    normalized === "application/javascript" ||
+    normalized === "text/ecmascript" ||
+    normalized === "application/ecmascript"
+  );
+}
+
+function formatPreviewScriptSyntaxError(
+  error: unknown,
+  scriptIndex: number,
+  htmlLine: number,
+  source: string,
+): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return `HyperFrames preview contains invalid inline JavaScript in script block ${scriptIndex} near HTML line ${htmlLine}:\n${message}\n\n${scriptSnippet(source)}`;
+}
+
+function scriptSnippet(source: string): string {
+  const lines = source
+    .split(/\r\n|\r|\n/)
+    .map((line, index) => ({ line, lineNumber: index + 1 }))
+    .filter(({ line }) => line.trim().length > 0)
+    .slice(0, 6);
+  return lines
+    .map(({ line, lineNumber }) => `  ${String(lineNumber).padStart(4, " ")} | ${line}`)
+    .join("\n");
 }
 
 interface StageProps {
@@ -154,6 +248,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const sendClipBackward = useStudio((s) => s.sendClipBackward);
   const bringClipToFront = useStudio((s) => s.bringClipToFront);
   const sendClipToBack = useStudio((s) => s.sendClipToBack);
+  const repairTimelineLanes = useStudio((s) => s.repairTimelineLanes);
 
   const playerRef = useRef<HyperframesPlayerElement>(null);
   const stageShellRef = useRef<HTMLDivElement>(null);
@@ -165,6 +260,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const stageEditableClipRef = useRef<EditorClip | null>(null);
   const moveHandleRef = useRef<HTMLButtonElement>(null);
   const [resolvedHtml, setResolvedHtml] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [drag, setDrag] = useState<StageDrag>(null);
   const [renderedElementRect, setRenderedElementRect] = useState<DOMRect | null>(null);
 
@@ -267,27 +363,32 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   useEffect(() => {
     if (!project) {
       setResolvedHtml(null);
+      setPreviewError(null);
       return;
     }
+    if (repairTimelineLanes()) return;
     let alive = true;
     let cleanupResolvedHtml: (() => void) | null = null;
-    void resolvePreviewHtml(
-      project.hf.rootHtml,
-      project.hf.compositionHtml,
-      project.hf.assets,
-    ).then((resolved) => {
-      if (!alive) {
-        resolved.revoke();
-        return;
-      }
-      cleanupResolvedHtml = resolved.revoke;
-      setResolvedHtml(resolved.html);
-    });
+    setPreviewError(null);
+    void resolvePreviewHtml(project)
+      .then((resolved) => {
+        if (!alive) {
+          resolved.revoke();
+          return;
+        }
+        cleanupResolvedHtml = resolved.revoke;
+        setResolvedHtml(resolved.html);
+      })
+      .catch((error) => {
+        if (!alive) return;
+        setResolvedHtml(null);
+        setPreviewError(error instanceof Error ? error.message : String(error));
+      });
     return () => {
       alive = false;
       cleanupResolvedHtml?.();
     };
-  }, [project]);
+  }, [project, repairTimelineLanes]);
 
   useEffect(() => {
     if (!resolvedHtml) return;
@@ -743,6 +844,14 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           height={project.hf.height}
           style={{ position: "absolute", inset: 0, display: "block" }}
         />
+      )}
+      {previewError && (
+        <div className="absolute inset-0 grid place-items-center bg-stage-bg px-8 text-center">
+          <div className="max-w-xl rounded-md border border-destructive/30 bg-background/95 p-4 text-sm text-foreground shadow-sm">
+            <div className="mb-2 font-medium text-destructive">HyperFrames preview failed</div>
+            <div className="whitespace-pre-wrap text-muted-foreground">{previewError}</div>
+          </div>
+        </div>
       )}
       {outlineRect && (
         <div

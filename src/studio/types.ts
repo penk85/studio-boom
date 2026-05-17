@@ -413,11 +413,14 @@ export interface AppliedMotion {
 export interface ClipEditorMeta {
   // Display / editor UI
   name?: string;
-  kind?: "image" | "audio" | "video" | "character";
+  kind?: "image" | "audio" | "video" | "text" | "composition" | "character";
+  compositionKind?: "ai-block" | "registry-block" | "character" | "user-composition";
   uiTrackIndex?: number; // which editor track (0-based, maps to editorMeta.tracks[i])
   uiLaneIndex?: number; // which lane within the track
   // Character clips
   characterId?: string;
+  // Composition clips
+  compositionId?: string;
   // Media clips — id in Dexie mediaBlobs for blob copy on export
   mediaId?: string;
   // Audio clips linked to character clips.
@@ -474,7 +477,7 @@ export interface Project {
 export interface EditorClip {
   id: string;
   name: string;
-  kind: "image" | "audio" | "video" | "character";
+  kind: "image" | "audio" | "video" | "text" | "composition" | "character";
   start: number;
   duration: number;
   trackIndex: number;
@@ -486,6 +489,16 @@ export interface EditorClip {
   rotation: number;
   opacity: number;
   zIndex: number;
+  // Text-specific
+  content?: string;
+  color?: string;
+  fontSize?: number;
+  fontFamily?: string;
+  fontWeight?: number;
+  fitToBounds?: boolean;
+  // Composition-specific
+  compositionId?: string;
+  compositionKind?: ClipEditorMeta["compositionKind"];
   // Character-specific
   characterId?: string;
   poses?: Record<string, string>;
@@ -516,18 +529,34 @@ export function deriveEditorClips(project: Project): EditorClip[] {
       (el.type === "audio" && el.id.startsWith("audio_")
         ? el.id.slice("audio_".length)
         : undefined);
+    const compositionId =
+      "compositionId" in el && typeof el.compositionId === "string"
+        ? el.compositionId
+        : meta.compositionId;
     const kind: EditorClip["kind"] =
       meta.kind ??
       (el.type === "composition"
-        ? "character"
+        ? meta.characterId || meta.compositionKind === "character"
+          ? "character"
+          : "composition"
         : el.type === "audio"
           ? "audio"
           : el.type === "video"
             ? "video"
-            : "image");
+            : el.type === "text"
+              ? "text"
+              : "image");
     const scale = el.scale ?? 1;
     const mediaEl = el as { sourceWidth?: number; sourceHeight?: number };
     const studioEl = el as TimelineElement & { rotation?: number };
+    const textEl = el as {
+      content?: string;
+      color?: string;
+      fontSize?: number;
+      fontFamily?: string;
+      fontWeight?: number;
+      fitToBounds?: boolean;
+    };
     const width = (mediaEl.sourceWidth ?? 0) * scale;
     const height = (mediaEl.sourceHeight ?? 0) * scale;
 
@@ -546,6 +575,14 @@ export function deriveEditorClips(project: Project): EditorClip[] {
       rotation: studioEl.rotation ?? 0,
       opacity: el.opacity ?? 1,
       zIndex: el.zIndex,
+      content: textEl.content,
+      color: textEl.color,
+      fontSize: textEl.fontSize,
+      fontFamily: textEl.fontFamily,
+      fontWeight: textEl.fontWeight,
+      fitToBounds: textEl.fitToBounds,
+      compositionId,
+      compositionKind: meta.compositionKind,
       characterId: meta.characterId,
       poses: meta.poses,
       motions: meta.motions,
@@ -585,6 +622,23 @@ export interface MediaClip extends BaseClip {
   linkedCharacterClipId?: ID;
 }
 
+export interface TextClip extends BaseClip {
+  kind: "text";
+  content: string;
+  color?: string;
+  fontSize?: number;
+  fontFamily?: string;
+  fontWeight?: number;
+  fitToBounds?: boolean;
+}
+
+export interface CompositionClip extends BaseClip {
+  kind: "composition";
+  compositionId?: ID;
+  compositionKind?: Exclude<ClipEditorMeta["compositionKind"], "character">;
+  compositionHtml?: string;
+}
+
 export interface CharacterClip extends BaseClip {
   kind: "character";
   characterId: ID;
@@ -602,7 +656,7 @@ export interface CharacterClip extends BaseClip {
   };
 }
 
-export type AnyClip = MediaClip | CharacterClip;
+export type AnyClip = MediaClip | TextClip | CompositionClip | CharacterClip;
 
 export interface Track {
   id: ID;

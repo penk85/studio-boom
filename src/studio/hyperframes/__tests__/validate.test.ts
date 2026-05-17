@@ -34,9 +34,32 @@ describe("validateHfProject", () => {
     expect(() =>
       validateHfProject(
         makeProject({
+          rootHtml: `<html><body><div id="clip-1" data-composition-id="comp-1" data-composition-src="compositions/comp-1.html" data-start="0" data-duration="2" data-track-index="0"></div></body></html>`,
           compositionHtml: { "comp-1": "<html><body></body></html>" },
         }),
       ),
     ).not.toThrow();
+  });
+
+  it("throws when a root composition references a missing composition file", () => {
+    expect(() =>
+      validateHfProject(
+        makeProject({
+          rootHtml: `<html><body><div id="clip-1" data-composition-id="ai-test-card" data-composition-src="compositions/ai-test-card.html" data-start="0" data-duration="2" data-track-index="0"></div></body></html>`,
+          compositionHtml: {},
+        }),
+      ),
+    ).toThrow(/missing composition file "compositions\/ai-test-card.html"/);
+  });
+
+  it("throws when a root composition source path disagrees with its composition id", () => {
+    expect(() =>
+      validateHfProject(
+        makeProject({
+          rootHtml: `<html><body><div id="clip-1" data-composition-id="ai-test-card" data-composition-src="compositions/wrong.html" data-start="0" data-duration="2" data-track-index="0"></div></body></html>`,
+          compositionHtml: { "ai-test-card": "<html><body></body></html>" },
+        }),
+      ),
+    ).toThrow(/staged source path is "compositions\/ai-test-card.html"/);
   });
 });

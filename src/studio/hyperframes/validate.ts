@@ -46,6 +46,7 @@ export function validateHfProject(hf: HyperFramesProject): void {
           }
         }
       }
+      errors.push(...validateCompositionFileReferences(hf));
     } catch {
       errors.push("rootHtml could not be parsed");
     }
@@ -60,6 +61,40 @@ export function validateHfProject(hf: HyperFramesProject): void {
   if (errors.length > 0) {
     throw new Error(`HF project is not previewable:\n${errors.map((e) => `- ${e}`).join("\n")}`);
   }
+}
+
+function validateCompositionFileReferences(hf: HyperFramesProject): string[] {
+  if (typeof DOMParser === "undefined") return [];
+
+  const errors: string[] = [];
+  const doc = new DOMParser().parseFromString(hf.rootHtml, "text/html");
+  const stagedCompositionPaths = new Set(
+    Object.keys(hf.compositionHtml).map((id) => `compositions/${id}.html`),
+  );
+
+  for (const el of Array.from(doc.querySelectorAll("[data-composition-src]"))) {
+    const src = el.getAttribute("data-composition-src")?.trim();
+    if (!src) continue;
+    if (stagedCompositionPaths.has(src)) continue;
+
+    const id = el.getAttribute("id") || "(unknown id)";
+    const compositionId = el.getAttribute("data-composition-id") || "";
+    const expectedIdFromSrc = src.match(/^compositions\/(.+)\.html$/)?.[1];
+    const expected =
+      compositionId && hf.compositionHtml[compositionId] !== undefined
+        ? `compositions/${compositionId}.html`
+        : expectedIdFromSrc && hf.compositionHtml[expectedIdFromSrc] !== undefined
+          ? src
+          : null;
+
+    errors.push(
+      expected
+        ? `composition clip "${id}" references "${src}", but its staged source path is "${expected}"`
+        : `composition clip "${id}" references missing composition file "${src}"`,
+    );
+  }
+
+  return errors;
 }
 
 function isPositiveNumber(value: unknown): value is number {

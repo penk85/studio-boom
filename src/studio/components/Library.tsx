@@ -2,10 +2,14 @@
 import { useLiveQuery } from "dexie-react-hooks";
 import { db, deleteMediaIfUnused, importMediaFile, mediaIdsForCharacter, uid } from "../db";
 import { useStudio } from "../store";
-import type { CharacterClip, CharacterPart, CharacterPreset, MediaAsset } from "../types";
+import type { CharacterClip, CharacterPart, CharacterPreset, MediaAsset, TextClip } from "../types";
 import { deriveEditorClips } from "../types";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMediaUrl } from "../hooks/useMediaUrl";
+import {
+  buildCompositionRepairPrompt,
+  validateCompositionSourceHtml,
+} from "../hyperframes/composition-source";
 import {
   createBlankCharacter,
   listCharacterSlots,
@@ -17,6 +21,7 @@ import { ensureMotionPresetsSeeded } from "../presets/seed";
 
 const TABS = [
   { id: "media", label: "Media" },
+  { id: "text", label: "Text" },
   { id: "characters", label: "Characters" },
   { id: "presets", label: "Motion presets" },
   { id: "blocks", label: "Blocks" },
@@ -28,31 +33,124 @@ export function Library() {
   const [tab, setTab] = useState<TabId>("media");
   return (
     <div className="flex h-full flex-col bg-panel">
-      <div className="flex border-b border-border">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`flex-1 px-2 py-2 text-xs font-medium ${
-              tab === t.id
-                ? "border-b-2 border-primary bg-panel-2 text-foreground"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
+      <div className="border-b border-border bg-panel p-2">
+        <div className="grid grid-cols-3 gap-1 rounded-md bg-panel-2 p-1">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`min-w-0 rounded px-2 py-1.5 text-xs font-medium transition-colors ${
+                tab === t.id
+                  ? "bg-primary text-primary-foreground shadow-sm"
+                  : "text-muted-foreground hover:bg-panel hover:text-foreground"
+              }`}
+              title={t.label}
+            >
+              <span className="block truncate">{t.label}</span>
+            </button>
+          ))}
+        </div>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         {tab === "media" && <MediaTab />}
+        {tab === "text" && <TextTab />}
         {tab === "characters" && <CharactersTab />}
         {tab === "presets" && <PresetsTab />}
-        {tab === "blocks" && (
-          <ComingSoon
-            what="Hyperframes blocks"
-            desc="Drop-in titles, lower-thirds, and transitions from the Hyperframes catalog."
-          />
-        )}
+        {tab === "blocks" && <BlocksTab />}
+      </div>
+    </div>
+  );
+}
+
+const TEXT_BLOCKS = [
+  {
+    id: "title",
+    label: "Title",
+    content: "Add a title",
+    widthFactor: 0.62,
+    heightFactor: 0.16,
+    yFactor: 0.18,
+    fontSize: 88,
+    fontWeight: 800,
+  },
+  {
+    id: "caption",
+    label: "Caption",
+    content: "Add caption text",
+    widthFactor: 0.54,
+    heightFactor: 0.1,
+    yFactor: 0.78,
+    fontSize: 42,
+    fontWeight: 600,
+  },
+  {
+    id: "lower-third",
+    label: "Lower third",
+    content: "Speaker name",
+    widthFactor: 0.38,
+    heightFactor: 0.11,
+    yFactor: 0.68,
+    fontSize: 38,
+    fontWeight: 700,
+  },
+] as const;
+
+function TextTab() {
+  const project = useStudio((s) => s.project);
+  const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
+  const tracks = useStudio((s) => s.tracks);
+  const addClip = useStudio((s) => s.addClip);
+
+  const addTextBlock = (preset: (typeof TEXT_BLOCKS)[number]) => {
+    if (!project) return;
+    const trackIndex = Math.max(
+      0,
+      tracks.findIndex((t) => t.kind === "overlay"),
+    );
+    const width = Math.round(project.hf.width * preset.widthFactor);
+    const height = Math.round(project.hf.height * preset.heightFactor);
+    const clip: TextClip = {
+      id: uid(),
+      kind: "text",
+      name: preset.label,
+      content: preset.content,
+      trackIndex,
+      start: 0,
+      duration: 4,
+      x: Math.round((project.hf.width - width) / 2),
+      y: Math.round(project.hf.height * preset.yFactor),
+      width,
+      height,
+      rotation: 0,
+      opacity: 1,
+      zIndex: clips.filter((clip) => clip.kind !== "audio").length,
+      color: "#111827",
+      fontSize: preset.fontSize,
+      fontFamily: "Inter",
+      fontWeight: preset.fontWeight,
+      fitToBounds: false,
+    };
+    addClip(clip);
+  };
+
+  return (
+    <div className="space-y-3 p-3 text-xs">
+      <div className="grid grid-cols-1 gap-2">
+        {TEXT_BLOCKS.map((preset) => (
+          <button
+            key={preset.id}
+            type="button"
+            onClick={() => addTextBlock(preset)}
+            disabled={!project}
+            className="rounded border border-border bg-panel-2 p-3 text-left hover:border-primary hover:bg-panel disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <div className="font-medium text-foreground">{preset.label}</div>
+            <div className="mt-1 truncate text-[11px] text-muted-foreground">{preset.content}</div>
+          </button>
+        ))}
+      </div>
+      <div className="rounded border border-border bg-panel-2 p-2 text-[11px] leading-relaxed text-muted-foreground">
+        Select a text block after adding it to edit copy, color, and type styling in the Inspector.
       </div>
     </div>
   );
@@ -341,6 +439,135 @@ function PresetsTab() {
           </ul>
         </div>
       ))}
+    </div>
+  );
+}
+
+function BlocksTab() {
+  const project = useStudio((s) => s.project);
+  const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
+  const tracks = useStudio((s) => s.tracks);
+  const addClip = useStudio((s) => s.addClip);
+  const [source, setSource] = useState("");
+  const [errors, setErrors] = useState<string[]>([]);
+  const [validated, setValidated] = useState<ReturnType<typeof validateCompositionSourceHtml> | null>(
+    null,
+  );
+  const canAddBlock = Boolean(
+    project && source.trim() && validated?.ok && validated.html && validated.compositionId,
+  );
+
+  const validateSource = () => {
+    if (!project) return null;
+    const result = validateCompositionSourceHtml(source, {
+      compositionId: `ai_block_${Date.now()}`,
+      duration: 4,
+      width: project.hf.width,
+      height: project.hf.height,
+    });
+    setErrors(result.errors);
+    setValidated(result);
+    return result;
+  };
+
+  const addBlock = () => {
+    if (!project) return;
+    const result = validated;
+    if (!result?.ok || !result.compositionId || !result.html) return;
+
+    const trackIndex = Math.max(
+      0,
+      tracks.findIndex((t) => t.kind === "overlay"),
+    );
+    const width = result.width ?? project.hf.width;
+    const height = result.height ?? project.hf.height;
+
+    try {
+      addClip({
+        id: uid(),
+        kind: "composition",
+        compositionId: result.compositionId,
+        compositionKind: "ai-block",
+        compositionHtml: result.html,
+        name: result.compositionId,
+        trackIndex,
+        start: 0,
+        duration: result.duration ?? 4,
+        x: Math.round((project.hf.width - width) / 2),
+        y: Math.round((project.hf.height - height) / 2),
+        width,
+        height,
+        rotation: 0,
+        opacity: 1,
+        zIndex: clips.filter((clip) => clip.kind !== "audio").length,
+      });
+      setValidated(null);
+    } catch (error) {
+      setErrors([error instanceof Error ? error.message : String(error)]);
+      setValidated(null);
+    }
+  };
+
+  return (
+    <div className="space-y-3 p-3 text-xs">
+      <div className="rounded border border-border bg-panel-2 p-2 text-[11px] leading-relaxed text-muted-foreground">
+        Paste a self-contained HyperFrames composition. Studio stores it in project.hf and adds one
+        composition clip to the timeline.
+      </div>
+      <textarea
+        value={source}
+        onChange={(event) => {
+          setSource(event.target.value);
+          if (errors.length > 0) setErrors([]);
+          setValidated(null);
+        }}
+        rows={12}
+        spellCheck={false}
+        placeholder='<html data-composition-id="ai-title" ...>'
+        className="w-full resize-y rounded border border-border bg-input px-2 py-2 font-mono text-[11px] leading-relaxed text-foreground"
+      />
+      {errors.length > 0 && (
+        <div className="rounded border border-destructive/60 bg-destructive/10 p-2 text-[11px] text-destructive-foreground">
+          <div className="mb-1 font-medium">Validation failed</div>
+          <ul className="list-inside list-disc space-y-0.5">
+            {errors.map((error) => (
+              <li key={error}>{error}</li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            onClick={() =>
+              void navigator.clipboard?.writeText(buildCompositionRepairPrompt(errors, source))
+            }
+            className="mt-2 rounded border border-destructive/60 px-2 py-1 text-[10px] hover:bg-destructive/20"
+          >
+            Copy repair prompt
+          </button>
+        </div>
+      )}
+      {validated?.ok && (
+        <div className="rounded border border-primary/50 bg-primary/10 px-2 py-1 text-[11px] text-foreground">
+          Source is valid. Add block is now enabled.
+        </div>
+      )}
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={validateSource}
+          disabled={!project || !source.trim()}
+          className="flex-1 rounded border border-border px-2 py-1.5 text-xs text-foreground hover:bg-panel-2 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Validate
+        </button>
+        <button
+          type="button"
+          onClick={addBlock}
+          disabled={!canAddBlock}
+          className="flex-1 rounded bg-primary px-2 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Add block
+        </button>
+      </div>
     </div>
   );
 }

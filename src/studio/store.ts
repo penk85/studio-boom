@@ -7,6 +7,7 @@ import { db, deleteMediaIfUnused, isCurrentProjectShape, uid } from "./db";
 import type {
   AnyClip,
   CharacterClip,
+  CompositionClip,
   CharacterPreset,
   ClipEditorMeta,
   EditorClip,
@@ -16,6 +17,7 @@ import type {
   MotionPreset,
   Project,
   ProjectEditorMeta,
+  TextClip,
   Track,
   TrackKind,
   TrackMeta,
@@ -29,6 +31,7 @@ import {
   type StudioTimelineElement,
 } from "./hyperframes/html";
 import { normalizeNativeHyperframesHtml } from "./hyperframes/native";
+import { validateCompositionSourceHtml } from "./hyperframes/composition-source";
 import {
   createRootCompositionHtml,
   updateRootCompositionHtml,
@@ -146,7 +149,150 @@ function normalizeProjectRootHtml(hf: HyperFramesProject, html: string): string 
   });
 }
 
-function buildTimelineElement(clip: AnyClip, zIndex: number): StudioTimelineElement {
+function assertValidCompositionHtml(
+  html: string,
+  defaults: {
+    compositionId: string;
+    duration: number;
+    width: number;
+    height: number;
+  },
+): string {
+  const result = validateCompositionSourceHtml(html, defaults);
+  if (!result.ok || !result.html) {
+    throw new Error(
+      `Composition source is invalid:\n${result.errors.map((error) => `- ${error}`).join("\n")}`,
+    );
+  }
+  return result.html;
+}
+
+function renderTrackIndexFor(uiTrackIndex = 0, uiLaneIndex = 0): number {
+  return Math.max(0, uiTrackIndex) * 1000 + Math.max(0, uiLaneIndex);
+}
+
+function repairProjectTimelineLanes(project: Project): Project {
+  const clips = deriveEditorClips(project).sort(
+    (a, b) =>
+      a.trackIndex - b.trackIndex ||
+      a.laneIndex - b.laneIndex ||
+      a.start - b.start ||
+      a.id.localeCompare(b.id),
+  );
+  if (clips.length === 0) return project;
+
+  const nextClipMeta: Record<string, ClipEditorMeta> = { ...project.editorMeta.clips };
+  const nextLaneCounts = new Map<number, number>();
+  let changed = false;
+
+  const maxTrackIndex = Math.max(project.editorMeta.tracks.length - 1, ...clips.map((c) => c.trackIndex));
+  for (let trackIndex = 0; trackIndex <= maxTrackIndex; trackIndex += 1) {
+    const trackClips = clips.filter((clip) => clip.trackIndex === trackIndex);
+    if (trackClips.length === 0) continue;
+
+    const laneSchedules: Array<Array<{ start: number; end: number }>> = [];
+    for (const clip of trackClips) {
+      const preferredLane = Math.max(0, clip.laneIndex ?? 0);
+      const laneIndex = firstNonOverlappingLane(
+        laneSchedules,
+        preferredLane,
+        clip.start,
+        clip.start + clip.duration,
+      );
+      laneSchedules[laneIndex] ??= [];
+      laneSchedules[laneIndex]!.push({ start: clip.start, end: clip.start + clip.duration });
+
+      const existingMeta = nextClipMeta[clip.id] ?? {};
+      if (
+        existingMeta.uiTrackIndex !== trackIndex ||
+        (existingMeta.uiLaneIndex ?? 0) !== laneIndex
+      ) {
+        nextClipMeta[clip.id] = {
+          ...existingMeta,
+          uiTrackIndex: trackIndex,
+          uiLaneIndex: laneIndex,
+        };
+        changed = true;
+      }
+    }
+    nextLaneCounts.set(trackIndex, Math.max(1, laneSchedules.length));
+  }
+
+  const nextTracks = project.editorMeta.tracks.map((track, trackIndex) => {
+    const laneCount = nextLaneCounts.get(trackIndex);
+    if (laneCount === undefined || (track.lanes ?? 1) >= laneCount) return track;
+    changed = true;
+    return { ...track, lanes: laneCount };
+  });
+
+  if (!changed) return project;
+  return {
+    ...project,
+    editorMeta: {
+      ...project.editorMeta,
+      clips: nextClipMeta,
+      tracks: nextTracks,
+    },
+  };
+}
+
+function firstNonOverlappingLane(
+  laneSchedules: Array<Array<{ start: number; end: number }>>,
+  preferredLane: number,
+  start: number,
+  end: number,
+): number {
+  if (preferredLane >= laneSchedules.length) return preferredLane;
+  for (let lane = preferredLane; lane < laneSchedules.length; lane += 1) {
+    if (!laneHasOverlap(laneSchedules[lane] ?? [], start, end)) return lane;
+  }
+  return laneSchedules.length;
+}
+
+function laneHasOverlap(
+  scheduled: Array<{ start: number; end: number }>,
+  start: number,
+  end: number,
+): boolean {
+  return scheduled.some((clip) => clip.start < end && clip.end > start);
+}
+
+export function syncProjectRenderTrackIndices(project: Project): Project {
+  if (!project.hf.rootHtml || typeof DOMParser === "undefined") return project;
+
+  project = repairProjectTimelineLanes(project);
+  const doc = new DOMParser().parseFromString(project.hf.rootHtml, "text/html");
+  let changed = false;
+
+  for (const [clipId, meta] of Object.entries(project.editorMeta.clips)) {
+    const el = doc.getElementById(clipId);
+    if (!el) continue;
+    const renderTrackIndex = renderTrackIndexFor(meta.uiTrackIndex ?? 0, meta.uiLaneIndex ?? 0);
+    const nextValue = String(renderTrackIndex);
+    if (el.getAttribute("data-track-index") !== nextValue) {
+      el.setAttribute("data-track-index", nextValue);
+      changed = true;
+    }
+  }
+
+  if (!changed) return project;
+  return {
+    ...project,
+    hf: {
+      ...project.hf,
+      rootHtml: normalizeProjectRootHtml(
+        project.hf,
+        "<!DOCTYPE html>\n" + doc.documentElement.outerHTML,
+      ),
+    },
+  };
+}
+
+function buildTimelineElement(
+  clip: AnyClip,
+  zIndex: number,
+  renderTrackIndex: number,
+): StudioTimelineElement {
   if (clip.kind === "character") {
     return {
       id: clip.id,
@@ -155,6 +301,7 @@ function buildTimelineElement(clip: AnyClip, zIndex: number): StudioTimelineElem
       startTime: clip.start,
       duration: clip.duration,
       zIndex,
+      renderTrackIndex,
       x: clip.x,
       y: clip.y,
       src: `compositions/comp_${clip.id}.html`,
@@ -165,6 +312,51 @@ function buildTimelineElement(clip: AnyClip, zIndex: number): StudioTimelineElem
     };
   }
 
+  if (clip.kind === "composition") {
+    const compositionId = clip.compositionId ?? `comp_${clip.id}`;
+    return {
+      id: clip.id,
+      type: "composition",
+      name: clip.name,
+      startTime: clip.start,
+      duration: clip.duration,
+      zIndex,
+      renderTrackIndex,
+      x: clip.x,
+      y: clip.y,
+      src: `compositions/${compositionId}.html`,
+      compositionId,
+      sourceWidth: clip.width,
+      sourceHeight: clip.height,
+      rotation: clip.rotation,
+      opacity: clip.opacity,
+    };
+  }
+
+  if (clip.kind === "text") {
+    return {
+      id: clip.id,
+      type: "text",
+      name: clip.name,
+      content: clip.content,
+      startTime: clip.start,
+      duration: clip.duration,
+      zIndex,
+      renderTrackIndex,
+      x: clip.x,
+      y: clip.y,
+      sourceWidth: clip.width,
+      sourceHeight: clip.height,
+      rotation: clip.rotation,
+      opacity: clip.opacity,
+      color: clip.color,
+      fontSize: clip.fontSize,
+      fontFamily: clip.fontFamily,
+      fontWeight: clip.fontWeight,
+      fitToBounds: clip.fitToBounds,
+    };
+  }
+
   return {
     id: clip.id,
     type: clip.kind,
@@ -172,6 +364,7 @@ function buildTimelineElement(clip: AnyClip, zIndex: number): StudioTimelineElem
     startTime: clip.start,
     duration: clip.duration,
     zIndex,
+    renderTrackIndex,
     x: clip.x,
     y: clip.y,
     src: `asset:${clip.mediaId}`,
@@ -182,10 +375,8 @@ function buildTimelineElement(clip: AnyClip, zIndex: number): StudioTimelineElem
   };
 }
 
-function buildElementUpdates(
-  patch: Partial<AnyClip>,
-): Partial<TimelineElement> & { rotation?: number } {
-  const updates: Partial<TimelineElement> & { rotation?: number } = {};
+function buildElementUpdates(patch: Partial<AnyClip>): Partial<StudioTimelineElement> {
+  const updates: Partial<StudioTimelineElement> = {};
 
   if (patch.start !== undefined) updates.startTime = patch.start;
   if (patch.duration !== undefined) updates.duration = patch.duration;
@@ -197,6 +388,18 @@ function buildElementUpdates(
   if (patch.name !== undefined) updates.name = patch.name;
   if (patch.width !== undefined) updates.sourceWidth = patch.width;
   if (patch.height !== undefined) updates.sourceHeight = patch.height;
+  if ("content" in patch && patch.content !== undefined) updates.content = patch.content;
+  if ("color" in patch && patch.color !== undefined) updates.color = patch.color;
+  if ("fontSize" in patch && patch.fontSize !== undefined) updates.fontSize = patch.fontSize;
+  if ("fontFamily" in patch && patch.fontFamily !== undefined) {
+    updates.fontFamily = patch.fontFamily;
+  }
+  if ("fontWeight" in patch && patch.fontWeight !== undefined) {
+    updates.fontWeight = patch.fontWeight;
+  }
+  if ("fitToBounds" in patch && patch.fitToBounds !== undefined) {
+    updates.fitToBounds = patch.fitToBounds;
+  }
 
   return updates;
 }
@@ -302,6 +505,12 @@ interface StudioState {
 
   /** Directly replace rootHtml (used by Stage's useElementPicker onSyncFiles). */
   updateRootHtml: (html: string, options?: ProjectMutationOptions) => void;
+  updateCompositionHtml: (
+    compositionId: string,
+    html: string,
+    options?: ProjectMutationOptions,
+  ) => void;
+  repairTimelineLanes: () => boolean;
 
   addMediaToTimeline: (asset: MediaAsset, trackIndex?: number, insertAtTime?: number) => void;
   registerMediaAsset: (asset: MediaAsset) => void;
@@ -422,9 +631,14 @@ export const useStudio = create<StudioState>((set, get) => ({
     const motionPresets = new Map(allPresets.map((p) => [p.id, p]));
     const mediaAssets = new Map(allMedia.map((m) => [m.id, m]));
 
+    let project = syncProjectRenderTrackIndices(storedProject);
+    if (project !== storedProject) {
+      project = { ...project, updatedAt: Date.now() };
+      await db.projects.put(project);
+    }
     set({
-      project: storedProject,
-      tracks: storedProject.editorMeta.tracks,
+      project,
+      tracks: project.editorMeta.tracks,
       characters,
       motionPresets,
       mediaAssets,
@@ -508,6 +722,17 @@ export const useStudio = create<StudioState>((set, get) => ({
     const state = get();
     const p = state.project;
     if (!p) return;
+
+    if (clip.kind === "composition" && clip.compositionHtml !== undefined) {
+      const compositionId = clip.compositionId ?? `comp_${clip.id}`;
+      assertValidCompositionHtml(clip.compositionHtml, {
+        compositionId,
+        duration: clip.duration,
+        width: clip.width || p.hf.width,
+        height: clip.height || p.hf.height,
+      });
+    }
+
     get().checkpointHistory();
 
     const currentClips = deriveEditorClips(p);
@@ -545,10 +770,28 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (nextClip.kind === "character") {
       const charClip = nextClip as CharacterClip;
       meta.characterId = charClip.characterId;
+      meta.compositionKind = "character";
       meta.poses = charClip.poses;
       meta.visemes = charClip.visemes;
       meta.motions = charClip.motions;
       meta.autoBlink = charClip.autoBlink;
+    } else if (nextClip.kind === "composition") {
+      const compositionClip = nextClip as CompositionClip;
+      const compositionId = compositionClip.compositionId ?? `comp_${compositionClip.id}`;
+      meta.compositionId = compositionId;
+      meta.compositionKind = compositionClip.compositionKind ?? "user-composition";
+      if (compositionClip.compositionHtml !== undefined) {
+        compositionHtml[compositionId] = assertValidCompositionHtml(compositionClip.compositionHtml, {
+          compositionId,
+          duration: compositionClip.duration,
+          width: compositionClip.width || currentProject.hf.width,
+          height: compositionClip.height || currentProject.hf.height,
+        });
+      }
+    } else if (nextClip.kind === "text") {
+      const textClip = nextClip as TextClip;
+      meta.kind = "text";
+      meta.name = textClip.name;
     } else {
       const mediaClip = nextClip as MediaClip;
       meta.mediaId = mediaClip.mediaId;
@@ -556,9 +799,10 @@ export const useStudio = create<StudioState>((set, get) => ({
       hf = registerHfAsset(hf, state.mediaAssets.get(mediaClip.mediaId));
     }
 
+    const renderTrackIndex = renderTrackIndexFor(nextClip.trackIndex, nextClip.laneIndex ?? 0);
     const { html: nextRootHtml, id: insertedId } = addStudioElementToHtml(
       hf.rootHtml,
-      buildTimelineElement(nextClip, zIndex),
+      buildTimelineElement(nextClip, zIndex, renderTrackIndex),
     );
     const nextClipsMeta = { ...currentProject.editorMeta.clips, [insertedId]: meta };
     const rootHtml = normalizeProjectRootHtml(hf, nextRootHtml);
@@ -569,7 +813,12 @@ export const useStudio = create<StudioState>((set, get) => ({
       ...currentProject.editorMeta,
       clips: nextClipsMeta,
     };
-    const newProject: Project = { ...currentProject, hf, editorMeta, updatedAt: Date.now() };
+    const newProject: Project = syncProjectRenderTrackIndices({
+      ...currentProject,
+      hf,
+      editorMeta,
+      updatedAt: Date.now(),
+    });
     set({
       project: newProject,
       tracks: newProject.editorMeta.tracks,
@@ -602,10 +851,19 @@ export const useStudio = create<StudioState>((set, get) => ({
     const newMeta = { ...existingMeta };
 
     if (patch.name !== undefined) newMeta.name = patch.name;
+    if (patch.kind !== undefined) newMeta.kind = patch.kind as ClipEditorMeta["kind"];
     if (patch.trackIndex !== undefined) newMeta.uiTrackIndex = patch.trackIndex;
     if (patch.laneIndex !== undefined) newMeta.uiLaneIndex = patch.laneIndex;
 
-    let rootHtml = updateStudioElementInHtml(p.hf.rootHtml, id, buildElementUpdates(patch));
+    const elementUpdates = buildElementUpdates(patch);
+    if (patch.trackIndex !== undefined || patch.laneIndex !== undefined) {
+      elementUpdates.renderTrackIndex = renderTrackIndexFor(
+        newMeta.uiTrackIndex ?? 0,
+        newMeta.uiLaneIndex ?? 0,
+      );
+    }
+
+    let rootHtml = updateStudioElementInHtml(p.hf.rootHtml, id, elementUpdates);
 
     if (patch.start !== undefined) {
       const { elements } = parseStudioHtml(p.hf.rootHtml);
@@ -630,18 +888,38 @@ export const useStudio = create<StudioState>((set, get) => ({
       if ("voiceLine" in charPatch) newMeta.voiceLine = charPatch.voiceLine;
     }
 
+    if (patch.kind === "composition" || existingMeta.kind === "composition") {
+      const compositionPatch = patch as Partial<CompositionClip>;
+      if ("compositionId" in compositionPatch)
+        newMeta.compositionId = compositionPatch.compositionId;
+      if ("compositionKind" in compositionPatch) {
+        newMeta.compositionKind = compositionPatch.compositionKind;
+      }
+    }
+
     const editorMeta: ProjectEditorMeta = {
       ...p.editorMeta,
       clips: { ...p.editorMeta.clips, [id]: newMeta },
     };
-    const newProject: Project = {
+    const newProject: Project = syncProjectRenderTrackIndices({
       ...p,
       hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
       editorMeta,
       updatedAt: Date.now(),
-    };
-    set({ project: newProject });
+    });
+    set({ project: newProject, tracks: newProject.editorMeta.tracks });
     scheduleSave(get);
+  },
+
+  repairTimelineLanes() {
+    const p = get().project;
+    if (!p) return false;
+    const repaired = syncProjectRenderTrackIndices(p);
+    if (repaired === p) return false;
+    const newProject = { ...repaired, updatedAt: Date.now() };
+    set({ project: newProject, tracks: newProject.editorMeta.tracks });
+    scheduleSave(get);
+    return true;
   },
 
   removeClip(id) {
@@ -664,8 +942,8 @@ export const useStudio = create<StudioState>((set, get) => ({
     rootHtml = normalizeProjectRootHtml(p.hf, rootHtml);
 
     const compositionHtml = { ...p.hf.compositionHtml };
-    if (existingMeta?.kind === "character") {
-      delete compositionHtml[`comp_${id}`];
+    if (existingMeta?.kind === "character" || existingMeta?.kind === "composition") {
+      delete compositionHtml[existingMeta.compositionId ?? `comp_${id}`];
     }
 
     const referencedIds = collectReferencedAssetIds(newClipsMeta, state.characters);
@@ -736,6 +1014,33 @@ export const useStudio = create<StudioState>((set, get) => ({
             width: p.hf.width,
             height: p.hf.height,
           }),
+        },
+        updatedAt: Date.now(),
+      },
+    });
+    scheduleSave(get);
+  },
+
+  updateCompositionHtml(compositionId, html, options) {
+    const p = get().project;
+    if (!p) return;
+    const clip = deriveEditorClips(p).find((candidate) => candidate.compositionId === compositionId);
+    const normalizedHtml = assertValidCompositionHtml(html, {
+      compositionId,
+      duration: clip?.duration ?? p.hf.duration,
+      width: clip?.width || p.hf.width,
+      height: clip?.height || p.hf.height,
+    });
+    if (options?.history !== false) get().checkpointHistory();
+    set({
+      project: {
+        ...p,
+        hf: {
+          ...p.hf,
+          compositionHtml: {
+            ...p.hf.compositionHtml,
+            [compositionId]: normalizedHtml,
+          },
         },
         updatedAt: Date.now(),
       },

@@ -1,12 +1,16 @@
 // Inspector — edits the currently selected clip's properties.
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db } from "../db";
 import { useStudio } from "../store";
-import type { CharacterClip, CharacterPreset } from "../types";
+import type { CharacterClip, CharacterPreset, EditorClip, TextClip } from "../types";
 import { deriveEditorClips } from "../types";
 import { VoiceLipSyncPanel } from "./VoiceLipSyncPanel";
 import { MotionPanel } from "./MotionPanel";
+import {
+  buildCompositionRepairPrompt,
+  validateCompositionSourceHtml,
+} from "../hyperframes/composition-source";
 
 export function Inspector() {
   const project = useStudio((s) => s.project);
@@ -14,6 +18,7 @@ export function Inspector() {
   const tracks = useStudio((s) => s.tracks);
   const id = useStudio((s) => s.selectedClipId);
   const update = useStudio((s) => s.updateClip);
+  const updateCompositionHtml = useStudio((s) => s.updateCompositionHtml);
   const remove = useStudio((s) => s.removeClip);
   const registerCharacterPreset = useStudio((s) => s.registerCharacterPreset);
   const clip = clips.find((c) => c.id === id);
@@ -123,6 +128,21 @@ export function Inspector() {
                 voice line.
               </p>
             )}
+            {clip.kind === "text" && (
+              <TextInspector
+                clip={clip as TextClip}
+                update={(patch) => update(clip.id, patch as Partial<TextClip>)}
+              />
+            )}
+            {clip.kind === "composition" && clip.compositionId && (
+              <CompositionSourceInspector
+                clip={clip}
+                source={project.hf.compositionHtml[clip.compositionId] ?? ""}
+                projectWidth={project.hf.width}
+                projectHeight={project.hf.height}
+                onApply={(html) => updateCompositionHtml(clip.compositionId!, html)}
+              />
+            )}
             <button
               onClick={() => {
                 if (!linkedSpeechAudio) remove(clip.id);
@@ -199,6 +219,227 @@ export function Inspector() {
   );
 }
 
+function CompositionSourceInspector({
+  clip,
+  source,
+  projectWidth,
+  projectHeight,
+  onApply,
+}: {
+  clip: EditorClip & { kind: "composition"; compositionId: string };
+  source: string;
+  projectWidth: number;
+  projectHeight: number;
+  onApply: (html: string) => void;
+}) {
+  const [draft, setDraft] = useState(source);
+  const [errors, setErrors] = useState<string[]>([]);
+  const [validatedHtml, setValidatedHtml] = useState<string | null>(null);
+  const validationDefaults = useMemo(
+    () => ({
+      compositionId: clip.compositionId,
+      duration: clip.duration,
+      width: clip.width || projectWidth,
+      height: clip.height || projectHeight,
+    }),
+    [clip.compositionId, clip.duration, clip.width, clip.height, projectWidth, projectHeight],
+  );
+  const storedValidation = useMemo(
+    () => validateCompositionSourceHtml(source, validationDefaults),
+    [source, validationDefaults],
+  );
+  const isEditingStoredSource = draft === source;
+
+  useEffect(() => {
+    setDraft(source);
+    setErrors([]);
+    setValidatedHtml(null);
+  }, [source, clip.compositionId]);
+
+  const validate = () => {
+    const result = validateCompositionSourceHtml(draft, validationDefaults);
+    setErrors(result.errors);
+    setValidatedHtml(result.ok && result.html ? result.html : null);
+    return result;
+  };
+
+  const apply = () => {
+    if (!validatedHtml) return;
+    try {
+      onApply(validatedHtml);
+      setValidatedHtml(null);
+    } catch (error) {
+      setErrors([error instanceof Error ? error.message : String(error)]);
+      setValidatedHtml(null);
+    }
+  };
+
+  return (
+    <div className="rounded border border-border bg-panel-2 p-3">
+      <div className="mb-2 flex items-center gap-2">
+        <div className="font-semibold uppercase tracking-wider text-muted-foreground">Source</div>
+        <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
+          {clip.compositionId}
+        </span>
+      </div>
+      <textarea
+        value={draft}
+        onChange={(event) => {
+          setDraft(event.target.value);
+          setErrors([]);
+          setValidatedHtml(null);
+        }}
+        rows={10}
+        spellCheck={false}
+        className="w-full resize-y rounded border border-border bg-input px-2 py-2 font-mono text-[11px] leading-relaxed text-foreground"
+      />
+      {!storedValidation.ok && isEditingStoredSource && errors.length === 0 && (
+        <div className="mt-2 rounded border border-red-400/60 bg-red-500/10 p-2 text-[11px] text-red-100">
+          <div className="font-semibold">Stored source is malformed.</div>
+          <ul className="mt-1 list-inside list-disc space-y-0.5">
+            {storedValidation.errors.map((error) => (
+              <li key={error}>{error}</li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            onClick={() =>
+              void navigator.clipboard?.writeText(
+                buildCompositionRepairPrompt(storedValidation.errors, source),
+              )
+            }
+            className="mt-2 rounded border border-red-300/60 px-2 py-1 text-[10px] hover:bg-red-500/20"
+          >
+            Copy repair prompt
+          </button>
+        </div>
+      )}
+      {errors.length > 0 && (
+        <div className="mt-2 rounded border border-destructive/60 bg-destructive/10 p-2 text-[11px] text-destructive-foreground">
+          <ul className="list-inside list-disc space-y-0.5">
+            {errors.map((error) => (
+              <li key={error}>{error}</li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            onClick={() =>
+              void navigator.clipboard?.writeText(buildCompositionRepairPrompt(errors, draft))
+            }
+            className="mt-2 rounded border border-destructive/60 px-2 py-1 text-[10px] hover:bg-destructive/20"
+          >
+            Copy repair prompt
+          </button>
+        </div>
+      )}
+      {validatedHtml && (
+        <div className="mt-2 rounded border border-primary/50 bg-primary/10 px-2 py-1 text-[11px] text-foreground">
+          Source is valid. Apply to update project.hf.compositionHtml.
+        </div>
+      )}
+      <div className="mt-2 flex gap-2">
+        <button
+          type="button"
+          onClick={validate}
+          className="flex-1 rounded border border-border px-2 py-1.5 text-xs text-foreground hover:bg-panel"
+        >
+          Validate
+        </button>
+        <button
+          type="button"
+          onClick={apply}
+          disabled={!validatedHtml}
+          className="flex-1 rounded bg-primary px-2 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Apply
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TextInspector({
+  clip,
+  update,
+}: {
+  clip: TextClip;
+  update: (patch: Partial<TextClip>) => void;
+}) {
+  return (
+    <div className="rounded border border-border bg-panel-2 p-3">
+      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">Text</div>
+      <div className="space-y-2">
+        <Field label="Content">
+          <textarea
+            value={clip.content ?? ""}
+            rows={3}
+            onChange={(e) => update({ content: e.target.value })}
+            className="w-full resize-none rounded border border-border bg-input px-2 py-1 text-foreground"
+          />
+        </Field>
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="Color">
+            <div className="flex gap-1">
+              <input
+                type="color"
+                value={clip.color ?? "#f8fafc"}
+                onChange={(e) => update({ color: e.target.value })}
+                className="h-7 w-9 shrink-0 rounded border border-border bg-input p-0.5"
+              />
+              <input
+                value={clip.color ?? "#f8fafc"}
+                onChange={(e) => update({ color: e.target.value })}
+                className="min-w-0 flex-1 rounded border border-border bg-input px-2 py-1 font-mono text-[11px] text-foreground"
+              />
+            </div>
+          </Field>
+          <Field label="Size">
+            <NumberInput
+              value={clip.fontSize ?? 48}
+              min={8}
+              onChange={(v) => update({ fontSize: Math.max(8, v) })}
+            />
+          </Field>
+          <Field label="Family">
+            <select
+              value={clip.fontFamily ?? "Inter"}
+              onChange={(e) => update({ fontFamily: e.target.value })}
+              className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+            >
+              <option value="Inter">Inter</option>
+              <option value="Arial">Arial</option>
+              <option value="Georgia">Georgia</option>
+              <option value="Times New Roman">Times New Roman</option>
+              <option value="Courier New">Courier New</option>
+            </select>
+          </Field>
+          <Field label="Weight">
+            <select
+              value={clip.fontWeight ?? 700}
+              onChange={(e) => update({ fontWeight: Number(e.target.value) })}
+              className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+            >
+              <option value={400}>Regular</option>
+              <option value={500}>Medium</option>
+              <option value={600}>Semibold</option>
+              <option value={700}>Bold</option>
+              <option value={800}>Heavy</option>
+            </select>
+          </Field>
+        </div>
+        <label className="flex items-center gap-2 rounded border border-border bg-panel px-2 py-1.5 text-xs text-foreground">
+          <input
+            type="checkbox"
+            checked={clip.fitToBounds === true}
+            onChange={(e) => update({ fitToBounds: e.target.checked })}
+          />
+          Fit to bounds
+        </label>
+      </div>
+    </div>
+  );
+}
+
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block">
@@ -215,20 +456,49 @@ function NumberInput({
   onChange,
   step = 1,
   disabled = false,
+  min,
 }: {
   value: number;
   onChange: (v: number) => void;
   step?: number;
   disabled?: boolean;
+  min?: number;
 }) {
+  const [draft, setDraft] = useState(formatNumberInputValue(value));
+
+  useEffect(() => {
+    setDraft(formatNumberInputValue(value));
+  }, [value]);
+
+  const commit = (nextDraft: string) => {
+    const trimmed = nextDraft.trim();
+    if (trimmed === "" || trimmed === "-" || trimmed === "." || trimmed === "-.") return;
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed)) onChange(parsed);
+  };
+
   return (
     <input
       type="number"
-      value={Number.isFinite(value) ? Math.round(value * 100) / 100 : 0}
+      value={draft}
       step={step}
+      min={min}
       disabled={disabled}
-      onChange={(e) => onChange(Number(e.target.value))}
+      onChange={(e) => {
+        setDraft(e.target.value);
+        commit(e.target.value);
+      }}
+      onBlur={() => {
+        const trimmed = draft.trim();
+        if (trimmed === "" || !Number.isFinite(Number(trimmed))) {
+          setDraft(formatNumberInputValue(value));
+        }
+      }}
       className="w-full rounded border border-border bg-input px-2 py-1 text-foreground disabled:cursor-not-allowed disabled:opacity-60"
     />
   );
+}
+
+function formatNumberInputValue(value: number): string {
+  return Number.isFinite(value) ? String(Math.round(value * 100) / 100) : "";
 }

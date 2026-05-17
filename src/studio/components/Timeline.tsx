@@ -8,6 +8,7 @@ import { generateMotionOccurrences } from "../presets/apply";
 import { resolveExclusiveMotionOverlaps } from "../presets/motion-scheduling";
 import { useStudio, type ProjectMutationOptions } from "../store";
 import { useHfMediaHealth } from "../hooks/useHfMediaHealth";
+import { validateCompositionSourceHtml } from "../hyperframes/composition-source";
 import type {
   MotionCategory,
   MotionPreset,
@@ -16,6 +17,7 @@ import type {
   CharacterClip,
   EditorClip,
   MediaClip,
+  Project,
 } from "../types";
 import { deriveEditorClips } from "../types";
 import { fmtTime } from "../timeline-utils";
@@ -105,6 +107,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   if (!project) return null;
   const totalWidth = Math.max(1200, project.hf.duration * zoom);
   const timelineClips = clips.filter((clip) => !isLinkedSpeechAudioClip(clip));
+  const compositionSourceErrorsByClipId = buildCompositionSourceErrors(project, timelineClips);
   const linkedSpeechByCharacterId = new Map<string, EditorClip>(
     clips
       .filter(isLinkedSpeechAudioClip)
@@ -321,11 +324,14 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                       const laneIndex = Math.max(0, Math.min(lanes.length - 1, c.laneIndex ?? 0));
                       const laneTop = laneTops[laneIndex] ?? laneIndex * TRACK_HEIGHT;
                       const missingMediaIds = mediaHealth.missingAssetIdsByClipId.get(c.id) ?? [];
+                      const compositionSourceErrors =
+                        compositionSourceErrorsByClipId.get(c.id) ?? [];
                       return (
                         <ClipBlock
                           key={c.id}
                           clip={c}
                           missingMediaIds={missingMediaIds}
+                          compositionSourceErrors={compositionSourceErrors}
                           zoom={zoom}
                           selected={c.id === selectedId}
                           tracks={tracks.length}
@@ -404,9 +410,30 @@ function Ruler({ duration, zoom }: { duration: number; zoom: number }) {
   );
 }
 
+function buildCompositionSourceErrors(project: Project, clips: EditorClip[]): Map<string, string[]> {
+  const errorsByClipId = new Map<string, string[]>();
+  for (const clip of clips) {
+    if (clip.kind !== "composition" || !clip.compositionId) continue;
+    const source = project.hf.compositionHtml[clip.compositionId];
+    if (!source) {
+      errorsByClipId.set(clip.id, [`Missing source for composition "${clip.compositionId}".`]);
+      continue;
+    }
+    const result = validateCompositionSourceHtml(source, {
+      compositionId: clip.compositionId,
+      duration: clip.duration,
+      width: clip.width || project.hf.width,
+      height: clip.height || project.hf.height,
+    });
+    if (!result.ok) errorsByClipId.set(clip.id, result.errors);
+  }
+  return errorsByClipId;
+}
+
 function ClipBlock({
   clip,
   missingMediaIds,
+  compositionSourceErrors,
   zoom,
   selected,
   onSelect,
@@ -422,6 +449,7 @@ function ClipBlock({
 }: {
   clip: EditorClip;
   missingMediaIds: string[];
+  compositionSourceErrors: string[];
   zoom: number;
   selected: boolean;
   tracks: number;
@@ -441,15 +469,26 @@ function ClipBlock({
       ? "bg-clip-audio"
       : clip.kind === "character"
         ? "bg-clip-character"
-        : clip.kind === "video"
-          ? "bg-clip"
-          : "bg-clip-bg";
+        : clip.kind === "text"
+          ? "bg-fuchsia-500"
+          : clip.kind === "composition"
+            ? "bg-indigo-500"
+            : clip.kind === "video"
+              ? "bg-clip"
+              : "bg-clip-bg";
 
   const lane = clip.laneIndex ?? 0;
   const linkedAudio = clip.kind === "audio" && !!clip.linkedCharacterClipId;
   const clipMotions = clip.kind === "character" ? (clip.motions ?? []) : [];
   const missingMediaTitle =
     missingMediaIds.length > 0 ? `Missing media: ${missingMediaIds.join(", ")}` : undefined;
+  const malformedCompositionTitle =
+    compositionSourceErrors.length > 0
+      ? `Malformed composition source:\n${compositionSourceErrors.join("\n")}`
+      : undefined;
+  const clipTitle = [clip.name, missingMediaTitle, malformedCompositionTitle]
+    .filter(Boolean)
+    .join("\n");
 
   const onMouseDown = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -554,7 +593,7 @@ function ClipBlock({
         top,
         height: TRACK_HEIGHT - 8,
       }}
-      title={missingMediaTitle ? `${clip.name}\n${missingMediaTitle}` : clip.name}
+      title={clipTitle}
     >
       <div className="flex h-full items-center gap-1 px-2 text-[11px] font-medium text-foreground/95 mix-blend-luminosity">
         {clip.kind === "character" && (
@@ -574,13 +613,22 @@ function ClipBlock({
         )}
         {linkedAudio && <Lock size={11} className="shrink-0" aria-label="Linked speech audio" />}
         <span className="truncate">{clip.name}</span>
-        {(missingMediaIds.length > 0 || clipMotions.length > 0) && (
+        {(missingMediaIds.length > 0 ||
+          compositionSourceErrors.length > 0 ||
+          clipMotions.length > 0) && (
           <span className="ml-auto flex shrink-0 items-center gap-1">
             {missingMediaIds.length > 0 && (
               <TriangleAlert
                 size={13}
                 className="text-amber-200 drop-shadow"
                 aria-label={missingMediaTitle}
+              />
+            )}
+            {compositionSourceErrors.length > 0 && (
+              <TriangleAlert
+                size={13}
+                className="text-red-200 drop-shadow"
+                aria-label="Malformed composition source"
               />
             )}
             {clipMotions.length > 0 && (

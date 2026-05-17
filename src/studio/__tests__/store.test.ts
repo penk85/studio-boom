@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { pickFreeLane, createBlankProject, useStudio } from "../store";
+import {
+  pickFreeLane,
+  createBlankProject,
+  syncProjectRenderTrackIndices,
+  useStudio,
+} from "../store";
 
 const coreMock = vi.hoisted(() => ({
   generateCalls: [] as Array<{
@@ -35,6 +40,11 @@ vi.mock("@hyperframes/core", () => {
       opacity?: number;
       rotation?: number;
       compositionId?: string;
+      content?: string;
+      color?: string;
+      fontSize?: number;
+      fontFamily?: string;
+      fontWeight?: number;
     },
   ) => {
     const tagName =
@@ -44,7 +54,9 @@ vi.mock("@hyperframes/core", () => {
           ? "video"
           : element.type === "composition"
             ? "div"
-            : "img";
+            : element.type === "text"
+              ? "div"
+              : "img";
     const node = doc.createElement(tagName);
     node.setAttribute("id", element.id ?? "generated-id");
     node.setAttribute("data-start", String(element.startTime ?? 0));
@@ -65,6 +77,18 @@ vi.mock("@hyperframes/core", () => {
       node.setAttribute("data-type", "composition");
       node.setAttribute("data-composition-id", element.compositionId ?? "");
       if (element.src) node.setAttribute("data-composition-src", element.src);
+    }
+    if (element.type === "text") {
+      node.setAttribute("data-type", "text");
+      if (element.color) node.setAttribute("data-color", element.color);
+      if (element.fontSize !== undefined)
+        node.setAttribute("data-font-size", String(element.fontSize));
+      if (element.fontFamily) node.setAttribute("data-font-family", element.fontFamily);
+      if (element.fontWeight !== undefined)
+        node.setAttribute("data-font-weight", String(element.fontWeight));
+      const textNode = doc.createElement("div");
+      textNode.textContent = element.content ?? element.name ?? "";
+      node.appendChild(textNode);
     }
     return node;
   };
@@ -134,6 +158,11 @@ vi.mock("@hyperframes/core", () => {
         opacity?: number;
         compositionId?: string;
         rotation?: number;
+        content?: string;
+        color?: string;
+        fontSize?: number;
+        fontFamily?: string;
+        fontWeight?: number;
       },
     ) => {
       coreMock.addCalls += 1;
@@ -156,6 +185,11 @@ vi.mock("@hyperframes/core", () => {
         y?: number;
         opacity?: number;
         rotation?: number;
+        content?: string;
+        color?: string;
+        fontSize?: number;
+        fontFamily?: string;
+        fontWeight?: number;
       },
     ) => {
       coreMock.updateCalls += 1;
@@ -179,6 +213,18 @@ vi.mock("@hyperframes/core", () => {
       if (updates.opacity !== undefined) node.setAttribute("data-opacity", String(updates.opacity));
       if (updates.rotation !== undefined)
         node.setAttribute("data-rotation", String(updates.rotation));
+      if (updates.content !== undefined) {
+        const textNode = node.firstElementChild ?? doc.createElement("div");
+        textNode.textContent = updates.content;
+        if (!textNode.parentElement) node.appendChild(textNode);
+      }
+      if (updates.color !== undefined) node.setAttribute("data-color", updates.color);
+      if (updates.fontSize !== undefined)
+        node.setAttribute("data-font-size", String(updates.fontSize));
+      if (updates.fontFamily !== undefined)
+        node.setAttribute("data-font-family", updates.fontFamily);
+      if (updates.fontWeight !== undefined)
+        node.setAttribute("data-font-weight", String(updates.fontWeight));
       return serializeDoc(doc);
     },
     removeElementFromHtml: (html: string, elementId: string) => {
@@ -201,11 +247,13 @@ vi.mock("@hyperframes/core", () => {
         const type =
           element.getAttribute("data-type") === "composition"
             ? "composition"
-            : element.tagName.toLowerCase() === "audio"
-              ? "audio"
-              : element.tagName.toLowerCase() === "video"
-                ? "video"
-                : "image";
+            : element.getAttribute("data-type") === "text"
+              ? "text"
+              : element.tagName.toLowerCase() === "audio"
+                ? "audio"
+                : element.tagName.toLowerCase() === "video"
+                  ? "video"
+                  : "image";
         return {
           id: element.id,
           type,
@@ -223,6 +271,16 @@ vi.mock("@hyperframes/core", () => {
           y: Number(element.getAttribute("data-y") ?? 0),
           opacity: Number(element.getAttribute("data-opacity") ?? 1),
           rotation: Number(element.getAttribute("data-rotation") ?? 0),
+          content: element.firstElementChild?.textContent ?? element.textContent ?? "",
+          color: element.getAttribute("data-color") ?? undefined,
+          fontSize: element.hasAttribute("data-font-size")
+            ? Number(element.getAttribute("data-font-size"))
+            : undefined,
+          fontFamily: element.getAttribute("data-font-family") ?? undefined,
+          fontWeight: element.hasAttribute("data-font-weight")
+            ? Number(element.getAttribute("data-font-weight"))
+            : undefined,
+          compositionId: element.getAttribute("data-composition-id") ?? undefined,
         };
       });
       return {
@@ -233,7 +291,7 @@ vi.mock("@hyperframes/core", () => {
   };
 });
 import { createBlankCharacter, makePart } from "../character/character-utils";
-import type { CharacterClip, MediaAsset, MotionPreset } from "../types";
+import type { CharacterClip, CompositionClip, MediaAsset, MotionPreset, TextClip } from "../types";
 import { deriveEditorClips } from "../types";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -410,7 +468,7 @@ describe("createBlankProject", () => {
     expect(rootHtml).toContain('src="asset:media-1"');
     expect(rootHtml).toContain('data-start="0"');
     expect(rootHtml).toContain('data-duration="4"');
-    expect(rootHtml).toContain('data-track-index="0"');
+    expect(rootHtml).toContain('data-track-index="1000"');
     expect(rootHtml).toContain('data-x="910"');
     expect(rootHtml).toContain('data-y="490"');
     expect(rootHtml).toContain('data-width="100"');
@@ -422,6 +480,311 @@ describe("createBlankProject", () => {
     expect(coreMock.generateCalls.at(-1)?.opts).toMatchObject({
       includeStyles: true,
       includeScripts: true,
+    });
+  });
+
+  it("keeps HyperFrames render tracks separate from visual z-index", () => {
+    const project = createBlankProject("Track mapping");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+    });
+
+    useStudio.getState().addClip({
+      id: "background-clip",
+      kind: "text",
+      name: "Background",
+      content: "Back",
+      trackIndex: 2,
+      laneIndex: 0,
+      start: 0,
+      duration: 4,
+      x: 0,
+      y: 0,
+      width: 400,
+      height: 100,
+      rotation: 0,
+      opacity: 1,
+      zIndex: 0,
+    });
+    useStudio.getState().addClip({
+      id: "overlay-clip",
+      kind: "text",
+      name: "Overlay",
+      content: "Front",
+      trackIndex: 1,
+      laneIndex: 0,
+      start: 0,
+      duration: 4,
+      x: 0,
+      y: 140,
+      width: 400,
+      height: 100,
+      rotation: 0,
+      opacity: 1,
+      zIndex: 1,
+    });
+
+    const rootHtml = useStudio.getState().project!.hf.rootHtml;
+    const doc = new DOMParser().parseFromString(rootHtml, "text/html");
+    expect(doc.getElementById("background-clip")?.getAttribute("data-track-index")).toBe("2000");
+    expect(doc.getElementById("overlay-clip")?.getAttribute("data-track-index")).toBe("1000");
+    expect(rootHtml).toContain("z-index: 0");
+    expect(rootHtml).toContain("z-index: 1");
+
+    useStudio.getState().updateClip("overlay-clip", { trackIndex: 2, laneIndex: 1 });
+    const updatedDoc = new DOMParser().parseFromString(
+      useStudio.getState().project!.hf.rootHtml,
+      "text/html",
+    );
+    expect(updatedDoc.getElementById("overlay-clip")?.getAttribute("data-track-index")).toBe(
+      "2001",
+    );
+  });
+
+  it("repairs overlapping clips that share the same editor lane", () => {
+    const project = createBlankProject("Lane repair");
+    const rootHtml = `<!DOCTYPE html>
+<html data-composition-id="${project.id}" data-composition-duration="30">
+  <body>
+    <div id="stage" data-composition-id="${project.id}" data-start="0" data-duration="30">
+      <img id="image-a" data-start="0" data-duration="4" data-track-index="1003" data-name="A" src="asset:a" />
+      <img id="image-b" data-start="0" data-duration="4" data-track-index="1003" data-name="B" src="asset:b" />
+    </div>
+  </body>
+</html>`;
+    const repaired = syncProjectRenderTrackIndices({
+      ...project,
+      hf: { ...project.hf, rootHtml },
+      editorMeta: {
+        ...project.editorMeta,
+        tracks: project.editorMeta.tracks.map((track, index) =>
+          index === 1 ? { ...track, lanes: 4 } : track,
+        ),
+        clips: {
+          "image-a": {
+            kind: "image",
+            mediaId: "a",
+            uiTrackIndex: 1,
+            uiLaneIndex: 3,
+          },
+          "image-b": {
+            kind: "image",
+            mediaId: "b",
+            uiTrackIndex: 1,
+            uiLaneIndex: 3,
+          },
+        },
+      },
+    });
+
+    const doc = new DOMParser().parseFromString(repaired.hf.rootHtml, "text/html");
+    expect(repaired.editorMeta.clips["image-a"]?.uiLaneIndex).toBe(3);
+    expect(repaired.editorMeta.clips["image-b"]?.uiLaneIndex).toBe(4);
+    expect(repaired.editorMeta.tracks[1]?.lanes).toBe(5);
+    expect(doc.getElementById("image-a")?.getAttribute("data-track-index")).toBe("1003");
+    expect(doc.getElementById("image-b")?.getAttribute("data-track-index")).toBe("1004");
+  });
+
+  it("adds text clips through canonical rootHtml", () => {
+    const project = createBlankProject("Text clip");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+    });
+
+    const clip: TextClip = {
+      id: "text-1",
+      kind: "text",
+      name: "Title",
+      content: "Hello Studio",
+      trackIndex: 1,
+      start: 1,
+      duration: 3,
+      x: 120,
+      y: 90,
+      width: 640,
+      height: 180,
+      rotation: 0,
+      opacity: 1,
+      zIndex: 2,
+      color: "#ffffff",
+      fontSize: 72,
+      fontFamily: "Inter",
+      fontWeight: 700,
+    };
+
+    useStudio.getState().addClip(clip);
+
+    const state = useStudio.getState();
+    const rootHtml = state.project!.hf.rootHtml;
+    const added = deriveEditorClips(state.project!).find((c) => c.id === clip.id);
+
+    expect(rootHtml).toContain('data-type="text"');
+    expect(rootHtml).toContain("Hello Studio");
+    expect(rootHtml).toContain('data-font-size="72"');
+    expect(rootHtml).toContain('data-font-family="Inter"');
+    expect(added).toMatchObject({
+      id: "text-1",
+      kind: "text",
+      content: "Hello Studio",
+      width: 640,
+      height: 180,
+      fontSize: 72,
+      fontFamily: "Inter",
+      fontWeight: 700,
+    });
+
+    useStudio.getState().updateClip(clip.id, { content: "Updated", x: 240 });
+    expect(useStudio.getState().project!.hf.rootHtml).toContain("Updated");
+    expect(useStudio.getState().project!.hf.rootHtml).toContain('data-x="240"');
+  });
+
+  it("adds non-character composition clips with source html", () => {
+    const project = createBlankProject("Composition clip");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+    });
+
+    const sourceHtml = `<!DOCTYPE html>
+<html data-composition-id="ai-title" data-composition-duration="4">
+  <body>
+    <div id="stage" data-composition-id="ai-title" data-width="1920" data-height="1080">
+      AI block
+      <script>
+        window.__timelines = window.__timelines || {};
+        const tl = gsap.timeline({ paused: true });
+        window.__timelines["ai-title"] = tl;
+      </script>
+    </div>
+  </body>
+</html>`;
+    const clip: CompositionClip = {
+      id: "composition-1",
+      kind: "composition",
+      compositionId: "ai-title",
+      compositionKind: "ai-block",
+      compositionHtml: sourceHtml,
+      name: "AI Title",
+      trackIndex: 1,
+      start: 2,
+      duration: 4,
+      x: 0,
+      y: 0,
+      width: 1920,
+      height: 1080,
+      rotation: 0,
+      opacity: 1,
+      zIndex: 3,
+    };
+
+    useStudio.getState().addClip(clip);
+
+    const state = useStudio.getState();
+    const rootHtml = state.project!.hf.rootHtml;
+    const added = deriveEditorClips(state.project!).find((c) => c.id === clip.id);
+
+    expect(rootHtml).toContain('data-type="composition"');
+    expect(rootHtml).toContain('data-composition-id="ai-title"');
+    expect(rootHtml).toContain('data-composition-src="compositions/ai-title.html"');
+    expect(state.project!.hf.compositionHtml["ai-title"]).toContain("AI block");
+    expect(added).toMatchObject({
+      id: "composition-1",
+      kind: "composition",
+      compositionId: "ai-title",
+      compositionKind: "ai-block",
+      width: 1920,
+      height: 1080,
+    });
+
+    useStudio.getState().undo();
+    expect(useStudio.getState().project!.hf.rootHtml).not.toContain("composition-1");
+    expect(useStudio.getState().project!.hf.compositionHtml["ai-title"]).toBeUndefined();
+
+    useStudio.getState().redo();
+    expect(useStudio.getState().project!.hf.rootHtml).toContain("composition-1");
+    expect(useStudio.getState().project!.hf.compositionHtml["ai-title"]).toContain("AI block");
+  });
+
+  it("rejects invalid non-character composition source before inserting the clip", () => {
+    const project = createBlankProject("Bad composition clip");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+    });
+
+    const clip: CompositionClip = {
+      id: "composition-bad",
+      kind: "composition",
+      compositionId: "ai-bad",
+      compositionKind: "ai-block",
+      compositionHtml: `<!DOCTYPE html>
+<html data-composition-id="ai-bad" data-composition-duration="4">
+  <body>
+    <div id="stage" data-composition-id="ai-bad" data-width="1920" data-height="1080">
+      <script>
+        window.__timelines = window.__timelines || {};
+        const tl = gsap.timeline({ paused: true });
+        const broken = ;
+        window.__timelines["ai-bad"] = tl;
+      </script>
+    </div>
+  </body>
+</html>`,
+      name: "Bad AI Block",
+      trackIndex: 1,
+      start: 0,
+      duration: 4,
+      x: 0,
+      y: 0,
+      width: 1920,
+      height: 1080,
+      rotation: 0,
+      opacity: 1,
+      zIndex: 0,
+    };
+
+    expect(() => useStudio.getState().addClip(clip)).toThrow(/Composition source is invalid/);
+    expect(useStudio.getState().project!.hf.rootHtml).not.toContain("composition-bad");
+    expect(useStudio.getState().project!.hf.compositionHtml["ai-bad"]).toBeUndefined();
+  });
+
+  it("preserves character clips as specialized compositions", () => {
+    const project = createBlankProject("Character derivation");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+    });
+
+    const clip: CharacterClip = {
+      id: "character-1",
+      kind: "character",
+      characterId: "character-source-1",
+      name: "Actor",
+      trackIndex: 0,
+      start: 0,
+      duration: 4,
+      x: 10,
+      y: 20,
+      width: 300,
+      height: 450,
+      rotation: 0,
+      opacity: 1,
+      zIndex: 0,
+      poses: {},
+      autoBlink: false,
+    };
+
+    useStudio.getState().addClip(clip);
+
+    const added = deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clip.id);
+    expect(added).toMatchObject({
+      id: "character-1",
+      kind: "character",
+      characterId: "character-source-1",
+      compositionId: "comp_character-1",
+      compositionKind: "character",
     });
   });
 
