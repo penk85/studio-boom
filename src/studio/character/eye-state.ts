@@ -38,14 +38,6 @@ export function eyeVariantsForSlot(slot: CharacterSlotRef): EyeVariant[] {
   return ordered;
 }
 
-export function eyeStateSetForSlot(slot: CharacterSlotRef): Set<string> {
-  return new Set(eyeVariantsForSlot(slot).map((variant) => variant.state));
-}
-
-export function slotHasEyeState(slot: CharacterSlotRef, state: EyeState) {
-  return eyeStateSetForSlot(slot).has(state);
-}
-
 export function blinkWindowsForClip(clip: {
   id: string;
   duration: number;

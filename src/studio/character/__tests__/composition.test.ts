@@ -3,6 +3,8 @@ import { validateCompositionSourceHtml } from "../../hyperframes/composition-sou
 import type { CharacterClipMeta, MotionPreset } from "../../types";
 import { createBlankCharacter, makePart } from "../character-utils";
 import { buildCharacterCompositionHtml } from "../composition";
+import { blinkWindowsForClip } from "../eye-state";
+import { createDefaultMouthRig } from "../mouth-libraries";
 
 function makeCharacter() {
   return {
@@ -61,6 +63,16 @@ function makeCharacter() {
         height: 54,
         zIndex: 5,
       }),
+      makePart("mouth", "mouth-raspberry-media", {
+        id: "mouth-raspberry",
+        slotId: "role:mouth",
+        pose: "raspberry",
+        x: 190,
+        y: 250,
+        width: 150,
+        height: 70,
+        zIndex: 5,
+      }),
     ],
   };
 }
@@ -86,6 +98,20 @@ function build(
   });
 }
 
+function extractScene(html: string) {
+  const match = html.match(/const S = (\{.*?\});\n\s+const tl/s);
+  expect(match).not.toBeNull();
+  return JSON.parse(match![1]) as {
+    initialTargets: Array<{ selector: string; vars: Record<string, number | string> }>;
+    slotEvents: Array<{
+      slotId: string;
+      key: string;
+      variant?: { show?: string };
+      generatedMouth?: { components: Record<string, unknown> };
+    }>;
+  };
+}
+
 describe("buildCharacterCompositionHtml", () => {
   it("generates explicit puppet DOM, asset refs, dimensions, and timeline registration", () => {
     const html = build();
@@ -108,6 +134,121 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).toContain('window.__timelines["char_clip-1"]');
     expect(html).not.toMatch(/repeat\s*:\s*-1/);
     expect(html).not.toMatch(/\basync\b/);
+  });
+
+  it("keeps generated DOM ids unique when slot ids sanitize to the same text", () => {
+    const character = {
+      ...createBlankCharacter("Actor"),
+      id: "char-collision",
+      parts: [
+        makePart("body", "body-colon-media", {
+          id: "body-colon",
+          slotId: "slot:body",
+          pose: "idle",
+          x: 80,
+          y: 100,
+          zIndex: 1,
+        }),
+        makePart("body", "body-hyphen-media", {
+          id: "body-hyphen",
+          slotId: "slot-body",
+          pose: "idle",
+          x: 160,
+          y: 120,
+          zIndex: 2,
+        }),
+      ],
+    };
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_collision",
+      clipId: "clip-collision",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character,
+      meta: {
+        characterId: "char-collision",
+        poses: {},
+        autoBlink: false,
+      },
+      motionPresets: new Map(),
+    });
+    const ids = Array.from(html.matchAll(/\sid="([^"]+)"/g), (match) => match[1]);
+
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(html).toContain('data-character-slot-id="slot:body"');
+    expect(html).toContain('data-character-slot-id="slot-body"');
+  });
+
+  it("uses mouth variants by default when a generated rig also exists", () => {
+    const character = {
+      ...makeCharacter(),
+      mouthRig: createDefaultMouthRig("natural", {
+        x: 190,
+        y: 250,
+        width: 150,
+        height: 70,
+        zIndex: 5,
+      }),
+    };
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_mouth_variants",
+      clipId: "clip-mouth-variants",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character,
+      meta: {
+        characterId: "char-1",
+        poses: {},
+        autoBlink: false,
+      },
+      motionPresets: new Map(),
+    });
+    const scene = extractScene(html);
+
+    expect(html).toContain('data-character-part-id="mouth-rest"');
+    expect(html).not.toContain('data-character-generated-mouth="true"');
+    expect(scene.slotEvents.some((event) => event.slotId === "role:mouth" && event.variant)).toBe(
+      true,
+    );
+  });
+
+  it("renders an explicit generated mouth rig through the same slot event stream", () => {
+    const character = {
+      ...makeCharacter(),
+      mouthStyle: "rig" as const,
+      mouthRig: createDefaultMouthRig("natural", {
+        x: 190,
+        y: 250,
+        width: 150,
+        height: 70,
+        zIndex: 5,
+      }),
+    };
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_mouth_rig",
+      clipId: "clip-mouth-rig",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character,
+      meta: {
+        characterId: "char-1",
+        poses: {},
+        autoBlink: false,
+        visemes: [{ t: 0.3, v: "A" }],
+      },
+      motionPresets: new Map(),
+    });
+    const scene = extractScene(html);
+
+    expect(html).toContain('data-character-generated-mouth="true"');
+    expect(html).toContain("slotEvents");
+    expect(html).not.toContain("mouthRigEvents");
+    expect(
+      scene.slotEvents.some((event) => event.slotId === "role:mouth" && event.generatedMouth),
+    ).toBe(true);
   });
 
   it("serializes speech audio, viseme swaps, and finite applied motion data", () => {
@@ -143,8 +284,156 @@ describe("buildCharacterCompositionHtml", () => {
 
     expect(html).toContain('data-character-speech="true"');
     expect(html).toContain('src="asset:voice-audio"');
-    expect(html).toContain("mouthImageEvents");
+    expect(html).toContain("slotEvents");
     expect(html).toContain("motionSegments");
     expect(html).toContain('"y":12');
+  });
+
+  it("matches expression recorder face turns in the generated timeline", () => {
+    const preset: MotionPreset = {
+      id: "expression-turn",
+      name: "Look right",
+      category: "expression",
+      duration: 1,
+      loop: false,
+      tracks: [],
+      keyposes: [
+        { t: 0, faceTurnX: 1, parts: [] },
+        { t: 1, faceTurnX: 1, parts: [] },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = build(
+      {
+        autoBlink: false,
+        motions: [{ id: "applied-turn", presetId: preset.id, offset: 0, intensity: 1 }],
+      },
+      new Map([[preset.id, preset]]),
+    );
+    const scene = extractScene(html);
+
+    expect(
+      scene.initialTargets.some(
+        (target) => target.selector.includes("left-eye") && target.vars.skewY === -2,
+      ),
+    ).toBe(true);
+  });
+
+  it("lets expression mouth variant swaps drive the mouth when lip sync is inactive", () => {
+    const preset: MotionPreset = {
+      id: "expression-mouth",
+      name: "Raspberry",
+      category: "expression",
+      duration: 1,
+      loop: false,
+      tracks: [],
+      keyposes: [
+        {
+          t: 0,
+          parts: [{ partRole: "mouth", slotId: "role:mouth", poseSwap: "raspberry" }],
+        },
+        {
+          t: 1,
+          parts: [{ partRole: "mouth", slotId: "role:mouth", poseSwap: "raspberry" }],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = build(
+      {
+        autoBlink: false,
+        motions: [{ id: "applied-mouth", presetId: preset.id, offset: 0, intensity: 1 }],
+      },
+      new Map([[preset.id, preset]]),
+    );
+    const scene = extractScene(html);
+    const mouthTarget = scene.initialTargets.find((target) =>
+      target.selector.includes("role-mouth"),
+    );
+
+    expect(html).toContain('data-character-part-id="mouth-raspberry"');
+    expect(scene.slotEvents.some((event) => event.variant?.show?.includes("raspberry"))).toBe(true);
+    expect(mouthTarget?.vars.transformOrigin).toBe("61.111% 59.524%");
+  });
+
+  it("keeps lip sync in charge of mouth variant swaps when voice visemes exist", () => {
+    const preset: MotionPreset = {
+      id: "expression-mouth",
+      name: "Raspberry",
+      category: "expression",
+      duration: 1,
+      loop: false,
+      tracks: [],
+      keyposes: [
+        {
+          t: 0,
+          parts: [{ partRole: "mouth", slotId: "role:mouth", poseSwap: "raspberry" }],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = build(
+      {
+        autoBlink: false,
+        lipSyncAudioId: "voice-audio",
+        visemes: [{ t: 0, v: "A" }],
+        motions: [{ id: "applied-mouth", presetId: preset.id, offset: 0, intensity: 1 }],
+      },
+      new Map([[preset.id, preset]]),
+    );
+    const scene = extractScene(html);
+
+    expect(scene.slotEvents.some((event) => event.variant?.show?.includes("raspberry"))).toBe(
+      false,
+    );
+  });
+
+  it("does not let auto blink override an active expression eye pose", () => {
+    const preset: MotionPreset = {
+      id: "expression-eye",
+      name: "Closed eyes",
+      category: "expression",
+      duration: 10,
+      loop: false,
+      tracks: [],
+      keyposes: [
+        {
+          t: 0,
+          parts: [{ partRole: "eye", slotId: "slot:left-eye", poseSwap: "closed" }],
+        },
+        {
+          t: 10,
+          parts: [{ partRole: "eye", slotId: "slot:left-eye", poseSwap: "closed" }],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const clipId = "clip-blink-expression";
+    expect(
+      blinkWindowsForClip({ id: clipId, duration: 10, autoBlink: true }).length,
+    ).toBeGreaterThan(0);
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_blink_expression",
+      clipId,
+      width: 300,
+      height: 450,
+      duration: 10,
+      character: makeCharacter(),
+      meta: {
+        characterId: "char-1",
+        poses: {},
+        autoBlink: true,
+        motions: [{ id: "applied-eye", presetId: preset.id, offset: 0, intensity: 1 }],
+      },
+      motionPresets: new Map([[preset.id, preset]]),
+    });
+    const scene = extractScene(html);
+
+    expect(scene.slotEvents.some((event) => event.variant?.show?.includes("closed"))).toBe(true);
+    expect(scene.slotEvents.every((event) => event.key !== "open")).toBe(true);
   });
 });

@@ -1,5 +1,5 @@
 // Timeline — multi-track strip with draggable clips, ruler, playhead.
-import { ChevronDown, ChevronRight, Mic2, Minus, TriangleAlert } from "lucide-react";
+import { ChevronDown, ChevronRight, Mic2, Minus, SkipBack, TriangleAlert } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { PlayerControls, liveTime, usePlayerStore } from "@hyperframes/studio";
@@ -67,6 +67,7 @@ interface TimelineProps {
 
 export function Timeline({ togglePlay, seek }: TimelineProps) {
   const project = useStudio((s) => s.project);
+  const timelineReady = usePlayerStore((s) => s.timelineReady);
   const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
   const tracks = useStudio((s) => s.tracks);
   const zoom = useStudio((s) => s.zoom);
@@ -150,6 +151,16 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
     <div className="flex h-full flex-col bg-panel">
       {/* Transport */}
       <div className="flex items-center gap-2 border-b border-border px-2 py-1 text-xs">
+        <button
+          type="button"
+          onClick={() => seek(0)}
+          disabled={!timelineReady}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded border border-border bg-panel-2 text-foreground hover:bg-panel disabled:cursor-not-allowed disabled:opacity-45"
+          title="Stop and rewind"
+          aria-label="Stop and rewind"
+        >
+          <SkipBack size={14} />
+        </button>
         <PlayerControls onTogglePlay={togglePlay} onSeek={seek} />
         <div className="ml-auto flex shrink-0 items-center gap-2">
           <span className="text-muted-foreground">

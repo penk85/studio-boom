@@ -799,6 +799,109 @@ describe("createBlankProject", () => {
     );
   });
 
+  it("prunes stale generated speech audio when character lip sync changes or clears", () => {
+    const project = createBlankProject("Character voice cleanup");
+    const body = makeMediaAsset("body-a", "body-a");
+    const oldVoice: MediaAsset = {
+      ...makeMediaAsset("voice-old", "voice-old"),
+      kind: "audio",
+      scope: "generated-audio",
+      filename: "voice-old.mp3",
+      mimeType: "audio/mpeg",
+      duration: 1,
+    };
+    const newVoice: MediaAsset = {
+      ...makeMediaAsset("voice-new", "voice-new"),
+      kind: "audio",
+      scope: "generated-audio",
+      filename: "voice-new.mp3",
+      mimeType: "audio/mpeg",
+      duration: 1,
+    };
+    const character = {
+      ...createBlankCharacter("Actor"),
+      id: "character-source-1",
+      parts: [
+        makePart("body", body.id, {
+          id: "part-a",
+          name: "Body",
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 100,
+          zIndex: 1,
+        }),
+      ],
+    };
+    const clip: CompositionClip = {
+      id: "character-voice",
+      kind: "composition",
+      compositionKind: "character",
+      character: {
+        characterId: character.id,
+        poses: {},
+        autoBlink: false,
+        lipSyncAudioId: oldVoice.id,
+      },
+      name: "Actor",
+      trackIndex: 0,
+      start: 0,
+      duration: 4,
+      x: 10,
+      y: 20,
+      width: 300,
+      height: 450,
+      rotation: 0,
+      opacity: 1,
+      zIndex: 0,
+    };
+
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      characters: new Map([[character.id, character]]),
+      mediaAssets: new Map([
+        [body.id, body],
+        [oldVoice.id, oldVoice],
+        [newVoice.id, newVoice],
+      ]),
+    });
+
+    useStudio.getState().addClip(clip);
+    expect(useStudio.getState().project!.hf.assets.map((asset) => asset.id)).toContain(oldVoice.id);
+
+    useStudio.getState().updateClip(clip.id, {
+      character: {
+        ...clip.character,
+        lipSyncAudioId: newVoice.id,
+        visemes: [{ t: 0, v: "A" }],
+      },
+    } as Partial<CompositionClip>);
+
+    let state = useStudio.getState();
+    expect(state.project!.hf.assets.map((asset) => asset.id)).toEqual(
+      expect.arrayContaining([body.id, newVoice.id]),
+    );
+    expect(state.project!.hf.assets.map((asset) => asset.id)).not.toContain(oldVoice.id);
+    expect(state.project!.hf.compositionHtml[`char_${clip.id}`]).toContain("asset:voice-new");
+    expect(state.project!.hf.compositionHtml[`char_${clip.id}`]).not.toContain("asset:voice-old");
+
+    useStudio.getState().updateClip(clip.id, {
+      character: {
+        ...state.project!.editorMeta.clips[clip.id].character!,
+        lipSyncAudioId: undefined,
+        visemes: undefined,
+        voiceLine: undefined,
+      },
+    } as Partial<CompositionClip>);
+
+    state = useStudio.getState();
+    expect(state.project!.hf.assets.map((asset) => asset.id)).not.toContain(newVoice.id);
+    expect(state.project!.hf.compositionHtml[`char_${clip.id}`]).not.toContain(
+      'data-character-speech="true"',
+    );
+  });
+
   it("mutates root HTML through core helpers instead of regenerating the composition", () => {
     const project = createBlankProject("Direct mutation");
     const asset = makeMediaAsset("media-2", "Image");

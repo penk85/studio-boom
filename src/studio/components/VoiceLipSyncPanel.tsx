@@ -101,7 +101,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
                       ? "bg-primary/25 text-foreground"
                       : "border border-border text-muted-foreground"
                   }`}
-                  title={`${available ? "Available for lip sync" : "Missing mouth image"}\n${MOUTH_VISEME_DESCRIPTIONS[shape]}`}
+                  title={`${available ? "Available for lip sync" : "Missing mouth variant"}\n${MOUTH_VISEME_DESCRIPTIONS[shape]}`}
                 >
                   {shape}
                 </span>

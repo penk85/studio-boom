@@ -121,6 +121,19 @@ function collectReferencedAssetIds(
   return ids;
 }
 
+function pruneCandidateHfAssets(
+  hf: HyperFramesProject,
+  candidateIds: Set<string>,
+  referencedIds: Set<string>,
+): HyperFramesProject {
+  if (candidateIds.size === 0) return hf;
+  const assets = hf.assets.filter((asset) => {
+    if (!candidateIds.has(asset.id)) return true;
+    return referencedIds.has(asset.id);
+  });
+  return assets.length === hf.assets.length ? hf : { ...hf, assets };
+}
+
 function registerCharacterAssets(
   hf: HyperFramesProject,
   character: CharacterPreset | undefined,
@@ -940,6 +953,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (options?.history !== false) get().checkpointHistory();
 
     const existingMeta = p.editorMeta.clips[id] ?? {};
+    const previousLipSyncAudioId = existingMeta.character?.lipSyncAudioId;
 
     const newMeta = { ...existingMeta };
 
@@ -978,6 +992,11 @@ export const useStudio = create<StudioState>((set, get) => ({
           : undefined;
       }
     }
+    const removedCharacterAudioIds = new Set<string>();
+    const nextLipSyncAudioId = newMeta.character?.lipSyncAudioId;
+    if (previousLipSyncAudioId && previousLipSyncAudioId !== nextLipSyncAudioId) {
+      removedCharacterAudioIds.add(previousLipSyncAudioId);
+    }
 
     const editorMeta: ProjectEditorMeta = {
       ...p.editorMeta,
@@ -996,6 +1015,16 @@ export const useStudio = create<StudioState>((set, get) => ({
       state.mediaAssets,
       state.motionPresets,
     );
+    if (removedCharacterAudioIds.size > 0) {
+      newProject = {
+        ...newProject,
+        hf: pruneCandidateHfAssets(
+          newProject.hf,
+          removedCharacterAudioIds,
+          collectReferencedAssetIds(newProject.editorMeta.clips, state.characters),
+        ),
+      };
+    }
     set({ project: newProject, tracks: newProject.editorMeta.tracks });
     scheduleSave(get);
   },

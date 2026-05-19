@@ -115,6 +115,16 @@ const MOTION_BEHAVIOR_OPTIONS: Array<{ value: PartMotionBehavior; label: string 
 const SAMPLE_WORDS = ["Hello", "Shalom", "Mommy", "Welcome"];
 const EYE_STATES: EyeState[] = ["open", "half", "closed", "wink"];
 
+function effectiveMouthModeFor(
+  character: Pick<CharacterPreset, "mouthRig" | "mouthStyle" | "parts">,
+): "rig" | "images" {
+  if (character.mouthStyle) return character.mouthStyle;
+  const hasVisibleMouthVariants = character.parts.some(
+    (part) => part.role === "mouth" && part.visible,
+  );
+  return character.mouthRig && !hasVisibleMouthVariants ? "rig" : "images";
+}
+
 type EditorMode = "select" | "pivot" | "bounds-rect" | "bounds-ellipse";
 type EditorBoundsMode = "frame" | "art";
 
@@ -440,7 +450,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   })();
   const exportData = JSON.stringify(normalizeCharacterSlots(doc), null, 2);
   const manifest = normalizePartManifest(doc.manifest);
-  const effectiveMouthMode: "rig" | "images" = doc.mouthStyle ?? (doc.mouthRig ? "rig" : "images");
+  const effectiveMouthMode = effectiveMouthModeFor(doc);
   const previewParentPart =
     preview?.targetRole === "head"
       ? orderedParts.find((part) => part.id === preview.targetPartId)
@@ -675,7 +685,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               ))}
               {doc.mouthRig && effectiveMouthMode === "rig" && (
                 <RigPlacementLayer
-                  key="mouth-rig"
+                  key="generated-mouth"
                   rig={doc.mouthRig}
                   selected={rigSelected}
                   scale={scale}
@@ -944,8 +954,8 @@ function MouthShapeSetup({
   onImport: (file: File, options?: ImportOptions) => void;
 }) {
   const [designerOpen, setDesignerOpen] = useState(false);
-  // "rig" is the default mode when a rig exists; "images" is the legacy/custom path.
-  const effectiveMode: "rig" | "images" = mouthStyle ?? (mouthRig ? "rig" : "images");
+  // Uploaded/generated variants are the default when they exist; rig is an explicit slot strategy.
+  const effectiveMode = effectiveMouthModeFor({ parts, mouthRig, mouthStyle });
 
   return (
     <div className="rounded border border-border bg-panel-2 p-2">
@@ -960,14 +970,14 @@ function MouthShapeSetup({
             onClick={() => onSetMouthStyle("rig")}
             className={`rounded-l px-2 py-0.5 ${effectiveMode === "rig" ? "bg-primary text-primary-foreground" : "hover:bg-panel"}`}
           >
-            Rig
+            Generated
           </button>
           <button
             type="button"
             onClick={() => onSetMouthStyle("images")}
             className={`rounded-r border-l border-border px-2 py-0.5 ${effectiveMode === "images" ? "bg-primary text-primary-foreground" : "hover:bg-panel"}`}
           >
-            Images
+            Variants
           </button>
         </div>
       </div>
@@ -979,7 +989,7 @@ function MouthShapeSetup({
             onClick={() => setDesignerOpen(true)}
             className="mb-2 w-full rounded border border-primary bg-primary/10 px-2 py-1.5 text-[11px] font-medium text-primary hover:bg-primary/20"
           >
-            {mouthRig ? `Rig: ${mouthRig.styleId} — Edit…` : "Choose mouth style…"}
+            {mouthRig ? `Generated: ${mouthRig.styleId} — Edit…` : "Choose generated mouth…"}
           </button>
           <MouthCreator
             isOpen={designerOpen}
@@ -1056,7 +1066,7 @@ function LayerList({
             }`}
           >
             <span className="min-w-0 flex-1 truncate font-medium">
-              Mouth rig
+              Generated mouth
               <span className="ml-1 font-normal text-muted-foreground">{mouthRig.styleId}</span>
             </span>
             <button
@@ -1191,7 +1201,7 @@ function Inspector({
       <div className="space-y-4">
         <CanvasControls doc={doc} onChange={onCanvasChange} />
         <section className="rounded border border-border bg-panel-2 p-3">
-          <div className="mb-3 font-medium">Mouth Rig — {rig.styleId}</div>
+          <div className="mb-3 font-medium">Generated mouth — {rig.styleId}</div>
           <div className="grid grid-cols-2 gap-2">
             <Field label="X">
               <input
@@ -1339,7 +1349,7 @@ function Inspector({
               ))}
             </select>
           </Field>
-          <Field label="Rig behavior">
+          <Field label="Motion behavior">
             <select
               value={part.motionBehavior ?? "none"}
               onChange={(e) =>
@@ -1444,7 +1454,7 @@ function Inspector({
       <section className="rounded border border-border bg-panel-2 p-3">
         <div className="mb-2 flex items-center justify-between">
           <span className="font-semibold uppercase tracking-wider text-muted-foreground">
-            Rig Helpers
+            Motion Helpers
           </span>
           <button
             onClick={() => onModeChange(mode === "select" ? "pivot" : "select")}

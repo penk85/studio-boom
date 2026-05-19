@@ -134,5 +134,10 @@ describe("Timeline playback integration", () => {
     const playButton = host.querySelector<HTMLButtonElement>('button[aria-label="Play"]');
     expect(playButton).not.toBeNull();
     expect(playButton?.disabled).toBe(false);
+    const stopButton = host.querySelector<HTMLButtonElement>(
+      'button[aria-label="Stop and rewind"]',
+    );
+    expect(stopButton).not.toBeNull();
+    expect(stopButton?.disabled).toBe(false);
   });
 });

@@ -1,5 +1,5 @@
 // MotionPresetRecorder — visual pose-and-capture flow for reusable motion presets.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Crosshair,
   Eye,
@@ -25,6 +25,8 @@ import {
 } from "../character/character-utils";
 import { localAlphaBounds, pivotForPart } from "../character/alpha-bounds";
 import { faceTurnMotionForPart } from "../character/face-turn";
+import { RigPreview } from "../character/MouthCreator";
+import { RIG_STYLES, VISEME_POSES } from "../character/mouth-libraries";
 import { expandKeyposesWithAnticipation } from "./apply";
 import type {
   CharacterPart,
@@ -109,6 +111,11 @@ export function MotionPresetRecorder({
       ),
     [character.parts, character.manifest],
   );
+  const usesGeneratedMouth = !!character.mouthRig && character.mouthStyle === "rig";
+  const generatedMouthPart = useMemo(
+    () => (usesGeneratedMouth ? generatedMouthPreviewPart(character) : null),
+    [character, usesGeneratedMouth],
+  );
   const [name, setName] = useState(
     initialPreset && (initialPreset.builtin || copyOnSave)
       ? customPresetName(initialPreset.name)
@@ -131,6 +138,18 @@ export function MotionPresetRecorder({
   const wrapRef = useRef<HTMLDivElement>(null);
   const planeRef = useRef<HTMLDivElement>(null);
   const lastPickRef = useRef<{ x: number; y: number; key: string; index: number } | null>(null);
+  const activePartForSlot = useCallback(
+    (slot: CharacterSlot, poseSwap?: string) => {
+      if (usesGeneratedMouth && slot.role === "mouth" && generatedMouthPart)
+        return generatedMouthPart;
+      return pickActivePartForSlot(slot, {
+        pose: poseSwap,
+        viseme: slot.role === "mouth" ? (poseSwap ?? "rest") : undefined,
+        eyeState: slot.role === "eye" ? (poseSwap ?? "open") : undefined,
+      });
+    },
+    [generatedMouthPart, usesGeneratedMouth],
+  );
 
   useEffect(() => {
     if (!selectedSlotId && slots.length > 0) setSelectedSlotId(slots[0].id);
@@ -180,10 +199,11 @@ export function MotionPresetRecorder({
         ? slots.find((s) => s.id === ov.slotId)
         : slots.find((s) => s.role === ov.partRole);
       if (!slot) continue;
-      const part = activePartForSlot(slot, ov.poseSwap);
+      const poseSwap = usesGeneratedMouth && slot.role === "mouth" ? undefined : ov.poseSwap;
+      const part = activePartForSlot(slot, poseSwap);
       next.set(slot.id, {
         ...defaultOverride(slot.id, part),
-        poseSwap: ov.poseSwap,
+        poseSwap,
         dx: ov.dx ?? 0,
         dy: ov.dy ?? 0,
         scale: ov.scale ?? 1,
@@ -199,7 +219,7 @@ export function MotionPresetRecorder({
     }
     setOverrides(next);
     setFaceTurnX(interp.faceTurnX);
-  }, [time, keyposes, slots]);
+  }, [activePartForSlot, time, keyposes, usesGeneratedMouth, slots]);
 
   const displayScale = previewMode === "export" ? 1 : fitScale;
   const selectedSlot = slots.find((slot) => slot.id === selectedSlotId) ?? null;
@@ -218,7 +238,11 @@ export function MotionPresetRecorder({
       const cur = next.get(slotId);
       const curPart = slot ? activePartForSlot(slot, cur?.poseSwap) : undefined;
       const base = cur ?? defaultOverride(slotId, curPart);
-      next.set(slotId, { ...base, ...patch });
+      const normalizedPatch =
+        slot?.role === "mouth" && usesGeneratedMouth && "poseSwap" in patch
+          ? { ...patch, poseSwap: undefined }
+          : patch;
+      next.set(slotId, { ...base, ...normalizedPatch });
       return next;
     });
   };
@@ -276,10 +300,12 @@ export function MotionPresetRecorder({
     const parts: RecordedPartOverride[] = [];
     for (const ov of overrides.values()) {
       const slot = slots.find((s) => s.id === ov.slotId);
-      const activePart = slot ? activePartForSlot(slot, ov.poseSwap) : undefined;
-      if (!slot || !isDirtyOverride(ov, activePart)) continue;
+      const poseSwap = slot?.role === "mouth" && usesGeneratedMouth ? undefined : ov.poseSwap;
+      const activePart = slot ? activePartForSlot(slot, poseSwap) : undefined;
+      const normalizedOverride = { ...ov, poseSwap };
+      if (!slot || !isDirtyOverride(normalizedOverride, activePart)) continue;
       const part: RecordedPartOverride = { partRole: slot.role, slotId: slot.id };
-      if (ov.poseSwap) part.poseSwap = ov.poseSwap;
+      if (poseSwap) part.poseSwap = poseSwap;
       if (ov.dx !== 0) part.dx = ov.dx;
       if (ov.dy !== 0) part.dy = ov.dy;
       if (ov.scale !== 1) part.scale = ov.scale;
@@ -340,14 +366,6 @@ export function MotionPresetRecorder({
     onSaved?.(preset);
     onClose();
   };
-
-  function activePartForSlot(slot: CharacterSlot, poseSwap?: string) {
-    return pickActivePartForSlot(slot, {
-      pose: poseSwap,
-      viseme: slot.role === "mouth" ? (poseSwap ?? "rest") : undefined,
-      eyeState: slot.role === "eye" ? (poseSwap ?? "open") : undefined,
-    });
-  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-background/90 p-6">
@@ -480,6 +498,9 @@ export function MotionPresetRecorder({
                       stageScale={displayScale}
                       faceTurnX={faceTurnX}
                       canvasWidth={character.canvasWidth}
+                      mouthRig={
+                        usesGeneratedMouth && slot.role === "mouth" ? character.mouthRig : undefined
+                      }
                       onSelectAtPoint={selectAtPoint}
                       onSelect={() => {
                         setSelectedSlotId(slot.id);
@@ -528,6 +549,7 @@ export function MotionPresetRecorder({
               slot={selectedSlot}
               part={selectedPart}
               override={selectedOverride}
+              usesGeneratedMouth={usesGeneratedMouth}
               advancedOpen={advancedOpen}
               onAdvancedOpenChange={setAdvancedOpen}
               onChange={(patch) => selectedSlotId && updateOverride(selectedSlotId, patch)}
@@ -773,6 +795,7 @@ function PropertiesPanel({
   slot,
   part,
   override,
+  usesGeneratedMouth,
   advancedOpen,
   onAdvancedOpenChange,
   onChange,
@@ -781,6 +804,7 @@ function PropertiesPanel({
   slot: CharacterSlot | null;
   part: CharacterPart | null;
   override: RecorderPartState | null;
+  usesGeneratedMouth: boolean;
   advancedOpen: boolean;
   onAdvancedOpenChange: (open: boolean) => void;
   onChange: (patch: Partial<RecorderPartState>) => void;
@@ -793,7 +817,8 @@ function PropertiesPanel({
       </div>
     );
   }
-  const variantOptions = variantOptionsForSlot(slot);
+  const variantOptions =
+    usesGeneratedMouth && slot.role === "mouth" ? [] : variantOptionsForSlot(slot);
   return (
     <div>
       <div className="mb-2 flex items-center gap-2">
@@ -1000,6 +1025,7 @@ function PoseLayer({
   stageScale,
   faceTurnX,
   canvasWidth,
+  mouthRig,
   onSelect,
   onSelectAtPoint,
   onChange,
@@ -1010,6 +1036,7 @@ function PoseLayer({
   stageScale: number;
   faceTurnX: number;
   canvasWidth: number;
+  mouthRig?: CharacterPreset["mouthRig"];
   onSelect: () => void;
   onSelectAtPoint: (clientX: number, clientY: number, altKey: boolean) => void;
   onChange: (patch: Partial<RecorderPartState>) => void;
@@ -1018,6 +1045,9 @@ function PoseLayer({
   const ov = override ?? defaultOverride(part.slotId, part);
   const turn = faceTurnMotionForPart(part, faceTurnX, canvasWidth);
   const alphaRect = localAlphaBounds(part);
+  const rigStyle = mouthRig
+    ? (RIG_STYLES.find((style) => style.id === mouthRig.styleId) ?? RIG_STYLES[0])
+    : null;
 
   const onPointerDown = (e: React.PointerEvent) => {
     e.stopPropagation();
@@ -1075,14 +1105,44 @@ function PoseLayer({
       }}
       title={part.name}
     >
-      {url && (
+      {mouthRig && rigStyle ? (
+        <RigPreview
+          style={rigStyle}
+          pose={mouthRig.poses.rest ?? VISEME_POSES.rest}
+          colors={{
+            lipColor: mouthRig.lipColor,
+            teethColor: mouthRig.teethColor,
+            tongueColor: mouthRig.tongueColor,
+            interiorColor: mouthRig.interiorColor,
+          }}
+          widthScale={mouthRig.widthScale}
+          upperCurve={mouthRig.upperCurve}
+          lowerCurve={mouthRig.lowerCurve}
+        />
+      ) : part.morph?.primaryPath ? (
+        <svg
+          viewBox={part.morph.viewBox ?? `0 0 ${part.width} ${part.height}`}
+          aria-hidden
+          overflow="visible"
+          className="pointer-events-none h-full w-full"
+        >
+          <path
+            d={part.morph.primaryPath}
+            fill={part.morph.fill ?? "#733f43"}
+            stroke={part.morph.stroke}
+            strokeWidth={part.morph.strokeWidth}
+            strokeLinecap={part.morph.strokeLinecap}
+            strokeLinejoin={part.morph.strokeLinejoin}
+          />
+        </svg>
+      ) : url ? (
         <img
           src={url}
           alt={part.name}
           draggable={false}
           className="pointer-events-none h-full w-full object-contain"
         />
-      )}
+      ) : null}
       <div
         onPointerDown={onPointerDown}
         className={`absolute ${selected ? "outline outline-1 outline-primary/80" : ""}`}
@@ -1590,6 +1650,35 @@ function defaultOverride(slotId: string, part?: CharacterPart): RecorderPartStat
     originX: part?.anchorX ?? 0.5,
     originY: part?.anchorY ?? 0.5,
     opacity: 1,
+  };
+}
+
+function generatedMouthPreviewPart(character: CharacterPreset): CharacterPart | null {
+  const rig = character.mouthRig;
+  if (!rig) return null;
+  const placement = rig.placement;
+  return {
+    id: "__generated-mouth-preview",
+    slotId: "role:mouth",
+    slotName: "Mouth",
+    role: "mouth",
+    name: "Generated mouth",
+    mediaId: "",
+    x: placement.x,
+    y: placement.y,
+    width: placement.width,
+    height: placement.height,
+    rotation: 0,
+    anchorX: 0.5,
+    anchorY: 0.5,
+    pivot: {
+      x: placement.x + placement.width / 2,
+      y: placement.y + placement.height / 2,
+    },
+    motionBehavior: "lipSync",
+    zIndex: placement.zIndex,
+    depth: 0,
+    visible: true,
   };
 }
 

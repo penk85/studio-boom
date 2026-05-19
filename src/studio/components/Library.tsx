@@ -243,8 +243,30 @@ function CharactersTab() {
   const placePlaceholder = () => placeOnTimeline("stub", "Voice Character");
 
   const deleteCharacter = async (id: string) => {
-    if (!confirm("Delete this character? Clips referencing it will keep playing as placeholders."))
-      return;
+    const references = clips.filter(
+      (clip) => isCharacterCompositionClip(clip) && clip.character.characterId === id,
+    );
+    const message =
+      references.length > 0
+        ? [
+            `This character is used by ${references.length} timeline clip${
+              references.length === 1 ? "" : "s"
+            }.`,
+            "",
+            references
+              .slice(0, 5)
+              .map((clip) => `- ${clip.name || clip.id}`)
+              .join("\n"),
+            references.length > 5 ? `...and ${references.length - 5} more.` : "",
+            "",
+            "Deleting it removes the reusable rig from the library. Existing timeline clips will keep their generated source, but they cannot refresh from this character preset until you replace or recreate it.",
+            "",
+            "Delete this character anyway?",
+          ]
+            .filter(Boolean)
+            .join("\n")
+        : "Delete this character from the library?";
+    if (!confirm(message)) return;
     const character = await db.characters.get(id);
     const mediaIds = Array.from(mediaIdsForCharacter(character));
     await db.characters.delete(id);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { eyeStateSetForSlot, resolveEyeState } from "../character/eye-state";
+import { eyeVariantsForSlot, resolveEyeState } from "../character/eye-state";
 import { listCharacterSlots, pickActivePartForSlot } from "../character/character-utils";
 import { visemeAt } from "../lipsync/visemeMap";
 import { composeMotionsAt, deltaFor, poseSwapFor } from "../presets/apply";
@@ -134,7 +134,7 @@ function resolveAppliedState({
   const activeEyeState = resolveEyeState({
     expressionPoseSwap: poseSwapFor(composed, "eye", eyeSlot.id),
     proceduralPoseSwap: "closed",
-    availableStates: eyeStateSetForSlot(eyeSlot),
+    availableStates: new Set(eyeVariantsForSlot(eyeSlot).map((variant) => variant.state)),
   });
   const activeViseme = visemeAt(clip.visemes, t);
 

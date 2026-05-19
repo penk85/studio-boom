@@ -71,9 +71,9 @@ export function MouthCreator({ isOpen, onClose, onSave, initialRig }: MouthCreat
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <div>
-            <h2 className="text-base font-semibold">Choose Mouth Style</h2>
+            <h2 className="text-base font-semibold">Choose Generated Mouth Style</h2>
             <p className="text-[11px] text-muted-foreground">
-              Transform-based rig — all 10 visemes animate smoothly via GSAP.
+              Generated SVG mouth slot — all 10 visemes animate smoothly via GSAP.
             </p>
           </div>
           <button onClick={onClose} className="rounded p-1 hover:bg-panel-2">
