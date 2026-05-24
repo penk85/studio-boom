@@ -1,10 +1,13 @@
 // Inspector — edits the currently selected clip's properties.
 import { useEffect, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
+import { usePlayerStore } from "@hyperframes/studio";
+import { Plus } from "lucide-react";
 import { db } from "../db";
 import { useStudio } from "../store";
 import type {
   CharacterCompositionClip,
+  ClipKeyframeSelection,
   CharacterPreset,
   CompositionClip,
   EditorClip,
@@ -17,18 +20,35 @@ import {
   buildCompositionRepairPrompt,
   validateCompositionSourceHtml,
 } from "../hyperframes/composition-source";
+import {
+  keyframeDisplayValues,
+  sampleClipKeyframedState,
+  type ClipKeyframeDisplayValues,
+  type ClipKeyframeProperty,
+  type ClipMotionCheckpoint,
+} from "../hyperframes/keyframes";
 
-export function Inspector() {
+export function Inspector({ seek }: { seek?: (time: number) => void }) {
   const project = useStudio((s) => s.project);
   const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
   const tracks = useStudio((s) => s.tracks);
   const id = useStudio((s) => s.selectedClipId);
   const update = useStudio((s) => s.updateClip);
   const updateCompositionHtml = useStudio((s) => s.updateCompositionHtml);
+  const selectedKeyframe = useStudio((s) => s.selectedKeyframe);
+  const selectKeyframe = useStudio((s) => s.selectKeyframe);
+  const addClipMotionStep = useStudio((s) => s.addClipMotionStep);
+  const addClipMotionCheckpoint = useStudio((s) => s.addClipMotionCheckpoint);
+  const updateClipKeyframe = useStudio((s) => s.updateClipKeyframe);
+  const moveClipMotionCheckpoint = useStudio((s) => s.moveClipMotionCheckpoint);
+  const renameClipMotionStep = useStudio((s) => s.renameClipMotionStep);
+  const removeClipMotionCheckpoint = useStudio((s) => s.removeClipMotionCheckpoint);
+  const removeClipMotionStep = useStudio((s) => s.removeClipMotionStep);
   const remove = useStudio((s) => s.removeClip);
   const registerCharacterPreset = useStudio((s) => s.registerCharacterPreset);
   const clip = clips.find((c) => c.id === id);
   const characterClip = isCharacterCompositionClip(clip) ? clip : null;
+  const currentTime = usePlayerStore((s) => s.currentTime);
   const characterId = characterClip?.character.characterId;
   const character = useLiveQuery<CharacterPreset | undefined>(
     () => (characterId ? db.characters.get(characterId) : Promise.resolve(undefined)),
@@ -128,6 +148,29 @@ export function Inspector() {
                 update={(patch) => update(clip.id, patch as Partial<TextClip>)}
               />
             )}
+            {clip.kind !== "audio" && (
+              <MotionInspector
+                clip={clip}
+                currentTime={currentTime}
+                selectedKeyframe={selectedKeyframe?.clipId === clip.id ? selectedKeyframe : null}
+                onSelectKeyframe={selectKeyframe}
+                onSeek={(time) => seek?.(clip.start + time)}
+                onAddMotion={(time) => {
+                  const selection = addClipMotionStep(clip.id, time);
+                  if (selection) selectKeyframe(selection);
+                }}
+                onAddCheckpoint={(motionId, time) => {
+                  const selection = addClipMotionCheckpoint(clip.id, motionId, time);
+                  if (selection) selectKeyframe(selection);
+                  return selection;
+                }}
+                onUpdateKeyframe={updateClipKeyframe}
+                onMoveCheckpoint={moveClipMotionCheckpoint}
+                onRenameMotion={renameClipMotionStep}
+                onRemoveCheckpoint={removeClipMotionCheckpoint}
+                onRemoveMotion={removeClipMotionStep}
+              />
+            )}
             {clip.kind === "composition" &&
               clip.compositionId &&
               !isCharacterCompositionClip(clip) && (
@@ -225,6 +268,369 @@ export function Inspector() {
       </div>
     </div>
   );
+}
+
+const MOTION_FEELS = [
+  { id: "gentle", label: "Gentle", ease: "power2.out" },
+  { id: "smooth", label: "Smooth", ease: "power2.inOut" },
+  { id: "steady", label: "Steady", ease: "none" },
+  { id: "snappy", label: "Snappy", ease: "power3.out" },
+  { id: "bounce", label: "Bounce", ease: "back.out" },
+] as const;
+
+function MotionInspector({
+  clip,
+  currentTime,
+  selectedKeyframe,
+  onSelectKeyframe,
+  onSeek,
+  onAddMotion,
+  onAddCheckpoint,
+  onUpdateKeyframe,
+  onMoveCheckpoint,
+  onRenameMotion,
+  onRemoveCheckpoint,
+  onRemoveMotion,
+}: {
+  clip: EditorClip;
+  currentTime: number;
+  selectedKeyframe: ClipKeyframeSelection | null;
+  onSelectKeyframe: (selection: ClipKeyframeSelection | null) => void;
+  onSeek: (time: number) => void;
+  onAddMotion: (time: number) => void;
+  onAddCheckpoint: (motionId: string, time: number) => ClipKeyframeSelection | null;
+  onUpdateKeyframe: (
+    selection: ClipKeyframeSelection,
+    patch: ClipKeyframeDisplayValues & { ease?: string },
+  ) => void;
+  onMoveCheckpoint: (
+    clipId: string,
+    motionId: string,
+    checkpointId: string,
+    time: number,
+  ) => ClipKeyframeSelection | null;
+  onRenameMotion: (clipId: string, motionId: string, name: string) => void;
+  onRemoveCheckpoint: (clipId: string, motionId: string, checkpointId: string) => void;
+  onRemoveMotion: (clipId: string, motionId: string) => void;
+}) {
+  const selectedMotion = selectedKeyframe
+    ? clip.motionSteps.find((motion) => motion.checkpointIds.includes(selectedKeyframe.keyframeId))
+    : null;
+  const selectedCheckpoint =
+    selectedMotion && selectedKeyframe
+      ? selectedMotion.checkpoints.find(
+          (checkpoint) => checkpoint.id === selectedKeyframe.keyframeId,
+        )
+      : null;
+  const selectedCheckpointIndex =
+    selectedMotion && selectedCheckpoint
+      ? selectedMotion.checkpoints.findIndex(
+          (checkpoint) => checkpoint.id === selectedCheckpoint.id,
+        )
+      : -1;
+  const keyframe = selectedKeyframe
+    ? clip.keyframes.find((candidate) => candidate.id === selectedKeyframe.keyframeId)
+    : null;
+  const localPlayheadTime = Math.max(0, Math.min(clip.duration, currentTime - clip.start));
+  const selectedValues = keyframe ? keyframeDisplayValues(clip, keyframe) : {};
+  const previewState = sampleClipKeyframedState(clip, localPlayheadTime);
+  const previewSummary = `${Math.round(previewState.x)}, ${Math.round(previewState.y)}`;
+  const canRemoveCheckpoint =
+    selectedMotion &&
+    selectedCheckpoint &&
+    selectedMotion.checkpoints.length > 2 &&
+    selectedCheckpointIndex > 0 &&
+    selectedCheckpointIndex < selectedMotion.checkpoints.length - 1;
+  const addPointToMotion = (motion: EditorClip["motionSteps"][number]) => {
+    const time = pointTimeForMotion(motion, localPlayheadTime);
+    const selection = onAddCheckpoint(motion.id, time);
+    if (selection) {
+      onSelectKeyframe(selection);
+      onSeek(time);
+    }
+  };
+
+  return (
+    <div className="rounded border border-border bg-panel-2 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="font-semibold uppercase tracking-wider text-muted-foreground">Motion</div>
+        {selectedKeyframe && (
+          <button
+            type="button"
+            onClick={() => onSelectKeyframe(null)}
+            className="rounded border border-border px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-panel hover:text-foreground"
+          >
+            Done
+          </button>
+        )}
+      </div>
+
+      <button
+        type="button"
+        onClick={() => onAddMotion(localPlayheadTime)}
+        className="mb-2 w-full rounded border border-border bg-panel px-2 py-1.5 text-[11px] font-medium text-foreground hover:bg-panel-2"
+        title={`Add motion at ${localPlayheadTime.toFixed(1)}s near ${previewSummary}`}
+      >
+        + Motion
+      </button>
+
+      {clip.motionSteps.length > 0 && (
+        <div className="mb-2 space-y-1">
+          {clip.motionSteps.map((motion) => {
+            const selected = selectedMotion?.id === motion.id;
+            return (
+              <div
+                key={motion.id}
+                className={`rounded border p-2 ${
+                  selected ? "border-primary bg-primary/10" : "border-border bg-panel"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const checkpoint = motion.checkpoints[motion.checkpoints.length - 1];
+                      onSelectKeyframe(selectionForMotionCheckpoint(clip.id, checkpoint));
+                      if (checkpoint) onSeek(checkpoint.time);
+                    }}
+                    className="min-w-0 flex-1 truncate text-left text-[11px] font-medium text-foreground"
+                  >
+                    {motion.label}
+                  </button>
+                  <span className="shrink-0 text-[10px] text-muted-foreground">
+                    {motion.startTime.toFixed(1)}-{motion.endTime.toFixed(1)}s
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => addPointToMotion(motion)}
+                    className="flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:border-primary/60 hover:bg-primary/10 hover:text-foreground"
+                    title={`Add point at ${pointTimeForMotion(motion, localPlayheadTime).toFixed(
+                      1,
+                    )}s`}
+                  >
+                    <Plus size={11} />
+                    Point
+                  </button>
+                </div>
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {motion.checkpoints.map((checkpoint) => (
+                    <button
+                      key={checkpoint.id}
+                      type="button"
+                      onClick={() => {
+                        onSelectKeyframe(selectionForMotionCheckpoint(clip.id, checkpoint));
+                        onSeek(checkpoint.time);
+                      }}
+                      className={`rounded border px-2 py-0.5 text-[10px] ${
+                        selected && selectedKeyframe?.keyframeId === checkpoint.id
+                          ? "border-primary bg-primary/20 text-foreground"
+                          : "border-border text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {checkpoint.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {selectedMotion && selectedCheckpoint && keyframe ? (
+        <div className="space-y-2 rounded border border-border bg-panel p-2">
+          <div className="flex items-center gap-2 text-[11px]">
+            <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+              {selectedMotion.label} {selectedCheckpoint.label}
+            </span>
+            <button
+              type="button"
+              onClick={() => addPointToMotion(selectedMotion)}
+              className="flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-muted-foreground hover:border-primary/60 hover:bg-primary/10 hover:text-foreground"
+            >
+              <Plus size={11} />
+              Point
+            </button>
+            {canRemoveCheckpoint && (
+              <button
+                type="button"
+                onClick={() =>
+                  onRemoveCheckpoint(clip.id, selectedMotion.id, selectedCheckpoint.id)
+                }
+                className="text-muted-foreground hover:text-foreground"
+              >
+                Delete point
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => onRemoveMotion(clip.id, selectedMotion.id)}
+              className="text-destructive"
+            >
+              Delete
+            </button>
+          </div>
+          <Field label="Motion name">
+            <input
+              value={selectedMotion.name ?? ""}
+              placeholder="Motion"
+              onChange={(event) => onRenameMotion(clip.id, selectedMotion.id, event.target.value)}
+              className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+            />
+          </Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Point time (s)">
+              <NumberInput
+                value={selectedCheckpoint.time}
+                min={0}
+                step={0.05}
+                onChange={(value) => {
+                  const selection = onMoveCheckpoint(
+                    clip.id,
+                    selectedMotion.id,
+                    selectedCheckpoint.id,
+                    Math.max(0, Math.min(clip.duration, value)),
+                  );
+                  if (selection) {
+                    onSelectKeyframe(selection);
+                    onSeek(Math.max(0, Math.min(clip.duration, value)));
+                  }
+                }}
+              />
+            </Field>
+            <Field label="Span">
+              <div className="rounded border border-border bg-input px-2 py-1 text-foreground">
+                {selectedMotion.startTime.toFixed(1)}-{selectedMotion.endTime.toFixed(1)}s
+              </div>
+            </Field>
+            <Field label="Feel">
+              <select
+                value={feelForEase(selectedCheckpoint.ease)}
+                onChange={(event) =>
+                  onUpdateKeyframe(
+                    selectionForMotionCheckpointProperty(clip.id, selectedCheckpoint, "position"),
+                    { ease: easeForFeel(event.target.value) },
+                  )
+                }
+                className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+              >
+                {MOTION_FEELS.map((feel) => (
+                  <option key={feel.id} value={feel.id}>
+                    {feel.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </div>
+          <MotionValueFields
+            clip={clip}
+            values={selectedValues}
+            onChange={(property, values) =>
+              onUpdateKeyframe(
+                selectionForMotionCheckpointProperty(clip.id, selectedCheckpoint, property),
+                values,
+              )
+            }
+          />
+        </div>
+      ) : (
+        <div className="rounded border border-dashed border-border p-2 text-center text-[11px] text-muted-foreground">
+          No motion selected.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MotionValueFields({
+  clip,
+  values,
+  onChange,
+}: {
+  clip: EditorClip;
+  values: ClipKeyframeDisplayValues;
+  onChange: (property: ClipKeyframeProperty, values: ClipKeyframeDisplayValues) => void;
+}) {
+  const x = values.x ?? clip.x;
+  const y = values.y ?? clip.y;
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      <Field label="Left">
+        <NumberInput value={x} onChange={(nextX) => onChange("position", { x: nextX, y })} />
+      </Field>
+      <Field label="Top">
+        <NumberInput value={y} onChange={(nextY) => onChange("position", { x, y: nextY })} />
+      </Field>
+      <Field label="Size">
+        <NumberInput
+          value={values.scale ?? 1}
+          min={0.01}
+          step={0.05}
+          onChange={(scale) => onChange("scale", { scale: Math.max(0.01, scale) })}
+        />
+      </Field>
+      <Field label="Angle°">
+        <NumberInput
+          value={values.rotation ?? clip.rotation}
+          step={1}
+          onChange={(rotation) => onChange("rotation", { rotation })}
+        />
+      </Field>
+      <Field label="Visible">
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.05}
+          value={values.opacity ?? clip.opacity}
+          onChange={(event) => onChange("opacity", { opacity: Number(event.target.value) })}
+          className="w-full"
+        />
+      </Field>
+    </div>
+  );
+}
+
+function pointTimeForMotion(motion: EditorClip["motionSteps"][number], localPlayheadTime: number) {
+  const inset = Math.min(0.1, Math.max(0, (motion.endTime - motion.startTime) / 4));
+  const min = motion.startTime + inset;
+  const max = motion.endTime - inset;
+  const fallback = motion.startTime + (motion.endTime - motion.startTime) / 2;
+  const time = max > min ? Math.max(min, Math.min(max, localPlayheadTime)) : fallback;
+  return Math.round(time * 100) / 100;
+}
+
+function selectionForMotionCheckpoint(
+  clipId: string,
+  checkpoint: ClipMotionCheckpoint | undefined,
+): ClipKeyframeSelection | null {
+  if (!checkpoint) return null;
+  return {
+    clipId,
+    keyframeId: checkpoint.id,
+    property: "position",
+  };
+}
+
+function selectionForMotionCheckpointProperty(
+  clipId: string,
+  checkpoint: ClipMotionCheckpoint,
+  property: ClipKeyframeProperty,
+): ClipKeyframeSelection {
+  return {
+    clipId,
+    keyframeId: checkpoint.id,
+    property,
+  };
+}
+
+function feelForEase(ease: string | undefined): string {
+  return MOTION_FEELS.find((feel) => feel.ease === (ease ?? "power2.out"))?.id ?? "gentle";
+}
+
+function easeForFeel(id: string): string {
+  const ease = MOTION_FEELS.find((feel) => feel.id === id)?.ease ?? "power2.out";
+  return ease === "none" ? "" : ease;
 }
 
 function RootElementSourceInspector({ clip, rootHtml }: { clip: EditorClip; rootHtml: string }) {

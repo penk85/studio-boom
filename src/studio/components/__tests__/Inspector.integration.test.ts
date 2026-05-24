@@ -14,4 +14,22 @@ describe("Inspector source integration", () => {
     expect(source).toContain("readRootElementSource(rootHtml, clip.id)");
     expect(source).toContain("readOnly");
   });
+
+  it("shows motion controls for visual clips", () => {
+    const source = readFileSync(inspectorPath, "utf8");
+
+    expect(source).toContain("<MotionInspector");
+    expect(source).toContain("addClipMotionStep(clip.id, time)");
+    expect(source).toContain("addClipMotionCheckpoint(clip.id, motionId, time)");
+    expect(source).toContain("updateClipKeyframe");
+    expect(source).toContain("moveClipMotionCheckpoint");
+    expect(source).toContain("renameClipMotionStep");
+    expect(source).toContain("Motion name");
+    expect(source).toContain("pointTimeForMotion(motion, localPlayheadTime)");
+    expect(source).toContain("Point");
+    expect(source).toContain("onSeek(checkpoint.time)");
+    expect(source).toContain("removeClipMotionCheckpoint");
+    expect(source).toContain("removeClipMotionStep");
+    expect(source).toContain("sampleClipKeyframedState(clip, localPlayheadTime)");
+  });
 });

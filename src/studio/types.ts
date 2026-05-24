@@ -1,8 +1,16 @@
 // Core domain types for the Hyperframes Movie Studio.
 // These shapes are persisted in IndexedDB (via Dexie).
 
-import type { TimelineElement } from "@hyperframes/core";
+import type { Keyframe, TimelineElement } from "@hyperframes/core";
 import { parseStudioHtml } from "./hyperframes/html";
+import {
+  deriveClipMotionSteps,
+  readAllClipKeyframesFromHtml,
+  readAllClipMotionStepMetasFromHtml,
+  type ClipKeyframeProperty,
+  type ClipMotionStep,
+  type ClipMotionStepMeta,
+} from "./hyperframes/keyframes";
 
 export type ID = string;
 
@@ -448,6 +456,14 @@ export interface ClipEditorMeta {
   mediaId?: string;
 }
 
+export type { ClipKeyframeProperty, ClipMotionStep, ClipMotionStepMeta };
+
+export interface ClipKeyframeSelection {
+  clipId: string;
+  keyframeId: string;
+  property: ClipKeyframeProperty;
+}
+
 /** UI track metadata — names, kinds, lock/mute state. */
 export interface TrackMeta {
   id: string;
@@ -496,6 +512,9 @@ export interface EditorClip {
   rotation: number;
   opacity: number;
   zIndex: number;
+  keyframes: Keyframe[];
+  motionStepMetas: ClipMotionStepMeta[];
+  motionSteps: ClipMotionStep[];
   // Text-specific
   content?: string;
   color?: string;
@@ -533,6 +552,8 @@ export function isCharacterCompositionClip(
 export function deriveEditorClips(project: Project): EditorClip[] {
   if (!project.hf.rootHtml) return [];
   const { elements } = parseStudioHtml(project.hf.rootHtml);
+  const keyframesByClipId = readAllClipKeyframesFromHtml(project.hf.rootHtml);
+  const motionStepMetasByClipId = readAllClipMotionStepMetasFromHtml(project.hf.rootHtml);
   return elements.map((el: TimelineElement) => {
     const meta = project.editorMeta.clips[el.id] ?? {};
     const compositionId =
@@ -564,7 +585,9 @@ export function deriveEditorClips(project: Project): EditorClip[] {
     const width = (mediaEl.sourceWidth ?? 0) * scale;
     const height = (mediaEl.sourceHeight ?? 0) * scale;
 
-    return {
+    const keyframes = keyframesByClipId.get(el.id) ?? [];
+    const motionStepMetas = motionStepMetasByClipId.get(el.id) ?? [];
+    const clip = {
       id: el.id,
       name: meta.name ?? el.name ?? "",
       kind,
@@ -579,6 +602,9 @@ export function deriveEditorClips(project: Project): EditorClip[] {
       rotation: studioEl.rotation ?? 0,
       opacity: el.opacity ?? 1,
       zIndex: el.zIndex,
+      keyframes,
+      motionStepMetas,
+      motionSteps: [],
       content: textEl.content,
       color: textEl.color,
       fontSize: textEl.fontSize,
@@ -589,6 +615,11 @@ export function deriveEditorClips(project: Project): EditorClip[] {
       compositionKind: meta.compositionKind,
       character: meta.character,
       mediaId: meta.mediaId,
+    } satisfies EditorClip;
+
+    return {
+      ...clip,
+      motionSteps: deriveClipMotionSteps(clip, motionStepMetas),
     };
   });
 }

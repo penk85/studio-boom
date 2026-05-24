@@ -15,7 +15,13 @@ import {
 import { resolveIframe, useElementPicker, type PickedElement } from "@hyperframes/studio";
 import { useStudio } from "../store";
 import type { HyperframesPlayerElement } from "../../hyperframes-player";
-import { deriveEditorClips, type EditorClip } from "../types";
+import {
+  deriveEditorClips,
+  type ClipKeyframeProperty,
+  type ClipKeyframeSelection,
+  type EditorClip,
+} from "../types";
+import { sampleClipKeyframedState } from "../hyperframes/keyframes";
 import {
   commitElementRect,
   commitElementPosition,
@@ -102,7 +108,9 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const project = useStudio((s) => s.project);
   const selectClip = useStudio((s) => s.selectClip);
   const selectedClipId = useStudio((s) => s.selectedClipId);
+  const selectedKeyframe = useStudio((s) => s.selectedKeyframe);
   const updateClip = useStudio((s) => s.updateClip);
+  const updateClipKeyframe = useStudio((s) => s.updateClipKeyframe);
   const updateRootHtml = useStudio((s) => s.updateRootHtml);
   const checkpointHistory = useStudio((s) => s.checkpointHistory);
   const bringClipForward = useStudio((s) => s.bringClipForward);
@@ -135,6 +143,15 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     () => getStageEditableClip(selectedClip, clips),
     [clips, selectedClip],
   );
+  const selectedMotionEndpoint = useMemo(
+    () => getSelectedMotionEndpoint(stageEditableClip, selectedKeyframe),
+    [selectedKeyframe, stageEditableClip],
+  );
+  const selectedKeyframedClip = useMemo(
+    () => getSelectedKeyframedClip(stageEditableClip, selectedKeyframe),
+    [selectedKeyframe, stageEditableClip],
+  );
+  const activeHandleClip = selectedKeyframedClip ?? stageEditableClip;
   const outlinedClip = useMemo(() => {
     if (!stageEditableClip) return null;
     if (drag?.type === "move" && drag.clipId === stageEditableClip.id) {
@@ -143,8 +160,8 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     if (drag?.type === "resize" && drag.clipId === stageEditableClip.id) {
       return { ...stageEditableClip, ...drag.previewClip };
     }
-    return stageEditableClip;
-  }, [drag, stageEditableClip]);
+    return selectedKeyframedClip ?? stageEditableClip;
+  }, [drag, selectedKeyframedClip, stageEditableClip]);
   const stageGeometry = (() => {
     if (!project || !stageShellRef.current) return null;
     const iframe = resolveIframe(playerRef.current);
@@ -172,7 +189,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const previewRotation =
     drag?.type === "rotate" && stageEditableClip && drag.clipId === stageEditableClip.id
       ? drag.previewRotation
-      : (stageEditableClip?.rotation ?? 0);
+      : (activeHandleClip?.rotation ?? 0);
   const moveHandleStyle = outlineRect
     ? getMoveHandleStyle(outlineRect, stageShellRef.current)
     : null;
@@ -275,13 +292,14 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     if (drag) return;
 
     const clipId = stageEditableClip.id;
+    const fallbackClip = activeHandleClip ?? stageEditableClip;
     let stopped = false;
     const measure = async () => {
       if (stopped) return;
       const nextRect = await getRenderedPixelCompositionRect(
         iframeRef.current,
         clipId,
-        toCompositionRect(stageEditableClip),
+        toCompositionRect(fallbackClip),
       );
       if (stopped) return;
       setRenderedElementRect((currentRect) =>
@@ -295,7 +313,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       stopped = true;
       window.clearInterval(interval);
     };
-  }, [drag, iframeRef, stageEditableClip, resolvedHtml]);
+  }, [activeHandleClip, drag, iframeRef, selectedKeyframe, stageEditableClip, resolvedHtml]);
 
   // Element picker — click in player iframe → select clip.
   const { pickedElement, enablePick, isPickMode } = useElementPicker(iframeRef, {
@@ -460,7 +478,17 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         );
         const finalRotation = roundRotationDegrees(preview.previewRotation);
         commitElementRotation(iframeRef.current, currentDrag.clipId, finalRotation);
-        updateClip(currentDrag.clipId, { rotation: finalRotation });
+        const keyframeTarget = getStageKeyframeTarget(
+          currentDrag.clipId,
+          "rotation",
+          selectedKeyframe,
+          clips,
+        );
+        if (keyframeTarget) {
+          updateClipKeyframe(keyframeTarget.selection, { rotation: finalRotation });
+        } else {
+          updateClip(currentDrag.clipId, { rotation: finalRotation });
+        }
         setRenderedElementRect(null);
         clearDrag();
         return;
@@ -476,7 +504,20 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         const nextX = currentDrag.startX + delta.x;
         const nextY = currentDrag.startY + delta.y;
         commitElementPosition(iframeRef.current, currentDrag.clipId, nextX, nextY);
-        updateClip(currentDrag.clipId, { x: nextX, y: nextY });
+        const keyframeTarget = getStageKeyframeTarget(
+          currentDrag.clipId,
+          "position",
+          selectedKeyframe,
+          clips,
+        );
+        if (keyframeTarget) {
+          updateClipKeyframe(keyframeTarget.selection, {
+            x: nextX,
+            y: nextY,
+          });
+        } else {
+          updateClip(currentDrag.clipId, { x: nextX, y: nextY });
+        }
         clearDrag();
         return;
       }
@@ -489,13 +530,26 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         event.shiftKey,
       );
       const finalClip = roundCompositionRect(previewClip);
-      commitElementRect(iframeRef.current, currentDrag.clipId, finalClip);
-      updateClip(currentDrag.clipId, {
-        x: finalClip.x,
-        y: finalClip.y,
-        width: finalClip.width,
-        height: finalClip.height,
-      });
+      const keyframeTarget = getStageKeyframeTarget(
+        currentDrag.clipId,
+        "scale",
+        selectedKeyframe,
+        clips,
+      );
+      if (keyframeTarget) {
+        previewElementRect(iframeRef.current, currentDrag.clipId, finalClip);
+        updateClipKeyframe(keyframeTarget.selection, {
+          scale: scaleForKeyframedResize(keyframeTarget.clip, finalClip),
+        });
+      } else {
+        commitElementRect(iframeRef.current, currentDrag.clipId, finalClip);
+        updateClip(currentDrag.clipId, {
+          x: finalClip.x,
+          y: finalClip.y,
+          width: finalClip.width,
+          height: finalClip.height,
+        });
+      }
       setRenderedElementRect(null);
       clearDrag();
     };
@@ -543,10 +597,19 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       window.removeEventListener("pointercancel", cancelPointerDrag);
       window.removeEventListener("keydown", cancelKeyboardDrag);
     };
-  }, [activeDragKey, clearDrag, iframeRef, queueDragPreview, updateClip]);
+  }, [
+    activeDragKey,
+    clearDrag,
+    clips,
+    iframeRef,
+    queueDragPreview,
+    selectedKeyframe,
+    updateClip,
+    updateClipKeyframe,
+  ]);
 
   const startResize = (handle: ResizeHandle, event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (!stageEditableClip || !stageShellRef.current) return;
+    if (!stageEditableClip || !activeHandleClip || !stageShellRef.current) return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -557,7 +620,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       project.hf.height,
       iframe?.getBoundingClientRect() ?? null,
     );
-    const startClip = toCompositionRect(stageEditableClip);
+    const startClip = toCompositionRect(activeHandleClip);
     const startHandleRect = renderedElementRect
       ? domRectToCompositionRect(renderedElementRect)
       : startClip;
@@ -573,13 +636,13 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       startHandleRect,
       previewClip: startClip,
       previewHandleRect: startHandleRect,
-      rotation: stageEditableClip.rotation,
+      rotation: activeHandleClip.rotation,
       geometry,
     });
   };
 
   const startRotate = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (!stageEditableClip || !stageShellRef.current || !outlineRect) return;
+    if (!stageEditableClip || !activeHandleClip || !stageShellRef.current || !outlineRect) return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -601,9 +664,9 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       centerClientX,
       centerClientY,
       lastPointerAngle: pointerAngle,
-      startRotation: stageEditableClip.rotation,
-      rawRotation: stageEditableClip.rotation,
-      previewRotation: stageEditableClip.rotation,
+      startRotation: activeHandleClip.rotation,
+      rawRotation: activeHandleClip.rotation,
+      previewRotation: activeHandleClip.rotation,
     });
   };
 
@@ -657,11 +720,29 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         nudgeCheckpointedRef.current = true;
       }
 
-      const nextX = Math.round(currentClip.x + delta.x);
-      const nextY = Math.round(currentClip.y + delta.y);
+      const keyframeTarget = getStageKeyframeTarget(
+        currentClip.id,
+        "position",
+        useStudio.getState().selectedKeyframe,
+        deriveEditorClips(useStudio.getState().project!),
+      );
+      const keyframedState = keyframeTarget
+        ? sampleClipKeyframedState(keyframeTarget.clip, keyframeTarget.time)
+        : null;
+      const nextX = Math.round((keyframedState?.x ?? currentClip.x) + delta.x);
+      const nextY = Math.round((keyframedState?.y ?? currentClip.y) + delta.y);
       commitElementPosition(iframeRef.current, currentClip.id, nextX, nextY);
-      updateClip(currentClip.id, { x: nextX, y: nextY }, { history: false });
-      stageEditableClipRef.current = { ...currentClip, x: nextX, y: nextY };
+      if (keyframeTarget) {
+        updateClipKeyframe(keyframeTarget.selection, { x: nextX, y: nextY }, { history: false });
+        const nextProject = useStudio.getState().project;
+        const nextClip = nextProject
+          ? deriveEditorClips(nextProject).find((candidate) => candidate.id === currentClip.id)
+          : null;
+        stageEditableClipRef.current = nextClip ?? currentClip;
+      } else {
+        updateClip(currentClip.id, { x: nextX, y: nextY }, { history: false });
+        stageEditableClipRef.current = { ...currentClip, x: nextX, y: nextY };
+      }
       setRenderedElementRect(null);
 
       if (nudgeResetTimerRef.current !== null) window.clearTimeout(nudgeResetTimerRef.current);
@@ -684,6 +765,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     sendClipBackward,
     sendClipToBack,
     updateClip,
+    updateClipKeyframe,
   ]);
 
   if (!project) return null;
@@ -733,7 +815,18 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           <SelectionCorner handle="se" onPointerDown={startResize} />
         </div>
       )}
-      {outlineRect && rotateHandleStyle && stageEditableClip && (
+      {outlineRect && selectedMotionEndpoint && (
+        <div
+          className="pointer-events-none absolute z-40 rounded-full border border-primary/40 bg-panel/95 px-2 py-0.5 text-[11px] font-medium text-foreground shadow-[0_2px_10px_rgba(0,0,0,0.28)]"
+          style={{
+            left: outlineRect.left,
+            top: Math.max(4, outlineRect.top - 28),
+          }}
+        >
+          {selectedMotionEndpoint.motion.label} {selectedMotionEndpoint.endpointLabel}
+        </div>
+      )}
+      {outlineRect && rotateHandleStyle && stageEditableClip && activeHandleClip && (
         <button
           type="button"
           data-stage-rotate-handle=""
@@ -758,7 +851,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           {Math.round(previewRotation)}°
         </div>
       )}
-      {outlineRect && moveHandleStyle && stageEditableClip && (
+      {outlineRect && moveHandleStyle && stageEditableClip && activeHandleClip && (
         <button
           ref={moveHandleRef}
           type="button"
@@ -772,7 +865,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
             cursor: drag ? "grabbing" : "grab",
           }}
           onPointerDown={(event) => {
-            if (!stageEditableClip || !stageShellRef.current) return;
+            if (!stageEditableClip || !activeHandleClip || !stageShellRef.current) return;
             event.preventDefault();
             event.stopPropagation();
             event.currentTarget.setPointerCapture(event.pointerId);
@@ -789,10 +882,10 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
               pointerId: event.pointerId,
               startClientX: event.clientX,
               startClientY: event.clientY,
-              startX: stageEditableClip.x,
-              startY: stageEditableClip.y,
-              previewX: stageEditableClip.x,
-              previewY: stageEditableClip.y,
+              startX: activeHandleClip.x,
+              startY: activeHandleClip.y,
+              previewX: activeHandleClip.x,
+              previewY: activeHandleClip.y,
               geometry,
             });
           }}
@@ -840,6 +933,76 @@ function getStageEditableClip(selectedClip: EditorClip | null, clips: EditorClip
   if (!selectedClip) return null;
   if (selectedClip.kind === "audio") return null;
   return selectedClip;
+}
+
+function getStageKeyframeTarget(
+  clipId: string,
+  property: ClipKeyframeProperty,
+  selectedKeyframe: ClipKeyframeSelection | null,
+  clips: EditorClip[],
+) {
+  if (!selectedKeyframe || selectedKeyframe.clipId !== clipId) return null;
+  const clip = clips.find((candidate) => candidate.id === clipId);
+  if (!clip || clip.kind === "audio") return null;
+  const keyframe = clip.keyframes.find((candidate) => candidate.id === selectedKeyframe.keyframeId);
+  if (!keyframe) return null;
+  return {
+    clip,
+    time: keyframe.time,
+    property,
+    selection: {
+      clipId,
+      keyframeId: keyframe.id,
+      property,
+    },
+  };
+}
+
+function getSelectedMotionEndpoint(
+  clip: EditorClip | null,
+  selectedKeyframe: ClipKeyframeSelection | null,
+) {
+  if (!clip || !selectedKeyframe || selectedKeyframe.clipId !== clip.id) return null;
+  const motion = clip.motionSteps.find((candidate) =>
+    candidate.checkpointIds.includes(selectedKeyframe.keyframeId),
+  );
+  if (!motion) return null;
+  const checkpoint = motion.checkpoints.find(
+    (candidate) => candidate.id === selectedKeyframe.keyframeId,
+  );
+  return {
+    motion,
+    endpointLabel: checkpoint?.label ?? "Point",
+  };
+}
+
+function getSelectedKeyframedClip(
+  clip: EditorClip | null,
+  selectedKeyframe: ClipKeyframeSelection | null,
+): EditorClip | null {
+  if (!clip || !selectedKeyframe || selectedKeyframe.clipId !== clip.id) return null;
+  const keyframe = clip.keyframes.find((candidate) => candidate.id === selectedKeyframe.keyframeId);
+  if (!keyframe) return null;
+  const state = sampleClipKeyframedState(clip, keyframe.time);
+  const scale = Math.max(0.01, state.scale);
+  return {
+    ...clip,
+    x: state.x,
+    y: state.y,
+    width: clip.width * scale,
+    height: clip.height * scale,
+    rotation: state.rotation,
+    opacity: state.opacity,
+  };
+}
+
+function scaleForKeyframedResize(
+  clip: Pick<EditorClip, "width" | "height">,
+  rect: CompositionRect,
+): number {
+  const scaleX = rect.width / Math.max(1, clip.width);
+  const scaleY = rect.height / Math.max(1, clip.height);
+  return Math.max(0.01, Math.round(((scaleX + scaleY) / 2) * 1000) / 1000);
 }
 
 function getPickedClipId(

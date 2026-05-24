@@ -31,6 +31,10 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(source).toContain("commitElementRotation(iframeRef.current");
     expect(source).toContain("updateClip(currentDrag.clipId, { x: nextX, y: nextY })");
     expect(source).toContain("updateClip(currentDrag.clipId, { rotation: finalRotation })");
+    expect(source).toContain("updateClipKeyframe(");
+    expect(source).toContain("getStageKeyframeTarget(");
+    expect(source).toContain("getSelectedMotionEndpoint(");
+    expect(source).toContain("scaleForKeyframedResize(");
     expect(source).toContain("keyboardNudgeDelta(");
     expect(source).toContain(
       "updateClip(currentClip.id, { x: nextX, y: nextY }, { history: false })",

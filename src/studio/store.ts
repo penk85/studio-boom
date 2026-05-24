@@ -9,6 +9,8 @@ import type {
   CharacterClipMeta,
   CompositionClip,
   CharacterPreset,
+  ClipKeyframeProperty,
+  ClipKeyframeSelection,
   ClipEditorMeta,
   EditorClip,
   HyperFramesProject,
@@ -31,6 +33,25 @@ import {
   type StudioTimelineElement,
 } from "./hyperframes/html";
 import { normalizeNativeHyperframesHtml } from "./hyperframes/native";
+import {
+  addMotionCheckpointToClip,
+  addMotionStepToClip,
+  moveMotionCheckpoint,
+  moveMotionStep,
+  moveKeyframeProperty,
+  removeMotionCheckpoint,
+  removeMotionStep,
+  removeKeyframeProperty,
+  renameMotionStep,
+  setClipMotionModelInRootHtml,
+  setClipKeyframesInRootHtml,
+  storedValuesFromDisplayValues,
+  syncRootKeyframesHtml,
+  updateKeyframeProperty,
+  upsertKeyframeProperty,
+  type ClipKeyframeDisplayValues,
+  type ClipMotionEndpoint,
+} from "./hyperframes/keyframes";
 import { validateCompositionSourceHtml } from "./hyperframes/composition-source";
 import {
   createRootCompositionHtml,
@@ -170,10 +191,12 @@ function refreshProjectAssets(
 }
 
 function normalizeProjectRootHtml(hf: HyperFramesProject, html: string): string {
-  return normalizeNativeHyperframesHtml(html, {
-    width: hf.width,
-    height: hf.height,
-  });
+  return syncRootKeyframesHtml(
+    normalizeNativeHyperframesHtml(html, {
+      width: hf.width,
+      height: hf.height,
+    }),
+  );
 }
 
 function assertValidCompositionHtml(
@@ -383,15 +406,16 @@ export function syncProjectRenderTrackIndices(project: Project): Project {
     }
   }
 
-  if (!changed) return project;
+  const normalizedRootHtml = normalizeProjectRootHtml(
+    project.hf,
+    "<!DOCTYPE html>\n" + doc.documentElement.outerHTML,
+  );
+  if (!changed && normalizedRootHtml === project.hf.rootHtml) return project;
   return {
     ...project,
     hf: {
       ...project.hf,
-      rootHtml: normalizeProjectRootHtml(
-        project.hf,
-        "<!DOCTYPE html>\n" + doc.documentElement.outerHTML,
-      ),
+      rootHtml: normalizedRootHtml,
     },
   };
 }
@@ -527,6 +551,16 @@ function isVisualLayerClip(clip: EditorClip): boolean {
   return clip.kind !== "audio";
 }
 
+function hasDisplayValuePatch(patch: ClipKeyframeValuePatch): boolean {
+  return (
+    patch.x !== undefined ||
+    patch.y !== undefined ||
+    patch.scale !== undefined ||
+    patch.rotation !== undefined ||
+    patch.opacity !== undefined
+  );
+}
+
 function resolveNextLayerIndex(
   currentIndex: number,
   layerCount: number,
@@ -551,11 +585,16 @@ type ModalState = null | { type: "character-editor"; characterId: string } | { t
 interface HistoryEntry {
   project: Project;
   selectedClipId: string | null;
+  selectedKeyframe: ClipKeyframeSelection | null;
 }
 
 export interface ProjectMutationOptions {
   history?: boolean;
 }
+
+export type ClipKeyframeValuePatch = ClipKeyframeDisplayValues & {
+  ease?: string;
+};
 
 interface StudioState {
   project: Project | null;
@@ -567,6 +606,7 @@ interface StudioState {
   mediaAssets: Map<string, MediaAsset>;
 
   selectedClipId: string | null;
+  selectedKeyframe: ClipKeyframeSelection | null;
   zoom: number;
   historyPast: HistoryEntry[];
   historyFuture: HistoryEntry[];
@@ -580,6 +620,7 @@ interface StudioState {
   saveProject: () => Promise<void>;
 
   selectClip: (id: string | null) => void;
+  selectKeyframe: (selection: ClipKeyframeSelection | null) => void;
   checkpointHistory: () => void;
   undo: () => void;
   redo: () => void;
@@ -591,6 +632,65 @@ interface StudioState {
   sendClipBackward: (id: string) => void;
   bringClipToFront: (id: string) => void;
   sendClipToBack: (id: string) => void;
+  upsertClipKeyframe: (
+    clipId: string,
+    property: ClipKeyframeProperty,
+    time: number,
+    values: ClipKeyframeValuePatch,
+    options?: ProjectMutationOptions,
+  ) => string | null;
+  updateClipKeyframe: (
+    selection: ClipKeyframeSelection,
+    patch: ClipKeyframeValuePatch,
+    options?: ProjectMutationOptions,
+  ) => void;
+  moveClipKeyframe: (
+    selection: ClipKeyframeSelection,
+    time: number,
+    options?: ProjectMutationOptions,
+  ) => void;
+  removeClipKeyframe: (selection: ClipKeyframeSelection, options?: ProjectMutationOptions) => void;
+  addClipMotionStep: (
+    clipId: string,
+    time: number,
+    options?: ProjectMutationOptions,
+  ) => ClipKeyframeSelection | null;
+  addClipMotionCheckpoint: (
+    clipId: string,
+    motionId: string,
+    time: number,
+    options?: ProjectMutationOptions,
+  ) => ClipKeyframeSelection | null;
+  moveClipMotionCheckpoint: (
+    clipId: string,
+    motionId: string,
+    checkpointId: string,
+    time: number,
+    options?: ProjectMutationOptions,
+  ) => ClipKeyframeSelection | null;
+  removeClipMotionCheckpoint: (
+    clipId: string,
+    motionId: string,
+    checkpointId: string,
+    options?: ProjectMutationOptions,
+  ) => void;
+  moveClipMotionStep: (
+    clipId: string,
+    motionId: string,
+    patch: { startTime?: number; endTime?: number; selectEndpoint?: ClipMotionEndpoint },
+    options?: ProjectMutationOptions,
+  ) => ClipKeyframeSelection | null;
+  renameClipMotionStep: (
+    clipId: string,
+    motionId: string,
+    name: string,
+    options?: ProjectMutationOptions,
+  ) => void;
+  removeClipMotionStep: (
+    clipId: string,
+    motionId: string,
+    options?: ProjectMutationOptions,
+  ) => void;
 
   /** Directly replace rootHtml (used by Stage's useElementPicker onSyncFiles). */
   updateRootHtml: (html: string, options?: ProjectMutationOptions) => void;
@@ -673,6 +773,7 @@ function createHistoryEntry(state: StudioState): HistoryEntry | null {
   return {
     project: cloneProject(state.project),
     selectedClipId: state.selectedClipId,
+    selectedKeyframe: state.selectedKeyframe,
   };
 }
 
@@ -691,6 +792,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   motionPresets: new Map(),
   mediaAssets: new Map(),
   selectedClipId: null,
+  selectedKeyframe: null,
   zoom: 60,
   historyPast: [],
   historyFuture: [],
@@ -737,6 +839,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       motionPresets,
       mediaAssets,
       selectedClipId: null,
+      selectedKeyframe: null,
       historyPast: [],
       historyFuture: [],
     });
@@ -752,6 +855,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       motionPresets: new Map(),
       mediaAssets: new Map(),
       selectedClipId: null,
+      selectedKeyframe: null,
       historyPast: [],
       historyFuture: [],
     });
@@ -765,7 +869,18 @@ export const useStudio = create<StudioState>((set, get) => ({
   },
 
   selectClip(id) {
-    set({ selectedClipId: id });
+    const current = get().selectedKeyframe;
+    set({
+      selectedClipId: id,
+      selectedKeyframe: id && current?.clipId === id ? current : null,
+    });
+  },
+
+  selectKeyframe(selection) {
+    set({
+      selectedKeyframe: selection,
+      selectedClipId: selection?.clipId ?? get().selectedClipId,
+    });
   },
 
   checkpointHistory() {
@@ -789,6 +904,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       project,
       tracks: project.editorMeta.tracks,
       selectedClipId: previous.selectedClipId,
+      selectedKeyframe: previous.selectedKeyframe,
       historyPast: state.historyPast.slice(0, -1),
       historyFuture: trimHistory([...state.historyFuture, current]),
     });
@@ -806,6 +922,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       project,
       tracks: project.editorMeta.tracks,
       selectedClipId: next.selectedClipId,
+      selectedKeyframe: next.selectedKeyframe,
       historyPast: trimHistory([...state.historyPast, current]),
       historyFuture: state.historyFuture.slice(0, -1),
     });
@@ -1072,6 +1189,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     set({
       project: newProject,
       selectedClipId: state.selectedClipId === id ? null : state.selectedClipId,
+      selectedKeyframe: state.selectedKeyframe?.clipId === id ? null : state.selectedKeyframe,
     });
     scheduleSave(get);
 
@@ -1114,6 +1232,360 @@ export const useStudio = create<StudioState>((set, get) => ({
     applyClipLayerMove(id, "back", get, set);
   },
 
+  upsertClipKeyframe(clipId, property, time, values, options) {
+    const state = get();
+    const p = state.project;
+    if (!p) return null;
+    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    if (!clip || clip.kind === "audio") return null;
+    if (options?.history !== false) get().checkpointHistory();
+
+    const result = upsertKeyframeProperty(clip.keyframes, {
+      property,
+      time,
+      duration: clip.duration,
+      values: storedValuesFromDisplayValues(clip, property, values),
+      ease: values.ease,
+      createId: uid,
+    });
+    if (!result.keyframeId) return null;
+
+    const rootHtml = setClipKeyframesInRootHtml(p.hf.rootHtml, clipId, result.keyframes);
+    const selectedKeyframe: ClipKeyframeSelection = {
+      clipId,
+      keyframeId: result.keyframeId,
+      property,
+    };
+    set({
+      project: {
+        ...p,
+        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
+        updatedAt: Date.now(),
+      },
+      selectedClipId: clipId,
+      selectedKeyframe,
+    });
+    scheduleSave(get);
+    return result.keyframeId;
+  },
+
+  updateClipKeyframe(selection, patch, options) {
+    const state = get();
+    const p = state.project;
+    if (!p) return;
+    const clip = deriveEditorClips(p).find((candidate) => candidate.id === selection.clipId);
+    if (!clip || clip.kind === "audio") return;
+    if (options?.history !== false) get().checkpointHistory();
+
+    const result = updateKeyframeProperty(clip.keyframes, {
+      keyframeId: selection.keyframeId,
+      property: selection.property,
+      duration: clip.duration,
+      values: hasDisplayValuePatch(patch)
+        ? storedValuesFromDisplayValues(clip, selection.property, patch)
+        : undefined,
+      ease: patch.ease,
+    });
+    if (!result.keyframeId) return;
+
+    const rootHtml = setClipKeyframesInRootHtml(p.hf.rootHtml, selection.clipId, result.keyframes);
+    set({
+      project: {
+        ...p,
+        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
+        updatedAt: Date.now(),
+      },
+      selectedClipId: selection.clipId,
+      selectedKeyframe: selection,
+    });
+    scheduleSave(get);
+  },
+
+  moveClipKeyframe(selection, time, options) {
+    const state = get();
+    const p = state.project;
+    if (!p) return;
+    const clip = deriveEditorClips(p).find((candidate) => candidate.id === selection.clipId);
+    if (!clip || clip.kind === "audio") return;
+    if (options?.history !== false) get().checkpointHistory();
+
+    const result = moveKeyframeProperty(clip.keyframes, {
+      keyframeId: selection.keyframeId,
+      property: selection.property,
+      time,
+      duration: clip.duration,
+    });
+    if (!result.keyframeId) return;
+
+    const rootHtml = setClipKeyframesInRootHtml(p.hf.rootHtml, selection.clipId, result.keyframes);
+    const selectedKeyframe: ClipKeyframeSelection = {
+      ...selection,
+      keyframeId: result.keyframeId,
+    };
+    set({
+      project: {
+        ...p,
+        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
+        updatedAt: Date.now(),
+      },
+      selectedClipId: selection.clipId,
+      selectedKeyframe,
+    });
+    scheduleSave(get);
+  },
+
+  removeClipKeyframe(selection, options) {
+    const state = get();
+    const p = state.project;
+    if (!p) return;
+    const clip = deriveEditorClips(p).find((candidate) => candidate.id === selection.clipId);
+    if (!clip || clip.kind === "audio") return;
+    if (options?.history !== false) get().checkpointHistory();
+
+    const keyframes = removeKeyframeProperty(
+      clip.keyframes,
+      selection.keyframeId,
+      selection.property,
+    );
+    const rootHtml = setClipKeyframesInRootHtml(p.hf.rootHtml, selection.clipId, keyframes);
+    set({
+      project: {
+        ...p,
+        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
+        updatedAt: Date.now(),
+      },
+      selectedKeyframe: null,
+    });
+    scheduleSave(get);
+  },
+
+  addClipMotionStep(clipId, time, options) {
+    const state = get();
+    const p = state.project;
+    if (!p) return null;
+    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    if (!clip || clip.kind === "audio") return null;
+    if (options?.history !== false) get().checkpointHistory();
+
+    const result = addMotionStepToClip(clip, {
+      time,
+      createId: uid,
+    });
+    if (!result.selection) return null;
+
+    const rootHtml = setClipMotionModelInRootHtml(
+      p.hf.rootHtml,
+      clipId,
+      result.keyframes,
+      result.motionSteps,
+    );
+    const selectedKeyframe: ClipKeyframeSelection = {
+      clipId,
+      keyframeId: result.selection.keyframeId,
+      property: result.selection.property,
+    };
+    set({
+      project: {
+        ...p,
+        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
+        updatedAt: Date.now(),
+      },
+      selectedClipId: clipId,
+      selectedKeyframe,
+    });
+    scheduleSave(get);
+    return selectedKeyframe;
+  },
+
+  addClipMotionCheckpoint(clipId, motionId, time, options) {
+    const state = get();
+    const p = state.project;
+    if (!p) return null;
+    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    if (!clip || clip.kind === "audio") return null;
+    if (options?.history !== false) get().checkpointHistory();
+
+    const result = addMotionCheckpointToClip(clip, {
+      motionId,
+      time,
+      createId: uid,
+    });
+    if (!result.selection) return null;
+
+    const rootHtml = setClipMotionModelInRootHtml(
+      p.hf.rootHtml,
+      clipId,
+      result.keyframes,
+      result.motionSteps,
+    );
+    const selectedKeyframe: ClipKeyframeSelection = {
+      clipId,
+      keyframeId: result.selection.keyframeId,
+      property: result.selection.property,
+    };
+    set({
+      project: {
+        ...p,
+        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
+        updatedAt: Date.now(),
+      },
+      selectedClipId: clipId,
+      selectedKeyframe,
+    });
+    scheduleSave(get);
+    return selectedKeyframe;
+  },
+
+  moveClipMotionStep(clipId, motionId, patch, options) {
+    const state = get();
+    const p = state.project;
+    if (!p) return null;
+    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    if (!clip || clip.kind === "audio") return null;
+    if (options?.history !== false) get().checkpointHistory();
+
+    const result = moveMotionStep(clip, { motionId, ...patch });
+    if (!result.selection) return null;
+
+    const rootHtml = setClipMotionModelInRootHtml(
+      p.hf.rootHtml,
+      clipId,
+      result.keyframes,
+      result.motionSteps,
+    );
+    const selectedKeyframe: ClipKeyframeSelection = {
+      clipId,
+      keyframeId: result.selection.keyframeId,
+      property: result.selection.property,
+    };
+    set({
+      project: {
+        ...p,
+        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
+        updatedAt: Date.now(),
+      },
+      selectedClipId: clipId,
+      selectedKeyframe,
+    });
+    scheduleSave(get);
+    return selectedKeyframe;
+  },
+
+  moveClipMotionCheckpoint(clipId, motionId, checkpointId, time, options) {
+    const state = get();
+    const p = state.project;
+    if (!p) return null;
+    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    if (!clip || clip.kind === "audio") return null;
+    if (options?.history !== false) get().checkpointHistory();
+
+    const result = moveMotionCheckpoint(clip, { motionId, checkpointId, time });
+    if (!result.selection) return null;
+
+    const rootHtml = setClipMotionModelInRootHtml(
+      p.hf.rootHtml,
+      clipId,
+      result.keyframes,
+      result.motionSteps,
+    );
+    const selectedKeyframe: ClipKeyframeSelection = {
+      clipId,
+      keyframeId: result.selection.keyframeId,
+      property: result.selection.property,
+    };
+    set({
+      project: {
+        ...p,
+        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
+        updatedAt: Date.now(),
+      },
+      selectedClipId: clipId,
+      selectedKeyframe,
+    });
+    scheduleSave(get);
+    return selectedKeyframe;
+  },
+
+  renameClipMotionStep(clipId, motionId, name, options) {
+    const state = get();
+    const p = state.project;
+    if (!p) return;
+    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    if (!clip || clip.kind === "audio") return;
+    if (options?.history !== false) get().checkpointHistory();
+
+    const motionSteps = renameMotionStep(clip, motionId, name);
+    const rootHtml = setClipMotionModelInRootHtml(
+      p.hf.rootHtml,
+      clipId,
+      clip.keyframes,
+      motionSteps,
+    );
+    set({
+      project: {
+        ...p,
+        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
+        updatedAt: Date.now(),
+      },
+      selectedClipId: clipId,
+    });
+    scheduleSave(get);
+  },
+
+  removeClipMotionStep(clipId, motionId, options) {
+    const state = get();
+    const p = state.project;
+    if (!p) return;
+    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    if (!clip || clip.kind === "audio") return;
+    if (options?.history !== false) get().checkpointHistory();
+
+    const result = removeMotionStep(clip, motionId);
+    const rootHtml = setClipMotionModelInRootHtml(
+      p.hf.rootHtml,
+      clipId,
+      result.keyframes,
+      result.motionSteps,
+    );
+    set({
+      project: {
+        ...p,
+        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
+        updatedAt: Date.now(),
+      },
+      selectedClipId: clipId,
+      selectedKeyframe: null,
+    });
+    scheduleSave(get);
+  },
+
+  removeClipMotionCheckpoint(clipId, motionId, checkpointId, options) {
+    const state = get();
+    const p = state.project;
+    if (!p) return;
+    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    if (!clip || clip.kind === "audio") return;
+    if (options?.history !== false) get().checkpointHistory();
+
+    const result = removeMotionCheckpoint(clip, motionId, checkpointId);
+    const rootHtml = setClipMotionModelInRootHtml(
+      p.hf.rootHtml,
+      clipId,
+      result.keyframes,
+      result.motionSteps,
+    );
+    set({
+      project: {
+        ...p,
+        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
+        updatedAt: Date.now(),
+      },
+      selectedClipId: clipId,
+      selectedKeyframe: null,
+    });
+    scheduleSave(get);
+  },
+
   updateRootHtml(html, options) {
     const p = get().project;
     if (!p) return;
@@ -1123,10 +1595,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         ...p,
         hf: {
           ...p.hf,
-          rootHtml: normalizeNativeHyperframesHtml(html, {
-            width: p.hf.width,
-            height: p.hf.height,
-          }),
+          rootHtml: normalizeProjectRootHtml(p.hf, html),
         },
         updatedAt: Date.now(),
       },

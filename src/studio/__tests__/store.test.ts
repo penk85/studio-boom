@@ -327,6 +327,7 @@ function resetStudioStore() {
     motionPresets: new Map(),
     mediaAssets: new Map(),
     selectedClipId: null,
+    selectedKeyframe: null,
     zoom: 60,
     historyPast: [],
     historyFuture: [],
@@ -946,6 +947,146 @@ describe("createBlankProject", () => {
     expect(coreMock.updateCalls).toBeGreaterThanOrEqual(1);
     expect(rootHtml).toContain('data-x="128"');
     expect(rootHtml).toContain('data-y="96"');
+  });
+
+  it("stores clip keyframes in canonical rootHtml instead of editorMeta", () => {
+    const project = createBlankProject("Keyframes");
+    const asset = makeMediaAsset("media-kf", "Sprite");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([[asset.id, asset]]),
+    });
+
+    useStudio.getState().addMediaToTimeline(asset);
+    const clipId = useStudio.getState().selectedClipId!;
+
+    const keyframeId = useStudio
+      .getState()
+      .upsertClipKeyframe(clipId, "position", 1, { x: 150, y: 125 });
+
+    const state = useStudio.getState();
+    const rootHtml = state.project!.hf.rootHtml;
+    expect(keyframeId).toBeTruthy();
+    expect(rootHtml).toContain("data-keyframes=");
+    expect(rootHtml).toContain("data-studio-keyframes");
+    expect(rootHtml).toContain(`&quot;x&quot;:${150 - 910}`);
+    expect(rootHtml).toContain(`&quot;y&quot;:${125 - 490}`);
+    expect(state.project!.editorMeta.clips[clipId]).not.toHaveProperty("keyframes");
+    expect(state.selectedKeyframe).toMatchObject({
+      clipId,
+      keyframeId,
+      property: "position",
+    });
+  });
+
+  it("stores beginner motion steps as rootHtml grouping over native keyframes", () => {
+    const project = createBlankProject("Motion steps");
+    const asset = makeMediaAsset("media-motion", "Sprite");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([[asset.id, asset]]),
+    });
+
+    useStudio.getState().addMediaToTimeline(asset);
+    const clipId = useStudio.getState().selectedClipId!;
+    const selection = useStudio.getState().addClipMotionStep(clipId, 0.5);
+
+    const state = useStudio.getState();
+    const rootHtml = state.project!.hf.rootHtml;
+    expect(selection).toMatchObject({ clipId, property: "position" });
+    expect(rootHtml).toContain("data-keyframes=");
+    expect(rootHtml).toContain("data-motion-steps=");
+    expect(state.project!.editorMeta.clips[clipId]).not.toHaveProperty("motionSteps");
+
+    const clip = deriveEditorClips(state.project!).find((candidate) => candidate.id === clipId);
+    expect(clip?.motionSteps).toHaveLength(1);
+    expect(clip?.motionSteps[0]).toMatchObject({
+      label: "Motion",
+      startTime: 0.5,
+    });
+    expect(clip?.motionSteps[0]?.checkpointIds).toHaveLength(2);
+    expect(clip?.motionSteps[0]?.checkpoints.map((checkpoint) => checkpoint.label)).toEqual([
+      "Begin",
+      "End",
+    ]);
+
+    useStudio.getState().renameClipMotionStep(clipId, clip!.motionSteps[0]!.id, "Hero glide");
+    const namedClip = deriveEditorClips(useStudio.getState().project!).find(
+      (candidate) => candidate.id === clipId,
+    );
+    expect(namedClip?.motionSteps[0]).toMatchObject({
+      name: "Hero glide",
+      label: "Hero glide",
+    });
+    expect(useStudio.getState().project!.hf.rootHtml).toContain("Hero glide");
+
+    const checkpointSelection = useStudio
+      .getState()
+      .addClipMotionCheckpoint(clipId, namedClip!.motionSteps[0]!.id, 1);
+    const checkpointClip = deriveEditorClips(useStudio.getState().project!).find(
+      (candidate) => candidate.id === clipId,
+    );
+    expect(checkpointSelection).toMatchObject({ clipId, property: "position" });
+    expect(
+      checkpointClip?.motionSteps[0]?.checkpoints.map((checkpoint) => checkpoint.label),
+    ).toEqual(["Begin", "Point 1", "End"]);
+
+    useStudio.getState().removeClipMotionStep(clipId, checkpointClip!.motionSteps[0]!.id);
+    const removedHtml = useStudio.getState().project!.hf.rootHtml;
+    expect(removedHtml).not.toContain("data-keyframes=");
+    expect(removedHtml).not.toContain("data-motion-steps=");
+    expect(removedHtml).not.toContain("data-studio-keyframes");
+  });
+
+  it("undoes and redoes keyframe mutations as project snapshots", () => {
+    const project = createBlankProject("Keyframe undo");
+    const asset = makeMediaAsset("media-kf-undo", "Sprite");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([[asset.id, asset]]),
+    });
+
+    useStudio.getState().addMediaToTimeline(asset);
+    const clipId = useStudio.getState().selectedClipId!;
+    useStudio.getState().upsertClipKeyframe(clipId, "opacity", 1, { opacity: 0.25 });
+    expect(useStudio.getState().project!.hf.rootHtml).toContain("data-keyframes=");
+
+    useStudio.getState().undo();
+    expect(useStudio.getState().project!.hf.rootHtml).not.toContain("data-keyframes=");
+
+    useStudio.getState().redo();
+    expect(useStudio.getState().project!.hf.rootHtml).toContain("data-keyframes=");
+  });
+
+  it("keeps keyframe timing relative when clip start changes and clamps on trim", () => {
+    const project = createBlankProject("Keyframe timing");
+    const asset = makeMediaAsset("media-kf-time", "Sprite");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([[asset.id, asset]]),
+    });
+
+    useStudio.getState().addMediaToTimeline(asset);
+    const clipId = useStudio.getState().selectedClipId!;
+    const keyframeId = useStudio
+      .getState()
+      .upsertClipKeyframe(clipId, "rotation", 3, { rotation: 45 });
+
+    useStudio.getState().updateClip(clipId, { start: 2 });
+    expect(useStudio.getState().project!.hf.rootHtml).toContain(
+      'tl.to("#' + clipId + '", { rotation: 45, duration: 3 }, 2);',
+    );
+
+    useStudio.getState().updateClip(clipId, { duration: 1 });
+    const clip = deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clipId);
+    expect(clip?.keyframes).toEqual(
+      expect.arrayContaining([{ id: keyframeId!, time: 1, properties: { rotation: 45 } }]),
+    );
+    expect(clip?.motionSteps).toEqual([]);
   });
 
   it("persists width and height edits through updateElementInHtml", () => {

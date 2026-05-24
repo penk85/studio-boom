@@ -74,7 +74,7 @@ export function Studio() {
           </div>
         </main>
         <aside className="w-72 shrink-0 border-l border-border">
-          <Inspector />
+          <Inspector seek={seek} />
         </aside>
       </div>
     </div>

@@ -14,4 +14,23 @@ describe("Timeline selection integration", () => {
     expect(source).toContain("onClick={(e) => {");
     expect(source).toContain("onSelect();");
   });
+
+  it("renders beginner motion lanes as draggable motion bars", () => {
+    const source = readFileSync(timelinePath, "utf8");
+
+    expect(source).toContain("VisualMotionLaneSet");
+    expect(source).toContain("VisualMotionBlock");
+    expect(source).toContain("packVisualMotionRows");
+    expect(source).toContain("motion.label");
+    expect(source).toContain("addClipMotionStep(row.clip.id, time)");
+    expect(source).toContain("addClipMotionCheckpoint(row.clip.id, motionId, time)");
+    expect(source).toContain("moveClipMotionCheckpoint(row.clip.id, motionId, checkpointId, time");
+    expect(source).toContain(
+      "moveClipMotionStep(row.clip.id, motionId, patch, { history: false })",
+    );
+    expect(source).toContain("CheckpointMark");
+    expect(source).toContain('aria-label="Add point at playhead"');
+    expect(source).toContain("pointTimeForMotion(motion, localPlayheadTime)");
+    expect(source).toContain("selectionForMotionEndpoint");
+  });
 });
