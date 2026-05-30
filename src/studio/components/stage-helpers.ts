@@ -217,6 +217,13 @@ export function compositionRectToCss(
   };
 }
 
+export function compositionPointToCss(point: { x: number; y: number }, geometry: StageGeometry) {
+  return {
+    x: point.x / geometry.scaleX + geometry.rect.left,
+    y: point.y / geometry.scaleY + geometry.rect.top,
+  };
+}
+
 export function compositionDomRectToCss(rect: DOMRect, geometry: StageGeometry) {
   return {
     left: rect.left / geometry.scaleX + geometry.rect.left,

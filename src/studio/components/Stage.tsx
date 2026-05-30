@@ -21,7 +21,7 @@ import {
   type ClipKeyframeSelection,
   type EditorClip,
 } from "../types";
-import { sampleClipKeyframedState } from "../hyperframes/keyframes";
+import { getKeyframesForProperty, sampleClipKeyframedState } from "../hyperframes/keyframes";
 import {
   commitElementRect,
   commitElementPosition,
@@ -50,6 +50,7 @@ import {
   type CompositionRect,
   type ResizeHandle,
   type StageGeometry,
+  compositionPointToCss,
 } from "./stage-helpers";
 import { resolvePreviewHtml } from "../hyperframes/preview";
 
@@ -103,6 +104,19 @@ type StageDrag =
       rawRotation: number;
       previewRotation: number;
     };
+
+interface StageMotionPathPoint {
+  id: string;
+  x: number;
+  y: number;
+  selected: boolean;
+}
+
+interface StageMotionPath {
+  id: string;
+  points: StageMotionPathPoint[];
+  active: boolean;
+}
 
 export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const project = useStudio((s) => s.project);
@@ -173,6 +187,10 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       iframeRect && iframeRect.width > 0 && iframeRect.height > 0 ? iframeRect : null,
     );
   })();
+  const motionPaths =
+    stageEditableClip && stageGeometry
+      ? getStageMotionPaths(stageEditableClip, selectedKeyframe, stageGeometry, drag)
+      : [];
   const outlineRect =
     stageEditableClip && outlinedClip && stageGeometry
       ? drag?.type === "resize" && drag.clipId === stageEditableClip.id
@@ -201,6 +219,11 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       ? getRotationPillStyle(outlineRect, previewRotation, stageShellRef.current)
       : null;
   const activeDragKey = drag ? `${drag.pointerId}:${drag.clipId}` : null;
+  const selectedKeyframeKey = selectedKeyframe
+    ? `${selectedKeyframe.clipId}:${selectedKeyframe.keyframeId}:${selectedKeyframe.property}`
+    : null;
+  const moveHandleLabel = selectedKeyframe ? "Move selected keyframe" : "Move selected clip";
+  const rotateHandleLabel = selectedKeyframe ? "Rotate selected keyframe" : "Rotate selected clip";
 
   const beginDrag = useCallback((nextDrag: NonNullable<StageDrag>) => {
     dragRef.current = nextDrag;
@@ -283,6 +306,20 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       }
     };
   }, [iframeRef, onIframeLoad, resolvedHtml]);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player) return;
+
+    const preventPlayerClickToggle = (event: Event) => {
+      event.stopImmediatePropagation();
+    };
+
+    player.addEventListener("click", preventPlayerClickToggle, { capture: true });
+    return () => {
+      player.removeEventListener("click", preventPlayerClickToggle, { capture: true });
+    };
+  }, [resolvedHtml]);
 
   useEffect(() => {
     if (!stageEditableClip || !resolvedHtml) {
@@ -420,7 +457,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       window.clearTimeout(nudgeResetTimerRef.current);
       nudgeResetTimerRef.current = null;
     }
-  }, [selectedClipId]);
+  }, [selectedClipId, selectedKeyframeKey]);
 
   useEffect(() => {
     if (!stageEditableClip || !outlineRect || drag) return;
@@ -796,6 +833,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           </div>
         </div>
       )}
+      {motionPaths.length > 0 && <MotionPathOverlay paths={motionPaths} />}
       {outlineRect && (
         <div
           data-stage-selection-overlay=""
@@ -831,8 +869,8 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           type="button"
           data-stage-rotate-handle=""
           data-stage-keyboard-nudge=""
-          title="Rotate selected clip"
-          aria-label="Rotate selected clip"
+          title={rotateHandleLabel}
+          aria-label={rotateHandleLabel}
           className="absolute z-40 flex h-7 w-7 items-center justify-center rounded-full border border-primary/70 bg-panel/95 text-foreground shadow-[0_2px_10px_rgba(0,0,0,0.35)] backdrop-blur hover:bg-panel-2"
           style={{
             ...rotateHandleStyle,
@@ -857,8 +895,8 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           type="button"
           data-stage-move-handle=""
           data-stage-keyboard-nudge=""
-          title="Move selected clip"
-          aria-label="Move selected clip"
+          title={moveHandleLabel}
+          aria-label={moveHandleLabel}
           className="absolute z-40 flex h-7 w-7 items-center justify-center rounded-md border border-primary/70 bg-panel/95 text-foreground shadow-[0_2px_10px_rgba(0,0,0,0.35)] backdrop-blur hover:bg-panel-2"
           style={{
             ...moveHandleStyle,
@@ -900,6 +938,88 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   );
 }
 
+function MotionPathOverlay({ paths }: { paths: StageMotionPath[] }) {
+  return (
+    <svg
+      data-stage-motion-path=""
+      aria-hidden="true"
+      className="pointer-events-none absolute inset-0 z-20 h-full w-full overflow-visible"
+    >
+      <defs>
+        {paths.map((path, index) => (
+          <marker
+            key={path.id}
+            id={`stage-motion-arrow-${index}`}
+            markerWidth="8"
+            markerHeight="8"
+            refX="7"
+            refY="4"
+            orient="auto"
+            markerUnits="strokeWidth"
+          >
+            <path
+              d="M 0 0 L 8 4 L 0 8 z"
+              fill={path.active ? "var(--color-primary)" : "rgba(255,255,255,0.64)"}
+            />
+          </marker>
+        ))}
+      </defs>
+      {paths.map((path, index) => {
+        const pathData = motionPathData(path.points);
+        const stroke = path.active ? "var(--color-primary)" : "rgba(255,255,255,0.62)";
+        return (
+          <g key={path.id} opacity={path.active ? 0.92 : 0.48}>
+            <path
+              d={pathData}
+              fill="none"
+              stroke="rgba(3,7,18,0.72)"
+              strokeWidth={7}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            <path
+              d={pathData}
+              fill="none"
+              stroke={stroke}
+              strokeWidth={2.25}
+              strokeDasharray="8 7"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              markerEnd={`url(#stage-motion-arrow-${index})`}
+            />
+            {path.points.map((point, pointIndex) => {
+              const selected = point.selected;
+              const endpoint = pointIndex === 0 || pointIndex === path.points.length - 1;
+              const radius = selected ? 7 : endpoint ? 5.5 : 4.5;
+              return (
+                <g key={point.id}>
+                  <circle cx={point.x} cy={point.y} r={radius + 2.5} fill="rgba(3,7,18,0.76)" />
+                  <circle
+                    cx={point.x}
+                    cy={point.y}
+                    r={radius}
+                    fill={selected ? "var(--color-primary)" : "var(--color-panel)"}
+                    stroke={path.active ? "var(--color-primary)" : "rgba(255,255,255,0.68)"}
+                    strokeWidth={selected ? 2.5 : 1.75}
+                  />
+                  {selected && (
+                    <circle
+                      cx={point.x}
+                      cy={point.y}
+                      r={2.4}
+                      fill="var(--color-primary-foreground)"
+                    />
+                  )}
+                </g>
+              );
+            })}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 function SelectionCorner({
   handle,
   onPointerDown,
@@ -933,6 +1053,160 @@ function getStageEditableClip(selectedClip: EditorClip | null, clips: EditorClip
   if (!selectedClip) return null;
   if (selectedClip.kind === "audio") return null;
   return selectedClip;
+}
+
+function getStageMotionPaths(
+  clip: EditorClip,
+  selectedKeyframe: ClipKeyframeSelection | null,
+  geometry: StageGeometry,
+  drag: StageDrag,
+): StageMotionPath[] {
+  const selectedMotion = selectedKeyframe
+    ? clip.motionSteps.find((motion) => motion.checkpointIds.includes(selectedKeyframe.keyframeId))
+    : null;
+  const motionSteps = selectedMotion ? [selectedMotion] : clip.motionSteps;
+  const motionPaths =
+    motionSteps.length > 0
+      ? motionSteps.map((motion) => ({
+          id: motion.id,
+          active: !selectedMotion || motion.id === selectedMotion.id,
+          points: motion.checkpoints.map((checkpoint) =>
+            motionPathPointForTime({
+              clip,
+              time: checkpoint.time,
+              pointId: checkpoint.id,
+              selectedKeyframe,
+              geometry,
+              drag,
+            }),
+          ),
+        }))
+      : [standalonePositionPath(clip, selectedKeyframe, geometry, drag)].filter(
+          (path): path is StageMotionPath => path !== null,
+        );
+
+  return motionPaths.filter((path) => hasVisibleMotionPath(path.points));
+}
+
+function standalonePositionPath(
+  clip: EditorClip,
+  selectedKeyframe: ClipKeyframeSelection | null,
+  geometry: StageGeometry,
+  drag: StageDrag,
+): StageMotionPath | null {
+  const positionKeyframes = getKeyframesForProperty(clip.keyframes, "position");
+  if (positionKeyframes.length === 0) return null;
+
+  const points =
+    positionKeyframes[0] && positionKeyframes[0].time > 0
+      ? [
+          motionPathPointForTime({
+            clip,
+            time: 0,
+            pointId: `${clip.id}:motion-origin`,
+            selectedKeyframe,
+            geometry,
+            drag,
+          }),
+          ...positionKeyframes.map((keyframe) =>
+            motionPathPointForTime({
+              clip,
+              time: keyframe.time,
+              pointId: keyframe.id,
+              selectedKeyframe,
+              geometry,
+              drag,
+            }),
+          ),
+        ]
+      : positionKeyframes.map((keyframe) =>
+          motionPathPointForTime({
+            clip,
+            time: keyframe.time,
+            pointId: keyframe.id,
+            selectedKeyframe,
+            geometry,
+            drag,
+          }),
+        );
+
+  return {
+    id: `${clip.id}:position-path`,
+    active: true,
+    points,
+  };
+}
+
+function motionPathPointForTime({
+  clip,
+  time,
+  pointId,
+  selectedKeyframe,
+  geometry,
+  drag,
+}: {
+  clip: EditorClip;
+  time: number;
+  pointId: string;
+  selectedKeyframe: ClipKeyframeSelection | null;
+  geometry: StageGeometry;
+  drag: StageDrag;
+}): StageMotionPathPoint {
+  const state = sampleClipKeyframedState(clip, time);
+  const scale = Math.max(0.01, state.scale);
+  const point = compositionPointToCss(
+    {
+      x: state.x + (clip.width * scale) / 2,
+      y: state.y + (clip.height * scale) / 2,
+    },
+    geometry,
+  );
+  return applyMotionPathDragPreview(
+    {
+      id: pointId,
+      x: point.x,
+      y: point.y,
+      selected: selectedKeyframe?.clipId === clip.id && selectedKeyframe.keyframeId === pointId,
+    },
+    clip.id,
+    selectedKeyframe,
+    geometry,
+    drag,
+  );
+}
+
+function applyMotionPathDragPreview(
+  point: StageMotionPathPoint,
+  clipId: string,
+  selectedKeyframe: ClipKeyframeSelection | null,
+  geometry: StageGeometry,
+  drag: StageDrag,
+): StageMotionPathPoint {
+  if (!drag || drag.type !== "move" || drag.clipId !== clipId) return point;
+  const editingKeyframe = selectedKeyframe?.clipId === clipId;
+  if (editingKeyframe && selectedKeyframe.keyframeId !== point.id) return point;
+  return {
+    ...point,
+    x: point.x + (drag.previewX - drag.startX) / geometry.scaleX,
+    y: point.y + (drag.previewY - drag.startY) / geometry.scaleY,
+  };
+}
+
+function hasVisibleMotionPath(points: StageMotionPathPoint[]) {
+  if (points.length < 2) return false;
+  return points.some((point, index) => {
+    const previous = points[index - 1];
+    return previous ? Math.hypot(point.x - previous.x, point.y - previous.y) > 1 : false;
+  });
+}
+
+function motionPathData(points: StageMotionPathPoint[]) {
+  return points
+    .map(
+      (point, index) =>
+        `${index === 0 ? "M" : "L"} ${formatSvgNumber(point.x)} ${formatSvgNumber(point.y)}`,
+    )
+    .join(" ");
 }
 
 function getStageKeyframeTarget(
@@ -1231,6 +1505,10 @@ function rotateUnitVector(x: number, y: number, rotation: number) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
+}
+
+function formatSvgNumber(value: number) {
+  return Number.isFinite(value) ? String(Math.round(value * 100) / 100) : "0";
 }
 
 type LayerShortcut = "forward" | "backward" | "front" | "back";

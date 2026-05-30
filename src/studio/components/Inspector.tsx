@@ -1,5 +1,5 @@
 // Inspector — edits the currently selected clip's properties.
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { usePlayerStore } from "@hyperframes/studio";
 import { Plus } from "lucide-react";
@@ -11,6 +11,7 @@ import type {
   CharacterPreset,
   CompositionClip,
   EditorClip,
+  Project,
   TextClip,
 } from "../types";
 import { deriveEditorClips, isCharacterCompositionClip } from "../types";
@@ -20,6 +21,7 @@ import {
   buildCompositionRepairPrompt,
   validateCompositionSourceHtml,
 } from "../hyperframes/composition-source";
+import { buildCompositionPreviewProject } from "../hyperframes/composition-preview-project";
 import {
   keyframeDisplayValues,
   sampleClipKeyframedState,
@@ -27,6 +29,7 @@ import {
   type ClipKeyframeProperty,
   type ClipMotionCheckpoint,
 } from "../hyperframes/keyframes";
+import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
 
 export function Inspector({ seek }: { seek?: (time: number) => void }) {
   const project = useStudio((s) => s.project);
@@ -175,6 +178,7 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
               clip.compositionId &&
               !isCharacterCompositionClip(clip) && (
                 <CompositionSourceInspector
+                  project={project}
                   clip={clip}
                   source={project.hf.compositionHtml[clip.compositionId] ?? ""}
                   projectWidth={project.hf.width}
@@ -665,12 +669,14 @@ function RootElementSourceInspector({ clip, rootHtml }: { clip: EditorClip; root
 }
 
 function CompositionSourceInspector({
+  project,
   clip,
   source,
   projectWidth,
   projectHeight,
   onApply,
 }: {
+  project: Project;
   clip: EditorClip & { kind: "composition"; compositionId: string };
   source: string;
   projectWidth: number;
@@ -679,7 +685,13 @@ function CompositionSourceInspector({
 }) {
   const [draft, setDraft] = useState(source);
   const [errors, setErrors] = useState<string[]>([]);
-  const [validatedHtml, setValidatedHtml] = useState<string | null>(null);
+  const [validated, setValidated] = useState<ReturnType<
+    typeof validateCompositionSourceForClip
+  > | null>(null);
+  const [previewProject, setPreviewProject] = useState<Project | null>(null);
+  const [previewStatus, setPreviewStatus] = useState<"idle" | "loading" | "ready" | "error">(
+    "idle",
+  );
   const validationDefaults = useMemo(
     () => ({
       compositionId: clip.compositionId,
@@ -690,32 +702,52 @@ function CompositionSourceInspector({
     [clip.compositionId, clip.duration, clip.width, clip.height, projectWidth, projectHeight],
   );
   const storedValidation = useMemo(
-    () => validateCompositionSourceHtml(source, validationDefaults),
-    [source, validationDefaults],
+    () => validateCompositionSourceForClip(source, clip.compositionId, validationDefaults),
+    [clip.compositionId, source, validationDefaults],
   );
   const isEditingStoredSource = draft === source;
+  const validatedHtml = validated?.ok && validated.html ? validated.html : null;
+  const canPreview = Boolean(validatedHtml);
+  const canApply = Boolean(validatedHtml && previewStatus === "ready");
+  const handlePreviewStatusChange = useCallback(
+    (status: "idle" | "loading" | "ready" | "error") => setPreviewStatus(status),
+    [],
+  );
 
   useEffect(() => {
     setDraft(source);
     setErrors([]);
-    setValidatedHtml(null);
+    setValidated(null);
+    setPreviewProject(null);
+    setPreviewStatus("idle");
   }, [source, clip.compositionId]);
 
   const validate = () => {
-    const result = validateCompositionSourceHtml(draft, validationDefaults);
+    const result = validateCompositionSourceForClip(draft, clip.compositionId, validationDefaults);
     setErrors(result.errors);
-    setValidatedHtml(result.ok && result.html ? result.html : null);
+    setValidated(result.ok && result.html ? result : null);
+    setPreviewProject(null);
+    setPreviewStatus("idle");
     return result;
   };
 
+  const preview = () => {
+    if (!validated?.ok || !validated.html) return;
+    setPreviewProject(buildCompositionPreviewProject(project, validated));
+  };
+
   const apply = () => {
-    if (!validatedHtml) return;
+    if (!validatedHtml || previewStatus !== "ready") return;
     try {
       onApply(validatedHtml);
-      setValidatedHtml(null);
+      setValidated(null);
+      setPreviewProject(null);
+      setPreviewStatus("idle");
     } catch (error) {
       setErrors([error instanceof Error ? error.message : String(error)]);
-      setValidatedHtml(null);
+      setValidated(null);
+      setPreviewProject(null);
+      setPreviewStatus("idle");
     }
   };
 
@@ -732,7 +764,9 @@ function CompositionSourceInspector({
         onChange={(event) => {
           setDraft(event.target.value);
           setErrors([]);
-          setValidatedHtml(null);
+          setValidated(null);
+          setPreviewProject(null);
+          setPreviewStatus("idle");
         }}
         rows={10}
         spellCheck={false}
@@ -779,22 +813,42 @@ function CompositionSourceInspector({
       )}
       {validatedHtml && (
         <div className="mt-2 rounded border border-primary/50 bg-primary/10 px-2 py-1 text-[11px] text-foreground">
-          Source is valid. Apply to update project.hf.compositionHtml.
+          Source is valid. Preview it before updating project.hf.compositionHtml.
         </div>
       )}
-      <div className="mt-2 flex gap-2">
+      {previewProject && (
+        <div className="mt-2">
+          <HyperFramesPreviewPanel
+            project={previewProject}
+            width={(validated?.width ?? clip.width) || projectWidth}
+            height={(validated?.height ?? clip.height) || projectHeight}
+            seekTime={Math.min((validated?.duration ?? clip.duration) * 0.35, 1)}
+            title={`Preview ${clip.compositionId}`}
+            onStatusChange={handlePreviewStatusChange}
+          />
+        </div>
+      )}
+      <div className="mt-2 grid grid-cols-3 gap-2">
         <button
           type="button"
           onClick={validate}
-          className="flex-1 rounded border border-border px-2 py-1.5 text-xs text-foreground hover:bg-panel"
+          className="rounded border border-border px-2 py-1.5 text-xs text-foreground hover:bg-panel"
         >
           Validate
         </button>
         <button
           type="button"
+          onClick={preview}
+          disabled={!canPreview}
+          className="rounded border border-border px-2 py-1.5 text-xs text-foreground hover:bg-panel disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Preview
+        </button>
+        <button
+          type="button"
           onClick={apply}
-          disabled={!validatedHtml}
-          className="flex-1 rounded bg-primary px-2 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!canApply}
+          className="rounded bg-primary px-2 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
         >
           Apply
         </button>
@@ -807,6 +861,26 @@ function isPrimitiveSourceClip(clip: EditorClip): boolean {
   return (
     clip.kind === "image" || clip.kind === "video" || clip.kind === "audio" || clip.kind === "text"
   );
+}
+
+function validateCompositionSourceForClip(
+  html: string,
+  expectedCompositionId: string,
+  defaults: Parameters<typeof validateCompositionSourceHtml>[1],
+) {
+  const result = validateCompositionSourceHtml(html, defaults);
+  if (result.ok && result.compositionId !== expectedCompositionId) {
+    return {
+      ...result,
+      ok: false,
+      html: undefined,
+      errors: [
+        ...result.errors,
+        `Composition source id "${result.compositionId ?? "(missing)"}" must match "${expectedCompositionId}".`,
+      ],
+    };
+  }
+  return result;
 }
 
 function readRootElementSource(rootHtml: string, elementId: string): string | null {

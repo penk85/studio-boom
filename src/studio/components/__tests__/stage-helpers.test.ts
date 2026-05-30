@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   compositionDomRectToCss,
+  compositionPointToCss,
   compositionRectToCss,
   getStageGeometry,
   keyboardNudgeDelta,
@@ -62,6 +63,7 @@ describe("stage helpers", () => {
       width: 200,
       height: 150,
     });
+    expect(compositionPointToCss({ x: 300, y: 140 }, geometry)).toEqual({ x: 170, y: 100 });
     expect(compositionDomRectToCss(new DOMRect(200, 120, 400, 300), geometry)).toEqual({
       left: 120,
       top: 90,

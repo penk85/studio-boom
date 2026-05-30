@@ -132,6 +132,7 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).toContain('src="asset:body-media"');
     expect(html).toContain('src="asset:eye-open-media"');
     expect(html).toContain('window.__timelines["char_clip-1"]');
+    expect(html).toContain("tl.to({}, { duration: S.duration }, 0);");
     expect(html).not.toMatch(/repeat\s*:\s*-1/);
     expect(html).not.toMatch(/\basync\b/);
   });

@@ -16,6 +16,8 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(source).toContain("resolveIframe(playerRef.current)");
     expect(source).toContain("<hyperframes-player");
     expect(source).toContain("srcdoc={resolvedHtml}");
+    expect(source).toContain("preventPlayerClickToggle");
+    expect(source).toContain('player.addEventListener("click", preventPlayerClickToggle');
     expect(source).not.toContain("directUrl=");
   });
 
@@ -50,6 +52,9 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(source).toContain("resolveTargetClipId(");
     expect(source).toContain("getRenderedPixelCompositionRect(");
     expect(source).toContain("compositionDomRectToCss(renderedElementRect, stageGeometry)");
+    expect(source).toContain("<MotionPathOverlay paths={motionPaths} />");
+    expect(source).toContain('data-stage-motion-path=""');
+    expect(source).toContain("getStageMotionPaths(");
     expect(source).toContain('data-stage-move-handle=""');
     expect(source).toContain("resizeCompositionRect({");
     expect(source).toContain("scaleCompositionRectFromHandleRect(");

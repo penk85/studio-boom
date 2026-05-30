@@ -52,7 +52,10 @@ import {
   type ClipKeyframeDisplayValues,
   type ClipMotionEndpoint,
 } from "./hyperframes/keyframes";
-import { validateCompositionSourceHtml } from "./hyperframes/composition-source";
+import {
+  validateCompositionSourceHtml,
+  type CompositionSourceValidation,
+} from "./hyperframes/composition-source";
 import {
   createRootCompositionHtml,
   updateRootCompositionHtml,
@@ -199,7 +202,13 @@ function normalizeProjectRootHtml(hf: HyperFramesProject, html: string): string 
   );
 }
 
-function assertValidCompositionHtml(
+type ValidCompositionSource = CompositionSourceValidation & {
+  ok: true;
+  html: string;
+  compositionId: string;
+};
+
+function assertValidCompositionSourceHtml(
   html: string,
   defaults: {
     compositionId: string;
@@ -207,14 +216,34 @@ function assertValidCompositionHtml(
     width: number;
     height: number;
   },
-): string {
+  options: { expectedCompositionId?: string } = {},
+): ValidCompositionSource {
   const result = validateCompositionSourceHtml(html, defaults);
-  if (!result.ok || !result.html) {
-    throw new Error(
-      `Composition source is invalid:\n${result.errors.map((error) => `- ${error}`).join("\n")}`,
+  const errors = [...result.errors];
+  const compositionId = result.compositionId ?? defaults.compositionId;
+
+  if (
+    options.expectedCompositionId &&
+    compositionId &&
+    compositionId !== options.expectedCompositionId
+  ) {
+    errors.push(
+      `Composition source id "${compositionId}" does not match selected composition "${options.expectedCompositionId}".`,
     );
   }
-  return result.html;
+
+  if (!result.ok || !result.html || !compositionId || errors.length > 0) {
+    throw new Error(
+      `Composition source is invalid:\n${errors.map((error) => `- ${error}`).join("\n")}`,
+    );
+  }
+
+  return {
+    ...result,
+    ok: true,
+    html: result.html,
+    compositionId,
+  };
 }
 
 function normalizeCharacterClipMeta(meta: CharacterClipMeta): CharacterClipMeta {
@@ -869,10 +898,9 @@ export const useStudio = create<StudioState>((set, get) => ({
   },
 
   selectClip(id) {
-    const current = get().selectedKeyframe;
     set({
       selectedClipId: id,
-      selectedKeyframe: id && current?.clipId === id ? current : null,
+      selectedKeyframe: null,
     });
   },
 
@@ -934,18 +962,23 @@ export const useStudio = create<StudioState>((set, get) => ({
     const p = state.project;
     if (!p) return;
 
+    let validatedCompositionSource: ValidCompositionSource | null = null;
     if (
       clip.kind === "composition" &&
       clip.compositionKind !== "character" &&
       clip.compositionHtml !== undefined
     ) {
       const compositionId = clip.compositionId ?? `comp_${clip.id}`;
-      assertValidCompositionHtml(clip.compositionHtml, {
-        compositionId,
-        duration: clip.duration,
-        width: clip.width || p.hf.width,
-        height: clip.height || p.hf.height,
-      });
+      validatedCompositionSource = assertValidCompositionSourceHtml(
+        clip.compositionHtml,
+        {
+          compositionId,
+          duration: clip.duration,
+          width: clip.width || p.hf.width,
+          height: clip.height || p.hf.height,
+        },
+        clip.compositionId ? { expectedCompositionId: clip.compositionId } : {},
+      );
     }
 
     get().checkpointHistory();
@@ -988,7 +1021,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         compositionClip.compositionId ??
         (compositionClip.compositionKind === "character"
           ? defaultCharacterCompositionId(compositionClip.id)
-          : `comp_${compositionClip.id}`);
+          : (validatedCompositionSource?.compositionId ?? `comp_${compositionClip.id}`));
       meta.compositionId = compositionId;
       meta.compositionKind = compositionClip.compositionKind ?? "user-composition";
       nextClip = { ...compositionClip, compositionId };
@@ -1014,15 +1047,19 @@ export const useStudio = create<StudioState>((set, get) => ({
         });
         hf = registerCharacterAssets(hf, character, meta.character, state.mediaAssets);
       } else if (compositionClip.compositionHtml !== undefined) {
-        compositionHtml[compositionId] = assertValidCompositionHtml(
-          compositionClip.compositionHtml,
-          {
-            compositionId,
-            duration: compositionClip.duration,
-            width: compositionClip.width || currentProject.hf.width,
-            height: compositionClip.height || currentProject.hf.height,
-          },
-        );
+        const source =
+          validatedCompositionSource ??
+          assertValidCompositionSourceHtml(
+            compositionClip.compositionHtml,
+            {
+              compositionId,
+              duration: compositionClip.duration,
+              width: compositionClip.width || currentProject.hf.width,
+              height: compositionClip.height || currentProject.hf.height,
+            },
+            { expectedCompositionId: compositionId },
+          );
+        compositionHtml[compositionId] = source.html;
       }
     } else if (nextClip.kind === "text") {
       const textClip = nextClip as TextClip;
@@ -1059,6 +1096,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       project: newProject,
       tracks: newProject.editorMeta.tracks,
       selectedClipId: insertedId,
+      selectedKeyframe: null,
     });
     scheduleSave(get);
   },
@@ -1609,12 +1647,16 @@ export const useStudio = create<StudioState>((set, get) => ({
     const clip = deriveEditorClips(p).find(
       (candidate) => candidate.compositionId === compositionId,
     );
-    const normalizedHtml = assertValidCompositionHtml(html, {
-      compositionId,
-      duration: clip?.duration ?? p.hf.duration,
-      width: clip?.width || p.hf.width,
-      height: clip?.height || p.hf.height,
-    });
+    const source = assertValidCompositionSourceHtml(
+      html,
+      {
+        compositionId,
+        duration: clip?.duration ?? p.hf.duration,
+        width: clip?.width || p.hf.width,
+        height: clip?.height || p.hf.height,
+      },
+      { expectedCompositionId: compositionId },
+    );
     if (options?.history !== false) get().checkpointHistory();
     set({
       project: {
@@ -1623,7 +1665,7 @@ export const useStudio = create<StudioState>((set, get) => ({
           ...p.hf,
           compositionHtml: {
             ...p.hf.compositionHtml,
-            [compositionId]: normalizedHtml,
+            [compositionId]: source.html,
           },
         },
         updatedAt: Date.now(),

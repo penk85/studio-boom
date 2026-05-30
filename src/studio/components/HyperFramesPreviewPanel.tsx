@@ -70,7 +70,10 @@ export function HyperFramesPreviewPanel({
     void resolvePreviewHtml(project)
       .then((resolved) => {
         revoke = resolved.revoke;
-        if (cancelled) return;
+        if (cancelled) {
+          resolved.revoke();
+          return;
+        }
         setHtml(withPreviewSeekDriver(resolved.html, resolvedSeekTime));
         onStatusChange?.("ready");
       })

@@ -126,6 +126,29 @@ describe("validateCompositionSourceHtml", () => {
     expect(result.errors.join("\n")).toMatch(/window.__timelines/);
   });
 
+  it("rejects a stage composition id that disagrees with the source root", () => {
+    const result = validateCompositionSourceHtml(
+      `<!DOCTYPE html>
+<html data-composition-id="ai-title" data-composition-duration="4">
+  <body>
+    <div id="stage" data-composition-id="wrong-id" data-width="1920" data-height="1080">
+      <script>
+        window.__timelines = window.__timelines || {};
+        const tl = gsap.timeline({ paused: true });
+        window.__timelines["ai-title"] = tl;
+      </script>
+    </div>
+  </body>
+</html>`,
+      defaults,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.errors.join("\n")).toContain(
+      '#stage data-composition-id "wrong-id" must match composition id "ai-title".',
+    );
+  });
+
   it("rejects source with invalid inline JavaScript", () => {
     const result = validateCompositionSourceHtml(
       `<!DOCTYPE html>

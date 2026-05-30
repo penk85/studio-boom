@@ -901,6 +901,7 @@ function appendCharacterTimelineScript(
   script.textContent = `(function(){
   const S = ${sceneJson};
   const tl = gsap.timeline({ paused: true });
+  tl.to({}, { duration: S.duration }, 0);
   const setVars = function(targets, time) {
     targets.forEach(function(target) { tl.set(target.selector, target.vars, time); });
   };

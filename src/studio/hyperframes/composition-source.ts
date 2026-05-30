@@ -44,6 +44,16 @@ export function validateCompositionSourceHtml(
   const compositionId = root?.getAttribute("data-composition-id")?.trim() || defaults.compositionId;
   if (!compositionId) errors.push("Missing composition id.");
 
+  const stageCompositionId = doc
+    .getElementById("stage")
+    ?.getAttribute("data-composition-id")
+    ?.trim();
+  if (compositionId && stageCompositionId && stageCompositionId !== compositionId) {
+    errors.push(
+      `#stage data-composition-id "${stageCompositionId}" must match composition id "${compositionId}".`,
+    );
+  }
+
   const duration =
     parsePositiveNumber(root?.getAttribute("data-duration")) ??
     parsePositiveNumber(doc.documentElement.getAttribute("data-composition-duration")) ??

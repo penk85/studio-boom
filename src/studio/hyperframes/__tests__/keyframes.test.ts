@@ -70,25 +70,61 @@ describe("native clip keyframes", () => {
       ]),
     );
     expect(readClipMotionStepMetasFromHtml(html, "clip-1")).toEqual([]);
-    expect(html).toContain('data-studio-keyframes="true"');
+    expect(html).toContain('data-studio-timeline="true"');
     expect(html).toContain('window.__timelines["project-1"]');
+    expect(html).toContain('tl.set("#clip-1", { visibility: "hidden" }, 0);');
+    expect(html).toContain('tl.set("#clip-1", { visibility: "visible", opacity: 0.9 }, 1);');
+    expect(html).toContain('tl.set("#clip-1", { visibility: "hidden" }, 5);');
+    expect(countOccurrences(html, 'tl.set("#clip-1", { visibility: "visible"')).toBe(1);
     expect(html).toContain('tl.set("#clip-1", { x: 100, y: 50 }, 1);');
     expect(html).toContain(
       'tl.to("#clip-1", { x: 140, y: 70, duration: 2, ease: "power2.out" }, 1);',
     );
     expect(html).toContain('tl.to("#clip-1", { scale: 1.2, duration: 2, ease: "power2.out" }, 1);');
-    expect(html).not.toContain("visibility");
     expect(html).not.toContain("display");
   });
 
-  it("removes the generated script when no keyframes remain", () => {
+  it("keeps clip lifecycle script when no keyframes remain", () => {
     const withKeyframes = setClipKeyframesInRootHtml(rootHtml(), "clip-1", [
       { id: "kf-1", time: 0, properties: { opacity: 0.25 } },
     ]);
     const withoutKeyframes = setClipKeyframesInRootHtml(withKeyframes, "clip-1", []);
 
     expect(withoutKeyframes).not.toContain('data-keyframes="');
-    expect(withoutKeyframes).not.toContain('data-studio-keyframes="true"');
+    expect(withoutKeyframes).toContain('data-studio-timeline="true"');
+    expect(withoutKeyframes).toContain(
+      'tl.set("#clip-1", { visibility: "visible", opacity: 0.9 }, 1);',
+    );
+    expect(withoutKeyframes).not.toContain('tl.to("#clip-1"');
+  });
+
+  it("does not put competing hidden and visible bookends at time zero", () => {
+    const html = setClipKeyframesInRootHtml(
+      rootHtml().replace('data-start="1"', 'data-start="0"'),
+      "clip-1",
+      [
+        {
+          id: "kf-1",
+          time: 1,
+          properties: { x: 20, y: 10 },
+        },
+      ],
+    );
+
+    expect(html).toContain('tl.set("#clip-1", { visibility: "visible", opacity: 0.9 }, 0);');
+    expect(html).toContain('tl.set("#clip-1", { visibility: "hidden" }, 4);');
+    expect(html).not.toContain('tl.set("#clip-1", { visibility: "hidden" }, 0);');
+  });
+
+  it("generates lifecycle bookends for timed visual clips without keyframes", () => {
+    const html = syncRootKeyframesHtml(rootHtml());
+
+    expect(html).toContain('data-studio-timeline="true"');
+    expect(html).toContain('tl.set("#clip-1", { visibility: "hidden" }, 0);');
+    expect(html).toContain('tl.set("#clip-1", { visibility: "visible", opacity: 0.9 }, 1);');
+    expect(html).toContain('tl.set("#clip-1", { visibility: "hidden" }, 5);');
+    expect(countOccurrences(html, 'tl.set("#clip-1", { visibility:')).toBe(3);
+    expect(html).not.toContain('tl.to("#clip-1"');
   });
 
   it("removes stale motion metadata when the clip has no keyframes", () => {
@@ -103,7 +139,7 @@ describe("native clip keyframes", () => {
 </html>`);
 
     expect(html).not.toContain("data-motion-steps");
-    expect(html).not.toContain('data-studio-keyframes="true"');
+    expect(html).toContain('data-studio-timeline="true"');
   });
 
   it("clamps and prunes malformed or out-of-range values", () => {
@@ -290,3 +326,7 @@ describe("native clip keyframes", () => {
     expect(removed.motionSteps).toEqual([]);
   });
 });
+
+function countOccurrences(value: string, needle: string): number {
+  return value.split(needle).length - 1;
+}

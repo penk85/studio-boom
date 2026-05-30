@@ -86,7 +86,8 @@ export const CLIP_KEYFRAME_EASES = [
   "expo.out",
 ];
 
-const STUDIO_KEYFRAMES_SCRIPT_ATTR = "data-studio-keyframes";
+const STUDIO_TIMELINE_SCRIPT_ATTR = "data-studio-timeline";
+const LEGACY_STUDIO_KEYFRAMES_SCRIPT_ATTR = "data-studio-keyframes";
 const STUDIO_MOTION_STEPS_ATTR = "data-motion-steps";
 const LEGACY_SYNTHETIC_MOTION_BASE_PREFIX = "__studio-motion-base";
 const LEGACY_AUTO_MOTION_ID_PREFIX = "motion-";
@@ -173,6 +174,7 @@ export function syncRootKeyframesHtml(html: string): string {
   const rootCompositionId = resolveRootCompositionId(doc);
   if (!rootCompositionId) return html;
 
+  const timedVisualClips = collectTimedVisualClips(doc, rootCompositionId);
   const animatedClips: Array<{ el: HTMLElement; keyframes: Keyframe[] }> = [];
   for (const el of Array.from(
     doc.querySelectorAll<HTMLElement>(`[id][data-keyframes], [id][${STUDIO_MOTION_STEPS_ATTR}]`),
@@ -189,14 +191,22 @@ export function syncRootKeyframesHtml(html: string): string {
       animatedClips.push({ el, keyframes: materialized.keyframes });
   }
 
-  doc.querySelectorAll(`script[${STUDIO_KEYFRAMES_SCRIPT_ATTR}="true"]`).forEach((script) => {
-    script.remove();
-  });
+  doc
+    .querySelectorAll(
+      `script[${STUDIO_TIMELINE_SCRIPT_ATTR}="true"], script[${LEGACY_STUDIO_KEYFRAMES_SCRIPT_ATTR}="true"]`,
+    )
+    .forEach((script) => {
+      script.remove();
+    });
 
-  if (animatedClips.length > 0) {
+  if (timedVisualClips.length > 0 || animatedClips.length > 0) {
     const script = doc.createElement("script");
-    script.setAttribute(STUDIO_KEYFRAMES_SCRIPT_ATTR, "true");
-    script.textContent = buildStudioKeyframesScript(rootCompositionId, animatedClips);
+    script.setAttribute(STUDIO_TIMELINE_SCRIPT_ATTR, "true");
+    script.textContent = buildStudioTimelineScript(
+      rootCompositionId,
+      timedVisualClips,
+      animatedClips,
+    );
     (doc.body || root).appendChild(script);
   }
 
@@ -999,8 +1009,9 @@ function removePropertyFromKeyframes(
   });
 }
 
-function buildStudioKeyframesScript(
+function buildStudioTimelineScript(
   compositionId: string,
+  timedVisualClips: HTMLElement[],
   clips: Array<{ el: HTMLElement; keyframes: Keyframe[] }>,
 ): string {
   const lines: string[] = [
@@ -1009,6 +1020,10 @@ function buildStudioKeyframesScript(
     `  const tl = window.__timelines[${JSON.stringify(compositionId)}];`,
     '  if (!tl || typeof tl.set !== "function" || typeof tl.to !== "function") return;',
   ];
+
+  for (const el of timedVisualClips) {
+    lines.push(...compileClipLifecycle(el));
+  }
 
   for (const { el, keyframes } of clips) {
     lines.push(...compileElementKeyframes(el, keyframes));
@@ -1038,6 +1053,20 @@ function compileElementKeyframes(el: HTMLElement, keyframes: Keyframe[]): string
     );
   }
 
+  return lines;
+}
+
+function compileClipLifecycle(el: HTMLElement): string[] {
+  const selector = JSON.stringify(`#${el.id}`);
+  const clipStart = parseElementStart(el);
+  const clipDuration = parseElementDuration(el);
+  const base = readElementBaseState(el);
+  const lines = [];
+  if (clipStart > TIME_EPSILON) lines.push(formatSet(selector, { visibility: "hidden" }, 0));
+  lines.push(formatSet(selector, { visibility: "visible", opacity: base.opacity }, clipStart));
+  if (clipDuration > TIME_EPSILON) {
+    lines.push(formatSet(selector, { visibility: "hidden" }, clipStart + clipDuration));
+  }
   return lines;
 }
 
@@ -1114,7 +1143,11 @@ function varsForKeyframe(
   }
 }
 
-function formatSet(selector: string, vars: Record<string, number>, position: number): string {
+function formatSet(
+  selector: string,
+  vars: Record<string, number | string>,
+  position: number,
+): string {
   return `  tl.set(${selector}, ${formatVars(vars)}, ${formatNumber(position)});`;
 }
 
@@ -1229,6 +1262,14 @@ function parseElementDuration(el: Element): number {
   const end = parseFiniteNumber(el.getAttribute("data-end"));
   if (end !== null && end > start) return end - start;
   return 0;
+}
+
+function collectTimedVisualClips(doc: Document, rootCompositionId: string): HTMLElement[] {
+  return Array.from(doc.querySelectorAll<HTMLElement>("[id][data-start]")).filter((el) => {
+    if (isCompositionRoot(el, rootCompositionId)) return false;
+    if (["AUDIO", "SCRIPT", "STYLE", "TEMPLATE"].includes(el.tagName)) return false;
+    return parseElementDuration(el) > TIME_EPSILON;
+  });
 }
 
 function resolveRootCompositionId(doc: Document): string | null {

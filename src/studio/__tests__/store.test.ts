@@ -291,6 +291,7 @@ vi.mock("@hyperframes/core", () => {
   };
 });
 import { createBlankCharacter, makePart } from "../character/character-utils";
+import { sampleClipKeyframedState } from "../hyperframes/keyframes";
 import type { CompositionClip, MediaAsset, MotionPreset, TextClip } from "../types";
 import { deriveEditorClips } from "../types";
 
@@ -708,6 +709,132 @@ describe("createBlankProject", () => {
     expect(useStudio.getState().project!.hf.compositionHtml["ai-title"]).toContain("AI block");
   });
 
+  it("uses the source composition id when adding a composition clip without an explicit id", () => {
+    const project = createBlankProject("Composition clip source id");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+    });
+
+    useStudio.getState().addClip({
+      id: "composition-source-id",
+      kind: "composition",
+      compositionKind: "ai-block",
+      compositionHtml: `<!DOCTYPE html>
+<html data-composition-id="ai-source-id" data-composition-duration="4">
+  <body>
+    <div id="stage" data-composition-id="ai-source-id" data-width="1920" data-height="1080">
+      <script>
+        window.__timelines = window.__timelines || {};
+        const tl = gsap.timeline({ paused: true });
+        window.__timelines["ai-source-id"] = tl;
+      </script>
+    </div>
+  </body>
+</html>`,
+      name: "AI Source Id",
+      trackIndex: 1,
+      start: 0,
+      duration: 4,
+      x: 0,
+      y: 0,
+      width: 1920,
+      height: 1080,
+      rotation: 0,
+      opacity: 1,
+      zIndex: 0,
+    });
+
+    const state = useStudio.getState();
+    const added = deriveEditorClips(state.project!).find((c) => c.id === "composition-source-id");
+    expect(added?.compositionId).toBe("ai-source-id");
+    expect(state.project!.hf.rootHtml).toContain('data-composition-id="ai-source-id"');
+    expect(state.project!.hf.compositionHtml["ai-source-id"]).toContain(
+      'window.__timelines["ai-source-id"]',
+    );
+  });
+
+  it("rejects composition source ids that disagree with the selected composition", () => {
+    const project = createBlankProject("Mismatched composition id");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+    });
+
+    const mismatchedClip: CompositionClip = {
+      id: "composition-mismatch",
+      kind: "composition",
+      compositionId: "expected-id",
+      compositionKind: "ai-block",
+      compositionHtml: `<!DOCTYPE html>
+<html data-composition-id="wrong-id" data-composition-duration="4">
+  <body>
+    <div id="stage" data-composition-id="wrong-id" data-width="1920" data-height="1080">
+      <script>
+        window.__timelines = window.__timelines || {};
+        const tl = gsap.timeline({ paused: true });
+        window.__timelines["wrong-id"] = tl;
+      </script>
+    </div>
+  </body>
+</html>`,
+      name: "Mismatch",
+      trackIndex: 1,
+      start: 0,
+      duration: 4,
+      x: 0,
+      y: 0,
+      width: 1920,
+      height: 1080,
+      rotation: 0,
+      opacity: 1,
+      zIndex: 0,
+    };
+
+    expect(() => useStudio.getState().addClip(mismatchedClip)).toThrow(/does not match/);
+    expect(useStudio.getState().project!.hf.rootHtml).not.toContain("composition-mismatch");
+
+    const validClip: CompositionClip = {
+      ...mismatchedClip,
+      id: "composition-valid",
+      compositionId: "expected-id",
+      compositionHtml: `<!DOCTYPE html>
+<html data-composition-id="expected-id" data-composition-duration="4">
+  <body>
+    <div id="stage" data-composition-id="expected-id" data-width="1920" data-height="1080">
+      <script>
+        window.__timelines = window.__timelines || {};
+        const tl = gsap.timeline({ paused: true });
+        window.__timelines["expected-id"] = tl;
+      </script>
+    </div>
+  </body>
+</html>`,
+    };
+    useStudio.getState().addClip(validClip);
+
+    expect(() =>
+      useStudio.getState().updateCompositionHtml(
+        "expected-id",
+        `<!DOCTYPE html>
+<html data-composition-id="wrong-id" data-composition-duration="4">
+  <body>
+    <div id="stage" data-composition-id="wrong-id" data-width="1920" data-height="1080">
+      <script>
+        window.__timelines = window.__timelines || {};
+        const tl = gsap.timeline({ paused: true });
+        window.__timelines["wrong-id"] = tl;
+      </script>
+    </div>
+  </body>
+</html>`,
+      ),
+    ).toThrow(/does not match/);
+    expect(useStudio.getState().project!.hf.compositionHtml["expected-id"]).toContain(
+      'window.__timelines["expected-id"]',
+    );
+  });
+
   it("rejects invalid non-character composition source before inserting the clip", () => {
     const project = createBlankProject("Bad composition clip");
     useStudio.setState({
@@ -969,7 +1096,7 @@ describe("createBlankProject", () => {
     const rootHtml = state.project!.hf.rootHtml;
     expect(keyframeId).toBeTruthy();
     expect(rootHtml).toContain("data-keyframes=");
-    expect(rootHtml).toContain("data-studio-keyframes");
+    expect(rootHtml).toContain("data-studio-timeline");
     expect(rootHtml).toContain(`&quot;x&quot;:${150 - 910}`);
     expect(rootHtml).toContain(`&quot;y&quot;:${125 - 490}`);
     expect(state.project!.editorMeta.clips[clipId]).not.toHaveProperty("keyframes");
@@ -978,6 +1105,92 @@ describe("createBlankProject", () => {
       keyframeId,
       property: "position",
     });
+  });
+
+  it("keeps position motion paths relative when the base clip moves", () => {
+    const project = createBlankProject("Relative keyframe path");
+    const asset = makeMediaAsset("media-relative-path", "Sprite");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([[asset.id, asset]]),
+    });
+
+    useStudio.getState().addMediaToTimeline(asset);
+    const clipId = useStudio.getState().selectedClipId!;
+    const baseClip = deriveEditorClips(useStudio.getState().project!).find(
+      (candidate) => candidate.id === clipId,
+    )!;
+
+    const keyframeId = useStudio
+      .getState()
+      .upsertClipKeyframe(clipId, "position", 1, { x: baseClip.x, y: baseClip.y - 300 });
+    const clipWithPath = deriveEditorClips(useStudio.getState().project!).find(
+      (candidate) => candidate.id === clipId,
+    )!;
+    const storedPosition = clipWithPath.keyframes.find(
+      (keyframe) => keyframe.id === keyframeId,
+    )!.properties;
+
+    expect(storedPosition).toEqual({ x: 0, y: -300 });
+
+    useStudio.getState().updateClip(clipId, { x: baseClip.x + 400, y: baseClip.y });
+
+    const movedClip = deriveEditorClips(useStudio.getState().project!).find(
+      (candidate) => candidate.id === clipId,
+    )!;
+    const movedKeyframe = movedClip.keyframes.find((keyframe) => keyframe.id === keyframeId);
+    const movedEndState = sampleClipKeyframedState(movedClip, 1);
+
+    expect(movedKeyframe?.properties).toEqual(storedPosition);
+    expect(movedEndState).toMatchObject({
+      x: baseClip.x + 400,
+      y: baseClip.y - 300,
+    });
+    expect(useStudio.getState().project!.hf.rootHtml).toContain(
+      `tl.to("#${clipId}", { x: ${baseClip.x + 400}, y: ${baseClip.y - 300}, duration: 1 }, 0);`,
+    );
+  });
+
+  it("clears keyframe selection when a base clip becomes selected", () => {
+    const project = createBlankProject("Base selection");
+    const asset = makeMediaAsset("media-base-selection", "Sprite");
+    const nextAsset = makeMediaAsset("media-next-base-selection", "Other sprite");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([
+        [asset.id, asset],
+        [nextAsset.id, nextAsset],
+      ]),
+    });
+
+    useStudio.getState().addMediaToTimeline(asset);
+    const clipId = useStudio.getState().selectedClipId!;
+    const keyframeId = useStudio
+      .getState()
+      .upsertClipKeyframe(clipId, "position", 1, { x: 150, y: 125 });
+
+    expect(useStudio.getState().selectedKeyframe).toMatchObject({
+      clipId,
+      keyframeId,
+      property: "position",
+    });
+
+    useStudio.getState().addMediaToTimeline(nextAsset);
+
+    expect(useStudio.getState().selectedClipId).not.toBe(clipId);
+    expect(useStudio.getState().selectedKeyframe).toBeNull();
+
+    useStudio.getState().selectKeyframe({
+      clipId,
+      keyframeId: keyframeId!,
+      property: "position",
+    });
+    useStudio.getState().selectClip(clipId);
+
+    expect(useStudio.getState().selectedClipId).toBe(clipId);
+    expect(useStudio.getState().selectedKeyframe).toBeNull();
   });
 
   it("stores beginner motion steps as rootHtml grouping over native keyframes", () => {
@@ -1037,7 +1250,7 @@ describe("createBlankProject", () => {
     const removedHtml = useStudio.getState().project!.hf.rootHtml;
     expect(removedHtml).not.toContain("data-keyframes=");
     expect(removedHtml).not.toContain("data-motion-steps=");
-    expect(removedHtml).not.toContain("data-studio-keyframes");
+    expect(removedHtml).toContain("data-studio-timeline");
   });
 
   it("undoes and redoes keyframe mutations as project snapshots", () => {
