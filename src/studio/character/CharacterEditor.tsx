@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState, type SVGAttributes } from "react";
-import { MouthCreator, RigPreview } from "./MouthCreator";
-import { RIG_STYLES } from "./mouth-libraries";
+import { useEffect, useRef, useState } from "react";
+import { EYE_PRESETS, MOUTH_PRESETS, generatePresetBlob } from "./presets";
 import { clamp } from "./mouth-morph";
 import {
   ArrowDown,
   ArrowUp,
+  ChevronDown,
+  ChevronRight,
   Copy,
   Download,
   Eye,
@@ -22,6 +23,7 @@ import { useStudio } from "../store";
 import {
   createBlankCharacter,
   defaultMotionBehaviorForRole,
+  getPartSlotId,
   makePart,
   normalizeCharacterSlots,
   normalizePartManifest,
@@ -48,7 +50,6 @@ import type {
   CharacterPreset,
   EyeState,
   ID,
-  MouthRig,
   MouthViseme,
   PartMotionBehavior,
   PartManifest,
@@ -115,15 +116,25 @@ const MOTION_BEHAVIOR_OPTIONS: Array<{ value: PartMotionBehavior; label: string 
 const SAMPLE_WORDS = ["Hello", "Shalom", "Mommy", "Welcome"];
 const EYE_STATES: EyeState[] = ["open", "half", "closed", "wink"];
 
-function effectiveMouthModeFor(
-  character: Pick<CharacterPreset, "mouthRig" | "mouthStyle" | "parts">,
-): "rig" | "images" {
-  if (character.mouthStyle) return character.mouthStyle;
-  const hasVisibleMouthVariants = character.parts.some(
-    (part) => part.role === "mouth" && part.visible,
-  );
-  return character.mouthRig && !hasVisibleMouthVariants ? "rig" : "images";
-}
+// Lip-sync test clips: drop audio files into ./lipsync-samples and they appear
+// automatically as test buttons on the mouth group inspector. (Vite glob — no
+// manifest to edit.)
+const LIPSYNC_SAMPLES = Object.entries(
+  import.meta.glob("./lipsync-samples/*.{mp3,wav,m4a,ogg,aac}", {
+    eager: true,
+    query: "?url",
+    import: "default",
+  }) as Record<string, string>,
+)
+  .map(([path, url]) => ({
+    name:
+      path
+        .split("/")
+        .pop()
+        ?.replace(/\.[^.]+$/, "") ?? "clip",
+    url,
+  }))
+  .sort((a, b) => a.name.localeCompare(b.name));
 
 type EditorMode = "select" | "pivot" | "bounds-rect" | "bounds-ellipse";
 type EditorBoundsMode = "frame" | "art";
@@ -131,24 +142,18 @@ type EditorBoundsMode = "frame" | "art";
 export function CharacterEditor({ characterId, onClose }: Props) {
   const [doc, setDoc] = useState<CharacterPreset | null>(null);
   const [selectedPartId, setSelectedPartId] = useState<ID | null>(null);
-  const [rigSelected, setRigSelected] = useState(false);
+  const [selectedSlotId, setSelectedSlotId] = useState<ID | null>(null);
   const [scale, setScale] = useState(0.7);
   const [mode, setMode] = useState<EditorMode>("select");
   const [boundsMode, setBoundsMode] = useState<EditorBoundsMode>("frame");
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [, setPreviewTick] = useState(0);
   const [status, setStatus] = useState<string | null>(null);
-  const [rigPreview, setRigPreview] = useState<{
-    visemes: MouthViseme[];
-    startedAt: number;
-    durationMs: number;
-  } | null>(null);
-  const [rigAudioViseme, setRigAudioViseme] = useState<MouthViseme>("rest");
-  const [rigAudioPlaying, setRigAudioPlaying] = useState(false);
+  const [mouthTestPlaying, setMouthTestPlaying] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
-  const rigAudioCtxRef = useRef<AudioContext | null>(null);
-  const rigRafRef = useRef<number | null>(null);
+  const mouthAudioCtxRef = useRef<AudioContext | null>(null);
+  const mouthAudioRafRef = useRef<number | null>(null);
   const alphaBackfillRef = useRef<Set<string>>(new Set());
   const alphaMaskRef = useRef<Map<string, AlphaHitMask>>(new Map());
   const alphaMaskLoadingRef = useRef<Set<string>>(new Set());
@@ -272,6 +277,8 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
   useEffect(() => {
     if (!preview) return;
+    // Audio-driven tests update the preview each frame and clear it on playback end.
+    if (preview.audioDriven) return;
     const t = window.setTimeout(() => setPreview(null), preview.durationMs);
     const interval = window.setInterval(() => setPreviewTick((n) => n + 1), 50);
     return () => {
@@ -279,16 +286,6 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       window.clearInterval(interval);
     };
   }, [preview]);
-
-  useEffect(() => {
-    if (!rigPreview) return;
-    const t = window.setTimeout(() => setRigPreview(null), rigPreview.durationMs);
-    const interval = window.setInterval(() => setPreviewTick((n) => n + 1), 50);
-    return () => {
-      window.clearTimeout(t);
-      window.clearInterval(interval);
-    };
-  }, [rigPreview]);
 
   if (!doc) {
     return (
@@ -386,81 +383,229 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
   const selectPart = (id: ID) => {
     setSelectedPartId(id);
-    setRigSelected(false);
+    setSelectedSlotId(null);
   };
-  const selectRig = () => {
+  const selectSlot = (slotId: ID) => {
+    setSelectedSlotId(slotId);
     setSelectedPartId(null);
-    setRigSelected(true);
-  };
-  const updateRigPlacement = (placement: NonNullable<typeof doc.mouthRig>["placement"]) => {
-    if (!doc.mouthRig) return;
-    updateDoc({ mouthRig: { ...doc.mouthRig, placement } });
   };
 
-  const playRigAudio = async (file: File) => {
-    if (rigRafRef.current) cancelAnimationFrame(rigRafRef.current);
-    await rigAudioCtxRef.current?.close();
-    rigAudioCtxRef.current = null;
-    setRigAudioPlaying(false);
-    setRigAudioViseme("rest");
+  const partsInSlot = (slotId: ID) => doc.parts.filter((p) => getPartSlotId(p) === slotId);
 
-    const arrayBuffer = await file.arrayBuffer();
-    const ctx = new AudioContext();
-    rigAudioCtxRef.current = ctx;
-    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 256;
-    const data = new Uint8Array(analyser.frequencyBinCount);
-
-    const source = ctx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(analyser);
-    analyser.connect(ctx.destination);
-    source.start();
-    setRigAudioPlaying(true);
-
-    const tick = () => {
-      analyser.getByteFrequencyData(data);
-      const mean = data.reduce((s, v) => s + v, 0) / data.length;
-      let v: MouthViseme = "rest";
-      if (mean > 55) v = "A";
-      else if (mean > 38) v = "E";
-      else if (mean > 22) v = "O";
-      else if (mean > 10) v = "MBP";
-      setRigAudioViseme(v);
-      rigRafRef.current = requestAnimationFrame(tick);
-    };
-    rigRafRef.current = requestAnimationFrame(tick);
-
-    source.onended = () => {
-      if (rigRafRef.current) cancelAnimationFrame(rigRafRef.current);
-      setRigAudioPlaying(false);
-      setRigAudioViseme("rest");
-      void ctx.close();
-    };
+  const toggleSlotVisible = (slotId: ID) => {
+    const anyVisible = partsInSlot(slotId).some((p) => p.visible);
+    setDoc((d) =>
+      d
+        ? {
+            ...d,
+            parts: d.parts.map((p) =>
+              getPartSlotId(p) === slotId ? { ...p, visible: !anyVisible } : p,
+            ),
+            updatedAt: Date.now(),
+          }
+        : d,
+    );
   };
 
-  const rigCurrentViseme: MouthViseme = (() => {
-    if (rigAudioPlaying) return rigAudioViseme;
-    if (!rigPreview) return "rest";
-    const elapsed = Date.now() - rigPreview.startedAt;
-    const t = Math.min(1, elapsed / rigPreview.durationMs);
-    const idx = Math.floor(t * rigPreview.visemes.length * 1.1) % rigPreview.visemes.length;
-    return rigPreview.visemes[idx] ?? "rest";
-  })();
+  const nudgeSlotZ = (slotId: ID, delta: number) => {
+    setDoc((d) =>
+      d
+        ? {
+            ...d,
+            parts: d.parts.map((p) =>
+              getPartSlotId(p) === slotId ? { ...p, zIndex: p.zIndex + delta } : p,
+            ),
+            updatedAt: Date.now(),
+          }
+        : d,
+    );
+  };
+
+  const removeSlot = (slotId: ID) => {
+    setDoc((d) =>
+      d
+        ? {
+            ...d,
+            parts: d.parts.filter((p) => getPartSlotId(p) !== slotId),
+            updatedAt: Date.now(),
+          }
+        : d,
+    );
+    if (selectedSlotId === slotId) setSelectedSlotId(null);
+  };
+
+  // Commit a one-shot group move (used by the Inspector numeric fields).
+  const applyGroupMove = (slotId: ID, dx: number, dy: number) => {
+    setDoc((d) =>
+      d
+        ? {
+            ...d,
+            parts: d.parts.map((p) => {
+              if (getPartSlotId(p) !== slotId) return p;
+              const pivot = pivotForPart(p);
+              return {
+                ...p,
+                x: p.x + dx,
+                y: p.y + dy,
+                pivot: { x: pivot.x + dx, y: pivot.y + dy },
+              };
+            }),
+            updatedAt: Date.now(),
+          }
+        : d,
+    );
+  };
+
+  // Commit a one-shot group scale around a fixed anchor corner.
+  const applyGroupScale = (
+    slotId: ID,
+    anchor: { x: number; y: number },
+    scaleX: number,
+    scaleY: number,
+  ) => {
+    setDoc((d) =>
+      d
+        ? {
+            ...d,
+            parts: d.parts.map((p) => {
+              if (getPartSlotId(p) !== slotId) return p;
+              const pivot = pivotForPart(p);
+              return {
+                ...p,
+                x: Math.round(anchor.x + (p.x - anchor.x) * scaleX),
+                y: Math.round(anchor.y + (p.y - anchor.y) * scaleY),
+                width: Math.max(4, Math.round(p.width * scaleX)),
+                height: Math.max(4, Math.round(p.height * scaleY)),
+                pivot: {
+                  x: Math.round(anchor.x + (pivot.x - anchor.x) * scaleX),
+                  y: Math.round(anchor.y + (pivot.y - anchor.y) * scaleY),
+                },
+              };
+            }),
+            updatedAt: Date.now(),
+          }
+        : d,
+    );
+  };
+
+  // Representative (rest) part of a mouth slot — used as the talk preview target.
+  const mouthSlotRepId = (slotId: ID) => {
+    const ps = partsInSlot(slotId);
+    return (ps.find((p) => p.viseme === "rest") ?? ps[0])?.id ?? "";
+  };
+
+  // Find an audio clip attached to a sample word (file named after the word).
+  const sampleForWord = (word: string) =>
+    LIPSYNC_SAMPLES.find((s) => s.name.toLowerCase() === word.toLowerCase());
+
+  // Word lip-sync test: play the attached clip (if any) with the word's scripted
+  // visemes timed to it; otherwise fall back to a silent shape preview.
+  const testMouthWord = (slotId: ID, word: string) => {
+    const sample = sampleForWord(word);
+    if (sample) {
+      void playMouthClip(slotId, sample.url, wordToVisemes(word));
+      return;
+    }
+    setPreview({
+      kind: "talk",
+      targetPartId: mouthSlotRepId(slotId),
+      targetSlotId: slotId,
+      targetRole: "mouth",
+      startedAt: Date.now(),
+      durationMs: 1300,
+      visemes: wordToVisemes(word),
+    });
+  };
+
+  const stopMouthTestAudio = () => {
+    if (mouthAudioRafRef.current) cancelAnimationFrame(mouthAudioRafRef.current);
+    mouthAudioRafRef.current = null;
+    void mouthAudioCtxRef.current?.close();
+    mouthAudioCtxRef.current = null;
+    setMouthTestPlaying(false);
+    setPreview(null);
+  };
+
+  // Play a clip and drive the mouth slot's visemes. With `scriptedVisemes` the
+  // sequence is timed to the clip's duration (correct shapes synced to audio);
+  // without it, the mouth is driven by live amplitude (rough, for arbitrary clips).
+  const playMouthClip = async (slotId: ID, url: string, scriptedVisemes?: MouthViseme[]) => {
+    stopMouthTestAudio();
+    const repId = mouthSlotRepId(slotId);
+    try {
+      const buffer = await fetch(url).then((r) => r.arrayBuffer());
+      const ctx = new AudioContext();
+      mouthAudioCtxRef.current = ctx;
+      const audioBuffer = await ctx.decodeAudioData(buffer);
+      const durationMs = audioBuffer.duration * 1000;
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      let analyser: AnalyserNode | null = null;
+      let data: Uint8Array<ArrayBuffer> | null = null;
+      if (scriptedVisemes) {
+        source.connect(ctx.destination);
+      } else {
+        analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        data = new Uint8Array(analyser.frequencyBinCount);
+        source.connect(analyser);
+        analyser.connect(ctx.destination);
+      }
+      const startedAt = Date.now();
+      source.start();
+      setMouthTestPlaying(true);
+      setPreview({
+        kind: "talk",
+        targetPartId: repId,
+        targetSlotId: slotId,
+        targetRole: "mouth",
+        startedAt,
+        durationMs,
+        audioDriven: true,
+        forcedViseme: "rest",
+      });
+      const tick = () => {
+        let v: MouthViseme = "rest";
+        if (scriptedVisemes) {
+          const t = Math.min(1, (Date.now() - startedAt) / Math.max(1, durationMs));
+          const idx = Math.min(scriptedVisemes.length - 1, Math.floor(t * scriptedVisemes.length));
+          v = scriptedVisemes[idx] ?? "rest";
+        } else if (analyser && data) {
+          analyser.getByteFrequencyData(data);
+          const mean = data.reduce((s, x) => s + x, 0) / data.length;
+          if (mean > 55) v = "A";
+          else if (mean > 38) v = "E";
+          else if (mean > 22) v = "O";
+          else if (mean > 10) v = "MBP";
+        }
+        setPreview((p) => (p && p.audioDriven ? { ...p, forcedViseme: v } : p));
+        mouthAudioRafRef.current = requestAnimationFrame(tick);
+      };
+      mouthAudioRafRef.current = requestAnimationFrame(tick);
+      source.onended = stopMouthTestAudio;
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : "Could not play test audio.");
+      stopMouthTestAudio();
+    }
+  };
+
   const exportData = JSON.stringify(normalizeCharacterSlots(doc), null, 2);
   const manifest = normalizePartManifest(doc.manifest);
-  const effectiveMouthMode = effectiveMouthModeFor(doc);
   const previewParentPart =
     preview?.targetRole === "head"
       ? orderedParts.find((part) => part.id === preview.targetPartId)
       : undefined;
-  const visibleEditorParts = orderedParts
-    .filter((part) => roleEnabledByManifest(part.role, manifest))
-    .filter((part) => !(part.role === "mouth" && effectiveMouthMode === "rig"));
+  const visibleEditorParts = orderedParts.filter((part) =>
+    roleEnabledByManifest(part.role, manifest),
+  );
   const selectedEditorPart = selectedPart
     ? visibleEditorParts.find((part) => part.id === selectedPart.id)
     : null;
+  const selectedSlotParts = selectedSlotId
+    ? doc.parts.filter((part) => getPartSlotId(part) === selectedSlotId)
+    : [];
+  const selectedSlotBounds =
+    selectedSlotParts.length > 0 ? unionFrameBounds(selectedSlotParts) : null;
 
   const canvasPointFromEvent = (e: React.PointerEvent) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -554,6 +699,107 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     window.addEventListener("pointerup", up);
   };
 
+  // Drag every variant in a slot together by the same canvas delta.
+  const startGroupDrag = (e: React.PointerEvent, slotId: ID) => {
+    if (e.button !== 0) return;
+    const snapshot = new Map(
+      partsInSlot(slotId).map((p) => {
+        const pivot = pivotForPart(p);
+        return [p.id, { x: p.x, y: p.y, pivot }] as const;
+      }),
+    );
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const move = (ev: PointerEvent) => {
+      const dx = Math.round((ev.clientX - sx) / scale);
+      const dy = Math.round((ev.clientY - sy) / scale);
+      setDoc((d) =>
+        d
+          ? {
+              ...d,
+              parts: d.parts.map((p) => {
+                const s = snapshot.get(p.id);
+                if (!s) return p;
+                return {
+                  ...p,
+                  x: s.x + dx,
+                  y: s.y + dy,
+                  pivot: { x: s.pivot.x + dx, y: s.pivot.y + dy },
+                };
+              }),
+              updatedAt: Date.now(),
+            }
+          : d,
+      );
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  // Resize a whole slot from a corner, scaling every variant around the
+  // opposite (fixed) corner of the group's union bounds.
+  const startGroupResize = (e: React.PointerEvent, slotId: ID, corner: ResizeCorner) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    const parts = partsInSlot(slotId);
+    const box = unionFrameBounds(parts);
+    const anchor = {
+      x: corner.includes("w") ? box.x + box.width : box.x,
+      y: corner.includes("n") ? box.y + box.height : box.y,
+    };
+    const snapshot = parts.map((p) => ({
+      id: p.id,
+      x: p.x,
+      y: p.y,
+      width: p.width,
+      height: p.height,
+      pivot: pivotForPart(p),
+    }));
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const move = (ev: PointerEvent) => {
+      const dx = (ev.clientX - sx) / scale;
+      const dy = (ev.clientY - sy) / scale;
+      const movingX = corner.includes("w") ? box.x + dx : box.x + box.width + dx;
+      const movingY = corner.includes("n") ? box.y + dy : box.y + box.height + dy;
+      const scaleX = Math.max(8, Math.abs(anchor.x - movingX)) / Math.max(1, box.width);
+      const scaleY = Math.max(8, Math.abs(anchor.y - movingY)) / Math.max(1, box.height);
+      setDoc((d) =>
+        d
+          ? {
+              ...d,
+              parts: d.parts.map((p) => {
+                const s = snapshot.find((q) => q.id === p.id);
+                if (!s) return p;
+                return {
+                  ...p,
+                  x: Math.round(anchor.x + (s.x - anchor.x) * scaleX),
+                  y: Math.round(anchor.y + (s.y - anchor.y) * scaleY),
+                  width: Math.max(4, Math.round(s.width * scaleX)),
+                  height: Math.max(4, Math.round(s.height * scaleY)),
+                  pivot: {
+                    x: Math.round(anchor.x + (s.pivot.x - anchor.x) * scaleX),
+                    y: Math.round(anchor.y + (s.pivot.y - anchor.y) * scaleY),
+                  },
+                };
+              }),
+              updatedAt: Date.now(),
+            }
+          : d,
+      );
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
   const handleCanvasPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
     const point = canvasPointFromEvent(e);
@@ -561,8 +807,19 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     const picked = pickPartAt(point);
     if (!picked) {
       setSelectedPartId(null);
-      setRigSelected(false);
+      setSelectedSlotId(null);
       return;
+    }
+    if (mode === "select") {
+      const slotId = getPartSlotId(picked);
+      // Keep editing a single variant if one of this slot is already picked.
+      const editingVariant =
+        selectedPart && !selectedSlotId && getPartSlotId(selectedPart) === slotId;
+      if (!editingVariant && partsInSlot(slotId).length > 1) {
+        selectSlot(slotId);
+        startGroupDrag(e, slotId);
+        return;
+      }
     }
     startCanvasPartDrag(e, picked, point);
   };
@@ -619,32 +876,18 @@ export function CharacterEditor({ characterId, onClose }: Props) {
             manifest={manifest}
             onChange={(nextManifest) => updateDoc({ manifest: nextManifest })}
           />
-          <UploadSlots
-            onImport={importSvg}
-            parts={doc.parts}
-            manifest={manifest}
-            mouthRig={doc.mouthRig}
-            mouthStyle={doc.mouthStyle}
-            onSaveRig={(rig) => updateDoc({ mouthRig: rig })}
-            onSetMouthStyle={(style) => updateDoc({ mouthStyle: style })}
-          />
+          <UploadSlots onImport={importSvg} parts={doc.parts} manifest={manifest} />
           <LayerList
-            parts={orderedParts.filter(
-              (p) => !(p.role === "mouth" && effectiveMouthMode === "rig"),
-            )}
+            parts={orderedParts}
             selectedId={selectedPartId}
+            selectedSlotId={selectedSlotId}
             onSelect={selectPart}
+            onSelectSlot={selectSlot}
             onChange={updatePart}
             onRemove={removePart}
-            mouthRig={effectiveMouthMode === "rig" ? doc.mouthRig : undefined}
-            rigSelected={rigSelected}
-            onSelectRig={selectRig}
-            onChangeRigZIndex={(z) =>
-              doc.mouthRig &&
-              updateDoc({
-                mouthRig: { ...doc.mouthRig, placement: { ...doc.mouthRig.placement, zIndex: z } },
-              })
-            }
+            onToggleSlotVisible={toggleSlotVisible}
+            onNudgeSlotZ={nudgeSlotZ}
+            onRemoveSlot={removeSlot}
           />
         </aside>
 
@@ -660,7 +903,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           onDragOver={(e) => e.preventDefault()}
         >
           <div
-            className="relative bg-[oklch(0.11_0.01_260)] shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] outline outline-1 outline-border"
+            className="relative bg-white shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] outline outline-1 outline-border"
             style={{ width: doc.canvasWidth * scale, height: doc.canvasHeight * scale }}
           >
             <div
@@ -683,17 +926,6 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   previewParentPart={previewParentPart}
                 />
               ))}
-              {doc.mouthRig && effectiveMouthMode === "rig" && (
-                <RigPlacementLayer
-                  key="generated-mouth"
-                  rig={doc.mouthRig}
-                  selected={rigSelected}
-                  scale={scale}
-                  currentViseme={rigCurrentViseme}
-                  onSelect={selectRig}
-                  onChange={updateRigPlacement}
-                />
-              )}
               {selectedEditorPart && (
                 <PartControlsOverlay
                   part={selectedEditorPart}
@@ -705,6 +937,14 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   preview={preview}
                   previewParentPart={previewParentPart}
                   onChange={(patch) => updatePart(selectedEditorPart.id, patch)}
+                />
+              )}
+              {selectedSlotId && selectedSlotBounds && (
+                <GroupControlsOverlay
+                  bounds={selectedSlotBounds}
+                  scale={scale}
+                  onStartMove={(e) => startGroupDrag(e, selectedSlotId)}
+                  onStartResize={(e, corner) => startGroupResize(e, selectedSlotId, corner)}
                 />
               )}
             </div>
@@ -720,26 +960,37 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         </main>
 
         <aside className="w-80 shrink-0 overflow-auto border-l border-border bg-panel p-3 text-xs">
-          <Inspector
-            doc={doc}
-            part={selectedPart}
-            mode={mode}
-            boundsMode={boundsMode}
-            onModeChange={setMode}
-            onBoundsModeChange={setBoundsMode}
-            onChange={updatePart}
-            onRemove={removePart}
-            onDuplicate={duplicatePart}
-            onPreview={setPreview}
-            onCanvasChange={(patch) => updateDoc(patch)}
-            rigSelected={rigSelected}
-            onRigChange={(rig) => updateDoc({ mouthRig: rig })}
-            onRigPreview={(visemes) =>
-              setRigPreview({ visemes, startedAt: Date.now(), durationMs: 1400 })
-            }
-            onRigAudioFile={playRigAudio}
-            rigAudioPlaying={rigAudioPlaying}
-          />
+          {selectedSlotId && selectedSlotBounds ? (
+            <GroupInspector
+              doc={doc}
+              slotId={selectedSlotId}
+              parts={selectedSlotParts}
+              bounds={selectedSlotBounds}
+              onCanvasChange={(patch) => updateDoc(patch)}
+              onMove={(dx, dy) => applyGroupMove(selectedSlotId, dx, dy)}
+              onScale={(anchor, sx, sy) => applyGroupScale(selectedSlotId, anchor, sx, sy)}
+              onSelectPart={selectPart}
+              lipSyncSamples={LIPSYNC_SAMPLES}
+              mouthTestPlaying={mouthTestPlaying}
+              onTestWord={(word) => testMouthWord(selectedSlotId, word)}
+              onTestAudio={(url) => void playMouthClip(selectedSlotId, url)}
+              onStopTestAudio={stopMouthTestAudio}
+            />
+          ) : (
+            <Inspector
+              doc={doc}
+              part={selectedPart}
+              mode={mode}
+              boundsMode={boundsMode}
+              onModeChange={setMode}
+              onBoundsModeChange={setBoundsMode}
+              onChange={updatePart}
+              onRemove={removePart}
+              onDuplicate={duplicatePart}
+              onPreview={setPreview}
+              onCanvasChange={(patch) => updateDoc(patch)}
+            />
+          )}
         </aside>
       </div>
     </div>
@@ -803,18 +1054,10 @@ function UploadSlots({
   onImport,
   parts,
   manifest,
-  mouthRig,
-  mouthStyle,
-  onSaveRig,
-  onSetMouthStyle,
 }: {
   onImport: (file: File, options?: ImportOptions) => void;
   parts: CharacterPart[];
   manifest: PartManifest;
-  mouthRig: MouthRig | undefined;
-  mouthStyle: CharacterPreset["mouthStyle"];
-  onSaveRig: (rig: MouthRig) => void;
-  onSetMouthStyle: (style: CharacterPreset["mouthStyle"]) => void;
 }) {
   return (
     <div className="space-y-3">
@@ -854,8 +1097,15 @@ function UploadSlots({
       </div>
       {manifest.hasEyes && (
         <div className="rounded border border-border bg-panel-2 p-2">
-          <div className="mb-1 font-semibold uppercase tracking-wider text-muted-foreground">
-            Eye States
+          <div className="mb-2 flex items-center justify-between">
+            <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+              Eye States
+            </span>
+            <span className="text-[10px] text-muted-foreground">(optional)</span>
+          </div>
+          <EyePresetSelector onImport={onImport} />
+          <div className="text-[10px] text-muted-foreground mb-2">
+            Or upload eye state variants:
           </div>
           <div className="grid grid-cols-2 gap-1.5">
             {(["left", "right"] as const).flatMap((side) =>
@@ -886,16 +1136,7 @@ function UploadSlots({
           </div>
         </div>
       )}
-      {manifest.hasMouth && (
-        <MouthShapeSetup
-          parts={parts}
-          mouthRig={mouthRig}
-          mouthStyle={mouthStyle}
-          onSaveRig={onSaveRig}
-          onSetMouthStyle={onSetMouthStyle}
-          onImport={onImport}
-        />
-      )}
+      {manifest.hasMouth && <MouthShapeSetup parts={parts} onImport={onImport} />}
     </div>
   );
 }
@@ -940,218 +1181,298 @@ function SlotUpload({
 
 function MouthShapeSetup({
   parts,
-  mouthRig,
-  mouthStyle,
-  onSaveRig,
-  onSetMouthStyle,
   onImport,
 }: {
   parts: CharacterPart[];
-  mouthRig: MouthRig | undefined;
-  mouthStyle: CharacterPreset["mouthStyle"];
-  onSaveRig: (rig: MouthRig) => void;
-  onSetMouthStyle: (style: CharacterPreset["mouthStyle"]) => void;
   onImport: (file: File, options?: ImportOptions) => void;
 }) {
-  const [designerOpen, setDesignerOpen] = useState(false);
-  // Uploaded/generated variants are the default when they exist; rig is an explicit slot strategy.
-  const effectiveMode = effectiveMouthModeFor({ parts, mouthRig, mouthStyle });
-
   return (
     <div className="rounded border border-border bg-panel-2 p-2">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="font-semibold uppercase tracking-wider text-muted-foreground">
-          Mouth Shapes
-        </span>
-        {/* Mode toggle */}
-        <div className="flex rounded border border-border text-[10px]">
-          <button
-            type="button"
-            onClick={() => onSetMouthStyle("rig")}
-            className={`rounded-l px-2 py-0.5 ${effectiveMode === "rig" ? "bg-primary text-primary-foreground" : "hover:bg-panel"}`}
-          >
-            Generated
-          </button>
-          <button
-            type="button"
-            onClick={() => onSetMouthStyle("images")}
-            className={`rounded-r border-l border-border px-2 py-0.5 ${effectiveMode === "images" ? "bg-primary text-primary-foreground" : "hover:bg-panel"}`}
-          >
-            Variants
-          </button>
-        </div>
+      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+        Mouth Shapes
       </div>
-
-      {effectiveMode === "rig" ? (
-        <>
-          <button
-            type="button"
-            onClick={() => setDesignerOpen(true)}
-            className="mb-2 w-full rounded border border-primary bg-primary/10 px-2 py-1.5 text-[11px] font-medium text-primary hover:bg-primary/20"
-          >
-            {mouthRig ? `Generated: ${mouthRig.styleId} — Edit…` : "Choose generated mouth…"}
-          </button>
-          <MouthCreator
-            isOpen={designerOpen}
-            onClose={() => setDesignerOpen(false)}
-            initialRig={mouthRig}
-            onSave={(rig) => {
-              onSaveRig(rig);
-              setDesignerOpen(false);
-            }}
-          />
-        </>
-      ) : (
-        <div className="grid grid-cols-2 gap-1.5">
-          {MOUTH_VISEMES.map((viseme) => {
-            const part = parts.find((p) => p.role === "mouth" && p.viseme === viseme);
-            return (
-              <SlotUpload
-                key={viseme}
-                compact
-                label={viseme}
-                filled={Boolean(part)}
-                onUpload={(file) =>
-                  onImport(file, {
-                    role: "mouth",
-                    viseme,
-                    label: `Mouth ${viseme}`,
-                    slotId: "role:mouth",
-                    zIndex: 60,
-                  })
-                }
-              />
-            );
-          })}
-        </div>
-      )}
+      <MouthPresetSelector onImport={onImport} />
+      <div className="mb-2 text-[10px] text-muted-foreground">Or upload mouth shape variants:</div>
+      <div className="grid grid-cols-2 gap-1.5">
+        {MOUTH_VISEMES.map((viseme) => {
+          const part = parts.find((p) => p.role === "mouth" && p.viseme === viseme);
+          return (
+            <SlotUpload
+              key={viseme}
+              compact
+              label={viseme}
+              filled={Boolean(part)}
+              onUpload={(file) =>
+                onImport(file, {
+                  role: "mouth",
+                  viseme,
+                  label: `Mouth ${viseme}`,
+                  slotId: "role:mouth",
+                  zIndex: 60,
+                })
+              }
+            />
+          );
+        })}
+      </div>
     </div>
+  );
+}
+
+const VISEME_ORDER: MouthViseme[] = ["rest", "A", "E", "O", "U", "MBP", "FV", "L", "WQ", "Smile"];
+const EYE_STATE_ORDER: EyeState[] = ["open", "half", "closed", "wink"];
+
+function variantLabel(part: CharacterPart) {
+  if (part.role === "mouth" && part.viseme) return part.viseme;
+  if (part.role === "eye" && part.eyeState) return part.eyeState;
+  return part.name;
+}
+
+function orderVariants(parts: CharacterPart[]) {
+  return parts.slice().sort((a, b) => {
+    if (a.role === "mouth" && b.role === "mouth") {
+      return VISEME_ORDER.indexOf(a.viseme ?? "rest") - VISEME_ORDER.indexOf(b.viseme ?? "rest");
+    }
+    if (a.role === "eye" && b.role === "eye") {
+      return (
+        EYE_STATE_ORDER.indexOf(a.eyeState ?? "open") -
+        EYE_STATE_ORDER.indexOf(b.eyeState ?? "open")
+      );
+    }
+    return a.zIndex - b.zIndex;
+  });
+}
+
+function LayerPartRow({
+  part,
+  selected,
+  indented,
+  onSelect,
+  onChange,
+  onRemove,
+}: {
+  part: CharacterPart;
+  selected: boolean;
+  indented?: boolean;
+  onSelect: () => void;
+  onChange: (patch: Partial<CharacterPart>) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <li
+      onClick={onSelect}
+      className={`flex cursor-pointer items-center gap-1 rounded border px-2 py-1.5 ${
+        indented ? "ml-3" : ""
+      } ${selected ? "border-primary bg-primary/15" : "border-border bg-panel-2 hover:bg-panel"}`}
+    >
+      <span className="min-w-0 flex-1 truncate">
+        {indented ? variantLabel(part) : (part.slotName ?? part.name)}
+        {!indented && (
+          <span className="ml-1 text-[10px] text-muted-foreground">{roleLabel(part.role)}</span>
+        )}
+      </span>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onChange({ visible: !part.visible });
+        }}
+        className="rounded p-1 text-muted-foreground hover:text-foreground"
+        title={part.visible ? "Hide" : "Show"}
+      >
+        {part.visible ? <Eye size={14} /> : <EyeOff size={14} />}
+      </button>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onChange({ zIndex: part.zIndex + 1 });
+        }}
+        className="rounded p-1 text-muted-foreground hover:text-foreground"
+        title="Bring forward"
+      >
+        <ArrowUp size={14} />
+      </button>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onChange({ zIndex: part.zIndex - 1 });
+        }}
+        className="rounded p-1 text-muted-foreground hover:text-foreground"
+        title="Send backward"
+      >
+        <ArrowDown size={14} />
+      </button>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove();
+        }}
+        className="rounded p-1 text-destructive"
+        title="Delete"
+      >
+        <Trash2 size={14} />
+      </button>
+    </li>
   );
 }
 
 function LayerList({
   parts,
   selectedId,
+  selectedSlotId,
   onSelect,
+  onSelectSlot,
   onChange,
   onRemove,
-  mouthRig,
-  rigSelected,
-  onSelectRig,
-  onChangeRigZIndex,
+  onToggleSlotVisible,
+  onNudgeSlotZ,
+  onRemoveSlot,
 }: {
   parts: CharacterPart[];
   selectedId: ID | null;
+  selectedSlotId: ID | null;
   onSelect: (id: ID) => void;
+  onSelectSlot: (slotId: ID) => void;
   onChange: (id: ID, patch: Partial<CharacterPart>) => void;
   onRemove: (id: ID) => void;
-  mouthRig?: MouthRig;
-  rigSelected?: boolean;
-  onSelectRig?: () => void;
-  onChangeRigZIndex?: (z: number) => void;
+  onToggleSlotVisible: (slotId: ID) => void;
+  onNudgeSlotZ: (slotId: ID, delta: number) => void;
+  onRemoveSlot: (slotId: ID) => void;
 }) {
+  const [expanded, setExpanded] = useState<Set<ID>>(new Set());
+
+  const groups = new Map<ID, CharacterPart[]>();
+  for (const part of parts) {
+    const slotId = getPartSlotId(part);
+    const arr = groups.get(slotId) ?? [];
+    arr.push(part);
+    groups.set(slotId, arr);
+  }
+  const groupList = Array.from(groups.entries())
+    .map(([slotId, slotParts]) => ({
+      slotId,
+      slotParts,
+      topZ: Math.max(...slotParts.map((p) => p.zIndex)),
+      name: slotParts[0].slotName ?? roleLabel(slotParts[0].role),
+    }))
+    .sort((a, b) => b.topZ - a.topZ);
+
+  const toggleExpanded = (slotId: ID) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(slotId)) next.delete(slotId);
+      else next.add(slotId);
+      return next;
+    });
+
   return (
     <div className="mt-4">
       <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
         Layers
       </div>
       <ul className="space-y-1">
-        {mouthRig && (
-          <li
-            onClick={onSelectRig}
-            className={`flex cursor-pointer items-center gap-2 rounded border px-2 py-1.5 ${
-              rigSelected
-                ? "border-primary bg-primary/15"
-                : "border-border bg-panel-2 hover:bg-panel"
-            }`}
-          >
-            <span className="min-w-0 flex-1 truncate font-medium">
-              Generated mouth
-              <span className="ml-1 font-normal text-muted-foreground">{mouthRig.styleId}</span>
-            </span>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onChangeRigZIndex?.(mouthRig.placement.zIndex + 1);
-              }}
-              className="rounded p-1 text-muted-foreground hover:text-foreground"
-              title="Bring forward"
-            >
-              <ArrowUp size={14} />
-            </button>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onChangeRigZIndex?.(mouthRig.placement.zIndex - 1);
-              }}
-              className="rounded p-1 text-muted-foreground hover:text-foreground"
-              title="Send backward"
-            >
-              <ArrowDown size={14} />
-            </button>
-          </li>
-        )}
-        {parts
-          .slice()
-          .reverse()
-          .map((part) => (
-            <li
-              key={part.id}
-              onClick={() => onSelect(part.id)}
-              className={`flex cursor-pointer items-center gap-2 rounded border px-2 py-1.5 ${
-                part.id === selectedId
-                  ? "border-primary bg-primary/15"
-                  : "border-border bg-panel-2 hover:bg-panel"
-              }`}
-            >
-              <span className="min-w-0 flex-1 truncate">
-                {part.slotName ?? part.name}
-                <span className="ml-1 text-[10px] text-muted-foreground">
-                  {roleLabel(part.role)}
+        {groupList.map(({ slotId, slotParts, name }) => {
+          // Single-variant slots stay as flat rows.
+          if (slotParts.length === 1) {
+            const part = slotParts[0];
+            return (
+              <LayerPartRow
+                key={part.id}
+                part={part}
+                selected={part.id === selectedId}
+                onSelect={() => onSelect(part.id)}
+                onChange={(patch) => onChange(part.id, patch)}
+                onRemove={() => onRemove(part.id)}
+              />
+            );
+          }
+          // Multi-variant slots render a collapsible group.
+          const isOpen = expanded.has(slotId);
+          const anyVisible = slotParts.some((p) => p.visible);
+          return (
+            <li key={slotId} className="space-y-1">
+              <div
+                onClick={() => onSelectSlot(slotId)}
+                className={`flex cursor-pointer items-center gap-1 rounded border px-2 py-1.5 ${
+                  slotId === selectedSlotId
+                    ? "border-primary bg-primary/15"
+                    : "border-border bg-panel-2 hover:bg-panel"
+                }`}
+              >
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleExpanded(slotId);
+                  }}
+                  className="rounded p-0.5 text-muted-foreground hover:text-foreground"
+                  title={isOpen ? "Collapse" : "Expand"}
+                >
+                  {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                </button>
+                <span className="min-w-0 flex-1 truncate font-medium">
+                  {name}
+                  <span className="ml-1 text-[10px] font-normal text-muted-foreground">
+                    {slotParts.length} parts
+                  </span>
                 </span>
-              </span>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onChange(part.id, { visible: !part.visible });
-                }}
-                className="rounded p-1 text-muted-foreground hover:text-foreground"
-                title={part.visible ? "Hide" : "Show"}
-              >
-                {part.visible ? <Eye size={14} /> : <EyeOff size={14} />}
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onChange(part.id, { zIndex: part.zIndex + 1 });
-                }}
-                className="rounded p-1 text-muted-foreground hover:text-foreground"
-                title="Bring forward"
-              >
-                <ArrowUp size={14} />
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onChange(part.id, { zIndex: part.zIndex - 1 });
-                }}
-                className="rounded p-1 text-muted-foreground hover:text-foreground"
-                title="Send backward"
-              >
-                <ArrowDown size={14} />
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRemove(part.id);
-                }}
-                className="rounded p-1 text-destructive"
-                title="Delete"
-              >
-                <Trash2 size={14} />
-              </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleSlotVisible(slotId);
+                  }}
+                  className="rounded p-1 text-muted-foreground hover:text-foreground"
+                  title={anyVisible ? "Hide all" : "Show all"}
+                >
+                  {anyVisible ? <Eye size={14} /> : <EyeOff size={14} />}
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onNudgeSlotZ(slotId, 1);
+                  }}
+                  className="rounded p-1 text-muted-foreground hover:text-foreground"
+                  title="Bring all forward"
+                >
+                  <ArrowUp size={14} />
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onNudgeSlotZ(slotId, -1);
+                  }}
+                  className="rounded p-1 text-muted-foreground hover:text-foreground"
+                  title="Send all backward"
+                >
+                  <ArrowDown size={14} />
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRemoveSlot(slotId);
+                  }}
+                  className="rounded p-1 text-destructive"
+                  title="Delete group"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+              {isOpen && (
+                <ul className="space-y-1">
+                  {orderVariants(slotParts).map((part) => (
+                    <LayerPartRow
+                      key={part.id}
+                      part={part}
+                      selected={part.id === selectedId}
+                      indented
+                      onSelect={() => onSelect(part.id)}
+                      onChange={(patch) => onChange(part.id, patch)}
+                      onRemove={() => onRemove(part.id)}
+                    />
+                  ))}
+                </ul>
+              )}
             </li>
-          ))}
+          );
+        })}
       </ul>
     </div>
   );
@@ -1169,11 +1490,6 @@ function Inspector({
   onDuplicate,
   onPreview,
   onCanvasChange,
-  rigSelected,
-  onRigChange,
-  onRigPreview,
-  onRigAudioFile,
-  rigAudioPlaying,
 }: {
   doc: CharacterPreset;
   part: CharacterPart | null;
@@ -1186,107 +1502,7 @@ function Inspector({
   onDuplicate: (part: CharacterPart) => void;
   onPreview: (preview: PreviewState) => void;
   onCanvasChange: (patch: Partial<CharacterPreset>) => void;
-  rigSelected: boolean;
-  onRigChange: (rig: MouthRig) => void;
-  onRigPreview: (visemes: MouthViseme[]) => void;
-  onRigAudioFile: (file: File) => void;
-  rigAudioPlaying: boolean;
 }) {
-  if (rigSelected && doc.mouthRig) {
-    const rig = doc.mouthRig;
-    const p = rig.placement;
-    const setP = (patch: Partial<typeof p>) =>
-      onRigChange({ ...rig, placement: { ...p, ...patch } });
-    return (
-      <div className="space-y-4">
-        <CanvasControls doc={doc} onChange={onCanvasChange} />
-        <section className="rounded border border-border bg-panel-2 p-3">
-          <div className="mb-3 font-medium">Generated mouth — {rig.styleId}</div>
-          <div className="grid grid-cols-2 gap-2">
-            <Field label="X">
-              <input
-                type="number"
-                value={p.x}
-                onChange={(e) => setP({ x: Number(e.target.value) })}
-                className="w-full rounded border border-border bg-background px-2 py-1"
-              />
-            </Field>
-            <Field label="Y">
-              <input
-                type="number"
-                value={p.y}
-                onChange={(e) => setP({ y: Number(e.target.value) })}
-                className="w-full rounded border border-border bg-background px-2 py-1"
-              />
-            </Field>
-            <Field label="Width">
-              <input
-                type="number"
-                value={p.width}
-                onChange={(e) => setP({ width: Number(e.target.value) })}
-                className="w-full rounded border border-border bg-background px-2 py-1"
-              />
-            </Field>
-            <Field label="Height">
-              <input
-                type="number"
-                value={p.height}
-                onChange={(e) => setP({ height: Number(e.target.value) })}
-                className="w-full rounded border border-border bg-background px-2 py-1"
-              />
-            </Field>
-            <Field label="Z-index">
-              <input
-                type="number"
-                value={p.zIndex}
-                onChange={(e) => setP({ zIndex: Number(e.target.value) })}
-                className="w-full rounded border border-border bg-background px-2 py-1"
-              />
-            </Field>
-          </div>
-        </section>
-        <section className="rounded border border-border bg-panel-2 p-3">
-          <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-            Test Talk
-          </div>
-          <div className="mb-3 grid grid-cols-2 gap-2">
-            {SAMPLE_WORDS.map((word) => (
-              <button
-                key={word}
-                type="button"
-                onClick={() => onRigPreview(wordToVisemes(word))}
-                className="rounded border border-border px-2 py-1 hover:bg-panel"
-              >
-                {word}
-              </button>
-            ))}
-          </div>
-          <div className="mb-1 text-[10px] text-muted-foreground">Or test with audio:</div>
-          <label
-            className={`flex cursor-pointer items-center gap-2 rounded border px-2 py-1.5 text-[11px] ${
-              rigAudioPlaying
-                ? "border-primary bg-primary/10 text-primary"
-                : "border-border hover:bg-panel"
-            }`}
-          >
-            <Upload size={13} />
-            {rigAudioPlaying ? "Playing…" : "Load audio file"}
-            <input
-              type="file"
-              accept="audio/*"
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void onRigAudioFile(file);
-                if (e.target) e.target.value = "";
-              }}
-            />
-          </label>
-        </section>
-      </div>
-    );
-  }
-
   if (!part) {
     return (
       <div className="space-y-4">
@@ -1594,94 +1810,218 @@ function CanvasControls({
   );
 }
 
-function RigPlacementLayer({
-  rig,
-  selected,
+/** Axis-aligned move/resize box for a whole slot group (eyes / mouth visemes). */
+function GroupControlsOverlay({
+  bounds,
   scale,
-  currentViseme = "rest",
-  onSelect,
-  onChange,
+  onStartMove,
+  onStartResize,
 }: {
-  rig: MouthRig;
-  selected: boolean;
+  bounds: { x: number; y: number; width: number; height: number };
   scale: number;
-  currentViseme?: MouthViseme;
-  onSelect: () => void;
-  onChange: (placement: MouthRig["placement"]) => void;
+  onStartMove: (e: React.PointerEvent) => void;
+  onStartResize: (e: React.PointerEvent, corner: ResizeCorner) => void;
 }) {
-  const rigStyle = RIG_STYLES.find((s) => s.id === rig.styleId) ?? RIG_STYLES[0];
-  const { placement: p } = rig;
-
-  const startDrag = (e: React.PointerEvent) => {
-    e.stopPropagation();
-    onSelect();
-    if (e.button !== 0) return;
-    const sx = e.clientX,
-      sy = e.clientY;
-    const ox = p.x,
-      oy = p.y;
-    const move = (ev: PointerEvent) =>
-      onChange({
-        ...p,
-        x: Math.round(ox + (ev.clientX - sx) / scale),
-        y: Math.round(oy + (ev.clientY - sy) / scale),
-      });
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+  const handleSize = 14 / Math.max(0.0001, scale);
+  const corners: ResizeCorner[] = ["nw", "ne", "sw", "se"];
+  const cornerPos: Record<ResizeCorner, { x: number; y: number }> = {
+    nw: { x: 0, y: 0 },
+    ne: { x: bounds.width, y: 0 },
+    sw: { x: 0, y: bounds.height },
+    se: { x: bounds.width, y: bounds.height },
   };
-
-  const resize = (corner: ResizeCorner) => (e: React.PointerEvent) => {
-    e.stopPropagation();
-    const sx = e.clientX,
-      sy = e.clientY;
-    const { x: ox, y: oy, width: ow, height: oh } = p;
-    const move = (ev: PointerEvent) => {
-      const dx = (ev.clientX - sx) / scale;
-      const dy = (ev.clientY - sy) / scale;
-      const width = Math.max(20, corner.includes("e") ? ow + dx : ow - dx);
-      const height = Math.max(12, corner.includes("s") ? oh + dy : oh - dy);
-      onChange({
-        ...p,
-        width: Math.round(width),
-        height: Math.round(height),
-        x: Math.round(corner.includes("w") ? ox + (ow - width) : ox),
-        y: Math.round(corner.includes("n") ? oy + (oh - height) : oy),
-      });
-    };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  };
-
   return (
     <div
-      onPointerDown={startDrag}
-      className={`absolute cursor-move select-none outline outline-offset-0 ${selected ? "outline-2 outline-primary" : "outline-1 outline-transparent hover:outline-accent/70"}`}
-      style={{ left: p.x, top: p.y, width: p.width, height: p.height, zIndex: p.zIndex }}
+      className="absolute"
+      style={{
+        left: bounds.x,
+        top: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+        zIndex: 10000,
+      }}
     >
-      <RigPreview
-        style={rigStyle}
-        pose={rig.poses[currentViseme] ?? rig.poses.rest}
-        colors={rig}
-        widthScale={rig.widthScale}
-        upperCurve={rig.upperCurve}
-        lowerCurve={rig.lowerCurve}
+      <div
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          onStartMove(e);
+        }}
+        className="absolute inset-0 cursor-move border-2 border-dashed border-primary"
+        style={{ boxShadow: "0 0 0 1px rgba(255,255,255,0.4)" }}
       />
-      {selected && (
-        <>
-          <ResizeHandle corner="nw" onResize={resize} />
-          <ResizeHandle corner="ne" onResize={resize} />
-          <ResizeHandle corner="sw" onResize={resize} />
-          <ResizeHandle corner="se" onResize={resize} />
-        </>
+      {corners.map((corner) => (
+        <button
+          key={corner}
+          type="button"
+          aria-label={`Resize group from ${corner}`}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            onStartResize(e, corner);
+          }}
+          className={`absolute rounded-sm border border-background bg-primary shadow-[0_1px_4px_rgba(0,0,0,0.35)] ${resizeCursor(corner)}`}
+          style={{
+            left: cornerPos[corner].x,
+            top: cornerPos[corner].y,
+            width: handleSize,
+            height: handleSize,
+            transform: "translate(-50%, -50%)",
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** Inspector panel shown when a whole slot group is selected. */
+function GroupInspector({
+  doc,
+  slotId,
+  parts,
+  bounds,
+  onCanvasChange,
+  onMove,
+  onScale,
+  onSelectPart,
+  lipSyncSamples,
+  mouthTestPlaying,
+  onTestWord,
+  onTestAudio,
+  onStopTestAudio,
+}: {
+  doc: CharacterPreset;
+  slotId: ID;
+  parts: CharacterPart[];
+  bounds: { x: number; y: number; width: number; height: number };
+  onCanvasChange: (patch: Partial<CharacterPreset>) => void;
+  onMove: (dx: number, dy: number) => void;
+  onScale: (anchor: { x: number; y: number }, scaleX: number, scaleY: number) => void;
+  onSelectPart: (id: ID) => void;
+  lipSyncSamples: Array<{ name: string; url: string }>;
+  mouthTestPlaying: boolean;
+  onTestWord: (word: string) => void;
+  onTestAudio: (url: string) => void;
+  onStopTestAudio: () => void;
+}) {
+  const name = parts[0]?.slotName ?? roleLabel(parts[0]?.role ?? "custom");
+  const isMouth = parts[0]?.role === "mouth";
+  const wordNames = SAMPLE_WORDS.map((w) => w.toLowerCase());
+  const wordHasAudio = (word: string) =>
+    lipSyncSamples.some((s) => s.name.toLowerCase() === word.toLowerCase());
+  // Clips not attached to a sample word are offered as standalone amplitude tests.
+  const otherSamples = lipSyncSamples.filter((s) => !wordNames.includes(s.name.toLowerCase()));
+  return (
+    <div className="space-y-4">
+      <CanvasControls doc={doc} onChange={onCanvasChange} />
+      <section className="rounded border border-primary/50 bg-primary/10 p-3">
+        <div className="mb-1 font-medium">{name} group</div>
+        <div className="mb-3 text-[11px] text-muted-foreground">
+          Move or resize all {parts.length} variants together. Edit one frame by selecting it below.
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <NumberField
+            label="X"
+            value={Math.round(bounds.x)}
+            onChange={(x) => onMove(x - bounds.x, 0)}
+          />
+          <NumberField
+            label="Y"
+            value={Math.round(bounds.y)}
+            onChange={(y) => onMove(0, y - bounds.y)}
+          />
+          <NumberField
+            label="Width"
+            value={Math.round(bounds.width)}
+            onChange={(w) =>
+              onScale({ x: bounds.x, y: bounds.y }, Math.max(8, w) / Math.max(1, bounds.width), 1)
+            }
+          />
+          <NumberField
+            label="Height"
+            value={Math.round(bounds.height)}
+            onChange={(h) =>
+              onScale({ x: bounds.x, y: bounds.y }, 1, Math.max(8, h) / Math.max(1, bounds.height))
+            }
+          />
+        </div>
+      </section>
+      {isMouth && (
+        <section className="rounded border border-border bg-panel-2 p-3">
+          <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+            Test Lip Sync
+          </div>
+          <div className="mb-2 grid grid-cols-2 gap-2">
+            {SAMPLE_WORDS.map((word) => {
+              const hasAudio = wordHasAudio(word);
+              return (
+                <button
+                  key={word}
+                  type="button"
+                  onClick={() => onTestWord(word)}
+                  className="flex items-center justify-center gap-1 rounded border border-border px-2 py-1 hover:bg-panel"
+                  title={
+                    hasAudio ? `Play "${word}" with audio` : `${word} (silent — no clip attached)`
+                  }
+                >
+                  {word}
+                  {hasAudio && <span className="text-[9px] text-primary">♪</span>}
+                </button>
+              );
+            })}
+          </div>
+          {otherSamples.length > 0 && (
+            <>
+              <div className="mb-1 text-[10px] text-muted-foreground">Or test with a clip:</div>
+              <div className="grid grid-cols-2 gap-1">
+                {otherSamples.map((sample) => (
+                  <button
+                    key={sample.url}
+                    type="button"
+                    onClick={() => (mouthTestPlaying ? onStopTestAudio() : onTestAudio(sample.url))}
+                    className="truncate rounded border border-border bg-background px-2 py-1 text-[10px] hover:bg-panel"
+                    title={sample.name}
+                  >
+                    ▶ {sample.name}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+          {mouthTestPlaying && (
+            <button
+              type="button"
+              onClick={onStopTestAudio}
+              className="mt-2 w-full rounded border border-primary bg-primary/10 px-2 py-1 text-[10px] text-primary"
+            >
+              ■ Stop
+            </button>
+          )}
+          {lipSyncSamples.length === 0 && (
+            <div className="mt-2 rounded border border-dashed border-border p-2 text-[10px] text-muted-foreground">
+              Drop audio into <code>src/studio/character/lipsync-samples/</code>. Name a file after
+              a word above (e.g. <code>mommy.mp3</code>) to attach it to that button; other clips
+              appear here as standalone tests.
+            </div>
+          )}
+        </section>
       )}
+      <section className="rounded border border-border bg-panel-2 p-3">
+        <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+          Variants
+        </div>
+        <div className="grid grid-cols-3 gap-1">
+          {orderVariants(parts).map((part) => (
+            <button
+              key={part.id}
+              type="button"
+              onClick={() => onSelectPart(part.id)}
+              className="truncate rounded border border-border bg-background px-2 py-1 text-[10px] hover:bg-panel"
+              title={`Edit ${variantLabel(part)}`}
+            >
+              {variantLabel(part)}
+            </button>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }
@@ -2170,24 +2510,6 @@ function BoundsOverlay({ bounds, zIndex }: { bounds: CharacterPartBounds; zIndex
 
 type ResizeCorner = "nw" | "ne" | "sw" | "se";
 
-function ResizeHandle({
-  corner,
-  onResize,
-}: {
-  corner: ResizeCorner;
-  onResize: (corner: ResizeCorner) => (e: React.PointerEvent) => void;
-}) {
-  const vertical = corner.includes("n") ? "-top-1.5" : "-bottom-1.5";
-  const horizontal = corner.includes("w") ? "-left-1.5" : "-right-1.5";
-  const cursor = corner === "nw" || corner === "se" ? "cursor-nwse-resize" : "cursor-nesw-resize";
-  return (
-    <div
-      onPointerDown={onResize(corner)}
-      className={`absolute ${vertical} ${horizontal} h-3.5 w-3.5 rounded-sm border border-background bg-primary ${cursor}`}
-    />
-  );
-}
-
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block">
@@ -2228,6 +2550,10 @@ interface PreviewState {
   startedAt: number;
   durationMs: number;
   visemes?: MouthViseme[];
+  /** When set, "talk" shows exactly this viseme (live audio-driven test). */
+  forcedViseme?: MouthViseme;
+  /** Audio drives the preview frame-by-frame; lifetime is managed by playback. */
+  audioDriven?: boolean;
 }
 
 function previewLabels(part: CharacterPart): Array<{ kind: PreviewState["kind"]; label: string }> {
@@ -2341,9 +2667,13 @@ function previewDelta(
     return { dx: 0, dy: Math.round(-Math.abs(wave) * 12), rotation: 0, scale: 1, opacity: 1 };
   }
   if (preview.kind === "talk" && part.role === "mouth") {
-    const visemes = preview.visemes ?? ["rest", "A", "E", "O", "MBP"];
-    const idx = Math.floor(t * visemes.length * 1.1) % visemes.length;
-    const active = visemes[idx];
+    const active =
+      preview.forcedViseme ??
+      (() => {
+        const visemes = preview.visemes ?? ["rest", "A", "E", "O", "MBP"];
+        const idx = Math.floor(t * visemes.length * 1.1) % visemes.length;
+        return visemes[idx];
+      })();
     return {
       dx: 0,
       dy: 0,
@@ -2465,6 +2795,15 @@ function maxZ(parts: CharacterPart[]) {
   return parts.reduce((max, part) => Math.max(max, part.zIndex), 0);
 }
 
+/** Axis-aligned union of the parts' frame rectangles, in canvas space. */
+function unionFrameBounds(parts: CharacterPart[]) {
+  const minX = Math.min(...parts.map((p) => p.x));
+  const minY = Math.min(...parts.map((p) => p.y));
+  const maxX = Math.max(...parts.map((p) => p.x + p.width));
+  const maxY = Math.max(...parts.map((p) => p.y + p.height));
+  return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+}
+
 function normalizePartPatch(part: CharacterPart, patch: Partial<CharacterPart>): CharacterPart {
   const pivot =
     patch.x !== undefined ||
@@ -2483,4 +2822,274 @@ function normalizePartPatch(part: CharacterPart, patch: Partial<CharacterPart>):
     pivot,
     motionBehavior: part.motionBehavior ?? defaultMotionBehaviorForRole(part.role, part.viseme),
   };
+}
+
+const EYE_COLOR_PRESETS = [
+  { label: "Black", value: "#1a1a1a" },
+  { label: "Brown", value: "#6b4423" },
+  { label: "Blue", value: "#1e40af" },
+  { label: "Green", value: "#15803d" },
+  { label: "Hazel", value: "#a67c52" },
+] as const;
+
+const MOUTH_COLOR_PRESETS = [
+  { label: "Pink", value: "#e88a9a" },
+  { label: "Rose", value: "#d05d6e" },
+  { label: "Red", value: "#c0392b" },
+  { label: "Deep red", value: "#8b2230" },
+  { label: "Dark gray", value: "#4a4146" },
+] as const;
+
+function EyePresetSelector({
+  onImport,
+}: {
+  onImport: (file: File, options?: ImportOptions) => void;
+}) {
+  const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
+  const [selectedColor, setSelectedColor] = useState("#1a1a1a");
+  const [customColor, setCustomColor] = useState("#1a1a1a");
+
+  const handleApply = async () => {
+    if (!selectedPreset) return;
+    const preset = EYE_PRESETS.find((p) => p.id === selectedPreset);
+    if (!preset) return;
+
+    const color = customColor;
+    const eyeStates: EyeState[] = ["open", "half", "closed", "wink"];
+
+    for (const side of ["left", "right"] as const) {
+      for (const eyeState of eyeStates) {
+        const svg = preset.generateForState(eyeState, color);
+        const file = await generatePresetBlob(svg, `eye-${side}-${eyeState}.svg`);
+        onImport(file, {
+          role: "eye",
+          side,
+          eyeState,
+          label: `${side === "left" ? "Left" : "Right"} ${eyeState}`,
+          slotId: `slot:${side}-eye`,
+          zIndex: 50,
+        });
+      }
+    }
+    setSelectedPreset(null);
+  };
+
+  if (selectedPreset) {
+    const preset = EYE_PRESETS.find((p) => p.id === selectedPreset);
+    return (
+      <div className="mb-3 rounded border border-primary/50 bg-primary/10 p-2">
+        <div className="mb-2 text-[11px] font-medium">Configure {preset?.label} eyes</div>
+        <div className="mb-2">
+          <label className="mb-1 block text-[10px] font-semibold uppercase text-muted-foreground">
+            Color
+          </label>
+          <div className="flex gap-1 mb-2">
+            {EYE_COLOR_PRESETS.map((color) => (
+              <button
+                key={color.value}
+                type="button"
+                onClick={() => {
+                  setSelectedColor(color.value);
+                  setCustomColor(color.value);
+                }}
+                className={`h-6 w-6 rounded border-2 ${
+                  selectedColor === color.value ? "border-foreground" : "border-border"
+                }`}
+                style={{ backgroundColor: color.value }}
+                title={color.label}
+              />
+            ))}
+          </div>
+          <div className="flex gap-1 items-center">
+            <label className="text-[10px] text-muted-foreground">Custom:</label>
+            <input
+              type="color"
+              value={customColor}
+              onChange={(e) => {
+                setCustomColor(e.target.value);
+                setSelectedColor(e.target.value);
+              }}
+              className="h-6 w-10 cursor-pointer rounded border border-border"
+            />
+            <input
+              type="text"
+              value={customColor}
+              onChange={(e) => {
+                if (e.target.value.match(/^#[0-9a-f]{6}$/i)) {
+                  setCustomColor(e.target.value);
+                  setSelectedColor(e.target.value);
+                }
+              }}
+              placeholder="#000000"
+              className="text-[10px] rounded border border-border bg-background px-1 py-0.5 w-20"
+            />
+          </div>
+        </div>
+        <div className="flex gap-1">
+          <button
+            type="button"
+            onClick={handleApply}
+            className="flex-1 rounded bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground hover:opacity-90"
+          >
+            Add all states
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedPreset(null)}
+            className="rounded border border-border px-2 py-1 text-[10px] hover:bg-panel"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-3">
+      <div className="mb-1 text-[10px] text-muted-foreground">Quick presets:</div>
+      <div className="grid grid-cols-3 gap-1">
+        {EYE_PRESETS.map((preset) => (
+          <button
+            key={preset.id}
+            type="button"
+            onClick={() => {
+              setSelectedPreset(preset.id);
+              setCustomColor("#1a1a1a");
+              setSelectedColor("#1a1a1a");
+            }}
+            className="rounded border border-border bg-panel px-2 py-1 text-[10px] hover:bg-primary/10"
+            title={`Use ${preset.label} eye`}
+          >
+            {preset.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MouthPresetSelector({
+  onImport,
+}: {
+  onImport: (file: File, options?: ImportOptions) => void;
+}) {
+  const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
+  const [selectedColor, setSelectedColor] = useState("#c0392b");
+  const [customColor, setCustomColor] = useState("#c0392b");
+
+  const handleApply = async () => {
+    if (!selectedPreset) return;
+    const preset = MOUTH_PRESETS.find((p) => p.id === selectedPreset);
+    if (!preset) return;
+
+    const color = customColor;
+
+    for (const viseme of MOUTH_VISEMES) {
+      const svg = preset.generateForViseme(viseme, color);
+      const file = await generatePresetBlob(svg, `mouth-${viseme}.svg`);
+      onImport(file, {
+        role: "mouth",
+        viseme,
+        label: `Mouth ${viseme}`,
+        slotId: "role:mouth",
+        zIndex: 60,
+      });
+    }
+    setSelectedPreset(null);
+  };
+
+  if (selectedPreset) {
+    const preset = MOUTH_PRESETS.find((p) => p.id === selectedPreset);
+    return (
+      <div className="mb-3 rounded border border-primary/50 bg-primary/10 p-2">
+        <div className="mb-2 text-[11px] font-medium">Configure {preset?.label} mouth</div>
+        <div className="mb-2">
+          <label className="mb-1 block text-[10px] font-semibold uppercase text-muted-foreground">
+            Color
+          </label>
+          <div className="flex gap-1 mb-2">
+            {MOUTH_COLOR_PRESETS.map((color) => (
+              <button
+                key={color.value}
+                type="button"
+                onClick={() => {
+                  setSelectedColor(color.value);
+                  setCustomColor(color.value);
+                }}
+                className={`h-6 w-6 rounded border-2 ${
+                  selectedColor === color.value ? "border-foreground" : "border-border"
+                }`}
+                style={{ backgroundColor: color.value }}
+                title={color.label}
+              />
+            ))}
+          </div>
+          <div className="flex gap-1 items-center">
+            <label className="text-[10px] text-muted-foreground">Custom:</label>
+            <input
+              type="color"
+              value={customColor}
+              onChange={(e) => {
+                setCustomColor(e.target.value);
+                setSelectedColor(e.target.value);
+              }}
+              className="h-6 w-10 cursor-pointer rounded border border-border"
+            />
+            <input
+              type="text"
+              value={customColor}
+              onChange={(e) => {
+                if (e.target.value.match(/^#[0-9a-f]{6}$/i)) {
+                  setCustomColor(e.target.value);
+                  setSelectedColor(e.target.value);
+                }
+              }}
+              placeholder="#000000"
+              className="text-[10px] rounded border border-border bg-background px-1 py-0.5 w-20"
+            />
+          </div>
+        </div>
+        <div className="flex gap-1">
+          <button
+            type="button"
+            onClick={handleApply}
+            className="flex-1 rounded bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground hover:opacity-90"
+          >
+            Add all visemes
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedPreset(null)}
+            className="rounded border border-border px-2 py-1 text-[10px] hover:bg-panel"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-3">
+      <div className="mb-1 text-[10px] text-muted-foreground">Quick presets:</div>
+      <div className="grid grid-cols-2 gap-1">
+        {MOUTH_PRESETS.map((preset) => (
+          <button
+            key={preset.id}
+            type="button"
+            onClick={() => {
+              setSelectedPreset(preset.id);
+              setCustomColor("#c0392b");
+              setSelectedColor("#c0392b");
+            }}
+            className="rounded border border-border bg-panel px-2 py-1 text-[10px] hover:bg-primary/10"
+            title={`Use ${preset.label} mouth`}
+          >
+            {preset.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }

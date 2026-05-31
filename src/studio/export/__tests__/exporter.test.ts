@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assertExportBlobsPresent } from "../project-files";
-import { resolvePackagedAssetRefs } from "../project-files";
+import { resolvePackagedAssetRefs, resolvePackagedRuntimeRefs } from "../project-files";
 import type { HFAsset } from "../../types";
 
 const asset = (id: string, filename = `${id}.png`): HFAsset => ({
@@ -51,5 +51,43 @@ describe("resolvePackagedAssetRefs", () => {
     expect(resolvePackagedAssetRefs(`<img src="asset:part-1">`, assets, "../assets")).toBe(
       `<img src="../assets/part-1.svg">`,
     );
+  });
+});
+
+describe("resolvePackagedRuntimeRefs", () => {
+  it("rewrites root GSAP CDN scripts to the packaged local runtime and removes remote fonts", () => {
+    const html = `<!DOCTYPE html>
+<html>
+  <head>
+    <link data-hf-fonts="true" rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap">
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+  </head>
+  <body></body>
+</html>`;
+
+    const resolved = resolvePackagedRuntimeRefs(html, { gsap: "root" });
+
+    expect(resolved).toContain('src="gsap.min.js"');
+    expect(resolved).not.toContain("cdn.jsdelivr.net");
+    expect(resolved).not.toContain("fonts.googleapis.com");
+  });
+
+  it("omits duplicate sub-composition GSAP scripts because root owns the packaged runtime", () => {
+    const html = `<!DOCTYPE html>
+<html>
+  <head>
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <script>const tl = gsap.timeline({ paused: true });</script>
+  </body>
+</html>`;
+
+    const resolved = resolvePackagedRuntimeRefs(html, { gsap: "omit" });
+
+    expect(resolved).not.toContain("cdn.jsdelivr.net");
+    expect(resolved).not.toContain('src="gsap.min.js"');
+    expect(resolved).toContain("gsap.timeline");
   });
 });

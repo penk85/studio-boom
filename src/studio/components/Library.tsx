@@ -23,6 +23,7 @@ import {
   pickActivePartForSlot,
   roleEnabledByManifest,
 } from "../character/character-utils";
+import { thumbnailBoundsForParts } from "./character-thumbnail-bounds";
 import { ensureStarterCharacterSeeded } from "../character/starter";
 import { ensureMotionPresetsSeeded } from "../presets/seed";
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
@@ -310,9 +311,9 @@ function CharactersTab() {
       <ul className="space-y-2">
         {characters.map((c) => (
           <li key={c.id} className="rounded border border-border bg-panel-2 p-2">
-            <div className="mb-2 flex gap-2">
+            <div className="mb-2 flex gap-3">
               <CharacterThumbnail character={c} />
-              <div className="min-w-0 flex-1">
+              <div className="min-w-0 flex-1 py-1">
                 <div className="mb-1 flex items-center gap-2">
                   <span className="flex-1 truncate font-medium text-foreground">{c.name}</span>
                   <button
@@ -356,6 +357,8 @@ function CharactersTab() {
 }
 
 function CharacterThumbnail({ character }: { character: CharacterPreset }) {
+  const boxWidth = 72;
+  const boxHeight = 88;
   const slots = useMemo(
     () =>
       listCharacterSlots(character.parts).filter((slot) =>
@@ -373,22 +376,31 @@ function CharacterThumbnail({ character }: { character: CharacterPreset }) {
             eyeState: slot.role === "eye" ? "open" : undefined,
           }),
         )
-        .filter((part): part is CharacterPart => Boolean(part))
+        .filter((part): part is CharacterPart => Boolean(part) && part.visible !== false)
         .sort((a, b) => a.zIndex - b.zIndex),
     [slots],
   );
-  const boxWidth = 56;
-  const boxHeight = 72;
-  const scale = Math.min(boxWidth / character.canvasWidth, boxHeight / character.canvasHeight);
+  const bounds = useMemo(
+    () => thumbnailBoundsForParts(previewParts, character),
+    [character, previewParts],
+  );
+  const scale = Math.min(boxWidth / bounds.width, boxHeight / bounds.height);
+  const safeScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  const offsetX = boxWidth / 2 - (bounds.x + bounds.width / 2) * safeScale;
+  const offsetY = boxHeight / 2 - (bounds.y + bounds.height / 2) * safeScale;
 
   return (
-    <div className="flex h-[72px] w-[56px] shrink-0 items-center justify-center overflow-hidden rounded border border-border bg-stage-bg">
+    <div
+      className="relative flex h-[88px] w-[72px] shrink-0 items-center justify-center overflow-hidden rounded-md border border-border/60 bg-transparent"
+      aria-label={`${character.name} preview`}
+    >
+      {previewParts.length === 0 && <CharacterThumbnailFallback />}
       <div
-        className="relative origin-center"
+        className="absolute left-0 top-0 origin-top-left"
         style={{
           width: character.canvasWidth,
           height: character.canvasHeight,
-          transform: `scale(${scale})`,
+          transform: `matrix(${safeScale}, 0, 0, ${safeScale}, ${offsetX}, ${offsetY})`,
         }}
       >
         {previewParts.map((part) => (
@@ -396,6 +408,23 @@ function CharacterThumbnail({ character }: { character: CharacterPreset }) {
         ))}
       </div>
     </div>
+  );
+}
+
+function CharacterThumbnailFallback() {
+  return (
+    <svg viewBox="0 0 48 64" className="h-16 w-12 text-muted-foreground/60" aria-hidden="true">
+      <circle cx="24" cy="16" r="11" fill="currentColor" opacity="0.72" />
+      <path d="M13 54c1.8-14.2 6.2-22 11-22s9.2 7.8 11 22H13Z" fill="currentColor" opacity="0.42" />
+      <path
+        d="M10 39c3.6-5.2 8.2-7.8 14-7.8S34.4 33.8 38 39"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="4"
+        opacity="0.32"
+      />
+    </svg>
   );
 }
 
@@ -407,7 +436,7 @@ function CharacterThumbnailPart({ part }: { part: CharacterPart }) {
       src={url}
       alt={part.name}
       draggable={false}
-      className="absolute h-full w-full object-contain"
+      className="absolute object-contain"
       style={{
         left: part.x,
         top: part.y,

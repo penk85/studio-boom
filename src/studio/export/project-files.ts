@@ -59,6 +59,34 @@ export function resolvePackagedAssetRefs(
   });
 }
 
+export function resolvePackagedRuntimeRefs(
+  html: string,
+  options: { gsap: "root" | "omit" },
+): string {
+  if (!html) return html;
+
+  if (typeof DOMParser === "undefined") {
+    return resolvePackagedRuntimeRefsFallback(html, options);
+  }
+
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  for (const link of Array.from(doc.querySelectorAll<HTMLLinkElement>("link[href]"))) {
+    if (isRemoteFontLink(link)) link.remove();
+  }
+
+  for (const script of Array.from(doc.querySelectorAll<HTMLScriptElement>("script[src]"))) {
+    const src = script.getAttribute("src") ?? "";
+    if (!isGsapScriptSrc(src)) continue;
+    if (options.gsap === "omit") {
+      script.remove();
+    } else {
+      script.setAttribute("src", "gsap.min.js");
+    }
+  }
+
+  return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
+}
+
 export async function buildHyperframesProjectFiles(
   project: Project,
 ): Promise<HyperframesProjectFiles> {
@@ -81,7 +109,7 @@ export async function buildHyperframesProjectFiles(
     ([id, html]) => ({
       path: `compositions/${id}.html`,
       contents: resolvePackagedAssetRefs(
-        normalizeNativeHyperframesHtml(html),
+        resolvePackagedRuntimeRefs(normalizeNativeHyperframesHtml(html), { gsap: "omit" }),
         hf.assets,
         "../assets",
       ),
@@ -94,7 +122,10 @@ export async function buildHyperframesProjectFiles(
       {
         path: "index.html",
         contents: resolvePackagedAssetRefs(
-          normalizeNativeHyperframesHtml(hf.rootHtml, { width: hf.width, height: hf.height }),
+          resolvePackagedRuntimeRefs(
+            normalizeNativeHyperframesHtml(hf.rootHtml, { width: hf.width, height: hf.height }),
+            { gsap: "root" },
+          ),
           hf.assets,
           "assets",
         ),
@@ -122,5 +153,33 @@ export function assertExportBlobsPresent(assets: HFAsset[], blobMap: Map<string,
     `Export is missing media blobs:\n${missing
       .map((asset) => `- ${asset.id}${asset.filename ? ` (${asset.filename})` : ""}`)
       .join("\n")}`,
+  );
+}
+
+function isRemoteFontLink(link: HTMLLinkElement): boolean {
+  const href = (link.getAttribute("href") ?? "").trim().toLowerCase();
+  if (link.hasAttribute("data-hf-fonts")) return true;
+  return href.includes("fonts.googleapis.com") || href.includes("fonts.gstatic.com");
+}
+
+function isGsapScriptSrc(src: string): boolean {
+  const value = src.trim().toLowerCase();
+  if (!value) return false;
+  if (value.includes("cdn.jsdelivr.net/npm/gsap@") && value.includes("/dist/gsap")) return true;
+  if (value.includes("unpkg.com/gsap@") && value.includes("/dist/gsap")) return true;
+  return /(?:^|\/)gsap(?:\.min)?\.js(?:[?#].*)?$/.test(value);
+}
+
+function resolvePackagedRuntimeRefsFallback(
+  html: string,
+  options: { gsap: "root" | "omit" },
+): string {
+  const withoutFonts = html.replace(
+    /<link\b(?=[^>]*\bhref=["'][^"']*fonts\.(?:googleapis|gstatic)\.com[^"']*["'])[^>]*>\s*/gi,
+    "",
+  );
+  return withoutFonts.replace(
+    /<script\b([^>]*?)\bsrc=["']([^"']*(?:cdn\.jsdelivr\.net\/npm\/gsap@[^"']*\/dist\/gsap|unpkg\.com\/gsap@[^"']*\/dist\/gsap|(?:^|\/)gsap(?:\.min)?\.js)[^"']*)["']([^>]*)>\s*<\/script>/gi,
+    options.gsap === "omit" ? "" : '<script$1src="gsap.min.js"$3></script>',
   );
 }
