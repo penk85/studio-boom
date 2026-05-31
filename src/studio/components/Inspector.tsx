@@ -47,6 +47,7 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
   const renameClipMotionStep = useStudio((s) => s.renameClipMotionStep);
   const removeClipMotionCheckpoint = useStudio((s) => s.removeClipMotionCheckpoint);
   const removeClipMotionStep = useStudio((s) => s.removeClipMotionStep);
+  const setMotionStepPathStyle = useStudio((s) => s.setClipMotionStepPathStyle);
   const remove = useStudio((s) => s.removeClip);
   const registerCharacterPreset = useStudio((s) => s.registerCharacterPreset);
   const clip = clips.find((c) => c.id === id);
@@ -170,6 +171,7 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
                 onUpdateKeyframe={updateClipKeyframe}
                 onMoveCheckpoint={moveClipMotionCheckpoint}
                 onRenameMotion={renameClipMotionStep}
+                onSetPathStyle={setMotionStepPathStyle}
                 onRemoveCheckpoint={removeClipMotionCheckpoint}
                 onRemoveMotion={removeClipMotionStep}
               />
@@ -299,6 +301,7 @@ function MotionInspector({
   onUpdateKeyframe,
   onMoveCheckpoint,
   onRenameMotion,
+  onSetPathStyle,
   onRemoveCheckpoint,
   onRemoveMotion,
 }: {
@@ -320,6 +323,7 @@ function MotionInspector({
     time: number,
   ) => ClipKeyframeSelection | null;
   onRenameMotion: (clipId: string, motionId: string, name: string) => void;
+  onSetPathStyle: (clipId: string, motionId: string, pathStyle: "linear" | "smooth") => void;
   onRemoveCheckpoint: (clipId: string, motionId: string, checkpointId: string) => void;
   onRemoveMotion: (clipId: string, motionId: string) => void;
 }) {
@@ -332,12 +336,6 @@ function MotionInspector({
           (checkpoint) => checkpoint.id === selectedKeyframe.keyframeId,
         )
       : null;
-  const selectedCheckpointIndex =
-    selectedMotion && selectedCheckpoint
-      ? selectedMotion.checkpoints.findIndex(
-          (checkpoint) => checkpoint.id === selectedCheckpoint.id,
-        )
-      : -1;
   const keyframe = selectedKeyframe
     ? clip.keyframes.find((candidate) => candidate.id === selectedKeyframe.keyframeId)
     : null;
@@ -345,12 +343,11 @@ function MotionInspector({
   const selectedValues = keyframe ? keyframeDisplayValues(clip, keyframe) : {};
   const previewState = sampleClipKeyframedState(clip, localPlayheadTime);
   const previewSummary = `${Math.round(previewState.x)}, ${Math.round(previewState.y)}`;
+  // Allow removing any checkpoint as long as we'd leave at least the 2 minimum
+  // a motion step needs. Used to be middle-only, which hid the option for the
+  // first/last point and pushed users to the "Delete motion" button by accident.
   const canRemoveCheckpoint =
-    selectedMotion &&
-    selectedCheckpoint &&
-    selectedMotion.checkpoints.length > 2 &&
-    selectedCheckpointIndex > 0 &&
-    selectedCheckpointIndex < selectedMotion.checkpoints.length - 1;
+    selectedMotion && selectedCheckpoint && selectedMotion.checkpoints.length > 2;
   const addPointToMotion = (motion: EditorClip["motionSteps"][number]) => {
     const time = pointTimeForMotion(motion, localPlayheadTime);
     const selection = onAddCheckpoint(motion.id, time);
@@ -467,7 +464,8 @@ function MotionInspector({
                 onClick={() =>
                   onRemoveCheckpoint(clip.id, selectedMotion.id, selectedCheckpoint.id)
                 }
-                className="text-muted-foreground hover:text-foreground"
+                className="rounded border border-border px-1.5 py-0.5 text-muted-foreground hover:border-primary/60 hover:bg-primary/10 hover:text-foreground"
+                title="Remove just this checkpoint from the motion"
               >
                 Delete point
               </button>
@@ -475,9 +473,10 @@ function MotionInspector({
             <button
               type="button"
               onClick={() => onRemoveMotion(clip.id, selectedMotion.id)}
-              className="text-destructive"
+              className="rounded border border-destructive/40 px-1.5 py-0.5 text-destructive hover:bg-destructive/10"
+              title="Remove the entire motion and every checkpoint"
             >
-              Delete
+              Delete motion
             </button>
           </div>
           <Field label="Motion name">
@@ -486,6 +485,13 @@ function MotionInspector({
               placeholder="Motion"
               onChange={(event) => onRenameMotion(clip.id, selectedMotion.id, event.target.value)}
               className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+            />
+          </Field>
+          <Field label="Path">
+            <PathStyleToggle
+              pathStyle={selectedMotion.pathStyle}
+              checkpointCount={selectedMotion.checkpoints.length}
+              onChange={(next) => onSetPathStyle(clip.id, selectedMotion.id, next)}
             />
           </Field>
           <div className="grid grid-cols-2 gap-2">
@@ -641,6 +647,49 @@ function feelForEase(ease: string | undefined): string {
 function easeForFeel(id: string): string {
   const ease = MOTION_FEELS.find((feel) => feel.id === id)?.ease ?? "power2.out";
   return ease === "none" ? "" : ease;
+}
+
+function PathStyleToggle({
+  pathStyle,
+  checkpointCount,
+  onChange,
+}: {
+  pathStyle: "linear" | "smooth";
+  checkpointCount: number;
+  onChange: (next: "linear" | "smooth") => void;
+}) {
+  // Smooth needs 3+ points to actually curve. We still let the user pick it
+  // with 2 points (so the choice persists when they add a third), but hint
+  // why nothing has curved yet.
+  const smoothInactive = pathStyle === "smooth" && checkpointCount < 3;
+  return (
+    <div>
+      <div className="grid grid-cols-2 overflow-hidden rounded border border-border bg-input">
+        {(["linear", "smooth"] as const).map((option) => {
+          const selected = pathStyle === option;
+          return (
+            <button
+              key={option}
+              type="button"
+              onClick={() => {
+                if (!selected) onChange(option);
+              }}
+              className={`px-2 py-1 text-[11px] font-medium capitalize transition-colors ${
+                selected ? "bg-primary/20 text-foreground" : "text-muted-foreground hover:bg-panel"
+              }`}
+            >
+              {option}
+            </button>
+          );
+        })}
+      </div>
+      {smoothInactive && (
+        <div className="mt-1 text-[10px] text-muted-foreground">
+          Add a third point to bend the path.
+        </div>
+      )}
+    </div>
+  );
 }
 
 function RootElementSourceInspector({ clip, rootHtml }: { clip: EditorClip; rootHtml: string }) {

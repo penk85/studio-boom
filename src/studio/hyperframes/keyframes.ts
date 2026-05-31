@@ -1,5 +1,12 @@
 import type { Keyframe, KeyframeProperties } from "@hyperframes/core";
 import { parseFiniteNumber, STUDIO_ROTATION_ATTR } from "./transform";
+import {
+  buildPositionPath,
+  normalizePathStyle,
+  type PathStyle,
+  type PositionCheckpoint,
+  type PositionPathSample,
+} from "./motion-path";
 
 export type ClipKeyframeProperty = "position" | "scale" | "rotation" | "opacity";
 
@@ -38,6 +45,7 @@ export interface ClipMotionStepMeta {
   id: string;
   checkpointIds: string[];
   name?: string;
+  pathStyle?: PathStyle;
 }
 
 export interface ClipMotionStep extends ClipMotionStepMeta {
@@ -49,7 +57,10 @@ export interface ClipMotionStep extends ClipMotionStepMeta {
   endTime: number;
   ease?: string;
   label: string;
+  pathStyle: PathStyle;
 }
+
+export type { PathStyle } from "./motion-path";
 
 export interface ClipMotionCheckpoint {
   id: string;
@@ -175,7 +186,11 @@ export function syncRootKeyframesHtml(html: string): string {
   if (!rootCompositionId) return html;
 
   const timedVisualClips = collectTimedVisualClips(doc, rootCompositionId);
-  const animatedClips: Array<{ el: HTMLElement; keyframes: Keyframe[] }> = [];
+  const animatedClips: Array<{
+    el: HTMLElement;
+    keyframes: Keyframe[];
+    motionSteps: ClipMotionStepMeta[];
+  }> = [];
   for (const el of Array.from(
     doc.querySelectorAll<HTMLElement>(`[id][data-keyframes], [id][${STUDIO_MOTION_STEPS_ATTR}]`),
   )) {
@@ -188,7 +203,11 @@ export function syncRootKeyframesHtml(html: string): string {
     writeClipKeyframesToElement(el, materialized.keyframes);
     writeClipMotionStepMetasToElement(el, materialized.motionSteps);
     if (materialized.keyframes.length > 0)
-      animatedClips.push({ el, keyframes: materialized.keyframes });
+      animatedClips.push({
+        el,
+        keyframes: materialized.keyframes,
+        motionSteps: materialized.motionSteps,
+      });
   }
 
   doc
@@ -318,6 +337,7 @@ export function deriveClipMotionSteps(
       endTime: end.time,
       ease: end.ease,
       label: meta.name ?? "Motion",
+      pathStyle: normalizePathStyle(meta.pathStyle),
     });
   }
   return steps.sort(
@@ -599,6 +619,21 @@ export function renameMotionStep(
   );
 }
 
+export function setMotionStepPathStyle(
+  clip: ClipKeyframeBase & {
+    motionStepMetas?: ClipMotionStepMeta[];
+  },
+  motionId: string,
+  pathStyle: PathStyle,
+): ClipMotionStepMeta[] {
+  return normalizeMotionStepMetas(
+    clip.keyframes ?? [],
+    (clip.motionStepMetas ?? []).map((meta) =>
+      meta.id === motionId ? normalizeMotionStepMeta({ ...meta, pathStyle }) : meta,
+    ),
+  );
+}
+
 export function storedValuesFromDisplayValues(
   clip: ClipKeyframeBase,
   property: ClipKeyframeProperty,
@@ -829,6 +864,7 @@ function readClipMotionStepMetasFromElement(el: Element): ClipMotionStepMeta[] {
       id: step.id,
       checkpointIds: checkpointIdsForMeta(step),
       name: sanitizeMotionStepName(step.name),
+      pathStyle: normalizePathStyle(step.pathStyle),
     }));
   } catch {
     return [];
@@ -915,10 +951,13 @@ function materializeMotionModelForElement(
 
 function normalizeMotionStepMeta(step: ClipMotionStepMeta): ClipMotionStepMeta {
   const name = sanitizeMotionStepName(step.name);
+  const pathStyle = normalizePathStyle(step.pathStyle);
   return {
     id: step.id,
     checkpointIds: checkpointIdsForMeta(step),
     ...(name ? { name } : {}),
+    // Only persist non-default to keep stored JSON tidy.
+    ...(pathStyle === "smooth" ? { pathStyle } : {}),
   };
 }
 
@@ -1017,7 +1056,7 @@ function removePropertyFromKeyframes(
 function buildStudioTimelineScript(
   compositionId: string,
   timedVisualClips: HTMLElement[],
-  clips: Array<{ el: HTMLElement; keyframes: Keyframe[] }>,
+  clips: Array<{ el: HTMLElement; keyframes: Keyframe[]; motionSteps: ClipMotionStepMeta[] }>,
 ): string {
   const lines: string[] = [
     "(function(){",
@@ -1030,15 +1069,19 @@ function buildStudioTimelineScript(
     lines.push(...compileClipLifecycle(el));
   }
 
-  for (const { el, keyframes } of clips) {
-    lines.push(...compileElementKeyframes(el, keyframes));
+  for (const { el, keyframes, motionSteps } of clips) {
+    lines.push(...compileElementKeyframes(el, keyframes, motionSteps));
   }
 
   lines.push("})();");
   return lines.join("\n");
 }
 
-function compileElementKeyframes(el: HTMLElement, keyframes: Keyframe[]): string[] {
+function compileElementKeyframes(
+  el: HTMLElement,
+  keyframes: Keyframe[],
+  motionSteps: ClipMotionStepMeta[],
+): string[] {
   const lines: string[] = [];
   const selector = JSON.stringify(`#${el.id}`);
   const clipStart = parseElementStart(el);
@@ -1047,6 +1090,18 @@ function compileElementKeyframes(el: HTMLElement, keyframes: Keyframe[]): string
   for (const property of CLIP_KEYFRAME_PROPERTIES) {
     const propertyKeyframes = getKeyframesForProperty(keyframes, property);
     if (propertyKeyframes.length === 0) continue;
+    if (property === "position") {
+      lines.push(
+        ...compilePositionKeyframes({
+          selector,
+          clipStart,
+          keyframes: propertyKeyframes,
+          base,
+          motionSteps,
+        }),
+      );
+      continue;
+    }
     lines.push(
       ...compilePropertyKeyframes({
         selector,
@@ -1072,6 +1127,100 @@ function compileClipLifecycle(el: HTMLElement): string[] {
   if (clipDuration > TIME_EPSILON) {
     lines.push(formatSet(selector, { visibility: "hidden" }, clipStart + clipDuration));
   }
+  return lines;
+}
+
+/**
+ * Position is special: it's the one property whose path can be smoothed across
+ * a motion step. Builds samples via the same `buildPositionPath` the stage
+ * overlay uses, so the runtime tweens through the exact points the user saw on
+ * the canvas. Pinned by motion-path.test.ts.
+ */
+function compilePositionKeyframes(args: {
+  selector: string;
+  clipStart: number;
+  keyframes: Keyframe[];
+  base: ClipKeyframedState;
+  motionSteps: ClipMotionStepMeta[];
+}): string[] {
+  const lines: string[] = [];
+  if (args.keyframes.length === 0) return lines;
+
+  const stepByCheckpointId = new Map<string, ClipMotionStepMeta>();
+  for (const step of args.motionSteps) {
+    for (const id of step.checkpointIds) stepByCheckpointId.set(id, step);
+  }
+
+  // Walk the (time-sorted) position keyframes, peeling off smooth-step runs as
+  // contiguous samples and falling back to per-keyframe sampling otherwise. The
+  // result is one flat list of samples that the emit loop converts to tweens.
+  const samples: PositionPathSample[] = [];
+  const emittedStepIds = new Set<string>();
+  let i = 0;
+  while (i < args.keyframes.length) {
+    const kf = args.keyframes[i]!;
+    const step = stepByCheckpointId.get(kf.id);
+    if (step?.pathStyle === "smooth" && !emittedStepIds.has(step.id)) {
+      const runKeyframes = args.keyframes.filter((candidate) =>
+        step.checkpointIds.includes(candidate.id),
+      );
+      // The run must start at this index to be valid (other runs anchor at
+      // their own start keyframe).
+      if (runKeyframes.length >= 3 && runKeyframes[0]?.id === kf.id) {
+        const checkpoints: PositionCheckpoint[] = runKeyframes.map((rk) => ({
+          id: rk.id,
+          time: rk.time,
+          x: args.base.x + (rk.properties.x ?? 0),
+          y: args.base.y + (rk.properties.y ?? 0),
+          ease: rk.ease,
+        }));
+        samples.push(...buildPositionPath(checkpoints, "smooth"));
+        emittedStepIds.add(step.id);
+        const lastInRun = runKeyframes[runKeyframes.length - 1]!;
+        i = args.keyframes.indexOf(lastInRun) + 1;
+        continue;
+      }
+    }
+
+    samples.push({
+      time: kf.time,
+      x: args.base.x + (kf.properties.x ?? 0),
+      y: args.base.y + (kf.properties.y ?? 0),
+      checkpointId: kf.id,
+      ease: kf.ease,
+    });
+    i += 1;
+  }
+
+  return emitPositionSamples(args.selector, args.clipStart, args.base, samples);
+}
+
+function emitPositionSamples(
+  selector: string,
+  clipStart: number,
+  base: ClipKeyframedState,
+  samples: PositionPathSample[],
+): string[] {
+  const lines: string[] = [];
+  if (samples.length === 0) return lines;
+
+  const baseVars = { x: base.x, y: base.y };
+  if (samples[0]!.time > TIME_EPSILON) {
+    lines.push(formatSet(selector, baseVars, clipStart));
+  }
+
+  let previousTime = 0;
+  for (const sample of samples) {
+    const vars = { x: sample.x, y: sample.y };
+    const duration = Math.max(0, sample.time - previousTime);
+    if (duration <= TIME_EPSILON) {
+      lines.push(formatSet(selector, vars, clipStart + sample.time));
+    } else {
+      lines.push(formatTo(selector, vars, clipStart + previousTime, duration, sample.ease));
+    }
+    previousTime = sample.time;
+  }
+
   return lines;
 }
 

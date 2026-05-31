@@ -22,6 +22,7 @@ import {
   type EditorClip,
 } from "../types";
 import { getKeyframesForProperty, sampleClipKeyframedState } from "../hyperframes/keyframes";
+import { buildPositionPath, type PositionCheckpoint } from "../hyperframes/motion-path";
 import {
   commitElementRect,
   commitElementPosition,
@@ -43,6 +44,7 @@ import {
   roundRotationDegrees,
   roundCompositionRect,
   resizeCompositionRect,
+  projectClickOntoPolyline,
   resolvePickedClipId,
   resolveTargetClipId,
   scaleCompositionRectFromHandleRect,
@@ -70,6 +72,10 @@ type StageDrag =
   | {
       type: "move";
       clipId: string;
+      /** Keyframe being moved (when a dot drag starts), so commitDrag can route
+       *  to updateClipKeyframe without depending on React state having flushed
+       *  the corresponding selectKeyframe call yet. */
+      keyframeId?: string;
       pointerId: number;
       startClientX: number;
       startClientY: number;
@@ -105,17 +111,32 @@ type StageDrag =
       previewRotation: number;
     };
 
-interface StageMotionPathPoint {
+// Visible dot the user can drag — one per user checkpoint.
+interface StageMotionPathCheckpoint {
   id: string;
   x: number;
   y: number;
   selected: boolean;
 }
 
+// Bare CSS point for the SVG path data + the clip-local time at that point.
+// Time is needed when the user clicks somewhere on the line: we interpolate
+// between two adjacent samples' times to pick where to insert a checkpoint.
+interface StageMotionPathPolylinePoint {
+  x: number;
+  y: number;
+  time: number;
+}
+
 interface StageMotionPath {
   id: string;
-  points: StageMotionPathPoint[];
   active: boolean;
+  /** Motion-step id when the path corresponds to one, otherwise undefined
+   *  (standalone position-keyframe runs). Used to route line-clicks back to
+   *  addClipMotionCheckpoint. */
+  motionId?: string;
+  polyline: StageMotionPathPolylinePoint[];
+  checkpoints: StageMotionPathCheckpoint[];
 }
 
 export function Stage({ iframeRef, onIframeLoad }: StageProps) {
@@ -123,8 +144,10 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const selectClip = useStudio((s) => s.selectClip);
   const selectedClipId = useStudio((s) => s.selectedClipId);
   const selectedKeyframe = useStudio((s) => s.selectedKeyframe);
+  const selectKeyframe = useStudio((s) => s.selectKeyframe);
   const updateClip = useStudio((s) => s.updateClip);
   const updateClipKeyframe = useStudio((s) => s.updateClipKeyframe);
+  const addClipMotionCheckpoint = useStudio((s) => s.addClipMotionCheckpoint);
   const updateRootHtml = useStudio((s) => s.updateRootHtml);
   const checkpointHistory = useStudio((s) => s.checkpointHistory);
   const bringClipForward = useStudio((s) => s.bringClipForward);
@@ -532,18 +555,23 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         const nextX = currentDrag.startX + delta.x;
         const nextY = currentDrag.startY + delta.y;
         commitElementPosition(iframeRef.current, currentDrag.clipId, nextX, nextY);
-        const keyframeTarget = getStageKeyframeTarget(
-          currentDrag.clipId,
-          "position",
-          selectedKeyframe,
-          clips,
-        );
+        // Prefer the drag's own keyframeId (set when starting from a path dot)
+        // so we route correctly even if selectKeyframe hasn't propagated yet.
+        const keyframeTarget = currentDrag.keyframeId
+          ? findKeyframeTargetById(currentDrag.clipId, currentDrag.keyframeId, "position", clips)
+          : getStageKeyframeTarget(currentDrag.clipId, "position", selectedKeyframe, clips);
+        const moved =
+          Math.abs(nextX - currentDrag.startX) > 0.5 || Math.abs(nextY - currentDrag.startY) > 0.5;
         if (keyframeTarget) {
-          updateClipKeyframe(keyframeTarget.selection, {
-            x: nextX,
-            y: nextY,
-          });
-        } else {
+          // For a tap-to-select on a dot (no movement), skip the no-op commit
+          // so we don't pollute undo history.
+          if (moved) {
+            updateClipKeyframe(keyframeTarget.selection, {
+              x: nextX,
+              y: nextY,
+            });
+          }
+        } else if (moved) {
           updateClip(currentDrag.clipId, { x: nextX, y: nextY });
         }
         clearDrag();
@@ -698,6 +726,112 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     });
   };
 
+  // Phase 1: click any motion-path dot to select that keyframe and start dragging.
+  const startCheckpointDrag = (
+    clipForDrag: EditorClip,
+    keyframeId: string,
+    event: ReactPointerEvent<SVGElement>,
+  ) => {
+    if (!project || !stageShellRef.current) return;
+    if (clipForDrag.kind === "audio") return;
+    const keyframe = clipForDrag.keyframes.find((kf) => kf.id === keyframeId);
+    if (!keyframe) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+
+    // Make the inspector reflect the grabbed checkpoint.
+    selectClip(clipForDrag.id);
+    selectKeyframe({ clipId: clipForDrag.id, keyframeId, property: "position" });
+
+    const state = sampleClipKeyframedState(clipForDrag, keyframe.time);
+    const iframe = resolveIframe(playerRef.current);
+    const geometry = getStageGeometry(
+      stageShellRef.current,
+      project.hf.width,
+      project.hf.height,
+      iframe?.getBoundingClientRect() ?? null,
+    );
+
+    beginDrag({
+      type: "move",
+      clipId: clipForDrag.id,
+      keyframeId,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startX: state.x,
+      startY: state.y,
+      previewX: state.x,
+      previewY: state.y,
+      geometry,
+    });
+  };
+
+  // Phase 2: click anywhere on the visible path line to insert a checkpoint at
+  // that location and immediately start dragging it. Falls back to a normal
+  // select-and-drag if the closest position turns out to coincide with an
+  // existing checkpoint (the store de-duplicates by time epsilon).
+  const startPathClickDrag = (
+    clipForDrag: EditorClip,
+    motionId: string,
+    polyline: StageMotionPathPolylinePoint[],
+    event: ReactPointerEvent<SVGElement>,
+  ) => {
+    if (!project || !stageShellRef.current) return;
+    if (clipForDrag.kind === "audio") return;
+    if (polyline.length < 2) return;
+
+    const shellRect = stageShellRef.current.getBoundingClientRect();
+    const clickX = event.clientX - shellRect.left;
+    const clickY = event.clientY - shellRect.top;
+    const projection = projectClickOntoPolyline({ x: clickX, y: clickY }, polyline);
+    if (!projection) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+
+    const selection = addClipMotionCheckpoint(clipForDrag.id, motionId, projection.time);
+    if (!selection) return;
+    selectClip(clipForDrag.id);
+    selectKeyframe(selection);
+
+    // After insertion, the project is updated synchronously by the zustand
+    // store. Pull the fresh clip state to compute composition coordinates for
+    // the new keyframe, so the move-drag starts exactly where the cursor is.
+    const nextProject = useStudio.getState().project;
+    const nextClip = nextProject
+      ? deriveEditorClips(nextProject).find((candidate) => candidate.id === clipForDrag.id)
+      : null;
+    const newKeyframe = nextClip?.keyframes.find((kf) => kf.id === selection.keyframeId);
+    if (!nextClip || !newKeyframe) return;
+
+    const state = sampleClipKeyframedState(nextClip, newKeyframe.time);
+    const iframe = resolveIframe(playerRef.current);
+    const geometry = getStageGeometry(
+      stageShellRef.current,
+      project.hf.width,
+      project.hf.height,
+      iframe?.getBoundingClientRect() ?? null,
+    );
+
+    beginDrag({
+      type: "move",
+      clipId: clipForDrag.id,
+      keyframeId: selection.keyframeId,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startX: state.x,
+      startY: state.y,
+      previewX: state.x,
+      previewY: state.y,
+      geometry,
+    });
+  };
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -824,7 +958,17 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           </div>
         </div>
       )}
-      {motionPaths.length > 0 && <MotionPathOverlay paths={motionPaths} />}
+      {motionPaths.length > 0 && stageEditableClip && (
+        <MotionPathOverlay
+          paths={motionPaths}
+          onCheckpointPointerDown={(checkpointId, event) =>
+            startCheckpointDrag(stageEditableClip, checkpointId, event)
+          }
+          onPathPointerDown={(motionId, polyline, event) =>
+            startPathClickDrag(stageEditableClip, motionId, polyline, event)
+          }
+        />
+      )}
       {outlineRect && (
         <div
           data-stage-selection-overlay=""
@@ -929,7 +1073,22 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   );
 }
 
-function MotionPathOverlay({ paths }: { paths: StageMotionPath[] }) {
+function MotionPathOverlay({
+  paths,
+  onCheckpointPointerDown,
+  onPathPointerDown,
+}: {
+  paths: StageMotionPath[];
+  onCheckpointPointerDown: (checkpointId: string, event: ReactPointerEvent<SVGElement>) => void;
+  onPathPointerDown: (
+    motionId: string,
+    polyline: StageMotionPathPolylinePoint[],
+    event: ReactPointerEvent<SVGElement>,
+  ) => void;
+}) {
+  // SVG container stays pointer-events-none so empty stage-area clicks pass
+  // through to the iframe/player. Per-element pointer-events are enabled below
+  // on dots and on the wide "hit-area" stroke under each line.
   return (
     <svg
       data-stage-motion-path=""
@@ -956,8 +1115,23 @@ function MotionPathOverlay({ paths }: { paths: StageMotionPath[] }) {
         ))}
       </defs>
       {paths.map((path, index) => {
-        const pathData = motionPathData(path.points);
+        const pathData = motionPathData(path.polyline);
         const stroke = path.active ? "var(--color-primary)" : "rgba(255,255,255,0.62)";
+        // Only paths bound to a motion step accept the click-to-insert gesture;
+        // standalone position runs don't have a motion to attach a checkpoint to.
+        const lineHitTarget = path.motionId ? (
+          <path
+            data-stage-motion-line-hit=""
+            d={pathData}
+            fill="none"
+            stroke="transparent"
+            strokeWidth={14}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{ cursor: "copy", pointerEvents: "stroke" }}
+            onPointerDown={(event) => onPathPointerDown(path.motionId!, path.polyline, event)}
+          />
+        ) : null;
         return (
           <g key={path.id} opacity={path.active ? 0.92 : 0.48}>
             <path
@@ -978,12 +1152,21 @@ function MotionPathOverlay({ paths }: { paths: StageMotionPath[] }) {
               strokeLinejoin="round"
               markerEnd={`url(#stage-motion-arrow-${index})`}
             />
-            {path.points.map((point, pointIndex) => {
+            {lineHitTarget}
+            {path.checkpoints.map((point, pointIndex) => {
               const selected = point.selected;
-              const endpoint = pointIndex === 0 || pointIndex === path.points.length - 1;
+              const endpoint = pointIndex === 0 || pointIndex === path.checkpoints.length - 1;
               const radius = selected ? 7 : endpoint ? 5.5 : 4.5;
               return (
-                <g key={point.id}>
+                <g
+                  key={point.id}
+                  data-stage-motion-checkpoint=""
+                  style={{
+                    pointerEvents: "auto",
+                    cursor: selected ? "grabbing" : "grab",
+                  }}
+                  onPointerDown={(event) => onCheckpointPointerDown(point.id, event)}
+                >
                   <circle cx={point.x} cy={point.y} r={radius + 2.5} fill="rgba(3,7,18,0.76)" />
                   <circle
                     cx={point.x}
@@ -1056,79 +1239,148 @@ function getStageMotionPaths(
     ? clip.motionSteps.find((motion) => motion.checkpointIds.includes(selectedKeyframe.keyframeId))
     : null;
   const motionSteps = selectedMotion ? [selectedMotion] : clip.motionSteps;
-  const motionPaths =
-    motionSteps.length > 0
-      ? motionSteps.map((motion) => ({
-          id: motion.id,
-          active: !selectedMotion || motion.id === selectedMotion.id,
-          points: motion.checkpoints.map((checkpoint) =>
-            motionPathPointForTime({
-              clip,
-              time: checkpoint.time,
-              pointId: checkpoint.id,
-              selectedKeyframe,
-              geometry,
-              drag,
-            }),
-          ),
-        }))
-      : [standalonePositionPath(clip, selectedKeyframe, geometry, drag)].filter(
-          (path): path is StageMotionPath => path !== null,
-        );
 
-  return motionPaths.filter((path) => hasVisibleMotionPath(path.points));
+  const paths: StageMotionPath[] =
+    motionSteps.length > 0
+      ? motionSteps.map((motion) =>
+          buildStageMotionPathFromStep(motion, clip, selectedKeyframe, geometry, drag, {
+            id: motion.id,
+            active: !selectedMotion || motion.id === selectedMotion.id,
+          }),
+        )
+      : buildStandaloneStageMotionPath(clip, selectedKeyframe, geometry, drag);
+
+  return paths.filter((path) => hasVisibleStagePolyline(path.polyline));
 }
 
-function standalonePositionPath(
+function buildStageMotionPathFromStep(
+  motion: EditorClip["motionSteps"][number],
   clip: EditorClip,
   selectedKeyframe: ClipKeyframeSelection | null,
   geometry: StageGeometry,
   drag: StageDrag,
-): StageMotionPath | null {
-  const positionKeyframes = getKeyframesForProperty(clip.keyframes, "position");
-  if (positionKeyframes.length === 0) return null;
+  identity: { id: string; active: boolean },
+): StageMotionPath {
+  // Build the user-checkpoint dots first — these honor drag previews per dot.
+  const checkpoints = motion.checkpoints.map((checkpoint) =>
+    stageCheckpointAt({
+      clip,
+      time: checkpoint.time,
+      pointId: checkpoint.id,
+      selectedKeyframe,
+      geometry,
+      drag,
+    }),
+  );
 
-  const points =
-    positionKeyframes[0] && positionKeyframes[0].time > 0
-      ? [
-          motionPathPointForTime({
-            clip,
-            time: 0,
-            pointId: `${clip.id}:motion-origin`,
-            selectedKeyframe,
-            geometry,
-            drag,
-          }),
-          ...positionKeyframes.map((keyframe) =>
-            motionPathPointForTime({
-              clip,
-              time: keyframe.time,
-              pointId: keyframe.id,
-              selectedKeyframe,
-              geometry,
-              drag,
-            }),
-          ),
-        ]
-      : positionKeyframes.map((keyframe) =>
-          motionPathPointForTime({
-            clip,
-            time: keyframe.time,
-            pointId: keyframe.id,
-            selectedKeyframe,
-            geometry,
-            drag,
-          }),
+  // Build the polyline. For linear we reuse the checkpoint dots verbatim. For
+  // smooth we sample the spline through the user's checkpoints (with drag
+  // previews applied so the curve bends live as you drag).
+  const polyline: StageMotionPathPolylinePoint[] =
+    motion.pathStyle === "smooth"
+      ? buildSmoothPolyline(motion, clip, selectedKeyframe, geometry, drag)
+      : checkpoints.map((checkpoint, index) =>
+          toPolylinePoint(checkpoint, motion.checkpoints[index]!.time),
         );
 
-  return {
-    id: `${clip.id}:position-path`,
-    active: true,
-    points,
-  };
+  return { ...identity, motionId: motion.id, polyline, checkpoints };
 }
 
-function motionPathPointForTime({
+function buildStandaloneStageMotionPath(
+  clip: EditorClip,
+  selectedKeyframe: ClipKeyframeSelection | null,
+  geometry: StageGeometry,
+  drag: StageDrag,
+): StageMotionPath[] {
+  const positionKeyframes = getKeyframesForProperty(clip.keyframes, "position");
+  if (positionKeyframes.length === 0) return [];
+
+  const checkpoints: StageMotionPathCheckpoint[] = [];
+  const polylineTimes: number[] = [];
+  if (positionKeyframes[0] && positionKeyframes[0].time > 0) {
+    checkpoints.push(
+      stageCheckpointAt({
+        clip,
+        time: 0,
+        pointId: `${clip.id}:motion-origin`,
+        selectedKeyframe,
+        geometry,
+        drag,
+      }),
+    );
+    polylineTimes.push(0);
+  }
+  for (const keyframe of positionKeyframes) {
+    checkpoints.push(
+      stageCheckpointAt({
+        clip,
+        time: keyframe.time,
+        pointId: keyframe.id,
+        selectedKeyframe,
+        geometry,
+        drag,
+      }),
+    );
+    polylineTimes.push(keyframe.time);
+  }
+  return [
+    {
+      id: `${clip.id}:position-path`,
+      active: true,
+      polyline: checkpoints.map((checkpoint, index) =>
+        toPolylinePoint(checkpoint, polylineTimes[index]!),
+      ),
+      checkpoints,
+    },
+  ];
+}
+
+function buildSmoothPolyline(
+  motion: EditorClip["motionSteps"][number],
+  clip: EditorClip,
+  selectedKeyframe: ClipKeyframeSelection | null,
+  geometry: StageGeometry,
+  drag: StageDrag,
+): StageMotionPathPolylinePoint[] {
+  // Reconstruct the same composition-space checkpoints the compiler uses, then
+  // call the shared sampler. Drag previews must be applied BEFORE sampling so
+  // the curve re-shapes as the user drags a checkpoint.
+  const positionCheckpoints: PositionCheckpoint[] = motion.checkpoints.map((checkpoint) => {
+    const state = sampleClipKeyframedState(clip, checkpoint.time);
+    const previewed = applyCheckpointDragInComposition(
+      { x: state.x, y: state.y },
+      checkpoint.id,
+      clip.id,
+      selectedKeyframe,
+      drag,
+    );
+    return {
+      id: checkpoint.id,
+      time: checkpoint.time,
+      x: previewed.x,
+      y: previewed.y,
+      ease: checkpoint.ease,
+    };
+  });
+
+  const samples = buildPositionPath(positionCheckpoints, "smooth");
+  return samples.map((sample) => {
+    const state = sampleClipKeyframedState(clip, sample.time);
+    const scale = Math.max(0.01, state.scale);
+    const css = compositionPointToCss(
+      {
+        // Display is center-of-clip; the curve shape is identical to the
+        // top-left path that the compiler tweens, just offset by half size.
+        x: sample.x + (clip.width * scale) / 2,
+        y: sample.y + (clip.height * scale) / 2,
+      },
+      geometry,
+    );
+    return { x: css.x, y: css.y, time: sample.time };
+  });
+}
+
+function stageCheckpointAt({
   clip,
   time,
   pointId,
@@ -1142,7 +1394,7 @@ function motionPathPointForTime({
   selectedKeyframe: ClipKeyframeSelection | null;
   geometry: StageGeometry;
   drag: StageDrag;
-}): StageMotionPathPoint {
+}): StageMotionPathCheckpoint {
   const state = sampleClipKeyframedState(clip, time);
   const scale = Math.max(0.01, state.scale);
   const point = compositionPointToCss(
@@ -1152,7 +1404,7 @@ function motionPathPointForTime({
     },
     geometry,
   );
-  return applyMotionPathDragPreview(
+  return applyCheckpointDragInCss(
     {
       id: pointId,
       x: point.x,
@@ -1166,13 +1418,13 @@ function motionPathPointForTime({
   );
 }
 
-function applyMotionPathDragPreview(
-  point: StageMotionPathPoint,
+function applyCheckpointDragInCss(
+  point: StageMotionPathCheckpoint,
   clipId: string,
   selectedKeyframe: ClipKeyframeSelection | null,
   geometry: StageGeometry,
   drag: StageDrag,
-): StageMotionPathPoint {
+): StageMotionPathCheckpoint {
   if (!drag || drag.type !== "move" || drag.clipId !== clipId) return point;
   const editingKeyframe = selectedKeyframe?.clipId === clipId;
   if (editingKeyframe && selectedKeyframe.keyframeId !== point.id) return point;
@@ -1183,7 +1435,30 @@ function applyMotionPathDragPreview(
   };
 }
 
-function hasVisibleMotionPath(points: StageMotionPathPoint[]) {
+function applyCheckpointDragInComposition(
+  point: { x: number; y: number },
+  checkpointId: string,
+  clipId: string,
+  selectedKeyframe: ClipKeyframeSelection | null,
+  drag: StageDrag,
+): { x: number; y: number } {
+  if (!drag || drag.type !== "move" || drag.clipId !== clipId) return point;
+  const editingKeyframe = selectedKeyframe?.clipId === clipId;
+  if (editingKeyframe && selectedKeyframe.keyframeId !== checkpointId) return point;
+  return {
+    x: point.x + (drag.previewX - drag.startX),
+    y: point.y + (drag.previewY - drag.startY),
+  };
+}
+
+function toPolylinePoint(
+  checkpoint: StageMotionPathCheckpoint,
+  time: number,
+): StageMotionPathPolylinePoint {
+  return { x: checkpoint.x, y: checkpoint.y, time };
+}
+
+function hasVisibleStagePolyline(points: StageMotionPathPolylinePoint[]) {
   if (points.length < 2) return false;
   return points.some((point, index) => {
     const previous = points[index - 1];
@@ -1191,7 +1466,7 @@ function hasVisibleMotionPath(points: StageMotionPathPoint[]) {
   });
 }
 
-function motionPathData(points: StageMotionPathPoint[]) {
+function motionPathData(points: StageMotionPathPolylinePoint[]) {
   return points
     .map(
       (point, index) =>
@@ -1207,9 +1482,18 @@ function getStageKeyframeTarget(
   clips: EditorClip[],
 ) {
   if (!selectedKeyframe || selectedKeyframe.clipId !== clipId) return null;
+  return findKeyframeTargetById(clipId, selectedKeyframe.keyframeId, property, clips);
+}
+
+function findKeyframeTargetById(
+  clipId: string,
+  keyframeId: string,
+  property: ClipKeyframeProperty,
+  clips: EditorClip[],
+) {
   const clip = clips.find((candidate) => candidate.id === clipId);
   if (!clip || clip.kind === "audio") return null;
-  const keyframe = clip.keyframes.find((candidate) => candidate.id === selectedKeyframe.keyframeId);
+  const keyframe = clip.keyframes.find((candidate) => candidate.id === keyframeId);
   if (!keyframe) return null;
   return {
     clip,

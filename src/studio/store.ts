@@ -43,6 +43,7 @@ import {
   removeMotionStep,
   removeKeyframeProperty,
   renameMotionStep,
+  setMotionStepPathStyle,
   setClipMotionModelInRootHtml,
   setClipKeyframesInRootHtml,
   storedValuesFromDisplayValues,
@@ -713,6 +714,12 @@ interface StudioState {
     clipId: string,
     motionId: string,
     name: string,
+    options?: ProjectMutationOptions,
+  ) => void;
+  setClipMotionStepPathStyle: (
+    clipId: string,
+    motionId: string,
+    pathStyle: "linear" | "smooth",
     options?: ProjectMutationOptions,
   ) => void;
   removeClipMotionStep: (
@@ -1553,6 +1560,32 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (options?.history !== false) get().checkpointHistory();
 
     const motionSteps = renameMotionStep(clip, motionId, name);
+    const rootHtml = setClipMotionModelInRootHtml(
+      p.hf.rootHtml,
+      clipId,
+      clip.keyframes,
+      motionSteps,
+    );
+    set({
+      project: {
+        ...p,
+        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
+        updatedAt: Date.now(),
+      },
+      selectedClipId: clipId,
+    });
+    scheduleSave(get);
+  },
+
+  setClipMotionStepPathStyle(clipId, motionId, pathStyle, options) {
+    const state = get();
+    const p = state.project;
+    if (!p) return;
+    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    if (!clip || clip.kind === "audio") return;
+    if (options?.history !== false) get().checkpointHistory();
+
+    const motionSteps = setMotionStepPathStyle(clip, motionId, pathStyle);
     const rootHtml = setClipMotionModelInRootHtml(
       p.hf.rootHtml,
       clipId,

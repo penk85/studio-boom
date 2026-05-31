@@ -52,9 +52,14 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(source).toContain("resolveTargetClipId(");
     expect(source).toContain("getRenderedPixelCompositionRect(");
     expect(source).toContain("compositionDomRectToCss(renderedElementRect, stageGeometry)");
-    expect(source).toContain("<MotionPathOverlay paths={motionPaths} />");
+    expect(source).toContain("<MotionPathOverlay");
+    expect(source).toContain("paths={motionPaths}");
+    expect(source).toContain("onCheckpointPointerDown=");
+    expect(source).toContain("onPathPointerDown=");
     expect(source).toContain('data-stage-motion-path=""');
     expect(source).toContain("getStageMotionPaths(");
+    expect(source).toContain('data-stage-motion-checkpoint=""');
+    expect(source).toContain('data-stage-motion-line-hit=""');
     expect(source).toContain('data-stage-move-handle=""');
     expect(source).toContain("resizeCompositionRect({");
     expect(source).toContain("scaleCompositionRectFromHandleRect(");

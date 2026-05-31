@@ -538,3 +538,65 @@ function getContainedRect(containerRect: DOMRect, width: number, height: number)
   const top = (containerRect.height - renderedHeight) / 2;
   return new DOMRect(left, top, renderedWidth, renderedHeight);
 }
+
+// ─── Motion path polyline projection ─────────────────────────────────────────
+// Used by Stage's line-click-to-insert-checkpoint gesture. Kept here (not in
+// Stage.tsx) so vitest can import it without pulling in @hyperframes/studio.
+
+export interface PolylinePoint {
+  x: number;
+  y: number;
+  time: number;
+}
+
+export interface PolylineProjection {
+  segmentIndex: number;
+  /** 0..1 along the closest segment. */
+  ratio: number;
+  x: number;
+  y: number;
+  time: number;
+  distance: number;
+}
+
+/**
+ * Find where a click lands on a polyline by projecting it onto every segment
+ * and keeping the nearest. Time is linearly interpolated between the segment
+ * endpoints' times. Returns null only when the polyline has fewer than two
+ * points.
+ */
+export function projectClickOntoPolyline(
+  click: { x: number; y: number },
+  polyline: PolylinePoint[],
+): PolylineProjection | null {
+  if (polyline.length < 2) return null;
+
+  let best: PolylineProjection | null = null;
+  for (let i = 0; i < polyline.length - 1; i += 1) {
+    const a = polyline[i]!;
+    const b = polyline[i + 1]!;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy;
+    let ratio = 0;
+    if (len2 > 0) {
+      ratio = ((click.x - a.x) * dx + (click.y - a.y) * dy) / len2;
+      if (ratio < 0) ratio = 0;
+      else if (ratio > 1) ratio = 1;
+    }
+    const px = a.x + dx * ratio;
+    const py = a.y + dy * ratio;
+    const distance = Math.hypot(click.x - px, click.y - py);
+    if (!best || distance < best.distance) {
+      best = {
+        segmentIndex: i,
+        ratio,
+        x: px,
+        y: py,
+        time: a.time + (b.time - a.time) * ratio,
+        distance,
+      };
+    }
+  }
+  return best;
+}
