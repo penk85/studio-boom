@@ -15,6 +15,19 @@ describe("Timeline selection integration", () => {
     expect(source).toContain("onSelect();");
   });
 
+  it("uses HyperFrames seek plumbing for a draggable timeline playhead", () => {
+    const source = readFileSync(timelinePath, "utf8");
+
+    expect(source).toContain("data-timeline-seek-surface");
+    expect(source).toContain("data-timeline-playhead-handle");
+    expect(source).toContain("seekDragRef");
+    expect(source).toContain("liveTime.notify(nextTime)");
+    expect(source).toContain("seek(nextTime)");
+    expect(source).toContain("autoScrollDuringSeekDrag");
+    expect(source).toContain("isTimelineSeekTarget");
+    expect(source).toContain("[data-timeline-clip-id]");
+  });
+
   it("renders beginner motion lanes as draggable motion bars", () => {
     const source = readFileSync(timelinePath, "utf8");
 

@@ -8,7 +8,14 @@ import {
   SkipBack,
   TriangleAlert,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { PlayerControls, liveTime, usePlayerStore } from "@hyperframes/studio";
 import { db, uid } from "../db";
@@ -40,6 +47,8 @@ const MOTION_ROW_HEIGHT = 28;
 const MOTION_PARENT_HEIGHT = 24;
 const RULER_HEIGHT = 28;
 const CLIP_DRAG_THRESHOLD_PX = 4;
+const SEEK_DRAG_EDGE_ZONE_PX = 40;
+const SEEK_DRAG_MAX_SCROLL_PX = 12;
 const MOTION_CATEGORY_ORDER: MotionCategory[] = [
   "expression",
   "headTurn",
@@ -120,12 +129,116 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
 
   const scrollerRef = useRef<HTMLDivElement>(null);
   const headerTracksRef = useRef<HTMLDivElement>(null);
+  const seekDragRef = useRef(false);
+  const seekDragPointerIdRef = useRef<number | null>(null);
+  const seekDragClientXRef = useRef<number | null>(null);
+  const seekDragScrollFrameRef = useRef<number | null>(null);
   const [expandedClipIds, setExpandedClipIds] = useState<Set<string>>(new Set());
   const [selectedMotionId, setSelectedMotionId] = useState<string | null>(null);
   const queriedPresets = useLiveQuery(() => db.motionPresets.toArray(), []);
   const presets = useMemo(() => queriedPresets ?? [], [queriedPresets]);
   const presetMap = useMemo(() => new Map(presets.map((p) => [p.id, p] as const)), [presets]);
   const mediaHealth = useHfMediaHealth(project?.hf);
+  const projectDuration = project?.hf.duration ?? 0;
+
+  const seekFromClientX = useCallback(
+    (clientX: number) => {
+      const scroller = scrollerRef.current;
+      if (!scroller || !timelineReady || projectDuration <= 0) return;
+      const rect = scroller.getBoundingClientRect();
+      const x = clientX - rect.left + scroller.scrollLeft;
+      const nextTime = Math.max(0, Math.min(projectDuration, x / Math.max(zoomRef.current, 1)));
+      liveTime.notify(nextTime);
+      seek(nextTime);
+    },
+    [projectDuration, seek, timelineReady],
+  );
+
+  const stepSeekDragAutoScroll = useCallback(() => {
+    seekDragScrollFrameRef.current = null;
+    const scroller = scrollerRef.current;
+    const clientX = seekDragClientXRef.current;
+    if (
+      !scroller ||
+      clientX == null ||
+      !seekDragRef.current ||
+      scroller.scrollWidth <= scroller.clientWidth
+    ) {
+      return;
+    }
+
+    const rect = scroller.getBoundingClientRect();
+    let scrollDelta = 0;
+    if (clientX < rect.left + SEEK_DRAG_EDGE_ZONE_PX) {
+      const proximity = Math.max(0, 1 - (clientX - rect.left) / SEEK_DRAG_EDGE_ZONE_PX);
+      scrollDelta = -SEEK_DRAG_MAX_SCROLL_PX * proximity;
+    } else if (clientX > rect.right - SEEK_DRAG_EDGE_ZONE_PX) {
+      const proximity = Math.max(0, 1 - (rect.right - clientX) / SEEK_DRAG_EDGE_ZONE_PX);
+      scrollDelta = SEEK_DRAG_MAX_SCROLL_PX * proximity;
+    }
+
+    if (scrollDelta === 0) return;
+    scroller.scrollLeft += scrollDelta;
+    seekFromClientX(clientX);
+    seekDragScrollFrameRef.current = window.requestAnimationFrame(stepSeekDragAutoScroll);
+  }, [seekFromClientX]);
+
+  const autoScrollDuringSeekDrag = useCallback(
+    (clientX: number) => {
+      seekDragClientXRef.current = clientX;
+      if (seekDragScrollFrameRef.current !== null) return;
+      seekDragScrollFrameRef.current = window.requestAnimationFrame(stepSeekDragAutoScroll);
+    },
+    [stepSeekDragAutoScroll],
+  );
+
+  const stopSeekDrag = useCallback(() => {
+    seekDragRef.current = false;
+    seekDragPointerIdRef.current = null;
+    seekDragClientXRef.current = null;
+    if (seekDragScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(seekDragScrollFrameRef.current);
+      seekDragScrollFrameRef.current = null;
+    }
+  }, []);
+
+  const startSeekDrag = useCallback(
+    (event: ReactPointerEvent<HTMLElement>, options?: { force?: boolean }) => {
+      if (event.button !== 0 || !timelineReady) return;
+      if (!options?.force && !isTimelineSeekTarget(event.target)) return;
+
+      if (options?.force) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      event.currentTarget.setPointerCapture(event.pointerId);
+      seekDragRef.current = true;
+      seekDragPointerIdRef.current = event.pointerId;
+      seekFromClientX(event.clientX);
+      autoScrollDuringSeekDrag(event.clientX);
+    },
+    [autoScrollDuringSeekDrag, seekFromClientX, timelineReady],
+  );
+
+  const handleSeekPointerMove = useCallback(
+    (event: ReactPointerEvent<HTMLElement>) => {
+      if (!seekDragRef.current || seekDragPointerIdRef.current !== event.pointerId) return;
+      seekFromClientX(event.clientX);
+      autoScrollDuringSeekDrag(event.clientX);
+    },
+    [autoScrollDuringSeekDrag, seekFromClientX],
+  );
+
+  const handleSeekPointerUp = useCallback(
+    (event: ReactPointerEvent<HTMLElement>) => {
+      if (seekDragPointerIdRef.current !== event.pointerId) return;
+      stopSeekDrag();
+    },
+    [stopSeekDrag],
+  );
+
+  useEffect(() => stopSeekDrag, [stopSeekDrag]);
+
   if (!project) return null;
   const totalWidth = Math.max(1200, project.hf.duration * zoom);
   const timelineClips = clips;
@@ -307,6 +420,12 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
         <div
           ref={scrollerRef}
           onScroll={syncHeaderScroll}
+          onPointerDown={startSeekDrag}
+          onPointerMove={handleSeekPointerMove}
+          onPointerUp={handleSeekPointerUp}
+          onPointerCancel={handleSeekPointerUp}
+          onLostPointerCapture={stopSeekDrag}
+          data-timeline-seek-surface=""
           className="relative min-h-0 flex-1 overflow-auto"
         >
           <div style={{ width: totalWidth, position: "relative" }}>
@@ -459,10 +578,30 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                 top: 0,
                 bottom: 0,
                 width: 2,
-                background: "var(--color-playhead)",
-                boxShadow: "0 0 8px var(--color-playhead)",
               }}
-            />
+            >
+              <div
+                className="absolute bottom-0 top-0"
+                style={{
+                  left: 0,
+                  width: 2,
+                  background: "var(--color-playhead)",
+                  boxShadow: "0 0 8px var(--color-playhead)",
+                }}
+              />
+              <button
+                type="button"
+                data-timeline-playhead-handle=""
+                aria-label="Drag playhead"
+                className="pointer-events-auto absolute top-0 h-5 w-5 -translate-x-1/2 cursor-ew-resize touch-none rounded-sm border border-primary/60 bg-panel/95 shadow-[0_2px_8px_rgba(0,0,0,0.35)]"
+                onPointerDown={(event) => startSeekDrag(event, { force: true })}
+              >
+                <span
+                  aria-hidden="true"
+                  className="absolute left-1/2 top-full h-0 w-0 -translate-x-1/2 border-l-[6px] border-r-[6px] border-t-[7px] border-l-transparent border-r-transparent border-t-primary"
+                />
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -1116,6 +1255,7 @@ function VisualMotionBlock({
 
   return (
     <div
+      data-timeline-motion-id={motion.id}
       role="button"
       tabIndex={0}
       onPointerDown={(event) => startDrag(event, "move")}
@@ -1775,6 +1915,25 @@ function motionDuration(motion: AppliedMotion, preset: MotionPreset | undefined)
 function intervalsOverlapAny(intervals: TimeSpan[], existing: TimeSpan[]) {
   return intervals.some((next) =>
     existing.some((current) => next.start < current.end && current.start < next.end),
+  );
+}
+
+function isTimelineSeekTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return true;
+  return !target.closest(
+    [
+      "[data-timeline-clip-id]",
+      "[data-timeline-motion-id]",
+      "[data-motion-id]",
+      "[data-motion-checkpoint-id]",
+      "button",
+      "input",
+      "textarea",
+      "select",
+      "[role='button']",
+      "[role='slider']",
+      "[contenteditable='true']",
+    ].join(", "),
   );
 }
 
