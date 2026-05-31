@@ -1919,8 +1919,9 @@ function intervalsOverlapAny(intervals: TimeSpan[], existing: TimeSpan[]) {
 }
 
 function isTimelineSeekTarget(target: EventTarget | null) {
-  if (!(target instanceof HTMLElement)) return true;
-  return !target.closest(
+  const element = target instanceof Element ? target : null;
+  if (!element) return true;
+  return !element.closest(
     [
       "[data-timeline-clip-id]",
       "[data-timeline-motion-id]",

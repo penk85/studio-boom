@@ -6,6 +6,13 @@ export interface VoiceOption {
   description?: string;
 }
 
+export interface ElevenLabsVoiceOption extends VoiceOption {
+  category?: string;
+  previewUrl?: string;
+  labels?: Record<string, string>;
+  isOwner?: boolean;
+}
+
 export const ELEVENLABS_VOICES: VoiceOption[] = [
   { id: "9BWtsMINqrJLrRacOk9x", name: "Aria" },
   { id: "CwhRBWXzGAHq8TQ4Fs17", name: "Roger" },

@@ -423,10 +423,13 @@ export type CompositionKind = "ai-block" | "registry-block" | "character" | "use
 
 export interface VoiceLineMeta {
   text: string;
-  voiceId: string;
-  modelId: string;
-  stability: number;
-  similarityBoost: number;
+  source?: "elevenlabs-tts" | "audio-file";
+  voiceId?: string;
+  voiceName?: string;
+  modelId?: string;
+  stability?: number;
+  similarityBoost?: number;
+  audioName?: string;
 }
 
 export interface CharacterClipMeta {

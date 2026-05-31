@@ -362,6 +362,38 @@ describe("buildCharacterCompositionHtml", () => {
     expect(mouthTarget?.vars.transformOrigin).toBe("61.111% 59.524%");
   });
 
+  it("lets expression mouth swaps continue when speech audio has no viseme timing", () => {
+    const preset: MotionPreset = {
+      id: "expression-mouth",
+      name: "Raspberry",
+      category: "expression",
+      duration: 1,
+      loop: false,
+      tracks: [],
+      keyposes: [
+        {
+          t: 0,
+          parts: [{ partRole: "mouth", slotId: "role:mouth", poseSwap: "raspberry" }],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = build(
+      {
+        autoBlink: false,
+        lipSyncAudioId: "imported-voice-audio",
+        motions: [{ id: "applied-mouth", presetId: preset.id, offset: 0, intensity: 1 }],
+      },
+      new Map([[preset.id, preset]]),
+    );
+    const scene = extractScene(html);
+
+    expect(html).toContain('data-character-speech="true"');
+    expect(html).toContain('src="asset:imported-voice-audio"');
+    expect(scene.slotEvents.some((event) => event.variant?.show?.includes("raspberry"))).toBe(true);
+  });
+
   it("keeps lip sync in charge of mouth variant swaps when voice visemes exist", () => {
     const preset: MotionPreset = {
       id: "expression-mouth",

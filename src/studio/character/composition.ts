@@ -329,7 +329,7 @@ function buildPuppetDom(
 }
 
 function lipSyncOwnsMouth(meta: CharacterClipMeta): boolean {
-  return !!meta.lipSyncAudioId || !!meta.visemes?.length;
+  return !!meta.visemes?.length;
 }
 
 function buildEyeSlot(

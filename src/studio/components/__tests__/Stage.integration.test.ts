@@ -98,6 +98,9 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(pluginSource).toContain('new URL(req.url ?? "/", "http://localhost").pathname');
     expect(pluginSource).toContain('pathname === "/api/hyperframes/preview-bundle"');
     expect(pluginSource).toContain("loadHyperframesBundler()");
+    expect(pluginSource).toContain("await assertProjectFilesNoTrackOverlaps(projectDir)");
     expect(pluginSource).toContain('bundleToSingleHtml(projectDir, { runtime: "inline" })');
+    expect(pluginSource).not.toContain("assertNoTrackOverlaps(html);");
+    expect(pluginSource).not.toContain("assertNoTrackOverlaps(bundledHtml);");
   });
 });

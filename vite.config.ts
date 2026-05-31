@@ -1,16 +1,19 @@
 import tailwindcss from "@tailwindcss/vite";
 import viteReact from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
-import { defineConfig, mergeConfig, type PluginOption } from "vite";
+import { defineConfig, loadEnv, mergeConfig, type PluginOption } from "vite";
 import tsConfigPaths from "vite-tsconfig-paths";
 import { hyperframesRenderPlugin } from "./src/studio/hyperframes/render-plugin";
 
-export default defineConfig(() => {
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), "");
   const plugins: PluginOption[] = [
     tailwindcss(),
     tsConfigPaths({ projects: ["./tsconfig.json"] }),
     viteReact(),
-    hyperframesRenderPlugin(),
+    hyperframesRenderPlugin({
+      elevenLabsApiKey: env.ELEVENLABS_API_KEY,
+    }),
   ];
 
   return mergeConfig(

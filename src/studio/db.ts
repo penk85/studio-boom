@@ -327,6 +327,16 @@ export async function garbageCollectUnusedInternalMedia(
 
 /** Save a custom ElevenLabs voice for reuse */
 export async function saveVoice(voiceId: string, name: string): Promise<SavedVoice> {
+  const existing = await db.savedVoices.where("voiceId").equals(voiceId).first();
+  if (existing) {
+    const updated: SavedVoice = {
+      ...existing,
+      name: name.trim() || existing.name || voiceId,
+      createdAt: Date.now(),
+    };
+    await db.savedVoices.put(updated);
+    return updated;
+  }
   const voice: SavedVoice = {
     id: uid(),
     voiceId,

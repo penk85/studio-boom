@@ -32,4 +32,16 @@ describe("Inspector source integration", () => {
     expect(source).toContain("removeClipMotionStep");
     expect(source).toContain("sampleClipKeyframedState(clip, localPlayheadTime)");
   });
+
+  it("keeps character speech controls in a dedicated inspector tab", () => {
+    const source = readFileSync(inspectorPath, "utf8");
+
+    expect(source).toContain('type InspectorTab = "clip" | "speech" | "motion" | "advanced"');
+    expect(source).toContain('label: "Speech"');
+    expect(source).toContain('activeTab === "speech"');
+    expect(source).toContain("<VoiceLipSyncPanel");
+    expect(source).not.toContain(
+      "{character && <MotionPanel clip={characterClip} character={character} />}\n      <VoiceLipSyncPanel",
+    );
+  });
 });

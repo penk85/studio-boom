@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -27,6 +27,10 @@ const MAX_RESULTS = 32;
 const results = new Map<string, RenderResult>();
 let bundlerPromise: Promise<BundleToSingleHtml> | null = null;
 
+interface HyperframesRenderPluginOptions {
+  elevenLabsApiKey?: string;
+}
+
 function rememberRenderResult(id: string, result: RenderResult): void {
   pruneExpiredResults();
   results.set(id, result);
@@ -45,7 +49,7 @@ function pruneExpiredResults(): void {
   }
 }
 
-export function hyperframesRenderPlugin(): Plugin {
+export function hyperframesRenderPlugin(options: HyperframesRenderPluginOptions = {}): Plugin {
   return {
     name: "studio-boom-hyperframes-render",
     apply: "serve",
@@ -69,6 +73,25 @@ export function hyperframesRenderPlugin(): Plugin {
             return;
           }
 
+          if (req.method === "GET" && pathname === "/api/elevenlabs/voices") {
+            await handleElevenLabsVoices(res, options);
+            return;
+          }
+
+          if (
+            req.method === "POST" &&
+            pathname.startsWith("/api/elevenlabs/text-to-speech/") &&
+            pathname.endsWith("/with-timestamps")
+          ) {
+            await handleElevenLabsTts(req, res, pathname, options);
+            return;
+          }
+
+          if (req.method === "POST" && pathname === "/api/elevenlabs/forced-alignment") {
+            await handleElevenLabsForcedAlignment(req, res, options);
+            return;
+          }
+
           next();
         } catch (error) {
           sendError(res, error);
@@ -78,15 +101,92 @@ export function hyperframesRenderPlugin(): Plugin {
   };
 }
 
+async function handleElevenLabsVoices(
+  res: ServerResponse,
+  options: HyperframesRenderPluginOptions,
+): Promise<void> {
+  const upstream = await fetch("https://api.elevenlabs.io/v1/voices?show_legacy=true", {
+    headers: {
+      "xi-api-key": elevenLabsApiKey(options),
+      Accept: "application/json",
+    },
+  });
+  await pipeUpstreamResponse(res, upstream);
+}
+
+async function handleElevenLabsTts(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  options: HyperframesRenderPluginOptions,
+): Promise<void> {
+  const voiceId = decodeURIComponent(
+    pathname.slice("/api/elevenlabs/text-to-speech/".length).replace(/\/with-timestamps$/, ""),
+  );
+  if (!voiceId.trim()) throw new Error("ElevenLabs voice id is required");
+
+  const request = await nodeRequestFromIncoming(req);
+  const body = await request.text();
+  const upstream = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
+      voiceId,
+    )}/with-timestamps?output_format=mp3_44100_128`,
+    {
+      method: "POST",
+      headers: {
+        "xi-api-key": elevenLabsApiKey(options),
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body,
+    },
+  );
+  await pipeUpstreamResponse(res, upstream);
+}
+
+async function handleElevenLabsForcedAlignment(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: HyperframesRenderPluginOptions,
+): Promise<void> {
+  const request = await nodeRequestFromIncoming(req);
+  const form = await request.formData();
+  const upstream = await fetch("https://api.elevenlabs.io/v1/forced-alignment", {
+    method: "POST",
+    headers: {
+      "xi-api-key": elevenLabsApiKey(options),
+      Accept: "application/json",
+    },
+    body: form,
+  });
+  await pipeUpstreamResponse(res, upstream);
+}
+
+function elevenLabsApiKey(options: HyperframesRenderPluginOptions): string {
+  const apiKey = options.elevenLabsApiKey?.trim();
+  if (!apiKey) {
+    throw new Error(
+      "ELEVENLABS_API_KEY is not configured. Add it to .env and restart the dev server.",
+    );
+  }
+  return apiKey;
+}
+
+async function pipeUpstreamResponse(res: ServerResponse, upstream: Response): Promise<void> {
+  res.statusCode = upstream.status;
+  res.setHeader("Content-Type", upstream.headers.get("Content-Type") ?? "application/json");
+  res.end(Buffer.from(await upstream.arrayBuffer()));
+}
+
 async function handlePreviewBundle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const projectDir = await writePostedProjectFiles(req);
+  await assertProjectFilesNoTrackOverlaps(projectDir);
   const scaleHints = await readCompositionScaleHints(projectDir);
   const bundleToSingleHtml = await loadHyperframesBundler();
   const html = applyCompositionScaleWrappers(
     await bundleToSingleHtml(projectDir, { runtime: "inline" }),
     scaleHints,
   );
-  assertNoTrackOverlaps(html);
   assertInlineScriptSyntax(html);
   res.statusCode = 200;
   res.setHeader("Content-Type", "text/html");
@@ -138,13 +238,13 @@ async function handleRender(req: IncomingMessage, res: ServerResponse): Promise<
   const projectDir = path.join(rootDir, "project");
   const outputPath = path.join(rootDir, "studio-boom.mp4");
   await writePostedProjectFiles(req, projectDir);
+  await assertProjectFilesNoTrackOverlaps(projectDir);
   const scaleHints = await readCompositionScaleHints(projectDir);
   const bundleToSingleHtml = await loadHyperframesBundler();
   const bundledHtml = applyCompositionScaleWrappers(
     await bundleToSingleHtml(projectDir, { runtime: "inline" }),
     scaleHints,
   );
-  assertNoTrackOverlaps(bundledHtml);
   assertInlineScriptSyntax(bundledHtml);
   await writeFile(path.join(projectDir, "index.html"), bundledHtml);
 
@@ -351,7 +451,48 @@ interface TimedHtmlClip {
   end: number;
 }
 
-function assertNoTrackOverlaps(html: string): void {
+async function assertProjectFilesNoTrackOverlaps(projectDir: string): Promise<void> {
+  const sources: Array<{ label: string; html: string }> = [
+    { label: "index.html", html: await readFile(path.join(projectDir, "index.html"), "utf8") },
+  ];
+  const compositionsDir = path.join(projectDir, "compositions");
+
+  try {
+    const entries = await readdir(compositionsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".html")) continue;
+      const label = `compositions/${entry.name}`;
+      sources.push({
+        label,
+        html: await readFile(path.join(compositionsDir, entry.name), "utf8"),
+      });
+    }
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error;
+  }
+
+  const errors = sources.flatMap(({ label, html }) => findTrackOverlapErrors(html, label));
+  if (errors.length > 0) {
+    throw new Error(
+      `HyperFrames project has same-track overlaps:\n${errors.join(
+        "\n",
+      )}\n\nMove one of the listed clips to a different editor lane/track or give internal block clips distinct data-track-index values.`,
+    );
+  }
+}
+
+export function assertNoTrackOverlaps(html: string, sourceLabel = "HTML"): void {
+  const errors = findTrackOverlapErrors(html, sourceLabel);
+  if (errors.length > 0) {
+    throw new Error(
+      `HyperFrames ${sourceLabel} has same-track overlaps:\n${errors.join(
+        "\n",
+      )}\n\nMove one of the listed clips to a different editor lane/track or give internal block clips distinct data-track-index values.`,
+    );
+  }
+}
+
+function findTrackOverlapErrors(html: string, sourceLabel: string): string[] {
   const clipsByTrack = new Map<string, TimedHtmlClip[]>();
 
   for (const rawTag of html.matchAll(/<([a-zA-Z][\w:-]*)(?:\s[^<>]*)?>/g)) {
@@ -382,18 +523,21 @@ function assertNoTrackOverlaps(html: string): void {
       const next = clips[i + 1];
       if (!current || !next || current.end <= next.start) continue;
       errors.push(
-        `Track ${track}: ${current.label} (${current.start}s-${current.end}s) overlaps ${next.label} (${next.start}s-${next.end}s).`,
+        `${sourceLabel} track ${track}: ${current.label} (${current.start}s-${current.end}s) overlaps ${next.label} (${next.start}s-${next.end}s).`,
       );
     }
   }
 
-  if (errors.length > 0) {
-    throw new Error(
-      `Bundled HyperFrames preview has same-track overlaps:\n${errors.join(
-        "\n",
-      )}\n\nMove one of the listed clips to a different editor lane/track or give internal block clips distinct data-track-index values.`,
-    );
-  }
+  return errors;
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ENOENT"
+  );
 }
 
 function parseNumericAttr(tag: string, attr: string): number | null {

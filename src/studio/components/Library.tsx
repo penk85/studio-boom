@@ -702,7 +702,6 @@ function MediaTab() {
   const allItems = useMemo(() => queriedItems ?? [], [queriedItems]);
   const characters = useLiveQuery(() => db.characters.toArray(), []);
   const project = useStudio((s) => s.project);
-  const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
   const inputRef = useRef<HTMLInputElement>(null);
   const addMedia = useStudio((s) => s.addMediaToTimeline);
   const registerMediaAsset = useStudio((s) => s.registerMediaAsset);
@@ -719,13 +718,8 @@ function MediaTab() {
       for (const part of character.parts) ids.add(part.mediaId);
       for (const variant of character.headVariants ?? []) ids.add(variant.mediaId);
     }
-    for (const clip of clips) {
-      if (isCharacterCompositionClip(clip) && clip.character.lipSyncAudioId) {
-        ids.add(clip.character.lipSyncAudioId);
-      }
-    }
     return ids;
-  }, [characters, clips]);
+  }, [characters]);
 
   const items = allItems.filter(
     (asset) => (asset.scope ?? "library") === "library" && !internalMediaIds.has(asset.id),

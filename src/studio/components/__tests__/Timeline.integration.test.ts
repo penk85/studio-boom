@@ -26,6 +26,8 @@ describe("Timeline selection integration", () => {
     expect(source).toContain("autoScrollDuringSeekDrag");
     expect(source).toContain("isTimelineSeekTarget");
     expect(source).toContain("[data-timeline-clip-id]");
+    expect(source).toContain("target instanceof Element");
+    expect(source).not.toContain("target instanceof HTMLElement");
   });
 
   it("renders beginner motion lanes as draggable motion bars", () => {

@@ -13,6 +13,7 @@ import {
   Clock3,
   Code2,
   Layers,
+  Mic2,
   Move,
   Paintbrush,
   Plus,
@@ -53,7 +54,7 @@ import {
 } from "../hyperframes/keyframes";
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
 
-type InspectorTab = "clip" | "motion" | "advanced";
+type InspectorTab = "clip" | "speech" | "motion" | "advanced";
 type ClipUpdater = (patch: Partial<AnyClip>) => void;
 type IconComponent = ComponentType<{ size?: number; className?: string }>;
 
@@ -98,7 +99,10 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
     if (clip?.kind === "audio" && activeTab === "motion") {
       setActiveTab("clip");
     }
-  }, [activeTab, clip?.kind]);
+    if (!characterClip && activeTab === "speech") {
+      setActiveTab("clip");
+    }
+  }, [activeTab, characterClip, clip?.kind]);
 
   if (!project) return null;
 
@@ -116,12 +120,15 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
             <InspectorTabs
               value={activeTab}
               canAnimate={clip.kind !== "audio"}
+              canSpeak={!!characterClip}
               onChange={setActiveTab}
             />
 
             {activeTab === "clip" && (
               <ClipInspectorTab clip={clip} onUpdate={(patch) => update(clip.id, patch)} />
             )}
+
+            {activeTab === "speech" && characterClip && <VoiceLipSyncPanel clip={characterClip} />}
 
             {activeTab === "motion" && clip.kind !== "audio" && (
               <>
@@ -218,20 +225,26 @@ function EmptyInspectorState() {
 function InspectorTabs({
   value,
   canAnimate,
+  canSpeak,
   onChange,
 }: {
   value: InspectorTab;
   canAnimate: boolean;
+  canSpeak: boolean;
   onChange: (value: InspectorTab) => void;
 }) {
   const tabs: { id: InspectorTab; label: string; icon: IconComponent; disabled?: boolean }[] = [
     { id: "clip", label: "Clip", icon: SlidersHorizontal },
+    ...(canSpeak ? [{ id: "speech" as const, label: "Speech", icon: Mic2 }] : []),
     { id: "motion", label: "Motion", icon: Sparkles, disabled: !canAnimate },
     { id: "advanced", label: "More", icon: Settings2 },
   ];
 
   return (
-    <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-background/35 p-1">
+    <div
+      className="grid gap-1 rounded-md border border-border bg-background/35 p-1"
+      style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}
+    >
       {tabs.map((tab) => {
         const selected = value === tab.id;
         const Icon = tab.icon;
@@ -358,7 +371,6 @@ function CharacterMotionTab({
         />
       </PanelSection>
       {character && <MotionPanel clip={characterClip} character={character} />}
-      <VoiceLipSyncPanel clip={characterClip} />
     </>
   );
 }
