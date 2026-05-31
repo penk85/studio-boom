@@ -9,6 +9,7 @@ import { build as buildWithEsbuild, transformSync } from "esbuild";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { parseHTML } from "linkedom";
 import type { Plugin } from "vite";
+import { findInlineScripts } from "./script-blocks";
 
 interface RenderResult {
   outputPath: string;
@@ -21,8 +22,28 @@ type BundleToSingleHtml = (
   options?: { runtime?: "inline" | "external"; probeMediaDuration?: boolean },
 ) => Promise<string>;
 
+const RESULT_TTL_MS = 60 * 60 * 1000; // 1 hour
+const MAX_RESULTS = 32;
 const results = new Map<string, RenderResult>();
 let bundlerPromise: Promise<BundleToSingleHtml> | null = null;
+
+function rememberRenderResult(id: string, result: RenderResult): void {
+  pruneExpiredResults();
+  results.set(id, result);
+  // Hard cap so a flood of renders can't grow the map unbounded.
+  while (results.size > MAX_RESULTS) {
+    const oldestKey = results.keys().next().value;
+    if (!oldestKey) break;
+    results.delete(oldestKey);
+  }
+}
+
+function pruneExpiredResults(): void {
+  const cutoff = Date.now() - RESULT_TTL_MS;
+  for (const [id, result] of results) {
+    if (result.createdAt <= cutoff) results.delete(id);
+  }
+}
 
 export function hyperframesRenderPlugin(): Plugin {
   return {
@@ -130,7 +151,7 @@ async function handleRender(req: IncomingMessage, res: ServerResponse): Promise<
   let log = "";
   log += await runHyperframes(["render", projectDir, "--output", outputPath, "--format", "mp4"]);
 
-  results.set(id, { outputPath, createdAt: Date.now(), log });
+  rememberRenderResult(id, { outputPath, createdAt: Date.now(), log });
   sendJson(res, { url: `/api/hyperframes/result/${id}`, log });
 }
 
@@ -160,6 +181,7 @@ async function writePostedProjectFiles(
 
 async function handleResult(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const id = decodeURIComponent(req.url?.split("/").pop() ?? "");
+  pruneExpiredResults();
   const result = results.get(id);
   if (!result) {
     res.statusCode = 404;
@@ -403,36 +425,17 @@ function formatTimedClipLabel(tagName: string, tag: string): string {
 }
 
 function assertInlineScriptSyntax(html: string): void {
-  let scriptIndex = 0;
-  for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
-    const attrs = match[1] ?? "";
-    const source = match[2] ?? "";
-    if (readAttr(attrs, "src") !== null) continue;
-    if (!isClassicJavaScriptType(readAttr(attrs, "type"))) continue;
-
-    scriptIndex += 1;
+  for (const script of findInlineScripts(html)) {
     try {
-      transformSync(source, {
+      transformSync(script.source, {
         loader: "js",
         logLevel: "silent",
         target: "es2022",
       });
     } catch (error) {
-      const htmlLine = html.slice(0, match.index ?? 0).split(/\r\n|\r|\n/).length;
-      throw new Error(formatScriptSyntaxError(error, scriptIndex, htmlLine, source));
+      throw new Error(formatScriptSyntaxError(error, script.index, script.htmlLine, script.source));
     }
   }
-}
-
-function isClassicJavaScriptType(type: string | null): boolean {
-  if (type === null || type.trim() === "") return true;
-  const normalized = type.trim().toLowerCase();
-  return (
-    normalized === "text/javascript" ||
-    normalized === "application/javascript" ||
-    normalized === "text/ecmascript" ||
-    normalized === "application/ecmascript"
-  );
 }
 
 function formatScriptSyntaxError(

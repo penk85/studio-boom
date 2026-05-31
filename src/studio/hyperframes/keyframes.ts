@@ -292,36 +292,37 @@ export function deriveClipMotionSteps(
   motionSteps: ClipMotionStepMeta[],
 ): ClipMotionStep[] {
   const keyframesById = new Map((clip.keyframes ?? []).map((keyframe) => [keyframe.id, keyframe]));
-  return normalizeMotionStepMetas(clip.keyframes ?? [], motionSteps)
-    .map((meta) => {
-      const checkpoints = meta.checkpointIds
-        .map((id) => keyframesById.get(id))
-        .filter((keyframe): keyframe is Keyframe => !!keyframe)
-        .sort((a, b) => a.time - b.time || a.id.localeCompare(b.id));
-      if (checkpoints.length < 2) return null;
-      const start = checkpoints[0]!;
-      const end = checkpoints[checkpoints.length - 1]!;
-      if (end.time <= start.time + TIME_EPSILON) return null;
-      return {
-        ...meta,
-        checkpointIds: checkpoints.map((keyframe) => keyframe.id),
-        checkpoints: checkpoints.map((keyframe, index) => ({
-          id: keyframe.id,
-          time: keyframe.time,
-          values: keyframeDisplayValues(clip, keyframe),
-          ease: keyframe.ease,
-          label: checkpointLabel(index, checkpoints.length),
-        })),
-        startKeyframeId: start.id,
-        endKeyframeId: end.id,
-        startTime: start.time,
-        endTime: end.time,
-        ease: end.ease,
-        label: meta.name ?? "Motion",
-      } satisfies ClipMotionStep;
-    })
-    .filter((step): step is ClipMotionStep => step !== null)
-    .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime || a.id.localeCompare(b.id));
+  const steps: ClipMotionStep[] = [];
+  for (const meta of normalizeMotionStepMetas(clip.keyframes ?? [], motionSteps)) {
+    const checkpoints = meta.checkpointIds
+      .map((id) => keyframesById.get(id))
+      .filter((keyframe): keyframe is Keyframe => !!keyframe)
+      .sort((a, b) => a.time - b.time || a.id.localeCompare(b.id));
+    if (checkpoints.length < 2) continue;
+    const start = checkpoints[0]!;
+    const end = checkpoints[checkpoints.length - 1]!;
+    if (end.time <= start.time + TIME_EPSILON) continue;
+    steps.push({
+      ...meta,
+      checkpointIds: checkpoints.map((keyframe) => keyframe.id),
+      checkpoints: checkpoints.map((keyframe, index) => ({
+        id: keyframe.id,
+        time: keyframe.time,
+        values: keyframeDisplayValues(clip, keyframe),
+        ease: keyframe.ease,
+        label: checkpointLabel(index, checkpoints.length),
+      })),
+      startKeyframeId: start.id,
+      endKeyframeId: end.id,
+      startTime: start.time,
+      endTime: end.time,
+      ease: end.ease,
+      label: meta.name ?? "Motion",
+    });
+  }
+  return steps.sort(
+    (a, b) => a.startTime - b.startTime || a.endTime - b.endTime || a.id.localeCompare(b.id),
+  );
 }
 
 export function addMotionStepToClip(
@@ -942,9 +943,13 @@ function sanitizeProperties(properties: Partial<KeyframeProperties>): Partial<Ke
   const out: Partial<KeyframeProperties> = {};
   if (Number.isFinite(properties.x)) out.x = Number(properties.x);
   if (Number.isFinite(properties.y)) out.y = Number(properties.y);
-  if (Number.isFinite(properties.scale)) out.scale = clampScale(properties.scale);
+  if (typeof properties.scale === "number" && Number.isFinite(properties.scale)) {
+    out.scale = clampScale(properties.scale);
+  }
   if (Number.isFinite(properties.rotation)) out.rotation = Number(properties.rotation);
-  if (Number.isFinite(properties.opacity)) out.opacity = clampOpacity(properties.opacity);
+  if (typeof properties.opacity === "number" && Number.isFinite(properties.opacity)) {
+    out.opacity = clampOpacity(properties.opacity);
+  }
   return out;
 }
 

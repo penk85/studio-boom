@@ -344,7 +344,7 @@ export function resolveTargetClipId(
 ): string | null {
   const fromTarget = resolveElementClipId(target instanceof Element ? target : null, clipIds);
   if (fromTarget) return fromTarget;
-  return resolveElementClipId(fallbackNode, clipIds);
+  return resolveElementClipId(fallbackNode ?? null, clipIds);
 }
 
 function resolveElementClipId(node: Element | null, clipIds: Set<string>): string | null {

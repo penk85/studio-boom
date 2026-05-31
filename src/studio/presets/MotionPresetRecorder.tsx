@@ -1131,8 +1131,12 @@ function PoseLayer({
             fill={part.morph.fill ?? "#733f43"}
             stroke={part.morph.stroke}
             strokeWidth={part.morph.strokeWidth}
-            strokeLinecap={part.morph.strokeLinecap}
-            strokeLinejoin={part.morph.strokeLinejoin}
+            strokeLinecap={
+              part.morph.strokeLinecap as "round" | "inherit" | "butt" | "square" | undefined
+            }
+            strokeLinejoin={
+              part.morph.strokeLinejoin as "round" | "inherit" | "miter" | "bevel" | undefined
+            }
           />
         </svg>
       ) : url ? (

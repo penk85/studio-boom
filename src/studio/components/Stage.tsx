@@ -153,10 +153,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     () => clips.find((clip) => clip.id === selectedClipId) ?? null,
     [clips, selectedClipId],
   );
-  const stageEditableClip = useMemo(
-    () => getStageEditableClip(selectedClip, clips),
-    [clips, selectedClip],
-  );
+  const stageEditableClip = useMemo(() => getStageEditableClip(selectedClip), [selectedClip]);
   const selectedMotionEndpoint = useMemo(
     () => getSelectedMotionEndpoint(stageEditableClip, selectedKeyframe),
     [selectedKeyframe, stageEditableClip],
@@ -269,16 +266,11 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     }
     if (repairTimelineLanes()) return;
     let alive = true;
-    let cleanupResolvedHtml: (() => void) | null = null;
     setPreviewError(null);
     void resolvePreviewHtml(project)
-      .then((resolved) => {
-        if (!alive) {
-          resolved.revoke();
-          return;
-        }
-        cleanupResolvedHtml = resolved.revoke;
-        setResolvedHtml(resolved.html);
+      .then((html) => {
+        if (!alive) return;
+        setResolvedHtml(html);
       })
       .catch((error) => {
         if (!alive) return;
@@ -287,7 +279,6 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       });
     return () => {
       alive = false;
-      cleanupResolvedHtml?.();
     };
   }, [project, repairTimelineLanes]);
 
@@ -646,7 +637,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   ]);
 
   const startResize = (handle: ResizeHandle, event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (!stageEditableClip || !activeHandleClip || !stageShellRef.current) return;
+    if (!project || !stageEditableClip || !activeHandleClip || !stageShellRef.current) return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -1049,7 +1040,7 @@ function SelectionCorner({
   );
 }
 
-function getStageEditableClip(selectedClip: EditorClip | null, clips: EditorClip[]) {
+function getStageEditableClip(selectedClip: EditorClip | null) {
   if (!selectedClip) return null;
   if (selectedClip.kind === "audio") return null;
   return selectedClip;

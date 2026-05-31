@@ -174,18 +174,24 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
                 onRemoveMotion={removeClipMotionStep}
               />
             )}
-            {clip.kind === "composition" &&
-              clip.compositionId &&
-              !isCharacterCompositionClip(clip) && (
+            {(() => {
+              if (clip.kind !== "composition" || !clip.compositionId) return null;
+              if (isCharacterCompositionClip(clip)) return null;
+              const compositionClip = clip as EditorClip & {
+                kind: "composition";
+                compositionId: string;
+              };
+              return (
                 <CompositionSourceInspector
                   project={project}
-                  clip={clip}
-                  source={project.hf.compositionHtml[clip.compositionId] ?? ""}
+                  clip={compositionClip}
+                  source={project.hf.compositionHtml[compositionClip.compositionId] ?? ""}
                   projectWidth={project.hf.width}
                   projectHeight={project.hf.height}
-                  onApply={(html) => updateCompositionHtml(clip.compositionId!, html)}
+                  onApply={(html) => updateCompositionHtml(compositionClip.compositionId, html)}
                 />
-              )}
+              );
+            })()}
             {isPrimitiveSourceClip(clip) && (
               <RootElementSourceInspector clip={clip} rootHtml={project.hf.rootHtml} />
             )}

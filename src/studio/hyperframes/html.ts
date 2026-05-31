@@ -172,8 +172,9 @@ function patchElementFromNativeAttrs(element: TimelineElement, doc: Document): T
     fontSize: fontSize ?? getElementFontSize(element),
     fontWeight: fontWeight ?? getElementFontWeight(element),
     fontFamily: el.getAttribute("data-font-family") ?? getElementFontFamily(element),
-    fitToBounds: el.getAttribute("data-fit-to-bounds") === "true" || getElementFitToBounds(element),
-  } as TimelineElement;
+    fitToBounds:
+      el.getAttribute("data-fit-to-bounds") === "true" ? true : getElementFitToBounds(element),
+  } as unknown as TimelineElement;
 }
 
 function getElementSourceWidth(element: TimelineElement): number | undefined {
@@ -203,7 +204,9 @@ function getElementFontFamily(element: TimelineElement): string | undefined {
 }
 
 function getElementFitToBounds(element: TimelineElement): boolean | undefined {
-  return "fitToBounds" in element ? element.fitToBounds : undefined;
+  if (!("fitToBounds" in element)) return undefined;
+  const value = (element as { fitToBounds?: unknown }).fitToBounds;
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function setNumericAttr(el: Element, attr: string, value: number | undefined): void {

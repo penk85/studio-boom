@@ -1,13 +1,11 @@
 import { getMediaUrl } from "../db";
 import { buildHyperframesProjectFiles, extFromAsset } from "../export/project-files";
 import type { HFAsset, Project } from "../types";
+import { findInlineScripts } from "./script-blocks";
 
-export interface ResolvedPreviewHtml {
-  html: string;
-  revoke: () => void;
-}
-
-export async function resolvePreviewHtml(project: Project): Promise<ResolvedPreviewHtml> {
+// Media URLs are cached process-wide in db.ts:blobUrlCache and freed when the
+// underlying media row is deleted. The preview pipeline does not own them.
+export async function resolvePreviewHtml(project: Project): Promise<string> {
   const { assets } = project.hf;
   const assetEntries = await Promise.all(
     assets.map(async (a) => [a.id, await getMediaUrl(a.id)] as const),
@@ -16,11 +14,7 @@ export async function resolvePreviewHtml(project: Project): Promise<ResolvedPrev
   let html = await bundlePreviewProject(project);
   html = resolvePreviewAssetPaths(html, assets, assetUrls);
   assertPreviewScriptSyntax(html);
-
-  return {
-    html,
-    revoke: () => {},
-  };
+  return html;
 }
 
 export async function bundlePreviewProject(project: Project): Promise<string> {
@@ -82,41 +76,17 @@ export function resolvePreviewAssetPaths(
 }
 
 export function assertPreviewScriptSyntax(html: string): void {
-  let scriptIndex = 0;
-  for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
-    const attrs = match[1] ?? "";
-    const source = match[2] ?? "";
-    if (readHtmlAttr(attrs, "src") !== null) continue;
-    if (!isClassicJavaScriptType(readHtmlAttr(attrs, "type"))) continue;
-
-    scriptIndex += 1;
+  for (const script of findInlineScripts(html)) {
     try {
       // Parse only. This does not execute the preview script.
-      new Function(source);
+      new Function(script.source);
     } catch (error) {
       if (error instanceof EvalError) continue;
-      const htmlLine = html.slice(0, match.index ?? 0).split(/\r\n|\r|\n/).length;
-      throw new Error(formatPreviewScriptSyntaxError(error, scriptIndex, htmlLine, source));
+      throw new Error(
+        formatPreviewScriptSyntaxError(error, script.index, script.htmlLine, script.source),
+      );
     }
   }
-}
-
-function readHtmlAttr(attrs: string, attr: string): string | null {
-  const escaped = attr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = attrs.match(new RegExp(`\\s${escaped}\\s*=\\s*("[^"]*"|'[^']*'|[^\\s>]+)`, "i"));
-  if (!match?.[1]) return null;
-  return match[1].replace(/^["']|["']$/g, "");
-}
-
-function isClassicJavaScriptType(type: string | null): boolean {
-  if (type === null || type.trim() === "") return true;
-  const normalized = type.trim().toLowerCase();
-  return (
-    normalized === "text/javascript" ||
-    normalized === "application/javascript" ||
-    normalized === "text/ecmascript" ||
-    normalized === "application/ecmascript"
-  );
 }
 
 function formatPreviewScriptSyntaxError(

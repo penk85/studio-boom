@@ -169,17 +169,20 @@ export function isCurrentProjectShape(project: unknown): project is Project {
   if (!isRecord(project) || !isRecord(project.hf) || !isRecord(project.editorMeta)) {
     return false;
   }
-  const hasCurrentEnvelope =
-    typeof project.id === "string" &&
-    typeof project.name === "string" &&
-    Array.isArray(project.hf.assets) &&
-    typeof project.hf.rootHtml === "string" &&
-    isRecord(project.hf.compositionHtml) &&
-    Array.isArray(project.editorMeta.tracks) &&
-    isRecord(project.editorMeta.clips);
-  if (!hasCurrentEnvelope) return false;
+  const clipsValue = project.editorMeta.clips;
+  if (
+    typeof project.id !== "string" ||
+    typeof project.name !== "string" ||
+    !Array.isArray(project.hf.assets) ||
+    typeof project.hf.rootHtml !== "string" ||
+    !isRecord(project.hf.compositionHtml) ||
+    !Array.isArray(project.editorMeta.tracks) ||
+    !isRecord(clipsValue)
+  ) {
+    return false;
+  }
 
-  for (const meta of Object.values(project.editorMeta.clips)) {
+  for (const meta of Object.values(clipsValue)) {
     if (!isRecord(meta)) return false;
     if (meta.kind === "character") return false;
     if (

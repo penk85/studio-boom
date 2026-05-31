@@ -901,6 +901,10 @@ function appendCharacterTimelineScript(
   script.textContent = `(function(){
   const S = ${sceneJson};
   const tl = gsap.timeline({ paused: true });
+  // Anchor the timeline to the full composition duration. The hyperframes runtime
+  // clamps a composition clip's visibility to min(data-duration, timeline.duration()),
+  // so without this tween the character's host clip disappears as soon as the last
+  // internal motion/viseme ends.
   tl.to({}, { duration: S.duration }, 0);
   const setVars = function(targets, time) {
     targets.forEach(function(target) { tl.set(target.selector, target.vars, time); });

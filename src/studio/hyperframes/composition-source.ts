@@ -1,4 +1,5 @@
 import { normalizeNativeHyperframesHtml } from "./native";
+import { findInlineScripts } from "./script-blocks";
 
 export interface CompositionSourceValidation {
   ok: boolean;
@@ -78,7 +79,7 @@ export function validateCompositionSourceHtml(
       "Missing script timeline registration. Add a paused GSAP timeline and register it on window.__timelines.",
     );
   }
-  errors.push(...validateInlineScriptSyntax(doc));
+  errors.push(...validateInlineScriptSyntax(trimmed));
 
   if (compositionId && !sourceMentionsTimelineRegistration(trimmed, compositionId)) {
     errors.push(`Missing window.__timelines registration for "${compositionId}".`);
@@ -215,32 +216,16 @@ function formatElementLabel(el: Element): string {
   return `<${el.tagName.toLowerCase()}${id ? ` id="${id}"` : ""}>`;
 }
 
-function validateInlineScriptSyntax(doc: Document): string[] {
+function validateInlineScriptSyntax(html: string): string[] {
   const errors: string[] = [];
-  let scriptIndex = 0;
-  for (const script of Array.from(doc.querySelectorAll("script"))) {
-    if (script.hasAttribute("src")) continue;
-    if (!isClassicJavaScriptType(script.getAttribute("type"))) continue;
-
-    scriptIndex += 1;
+  for (const script of findInlineScripts(html)) {
     try {
       // Parse only. This does not execute the pasted script.
-      new Function(script.textContent ?? "");
+      new Function(script.source);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      errors.push(`Script block ${scriptIndex} has invalid JavaScript: ${message}`);
+      errors.push(`Script block ${script.index} has invalid JavaScript: ${message}`);
     }
   }
   return errors;
-}
-
-function isClassicJavaScriptType(type: string | null): boolean {
-  if (type === null || type.trim() === "") return true;
-  const normalized = type.trim().toLowerCase();
-  return (
-    normalized === "text/javascript" ||
-    normalized === "application/javascript" ||
-    normalized === "text/ecmascript" ||
-    normalized === "application/ecmascript"
-  );
 }

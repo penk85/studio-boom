@@ -60,7 +60,6 @@ export function HyperFramesPreviewPanel({
     }
 
     let cancelled = false;
-    let revoke = () => {};
     setHtml(null);
     setError(null);
     setIsPlaying(false);
@@ -68,13 +67,9 @@ export function HyperFramesPreviewPanel({
     onStatusChange?.("loading");
 
     void resolvePreviewHtml(project)
-      .then((resolved) => {
-        revoke = resolved.revoke;
-        if (cancelled) {
-          resolved.revoke();
-          return;
-        }
-        setHtml(withPreviewSeekDriver(resolved.html, resolvedSeekTime));
+      .then((resolvedHtml) => {
+        if (cancelled) return;
+        setHtml(withPreviewSeekDriver(resolvedHtml, resolvedSeekTime));
         onStatusChange?.("ready");
       })
       .catch((reason) => {
@@ -85,7 +80,6 @@ export function HyperFramesPreviewPanel({
 
     return () => {
       cancelled = true;
-      revoke();
     };
   }, [project, resolvedSeekTime, onStatusChange]);
 
