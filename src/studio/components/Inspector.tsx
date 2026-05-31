@@ -1,11 +1,32 @@
 // Inspector — edits the currently selected clip's properties.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ComponentType,
+  type ReactNode,
+} from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { usePlayerStore } from "@hyperframes/studio";
-import { Plus } from "lucide-react";
+import {
+  Clock3,
+  Code2,
+  Layers,
+  Move,
+  Paintbrush,
+  Plus,
+  Settings2,
+  SlidersHorizontal,
+  Sparkles,
+  Trash2,
+  Type,
+  WandSparkles,
+} from "lucide-react";
 import { db } from "../db";
 import { useStudio } from "../store";
 import type {
+  AnyClip,
   CharacterCompositionClip,
   ClipKeyframeSelection,
   CharacterPreset,
@@ -13,6 +34,7 @@ import type {
   EditorClip,
   Project,
   TextClip,
+  TrackMeta,
 } from "../types";
 import { deriveEditorClips, isCharacterCompositionClip } from "../types";
 import { VoiceLipSyncPanel } from "./VoiceLipSyncPanel";
@@ -30,6 +52,10 @@ import {
   type ClipMotionCheckpoint,
 } from "../hyperframes/keyframes";
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
+
+type InspectorTab = "clip" | "motion" | "advanced";
+type ClipUpdater = (patch: Partial<AnyClip>) => void;
+type IconComponent = ComponentType<{ size?: number; className?: string }>;
 
 export function Inspector({ seek }: { seek?: (time: number) => void }) {
   const project = useStudio((s) => s.project);
@@ -53,6 +79,7 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
   const clip = clips.find((c) => c.id === id);
   const characterClip = isCharacterCompositionClip(clip) ? clip : null;
   const currentTime = usePlayerStore((s) => s.currentTime);
+  const [activeTab, setActiveTab] = useState<InspectorTab>("clip");
   const characterId = characterClip?.character.characterId;
   const character = useLiveQuery<CharacterPreset | undefined>(
     () => (characterId ? db.characters.get(characterId) : Promise.resolve(undefined)),
@@ -63,223 +90,427 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
     if (character) registerCharacterPreset(character);
   }, [character, registerCharacterPreset]);
 
+  useEffect(() => {
+    setActiveTab("clip");
+  }, [clip?.id]);
+
+  useEffect(() => {
+    if (clip?.kind === "audio" && activeTab === "motion") {
+      setActiveTab("clip");
+    }
+  }, [activeTab, clip?.kind]);
+
   if (!project) return null;
 
   return (
     <div className="flex h-full flex-col bg-panel">
-      <div className="border-b border-border px-3 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-        Inspector
-      </div>
+      <InspectorHeader clip={clip} project={project} />
       <div className="min-h-0 flex-1 overflow-auto p-3">
-        {!clip && (
-          <div className="text-xs text-muted-foreground">
-            Select a clip on the stage or timeline to edit its properties.
-          </div>
-        )}
-        {clip && (
+        {!clip ? (
           <div className="space-y-3 text-xs">
-            <Field label="Name">
-              <input
-                value={clip.name}
-                onChange={(e) => update(clip.id, { name: e.target.value })}
-                className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
-              />
-            </Field>
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Start (s)">
-                <NumberInput
-                  value={clip.start}
-                  step={0.1}
-                  onChange={(v) => update(clip.id, { start: Math.max(0, v) })}
-                />
-              </Field>
-              <Field label="Duration (s)">
-                <NumberInput
-                  value={clip.duration}
-                  step={0.1}
-                  onChange={(v) => update(clip.id, { duration: Math.max(0.1, v) })}
-                />
-              </Field>
-              <Field label="X">
-                <NumberInput value={clip.x} onChange={(v) => update(clip.id, { x: v })} />
-              </Field>
-              <Field label="Y">
-                <NumberInput value={clip.y} onChange={(v) => update(clip.id, { y: v })} />
-              </Field>
-              <Field label="Width">
-                <NumberInput value={clip.width} onChange={(v) => update(clip.id, { width: v })} />
-              </Field>
-              <Field label="Height">
-                <NumberInput value={clip.height} onChange={(v) => update(clip.id, { height: v })} />
-              </Field>
-              <Field label="Rotation°">
-                <NumberInput
-                  value={clip.rotation}
-                  onChange={(v) => update(clip.id, { rotation: v })}
-                />
-              </Field>
-              <Field label="Opacity">
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={clip.opacity}
-                  onChange={(e) => update(clip.id, { opacity: Number(e.target.value) })}
-                  className="w-full"
-                />
-              </Field>
-              <Field label="Z-Index">
-                <NumberInput value={clip.zIndex} onChange={(v) => update(clip.id, { zIndex: v })} />
-              </Field>
-              <Field label="Track">
-                <select
-                  value={clip.trackIndex}
-                  onChange={(e) => update(clip.id, { trackIndex: Number(e.target.value) })}
-                  className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
-                >
-                  {tracks.map((t, i) => (
-                    <option key={t.id} value={i}>
-                      {t.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            </div>
-            {clip.kind === "text" && (
-              <TextInspector
-                clip={clip as TextClip}
-                update={(patch) => update(clip.id, patch as Partial<TextClip>)}
-              />
+            <EmptyInspectorState />
+            <ProjectSettingsPanel project={project} />
+          </div>
+        ) : (
+          <div className="space-y-3 text-xs">
+            <InspectorTabs
+              value={activeTab}
+              canAnimate={clip.kind !== "audio"}
+              onChange={setActiveTab}
+            />
+
+            {activeTab === "clip" && (
+              <ClipInspectorTab clip={clip} onUpdate={(patch) => update(clip.id, patch)} />
             )}
-            {clip.kind !== "audio" && (
-              <MotionInspector
-                clip={clip}
-                currentTime={currentTime}
-                selectedKeyframe={selectedKeyframe?.clipId === clip.id ? selectedKeyframe : null}
-                onSelectKeyframe={selectKeyframe}
-                onSeek={(time) => seek?.(clip.start + time)}
-                onAddMotion={(time) => {
-                  const selection = addClipMotionStep(clip.id, time);
-                  if (selection) selectKeyframe(selection);
-                }}
-                onAddCheckpoint={(motionId, time) => {
-                  const selection = addClipMotionCheckpoint(clip.id, motionId, time);
-                  if (selection) selectKeyframe(selection);
-                  return selection;
-                }}
-                onUpdateKeyframe={updateClipKeyframe}
-                onMoveCheckpoint={moveClipMotionCheckpoint}
-                onRenameMotion={renameClipMotionStep}
-                onSetPathStyle={setMotionStepPathStyle}
-                onRemoveCheckpoint={removeClipMotionCheckpoint}
-                onRemoveMotion={removeClipMotionStep}
-              />
-            )}
-            {(() => {
-              if (clip.kind !== "composition" || !clip.compositionId) return null;
-              if (isCharacterCompositionClip(clip)) return null;
-              const compositionClip = clip as EditorClip & {
-                kind: "composition";
-                compositionId: string;
-              };
-              return (
-                <CompositionSourceInspector
-                  project={project}
-                  clip={compositionClip}
-                  source={project.hf.compositionHtml[compositionClip.compositionId] ?? ""}
-                  projectWidth={project.hf.width}
-                  projectHeight={project.hf.height}
-                  onApply={(html) => updateCompositionHtml(compositionClip.compositionId, html)}
-                />
-              );
-            })()}
-            {isPrimitiveSourceClip(clip) && (
-              <RootElementSourceInspector clip={clip} rootHtml={project.hf.rootHtml} />
-            )}
-            <button
-              onClick={() => {
-                remove(clip.id);
-              }}
-              className="w-full rounded bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground hover:opacity-90"
-            >
-              Delete clip
-            </button>
-            {characterClip && (
+
+            {activeTab === "motion" && clip.kind !== "audio" && (
               <>
-                <div className="rounded border border-border bg-panel-2 p-3">
-                  <label className="flex items-center gap-2 text-xs">
-                    <input
-                      type="checkbox"
-                      checked={characterClip.character.autoBlink !== false}
-                      onChange={(e) =>
-                        update(characterClip.id, {
-                          character: {
-                            ...characterClip.character,
-                            autoBlink: e.target.checked,
-                          },
-                        } as Partial<CompositionClip>)
-                      }
-                    />
-                    Auto blink
-                  </label>
-                  <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-                    Adds a subtle regular blink during playback when the eyes are otherwise open.
-                  </p>
-                </div>
-                {character && (
-                  <MotionPanel
-                    clip={characterClip as CharacterCompositionClip}
+                <MotionInspector
+                  clip={clip}
+                  currentTime={currentTime}
+                  selectedKeyframe={selectedKeyframe?.clipId === clip.id ? selectedKeyframe : null}
+                  onSelectKeyframe={selectKeyframe}
+                  onSeek={(time) => seek?.(clip.start + time)}
+                  onAddMotion={(time) => {
+                    const selection = addClipMotionStep(clip.id, time);
+                    if (selection) selectKeyframe(selection);
+                  }}
+                  onAddCheckpoint={(motionId, time) => {
+                    const selection = addClipMotionCheckpoint(clip.id, motionId, time);
+                    if (selection) selectKeyframe(selection);
+                    return selection;
+                  }}
+                  onUpdateKeyframe={updateClipKeyframe}
+                  onMoveCheckpoint={moveClipMotionCheckpoint}
+                  onRenameMotion={renameClipMotionStep}
+                  onSetPathStyle={setMotionStepPathStyle}
+                  onRemoveCheckpoint={removeClipMotionCheckpoint}
+                  onRemoveMotion={removeClipMotionStep}
+                />
+                {characterClip && (
+                  <CharacterMotionTab
+                    characterClip={characterClip}
                     character={character}
+                    onUpdate={(patch) => update(characterClip.id, patch)}
                   />
                 )}
-                <VoiceLipSyncPanel clip={characterClip as CharacterCompositionClip} />
               </>
+            )}
+
+            {activeTab === "advanced" && (
+              <AdvancedInspectorTab
+                clip={clip}
+                project={project}
+                tracks={tracks}
+                onUpdate={(patch) => update(clip.id, patch)}
+                onRemove={() => remove(clip.id)}
+                updateCompositionHtml={updateCompositionHtml}
+              />
             )}
           </div>
         )}
       </div>
+    </div>
+  );
+}
 
-      <div className="border-t border-border p-3 text-xs">
-        <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-          Project
+function InspectorHeader({ clip, project }: { clip: EditorClip | undefined; project: Project }) {
+  return (
+    <div className="border-b border-border px-3 py-3">
+      <div className="flex items-center gap-2">
+        <div className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-primary/35 bg-primary/15 text-primary">
+          <WandSparkles size={16} />
         </div>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="min-w-0">
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Inspector
+          </div>
+          <div className="truncate text-sm font-semibold text-foreground">
+            {clip?.name || (clip ? "Untitled clip" : project.name)}
+          </div>
+        </div>
+      </div>
+      {clip && (
+        <div className="mt-2 flex items-center gap-2">
+          <span className="rounded-full border border-border bg-panel-2 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+            {clipKindLabel(clip)}
+          </span>
+          <span className="min-w-0 truncate text-[10px] text-muted-foreground">{clip.id}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EmptyInspectorState() {
+  return (
+    <PanelSection title="Ready" icon={Sparkles}>
+      <div className="rounded-md border border-dashed border-border bg-background/30 px-3 py-4 text-center">
+        <div className="mx-auto mb-2 grid h-9 w-9 place-items-center rounded-md bg-primary/15 text-primary">
+          <SlidersHorizontal size={17} />
+        </div>
+        <div className="font-medium text-foreground">Pick a clip to shape it.</div>
+      </div>
+    </PanelSection>
+  );
+}
+
+function InspectorTabs({
+  value,
+  canAnimate,
+  onChange,
+}: {
+  value: InspectorTab;
+  canAnimate: boolean;
+  onChange: (value: InspectorTab) => void;
+}) {
+  const tabs: { id: InspectorTab; label: string; icon: IconComponent; disabled?: boolean }[] = [
+    { id: "clip", label: "Clip", icon: SlidersHorizontal },
+    { id: "motion", label: "Motion", icon: Sparkles, disabled: !canAnimate },
+    { id: "advanced", label: "More", icon: Settings2 },
+  ];
+
+  return (
+    <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-background/35 p-1">
+      {tabs.map((tab) => {
+        const selected = value === tab.id;
+        const Icon = tab.icon;
+        return (
+          <button
+            key={tab.id}
+            type="button"
+            disabled={tab.disabled}
+            onClick={() => onChange(tab.id)}
+            className={`flex min-w-0 items-center justify-center gap-1 rounded px-1.5 py-1.5 text-[11px] font-medium transition-colors ${
+              selected
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:bg-panel hover:text-foreground"
+            } disabled:cursor-not-allowed disabled:opacity-35`}
+          >
+            <Icon size={13} />
+            <span className="truncate">{tab.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function ClipInspectorTab({ clip, onUpdate }: { clip: EditorClip; onUpdate: ClipUpdater }) {
+  return (
+    <>
+      <PanelSection title="Clip" icon={Clock3}>
+        <div className="space-y-2">
           <Field label="Name">
             <input
-              value={project.name}
-              onChange={(e) => useStudio.getState().setProjectMeta({ name: e.target.value })}
+              value={clip.name}
+              onChange={(event) => onUpdate({ name: event.target.value })}
               className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
             />
           </Field>
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="Start (s)">
+              <NumberInput
+                value={clip.start}
+                step={0.1}
+                onChange={(value) => onUpdate({ start: Math.max(0, value) })}
+              />
+            </Field>
+            <Field label="Duration (s)">
+              <NumberInput
+                value={clip.duration}
+                step={0.1}
+                onChange={(value) => onUpdate({ duration: Math.max(0.1, value) })}
+              />
+            </Field>
+          </div>
+        </div>
+      </PanelSection>
+
+      <PanelSection title="Frame" icon={Move}>
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="X">
+            <NumberInput value={clip.x} onChange={(value) => onUpdate({ x: value })} />
+          </Field>
+          <Field label="Y">
+            <NumberInput value={clip.y} onChange={(value) => onUpdate({ y: value })} />
+          </Field>
+          <Field label="Width">
+            <NumberInput value={clip.width} onChange={(value) => onUpdate({ width: value })} />
+          </Field>
+          <Field label="Height">
+            <NumberInput value={clip.height} onChange={(value) => onUpdate({ height: value })} />
+          </Field>
+          <Field label="Rotation°">
+            <NumberInput
+              value={clip.rotation}
+              onChange={(value) => onUpdate({ rotation: value })}
+            />
+          </Field>
+        </div>
+      </PanelSection>
+
+      <PanelSection title="Look" icon={Paintbrush}>
+        <RangeField
+          label="Opacity"
+          value={clip.opacity}
+          min={0}
+          max={1}
+          step={0.05}
+          displayValue={`${Math.round(clip.opacity * 100)}%`}
+          onChange={(value) => onUpdate({ opacity: value })}
+        />
+      </PanelSection>
+
+      {clip.kind === "text" && (
+        <TextInspector
+          clip={clip as TextClip}
+          update={(patch) => onUpdate(patch as Partial<AnyClip>)}
+        />
+      )}
+    </>
+  );
+}
+
+function CharacterMotionTab({
+  characterClip,
+  character,
+  onUpdate,
+}: {
+  characterClip: CharacterCompositionClip;
+  character: CharacterPreset | undefined;
+  onUpdate: ClipUpdater;
+}) {
+  return (
+    <>
+      <PanelSection title="Character" icon={Sparkles}>
+        <SwitchRow
+          label="Auto blink"
+          checked={characterClip.character.autoBlink !== false}
+          onChange={(checked) =>
+            onUpdate({
+              character: {
+                ...characterClip.character,
+                autoBlink: checked,
+              },
+            } as Partial<CompositionClip>)
+          }
+        />
+      </PanelSection>
+      {character && <MotionPanel clip={characterClip} character={character} />}
+      <VoiceLipSyncPanel clip={characterClip} />
+    </>
+  );
+}
+
+function AdvancedInspectorTab({
+  clip,
+  project,
+  tracks,
+  onUpdate,
+  onRemove,
+  updateCompositionHtml,
+}: {
+  clip: EditorClip;
+  project: Project;
+  tracks: TrackMeta[];
+  onUpdate: ClipUpdater;
+  onRemove: () => void;
+  updateCompositionHtml: (compositionId: string, html: string) => void;
+}) {
+  const compositionClip =
+    clip.kind === "composition" && clip.compositionId && !isCharacterCompositionClip(clip)
+      ? (clip as EditorClip & { kind: "composition"; compositionId: string })
+      : null;
+
+  return (
+    <>
+      <PanelSection title="Layer" icon={Layers}>
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="Z-index">
+            <NumberInput value={clip.zIndex} onChange={(value) => onUpdate({ zIndex: value })} />
+          </Field>
+          <Field label="Track">
+            <select
+              value={clip.trackIndex}
+              onChange={(event) => onUpdate({ trackIndex: Number(event.target.value) })}
+              className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+            >
+              {tracks.map((track, index) => (
+                <option key={track.id} value={index}>
+                  {track.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+      </PanelSection>
+
+      {compositionClip && (
+        <CompositionSourceInspector
+          project={project}
+          clip={compositionClip}
+          source={project.hf.compositionHtml[compositionClip.compositionId] ?? ""}
+          projectWidth={project.hf.width}
+          projectHeight={project.hf.height}
+          onApply={(html) => updateCompositionHtml(compositionClip.compositionId, html)}
+        />
+      )}
+      {isPrimitiveSourceClip(clip) && (
+        <RootElementSourceInspector clip={clip} rootHtml={project.hf.rootHtml} />
+      )}
+
+      <ProjectSettingsPanel project={project} />
+
+      <PanelSection title="Danger" icon={Trash2}>
+        <button
+          type="button"
+          onClick={onRemove}
+          className="flex w-full items-center justify-center gap-2 rounded bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground hover:opacity-90"
+        >
+          <Trash2 size={13} />
+          Delete clip
+        </button>
+      </PanelSection>
+    </>
+  );
+}
+
+function ProjectSettingsPanel({ project }: { project: Project }) {
+  return (
+    <PanelSection title="Project" icon={Settings2}>
+      <div className="space-y-2">
+        <Field label="Name">
+          <input
+            value={project.name}
+            onChange={(event) => useStudio.getState().setProjectMeta({ name: event.target.value })}
+            className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+          />
+        </Field>
+        <div className="grid grid-cols-2 gap-2">
           <Field label="Duration (s)">
             <NumberInput
               value={project.hf.duration}
-              onChange={(v) => useStudio.getState().setProjectMeta({ duration: Math.max(1, v) })}
-            />
-          </Field>
-          <Field label="Width">
-            <NumberInput
-              value={project.hf.width}
-              onChange={(v) => useStudio.getState().setProjectMeta({ width: v })}
-            />
-          </Field>
-          <Field label="Height">
-            <NumberInput
-              value={project.hf.height}
-              onChange={(v) => useStudio.getState().setProjectMeta({ height: v })}
+              onChange={(value) =>
+                useStudio.getState().setProjectMeta({ duration: Math.max(1, value) })
+              }
             />
           </Field>
           <Field label="FPS">
             <NumberInput
               value={project.hf.fps}
-              onChange={(v) => useStudio.getState().setProjectMeta({ fps: v })}
+              onChange={(value) => useStudio.getState().setProjectMeta({ fps: value })}
+            />
+          </Field>
+          <Field label="Width">
+            <NumberInput
+              value={project.hf.width}
+              onChange={(value) => useStudio.getState().setProjectMeta({ width: value })}
+            />
+          </Field>
+          <Field label="Height">
+            <NumberInput
+              value={project.hf.height}
+              onChange={(value) => useStudio.getState().setProjectMeta({ height: value })}
             />
           </Field>
         </div>
       </div>
-    </div>
+    </PanelSection>
   );
+}
+
+function PanelSection({
+  title,
+  icon: Icon,
+  meta,
+  children,
+}: {
+  title: string;
+  icon: IconComponent;
+  meta?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="rounded-md border border-border bg-panel-2 p-3 shadow-[var(--shadow-panel)]">
+      <div className="mb-3 flex items-center gap-2">
+        <div className="grid h-6 w-6 shrink-0 place-items-center rounded bg-background/45 text-primary">
+          <Icon size={13} />
+        </div>
+        <div className="min-w-0 flex-1 font-semibold uppercase tracking-wider text-muted-foreground">
+          {title}
+        </div>
+        {meta && <div className="min-w-0 truncate text-[10px] text-muted-foreground">{meta}</div>}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function clipKindLabel(clip: EditorClip): string {
+  if (isCharacterCompositionClip(clip)) return "Character";
+  if (clip.kind === "composition") return clip.compositionKind ?? "Composition";
+  return clip.kind;
 }
 
 const MOTION_FEELS = [
@@ -696,13 +927,7 @@ function RootElementSourceInspector({ clip, rootHtml }: { clip: EditorClip; root
   const source = useMemo(() => readRootElementSource(rootHtml, clip.id), [rootHtml, clip.id]);
 
   return (
-    <div className="rounded border border-border bg-panel-2 p-3">
-      <div className="mb-2 flex items-center gap-2">
-        <div className="font-semibold uppercase tracking-wider text-muted-foreground">Source</div>
-        <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
-          rootHtml element
-        </span>
-      </div>
+    <PanelSection title="Source" icon={Code2} meta="rootHtml element">
       <textarea
         value={source ?? `Element "${clip.id}" was not found in project.hf.rootHtml.`}
         readOnly
@@ -719,7 +944,7 @@ function RootElementSourceInspector({ clip, rootHtml }: { clip: EditorClip; root
           Copy source
         </button>
       )}
-    </div>
+    </PanelSection>
   );
 }
 
@@ -807,13 +1032,7 @@ function CompositionSourceInspector({
   };
 
   return (
-    <div className="rounded border border-border bg-panel-2 p-3">
-      <div className="mb-2 flex items-center gap-2">
-        <div className="font-semibold uppercase tracking-wider text-muted-foreground">Source</div>
-        <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
-          {clip.compositionId}
-        </span>
-      </div>
+    <PanelSection title="Source" icon={Code2} meta={clip.compositionId}>
       <textarea
         value={draft}
         onChange={(event) => {
@@ -908,7 +1127,7 @@ function CompositionSourceInspector({
           Apply
         </button>
       </div>
-    </div>
+    </PanelSection>
   );
 }
 
@@ -952,8 +1171,7 @@ function TextInspector({
   update: (patch: Partial<TextClip>) => void;
 }) {
   return (
-    <div className="rounded border border-border bg-panel-2 p-3">
-      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">Text</div>
+    <PanelSection title="Text" icon={Type}>
       <div className="space-y-2">
         <Field label="Content">
           <textarea
@@ -1013,26 +1231,93 @@ function TextInspector({
             </select>
           </Field>
         </div>
-        <label className="flex items-center gap-2 rounded border border-border bg-panel px-2 py-1.5 text-xs text-foreground">
-          <input
-            type="checkbox"
-            checked={clip.fitToBounds === true}
-            onChange={(e) => update({ fitToBounds: e.target.checked })}
-          />
-          Fit to bounds
-        </label>
+        <SwitchRow
+          label="Fit to bounds"
+          checked={clip.fitToBounds === true}
+          onChange={(checked) => update({ fitToBounds: checked })}
+        />
       </div>
-    </div>
+    </PanelSection>
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label className="block">
       <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
         {label}
       </span>
       {children}
+    </label>
+  );
+}
+
+function RangeField({
+  label,
+  value,
+  min,
+  max,
+  step,
+  displayValue,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  displayValue: string;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <Field label={label}>
+      <div className="flex items-center gap-2">
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(event) => onChange(Number(event.target.value))}
+          className="min-w-0 flex-1"
+        />
+        <span className="w-10 rounded border border-border bg-input px-1.5 py-1 text-center text-[11px] tabular-nums text-foreground">
+          {displayValue}
+        </span>
+      </div>
+    </Field>
+  );
+}
+
+function SwitchRow({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex items-center justify-between gap-3 rounded border border-border bg-panel px-2 py-1.5 text-xs text-foreground">
+      <span className="min-w-0 truncate">{label}</span>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="sr-only"
+      />
+      <span
+        className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors ${
+          checked ? "border-primary/70 bg-primary/70" : "border-border bg-input"
+        }`}
+      >
+        <span
+          className={`absolute left-0.5 top-0.5 h-3.5 w-3.5 rounded-full transition-transform ${
+            checked ? "translate-x-4 bg-primary-foreground" : "bg-foreground/80"
+          }`}
+        />
+      </span>
     </label>
   );
 }

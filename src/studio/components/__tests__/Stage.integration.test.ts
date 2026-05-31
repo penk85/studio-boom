@@ -50,6 +50,10 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(source).toContain("if (!resolvedHtml || drag || isPickMode) return;");
     expect(source).toContain('doc.addEventListener("click", handleClick, true)');
     expect(source).toContain("resolveTargetClipId(");
+    expect(source).toContain("<StageClickOverlay");
+    expect(source).toContain('data-stage-click-target=""');
+    expect(source).toContain("renderedClickRects");
+    expect(source).toContain("getRenderedElementRect(iframe, clip.id)");
     expect(source).toContain("getRenderedPixelCompositionRect(");
     expect(source).toContain("compositionDomRectToCss(renderedElementRect, stageGeometry)");
     expect(source).toContain("<MotionPathOverlay");

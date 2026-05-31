@@ -15,6 +15,7 @@ import {
   resolvePickedClipId,
   resolveTargetClipId,
   scaleCompositionRectFromHandleRect,
+  snapCompositionRect,
   snapRotationDegrees,
 } from "../stage-helpers";
 
@@ -225,6 +226,34 @@ describe("stage helpers", () => {
     });
   });
 
+  it("snaps moving rects to canvas centers and exposes visual guide positions", () => {
+    const result = snapCompositionRect(
+      { x: 902, y: 502, width: 120, height: 80 },
+      [{ id: "canvas", kind: "canvas", rect: { x: 0, y: 0, width: 1920, height: 1080 } }],
+      10,
+    );
+
+    expect(result.rect).toEqual({ x: 900, y: 500, width: 120, height: 80 });
+    expect(result.guides).toEqual([
+      expect.objectContaining({ axis: "x", position: 960, targetAnchor: "center" }),
+      expect.objectContaining({ axis: "y", position: 540, targetAnchor: "center" }),
+    ]);
+  });
+
+  it("snaps moving rects to neighboring clip edges within threshold", () => {
+    const result = snapCompositionRect(
+      { x: 244, y: 204, width: 50, height: 40 },
+      [{ id: "other", kind: "clip", rect: { x: 300, y: 200, width: 80, height: 60 } }],
+      8,
+    );
+
+    expect(result.rect).toEqual({ x: 250, y: 200, width: 50, height: 40 });
+    expect(result.guides).toEqual([
+      expect.objectContaining({ axis: "x", position: 300, targetId: "other" }),
+      expect.objectContaining({ axis: "y", position: 200, targetId: "other" }),
+    ]);
+  });
+
   it("resolves nested picked nodes back to the owning clip id", () => {
     const iframe = document.createElement("iframe");
     document.body.appendChild(iframe);
@@ -269,5 +298,20 @@ describe("stage helpers", () => {
     const frame = document.createElement("iframe");
     frame.id = "clip-8";
     expect(resolveTargetClipId(null, new Set(["clip-8"]), frame)).toBe("clip-8");
+  });
+
+  it("resolves clicked targets that come from an iframe realm", () => {
+    const iframe = document.createElement("iframe");
+    document.body.appendChild(iframe);
+    iframe.contentDocument?.open();
+    iframe.contentDocument?.write(`<!DOCTYPE html><html><body>
+      <div id="clip-9"><span id="inside-frame">Inside</span></div>
+    </body></html>`);
+    iframe.contentDocument?.close();
+
+    const inner = iframe.contentDocument?.getElementById("inside-frame");
+
+    expect(resolveTargetClipId(inner, new Set(["clip-9"]))).toBe("clip-9");
+    iframe.remove();
   });
 });

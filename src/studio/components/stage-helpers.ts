@@ -16,6 +16,29 @@ export interface CompositionRect {
   height: number;
 }
 
+export type StageSnapAxis = "x" | "y";
+export type StageSnapAnchor = "start" | "center" | "end";
+
+export interface StageSnapTarget {
+  id: string;
+  rect: CompositionRect;
+  kind?: "canvas" | "clip";
+}
+
+export interface StageSnapGuide {
+  axis: StageSnapAxis;
+  position: number;
+  sourceAnchor: StageSnapAnchor;
+  targetAnchor: StageSnapAnchor;
+  targetId: string;
+  targetKind?: "canvas" | "clip";
+}
+
+export interface StageSnapResult {
+  rect: CompositionRect;
+  guides: StageSnapGuide[];
+}
+
 interface PixelBounds {
   x: number;
   y: number;
@@ -205,6 +228,27 @@ export function roundCompositionRect(rect: CompositionRect): CompositionRect {
   };
 }
 
+export function snapCompositionRect(
+  rect: CompositionRect,
+  targets: StageSnapTarget[],
+  threshold: number,
+): StageSnapResult {
+  const snapThreshold = Math.max(0, threshold);
+  if (snapThreshold <= 0 || targets.length === 0) return { rect, guides: [] };
+
+  const xSnap = findAxisSnap("x", rect, targets, snapThreshold);
+  const ySnap = findAxisSnap("y", rect, targets, snapThreshold);
+
+  return {
+    rect: {
+      ...rect,
+      x: rect.x + (xSnap?.delta ?? 0),
+      y: rect.y + (ySnap?.delta ?? 0),
+    },
+    guides: [xSnap?.guide, ySnap?.guide].filter((guide): guide is StageSnapGuide => Boolean(guide)),
+  };
+}
+
 export function compositionRectToCss(
   clip: Pick<EditorClip, "x" | "y" | "width" | "height">,
   geometry: StageGeometry,
@@ -342,9 +386,9 @@ export function resolveTargetClipId(
   clipIds: Set<string>,
   fallbackNode?: Element | null,
 ): string | null {
-  const fromTarget = resolveElementClipId(target instanceof Element ? target : null, clipIds);
+  const fromTarget = resolveElementClipId(asElement(target), clipIds);
   if (fromTarget) return fromTarget;
-  return resolveElementClipId(fallbackNode ?? null, clipIds);
+  return resolveElementClipId(asElement(fallbackNode ?? null), clipIds);
 }
 
 function resolveElementClipId(node: Element | null, clipIds: Set<string>): string | null {
@@ -356,6 +400,12 @@ function resolveElementClipId(node: Element | null, clipIds: Set<string>): strin
   return null;
 }
 
+function asElement(value: unknown): Element | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as { nodeType?: number };
+  return candidate.nodeType === 1 ? (value as Element) : null;
+}
+
 function rectToBounds(rect: CompositionRect) {
   return {
     left: rect.x,
@@ -363,6 +413,65 @@ function rectToBounds(rect: CompositionRect) {
     right: rect.x + rect.width,
     bottom: rect.y + rect.height,
   };
+}
+
+function findAxisSnap(
+  axis: StageSnapAxis,
+  rect: CompositionRect,
+  targets: StageSnapTarget[],
+  threshold: number,
+): { delta: number; guide: StageSnapGuide } | null {
+  const sourcePositions = snapPositionsForRect(axis, rect);
+  let best: {
+    distance: number;
+    delta: number;
+    guide: StageSnapGuide;
+  } | null = null;
+
+  for (const target of targets) {
+    const targetPositions = snapPositionsForRect(axis, target.rect);
+    for (const source of sourcePositions) {
+      for (const targetPosition of targetPositions) {
+        const delta = targetPosition.value - source.value;
+        const distance = Math.abs(delta);
+        if (distance > threshold) continue;
+        if (best && distance >= best.distance) continue;
+        best = {
+          distance,
+          delta,
+          guide: {
+            axis,
+            position: targetPosition.value,
+            sourceAnchor: source.anchor,
+            targetAnchor: targetPosition.anchor,
+            targetId: target.id,
+            targetKind: target.kind,
+          },
+        };
+      }
+    }
+  }
+
+  return best ? { delta: best.delta, guide: best.guide } : null;
+}
+
+function snapPositionsForRect(
+  axis: StageSnapAxis,
+  rect: CompositionRect,
+): { anchor: StageSnapAnchor; value: number }[] {
+  const bounds = rectToBounds(rect);
+  if (axis === "x") {
+    return [
+      { anchor: "start", value: bounds.left },
+      { anchor: "center", value: bounds.left + rect.width / 2 },
+      { anchor: "end", value: bounds.right },
+    ];
+  }
+  return [
+    { anchor: "start", value: bounds.top },
+    { anchor: "center", value: bounds.top + rect.height / 2 },
+    { anchor: "end", value: bounds.bottom },
+  ];
 }
 
 function measureImagePixelBounds(image: HTMLImageElement): PixelBounds | null {

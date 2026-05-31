@@ -12,7 +12,12 @@ import {
   type PointerEvent as ReactPointerEvent,
   type RefObject,
 } from "react";
-import { resolveIframe, useElementPicker, type PickedElement } from "@hyperframes/studio";
+import {
+  resolveIframe,
+  useElementPicker,
+  usePlayerStore,
+  type PickedElement,
+} from "@hyperframes/studio";
 import { useStudio } from "../store";
 import type { HyperframesPlayerElement } from "../../hyperframes-player";
 import {
@@ -35,6 +40,7 @@ import {
 import {
   compositionDomRectToCss,
   compositionRectToCss,
+  getRenderedElementRect,
   getRenderedPixelCompositionRect,
   getStageGeometry,
   keyboardNudgeDelta,
@@ -48,9 +54,12 @@ import {
   resolvePickedClipId,
   resolveTargetClipId,
   scaleCompositionRectFromHandleRect,
+  snapCompositionRect,
   snapRotationDegrees,
   type CompositionRect,
   type ResizeHandle,
+  type StageSnapGuide,
+  type StageSnapTarget,
   type StageGeometry,
   compositionPointToCss,
 } from "./stage-helpers";
@@ -61,6 +70,7 @@ const STAGE_NUDGE_RESET_MS = 400;
 const STAGE_NUDGE_STEP = 1;
 const STAGE_FAST_NUDGE_STEP = 10;
 const STAGE_ROTATION_SNAP_DEGREES = 15;
+const STAGE_SNAP_THRESHOLD_PX = 8;
 
 interface StageProps {
   iframeRef: RefObject<HTMLIFrameElement | null>;
@@ -81,8 +91,12 @@ type StageDrag =
       startClientY: number;
       startX: number;
       startY: number;
+      width: number;
+      height: number;
       previewX: number;
       previewY: number;
+      snapTargets: StageSnapTarget[];
+      snapGuides: StageSnapGuide[];
       geometry: StageGeometry;
     }
   | {
@@ -139,6 +153,18 @@ interface StageMotionPath {
   checkpoints: StageMotionPathCheckpoint[];
 }
 
+interface StageClickTarget {
+  id: string;
+  name: string;
+  kind: EditorClip["kind"];
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  zIndex: number;
+}
+
 export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const project = useStudio((s) => s.project);
   const selectClip = useStudio((s) => s.selectClip);
@@ -155,6 +181,8 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const bringClipToFront = useStudio((s) => s.bringClipToFront);
   const sendClipToBack = useStudio((s) => s.sendClipToBack);
   const repairTimelineLanes = useStudio((s) => s.repairTimelineLanes);
+  const currentTime = usePlayerStore((s) => s.currentTime);
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
 
   const playerRef = useRef<HyperframesPlayerElement>(null);
   const stageShellRef = useRef<HTMLDivElement>(null);
@@ -164,14 +192,20 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const nudgeResetTimerRef = useRef<number | null>(null);
   const nudgeCheckpointedRef = useRef(false);
   const stageEditableClipRef = useRef<EditorClip | null>(null);
+  const clipIdsRef = useRef<Set<string>>(new Set());
   const moveHandleRef = useRef<HTMLButtonElement>(null);
   const [resolvedHtml, setResolvedHtml] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [drag, setDrag] = useState<StageDrag>(null);
   const [renderedElementRect, setRenderedElementRect] = useState<DOMRect | null>(null);
+  const [renderedClickRects, setRenderedClickRects] = useState<Map<string, DOMRect>>(new Map());
 
   const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
   const clipIds = useMemo(() => new Set(clips.map((clip) => clip.id)), [clips]);
+  const stageClickTargets = useMemo(
+    () => getStageClickTargets(clips, currentTime, renderedClickRects),
+    [clips, currentTime, renderedClickRects],
+  );
   const selectedClip = useMemo(
     () => clips.find((clip) => clip.id === selectedClipId) ?? null,
     [clips, selectedClipId],
@@ -211,6 +245,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     stageEditableClip && stageGeometry
       ? getStageMotionPaths(stageEditableClip, selectedKeyframe, stageGeometry, drag)
       : [];
+  const snapGuides = drag?.type === "move" ? drag.snapGuides : [];
   const outlineRect =
     stageEditableClip && outlinedClip && stageGeometry
       ? drag?.type === "resize" && drag.clipId === stageEditableClip.id
@@ -366,6 +401,63 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     };
   }, [activeHandleClip, drag, iframeRef, selectedKeyframe, stageEditableClip, resolvedHtml]);
 
+  const measureRenderedClickRects = useCallback(() => {
+    if (!resolvedHtml) {
+      setRenderedClickRects((currentRects) =>
+        currentRects.size === 0 ? currentRects : new Map<string, DOMRect>(),
+      );
+      return;
+    }
+
+    const iframe = iframeRef.current ?? resolveIframe(playerRef.current);
+    if (!iframe) {
+      setRenderedClickRects((currentRects) =>
+        currentRects.size === 0 ? currentRects : new Map<string, DOMRect>(),
+      );
+      return;
+    }
+
+    const nextRects = new Map<string, DOMRect>();
+    for (const clip of clips) {
+      if (clip.kind === "audio") continue;
+      const rect = getRenderedElementRect(iframe, clip.id);
+      if (!rect) continue;
+      nextRects.set(clip.id, new DOMRect(rect.left, rect.top, rect.width, rect.height));
+    }
+
+    setRenderedClickRects((currentRects) =>
+      sameRectMap(currentRects, nextRects) ? currentRects : nextRects,
+    );
+  }, [clips, iframeRef, resolvedHtml]);
+
+  useEffect(() => {
+    if (!resolvedHtml) {
+      setRenderedClickRects((currentRects) =>
+        currentRects.size === 0 ? currentRects : new Map<string, DOMRect>(),
+      );
+      return;
+    }
+
+    let stopped = false;
+    const measure = () => {
+      if (!stopped) measureRenderedClickRects();
+    };
+
+    const frame = window.requestAnimationFrame(measure);
+    const interval = window.setInterval(measure, 200);
+    return () => {
+      stopped = true;
+      window.cancelAnimationFrame(frame);
+      window.clearInterval(interval);
+    };
+  }, [measureRenderedClickRects, resolvedHtml]);
+
+  useEffect(() => {
+    if (!resolvedHtml || isPlaying) return;
+    const frame = window.requestAnimationFrame(measureRenderedClickRects);
+    return () => window.cancelAnimationFrame(frame);
+  }, [currentTime, isPlaying, measureRenderedClickRects, resolvedHtml]);
+
   // Element picker — click in player iframe → select clip.
   const { pickedElement, enablePick, isPickMode } = useElementPicker(iframeRef, {
     workspaceFiles: project ? { "index.html": project.hf.rootHtml } : undefined,
@@ -381,37 +473,48 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
 
   useEffect(() => {
     if (!resolvedHtml) return;
-    const rootIframe = iframeRef.current;
-    if (!rootIframe) return;
 
     const cleanups = new Map<Document, () => void>();
     let stopped = false;
 
-    const bindFrameDocument = (frame: HTMLIFrameElement) => {
+    const bindFrameDocument = (frame: HTMLIFrameElement, rootFrame: HTMLIFrameElement) => {
       const doc = frame.contentDocument;
       if (!doc || cleanups.has(doc)) return;
+      const isRootFrame = frame === rootFrame;
 
-      const handleClick = (event: MouseEvent) => {
+      const pickFromEvent = (event: MouseEvent | PointerEvent) => {
+        if ("button" in event && event.button !== 0) return;
         const ownerFrame = doc.defaultView?.frameElement;
-        const clipId = resolveTargetClipId(
-          event.target,
-          clipIds,
-          ownerFrame instanceof Element ? ownerFrame : null,
-        );
-        if (clipId) selectClip(clipId);
+        const clipId = resolveTargetClipId(event.target, clipIdsRef.current, ownerFrame);
+        if (clipId) {
+          selectClip(clipId);
+          return;
+        }
+        if (isRootFrame) selectClip(null);
       };
 
+      const handlePointerDown = (event: PointerEvent) => pickFromEvent(event);
+      const handleClick = (event: MouseEvent) => pickFromEvent(event);
+
+      doc.addEventListener("pointerdown", handlePointerDown, true);
       doc.addEventListener("click", handleClick, true);
       cleanups.set(doc, () => {
+        doc.removeEventListener("pointerdown", handlePointerDown, true);
         doc.removeEventListener("click", handleClick, true);
       });
     };
 
     const bindAccessibleFrames = () => {
       if (stopped) return;
-      bindFrameDocument(rootIframe);
+      const rootIframe = iframeRef.current ?? resolveIframe(playerRef.current);
+      if (!rootIframe) return;
+      if (iframeRef.current !== rootIframe) {
+        (iframeRef as { current: HTMLIFrameElement | null }).current = rootIframe;
+        onIframeLoad();
+      }
+      bindFrameDocument(rootIframe, rootIframe);
       for (const frame of rootIframe.contentDocument?.querySelectorAll("iframe") ?? []) {
-        if (frame instanceof HTMLIFrameElement) bindFrameDocument(frame);
+        if (frame instanceof HTMLIFrameElement) bindFrameDocument(frame, rootIframe);
       }
     };
 
@@ -424,7 +527,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       for (const cleanup of cleanups.values()) cleanup();
       cleanups.clear();
     };
-  }, [clipIds, iframeRef, resolvedHtml, selectClip]);
+  }, [iframeRef, onIframeLoad, resolvedHtml, selectClip]);
 
   useEffect(() => {
     if (!resolvedHtml || drag || isPickMode) return;
@@ -457,6 +560,10 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   useEffect(() => {
     stageEditableClipRef.current = stageEditableClip;
   }, [stageEditableClip]);
+
+  useEffect(() => {
+    clipIdsRef.current = clipIds;
+  }, [clipIds]);
 
   useEffect(() => {
     return () => {
@@ -504,10 +611,16 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       );
 
       if (currentDrag.type === "move") {
-        const nextX = currentDrag.startX + delta.x;
-        const nextY = currentDrag.startY + delta.y;
+        const preview = getMovePreview(currentDrag, delta, !event.altKey);
+        const nextX = preview.previewX;
+        const nextY = preview.previewY;
         previewElementPosition(iframeRef.current, currentDrag.clipId, nextX, nextY);
-        queueDragPreview({ ...currentDrag, previewX: nextX, previewY: nextY });
+        queueDragPreview({
+          ...currentDrag,
+          previewX: nextX,
+          previewY: nextY,
+          snapGuides: preview.snapGuides,
+        });
         return;
       }
 
@@ -552,8 +665,9 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       );
 
       if (currentDrag.type === "move") {
-        const nextX = currentDrag.startX + delta.x;
-        const nextY = currentDrag.startY + delta.y;
+        const preview = getMovePreview(currentDrag, delta, !event.altKey);
+        const nextX = preview.previewX;
+        const nextY = preview.previewY;
         commitElementPosition(iframeRef.current, currentDrag.clipId, nextX, nextY);
         // Prefer the drag's own keyframeId (set when starting from a path dot)
         // so we route correctly even if selectKeyframe hasn't propagated yet.
@@ -746,6 +860,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     selectKeyframe({ clipId: clipForDrag.id, keyframeId, property: "position" });
 
     const state = sampleClipKeyframedState(clipForDrag, keyframe.time);
+    const scale = Math.max(0.01, state.scale);
     const iframe = resolveIframe(playerRef.current);
     const geometry = getStageGeometry(
       stageShellRef.current,
@@ -763,8 +878,12 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       startClientY: event.clientY,
       startX: state.x,
       startY: state.y,
+      width: clipForDrag.width * scale,
+      height: clipForDrag.height * scale,
       previewX: state.x,
       previewY: state.y,
+      snapTargets: buildMoveSnapTargets(clips, project.hf.width, project.hf.height, clipForDrag.id),
+      snapGuides: [],
       geometry,
     });
   };
@@ -809,6 +928,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     if (!nextClip || !newKeyframe) return;
 
     const state = sampleClipKeyframedState(nextClip, newKeyframe.time);
+    const scale = Math.max(0.01, state.scale);
     const iframe = resolveIframe(playerRef.current);
     const geometry = getStageGeometry(
       stageShellRef.current,
@@ -826,8 +946,12 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       startClientY: event.clientY,
       startX: state.x,
       startY: state.y,
+      width: nextClip.width * scale,
+      height: nextClip.height * scale,
       previewX: state.x,
       previewY: state.y,
+      snapTargets: buildMoveSnapTargets(clips, project.hf.width, project.hf.height, clipForDrag.id),
+      snapGuides: [],
       geometry,
     });
   };
@@ -958,6 +1082,13 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           </div>
         </div>
       )}
+      {stageGeometry && (
+        <StageClickOverlay
+          clips={stageClickTargets}
+          geometry={stageGeometry}
+          onSelectClip={selectClip}
+        />
+      )}
       {motionPaths.length > 0 && stageEditableClip && (
         <MotionPathOverlay
           paths={motionPaths}
@@ -968,6 +1099,9 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
             startPathClickDrag(stageEditableClip, motionId, polyline, event)
           }
         />
+      )}
+      {snapGuides.length > 0 && stageGeometry && (
+        <StageSnapGuideOverlay guides={snapGuides} geometry={stageGeometry} />
       )}
       {outlineRect && (
         <div
@@ -1057,8 +1191,17 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
               startClientY: event.clientY,
               startX: activeHandleClip.x,
               startY: activeHandleClip.y,
+              width: activeHandleClip.width,
+              height: activeHandleClip.height,
               previewX: activeHandleClip.x,
               previewY: activeHandleClip.y,
+              snapTargets: buildMoveSnapTargets(
+                clips,
+                project.hf.width,
+                project.hf.height,
+                stageEditableClip.id,
+              ),
+              snapGuides: [],
               geometry,
             });
           }}
@@ -1194,6 +1337,100 @@ function MotionPathOverlay({
   );
 }
 
+function StageClickOverlay({
+  clips,
+  geometry,
+  onSelectClip,
+}: {
+  clips: StageClickTarget[];
+  geometry: StageGeometry;
+  onSelectClip: (clipId: string | null) => void;
+}) {
+  return (
+    <div
+      aria-hidden="true"
+      className="absolute z-10"
+      style={{
+        left: geometry.rect.left,
+        top: geometry.rect.top,
+        width: geometry.rect.width,
+        height: geometry.rect.height,
+      }}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        if (event.target === event.currentTarget) onSelectClip(null);
+      }}
+    >
+      {clips.map((clip) => {
+        const rect = compositionRectToCss(clip, {
+          ...geometry,
+          rect: new DOMRect(0, 0, geometry.rect.width, geometry.rect.height),
+        });
+        return (
+          <div
+            key={clip.id}
+            data-stage-click-target=""
+            title={clip.name || clip.kind}
+            className="absolute bg-transparent"
+            style={{
+              left: rect.left,
+              top: rect.top,
+              width: Math.max(1, rect.width),
+              height: Math.max(1, rect.height),
+              transform: `rotate(${clip.rotation}deg)`,
+              transformOrigin: "center center",
+              zIndex: clip.zIndex,
+            }}
+            onPointerDown={(event) => {
+              if (event.button !== 0) return;
+              event.preventDefault();
+              event.stopPropagation();
+              onSelectClip(clip.id);
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function StageSnapGuideOverlay({
+  guides,
+  geometry,
+}: {
+  guides: StageSnapGuide[];
+  geometry: StageGeometry;
+}) {
+  return (
+    <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-[25]">
+      {guides.map((guide, index) => {
+        const isVertical = guide.axis === "x";
+        const style: CSSProperties = isVertical
+          ? {
+              left: guide.position / geometry.scaleX + geometry.rect.left,
+              top: geometry.rect.top,
+              width: 1,
+              height: geometry.rect.height,
+            }
+          : {
+              left: geometry.rect.left,
+              top: guide.position / geometry.scaleY + geometry.rect.top,
+              width: geometry.rect.width,
+              height: 1,
+            };
+        return (
+          <div
+            key={`${guide.axis}:${guide.position}:${guide.targetId}:${index}`}
+            data-stage-snap-guide=""
+            className="absolute bg-primary/85 shadow-[0_0_10px_rgba(168,85,247,0.85)]"
+            style={style}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
 function SelectionCorner({
   handle,
   onPointerDown,
@@ -1227,6 +1464,47 @@ function getStageEditableClip(selectedClip: EditorClip | null) {
   if (!selectedClip) return null;
   if (selectedClip.kind === "audio") return null;
   return selectedClip;
+}
+
+function getStageClickTargets(
+  clips: EditorClip[],
+  currentTime: number,
+  renderedRects: Map<string, DOMRect>,
+): StageClickTarget[] {
+  return clips
+    .filter((clip) => clip.kind !== "audio")
+    .map((clip) => {
+      const localTime = currentTime - clip.start;
+      if (localTime < 0 || localTime > clip.duration) return null;
+      const renderedRect = renderedRects.get(clip.id);
+      if (renderedRect) {
+        return {
+          id: clip.id,
+          name: clip.name,
+          kind: clip.kind,
+          x: renderedRect.left,
+          y: renderedRect.top,
+          width: renderedRect.width,
+          height: renderedRect.height,
+          rotation: 0,
+          zIndex: clip.zIndex,
+        };
+      }
+      const state = sampleClipKeyframedState(clip, Math.max(0, Math.min(clip.duration, localTime)));
+      const scale = Math.max(0.01, state.scale);
+      return {
+        id: clip.id,
+        name: clip.name,
+        kind: clip.kind,
+        x: state.x,
+        y: state.y,
+        width: clip.width * scale,
+        height: clip.height * scale,
+        rotation: state.rotation,
+        zIndex: clip.zIndex,
+      };
+    })
+    .filter((clip): clip is StageClickTarget => Boolean(clip));
 }
 
 function getStageMotionPaths(
@@ -1562,6 +1840,59 @@ function getPickedClipId(
   return resolvePickedClipId(iframe, pickedElement, clipIds);
 }
 
+function buildMoveSnapTargets(
+  clips: EditorClip[],
+  projectWidth: number,
+  projectHeight: number,
+  movingClipId: string,
+): StageSnapTarget[] {
+  return [
+    {
+      id: "stage-canvas",
+      kind: "canvas",
+      rect: { x: 0, y: 0, width: projectWidth, height: projectHeight },
+    },
+    ...clips
+      .filter((clip) => clip.id !== movingClipId && clip.kind !== "audio")
+      .map((clip) => ({
+        id: clip.id,
+        kind: "clip" as const,
+        rect: toCompositionRect(clip),
+      })),
+  ];
+}
+
+function getMovePreview(
+  drag: Extract<StageDrag, { type: "move" }>,
+  delta: { x: number; y: number },
+  snap: boolean,
+) {
+  const rect = {
+    x: drag.startX + delta.x,
+    y: drag.startY + delta.y,
+    width: drag.width,
+    height: drag.height,
+  };
+  if (!snap) {
+    return {
+      previewX: rect.x,
+      previewY: rect.y,
+      snapGuides: [],
+    };
+  }
+
+  const result = snapCompositionRect(
+    rect,
+    drag.snapTargets,
+    STAGE_SNAP_THRESHOLD_PX * Math.max(drag.geometry.scaleX, drag.geometry.scaleY),
+  );
+  return {
+    previewX: result.rect.x,
+    previewY: result.rect.y,
+    snapGuides: result.guides,
+  };
+}
+
 function getResizePreview(
   drag: Extract<StageDrag, { type: "resize" }>,
   deltaX: number,
@@ -1639,6 +1970,15 @@ function sameRect(a: DOMRect | null, b: DOMRect | null) {
     Math.abs(a.width - b.width) < 0.5 &&
     Math.abs(a.height - b.height) < 0.5
   );
+}
+
+function sameRectMap(a: Map<string, DOMRect>, b: Map<string, DOMRect>) {
+  if (a === b) return true;
+  if (a.size !== b.size) return false;
+  for (const [id, rect] of a) {
+    if (!sameRect(rect, b.get(id) ?? null)) return false;
+  }
+  return true;
 }
 
 function shiftRectForDrag(
