@@ -14,9 +14,34 @@ Studio Boom should support AI-generated clips in two native shapes:
   `text`, and `composition` elements that Studio Boom can parse and expose as
   individual timeline clips.
 
-The first implementation should focus on custom composition blocks plus source
-visibility, because that is the smallest useful path and aligns with
-HyperFrames.
+The first implementation now exists in a minimal form: Studio Boom can add native
+text clips, import validated custom HyperFrames composition blocks, preview them in
+a sandbox, and expose source for selected composition clips. The remaining work is
+mostly product polish, richer source editing, and nested composition editing.
+
+## Current Status
+
+Implemented:
+
+- First-class `text` clips can be inserted from Library -> Text and edited through
+  the Inspector.
+- Non-character `composition` clips can be inserted, selected, moved, resized,
+  trimmed, layered, undone/redone, previewed, and exported.
+- Characters are still composition clips with `compositionKind: "character"`.
+- Library -> Blocks accepts self-contained HyperFrames composition HTML, validates
+  it, previews it, and adds it as one `composition` clip.
+- The Inspector exposes source for selected composition clips and primitive root
+  elements.
+- Validation errors can be copied as repair prompts.
+- Character speech audio now lives inside character sub-compositions, not as
+  linked root audio siblings.
+
+Not implemented yet:
+
+- Direct built-in AI API generation.
+- Importing a simple generated top-level clip set as multiple editable clips.
+- Nested composition timeline editing.
+- A polished prompt-pack UI.
 
 ## Architectural Context
 
@@ -39,7 +64,7 @@ React state. All AI output must become canonical HyperFrames HTML stored in
 HyperFrames core clip types are:
 
 ```ts
-"video" | "image" | "text" | "audio" | "composition"
+"video" | "image" | "text" | "audio" | "composition";
 ```
 
 Studio Boom should align with those render-facing types. Editor metadata can
@@ -49,10 +74,10 @@ describe purpose:
 compositionKind?: "ai-block" | "registry-block" | "character" | "user-composition";
 ```
 
-## Phase 1: Clip Model Foundation
+## Phase 1: Clip Model Foundation - Implemented
 
-Add native editor support for HyperFrames clip types before building AI-specific
-UX.
+Native editor support for the important HyperFrames clip shapes is now in place.
+Keep this section as the contract for future work.
 
 - Add first-class `text` clips.
 - Add first-class non-character `composition` clips.
@@ -72,10 +97,10 @@ Acceptance criteria:
   previewed, and exported.
 - Existing character clips still work.
 
-## Phase 2: Source-First Custom AI Block MVP
+## Phase 2: Source-First Custom AI Block MVP - Mostly Implemented
 
-Build the first AI feature as paste/import of one custom HyperFrames composition
-block.
+The paste/import path exists. Future work should improve editing ergonomics and
+make source validation feedback friendlier.
 
 User flow:
 
@@ -87,14 +112,14 @@ User flow:
 6. Studio Boom creates one `composition` clip in `rootHtml` and stores the source
    in `compositionHtml[compositionId]`.
 
-Source view is part of this phase, not later.
+Source view is part of this phase, not later. Current behavior:
 
-- Add an Inspector Source tab.
-- For selected composition clips, show/edit `compositionHtml[compositionId]`.
-- For selected primitive clips, optionally show the corresponding root HTML
-  element source.
-- Source edits must use `Validate -> Preview -> Apply`.
-- Invalid source must never silently overwrite the project.
+- Inspector source panels show/edit `compositionHtml[compositionId]` for selected
+  composition clips.
+- Inspector source panels can show the corresponding root HTML element source for
+  selected primitive clips.
+- Composition source edits use `Validate -> Preview -> Apply`.
+- Invalid source does not overwrite the project.
 
 Acceptance criteria:
 
@@ -209,14 +234,15 @@ Future UI:
 - Expand a composition clip to reveal internal clips/timeline.
 - Double-click or enter a composition to edit `compositionHtml[compositionId]`.
 - Stage edits manipulate real elements in the active composition.
-- Speech audio/lip-sync can eventually move inside character compositions,
-  removing linked sibling audio hacks.
+- Character speech audio and lip-sync already live inside character compositions.
+  Keep that model when nested composition editing arrives.
 
 Acceptance criteria:
 
 - Composition editing uses the same source-of-truth rules as root editing.
 - No nested React preview renderer is introduced.
-- Character refactor can build on this model without blocking AI block MVP.
+- Existing native character composition clips keep working inside the nested
+  composition editing model.
 
 ## Phase 7: Catalog Effects And Keyframes
 
@@ -231,25 +257,18 @@ Defer broad catalog infrastructure until there is a concrete need.
 - Start with AI-authored GSAP in source; later expose selected animations as
   editable keyframes/curves.
 
-## Recommended First Implementation Slice
+## Next Implementation Slice
 
-Start here:
+The original first slice has landed. A useful next slice is:
 
-1. Update types so `EditorClip.kind` and related command types support:
-   - `text`
-   - non-character `composition`
-2. Add store/build helpers for non-character composition clips.
-3. Ensure `deriveEditorClips` maps HyperFrames composition elements using
-   `editorMeta.kind`, not always `character`.
-4. Add basic text clip serialization/parsing support through Studio HTML
-   boundary helpers.
-5. Add tests for:
-   - adding non-character composition clips
-   - adding text clips
-   - preserving character behavior
-   - undo/redo of composition/text edits
-   - export staging of composition HTML
-6. Then build Source tab and custom AI block import UI.
+1. Improve the Blocks tab with saved examples and a clearer prompt-copy flow.
+2. Add a prompt pack that includes current project dimensions, assets, supported
+   clip types, and source-of-truth rules.
+3. Support importing simple generated top-level clip sets as individual editable
+   clips, while falling back to a single composition block for complex HTML.
+4. Add source-edit test coverage around Validate -> Preview -> Apply.
+5. Start nested composition timeline editing only after the source workflow is
+   stable.
 
 ## Assumptions
 

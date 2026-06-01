@@ -14,6 +14,7 @@ The data model and HTML utilities. **Always import from here before writing any
 HTML generation, GSAP, or element mutation code.**
 
 **Types:**
+
 - `TimelineElement` — the in-memory model for a clip on the timeline
   - `TimelineMediaElement` — video / image / audio
   - `TimelineTextElement` — text
@@ -21,12 +22,14 @@ HTML generation, GSAP, or element mutation code.**
 - `GsapAnimation`, `GsapMethod`, `ParsedGsap` — GSAP animation data
 
 **HTML generation — use these to create composition HTML:**
+
 - `generateHyperframesHtml(elements, duration, opts)` — produces a full composition
   HTML string including GSAP CDN and `window.__timelines`. **This is the only correct
   way to create a new composition.** It enables the player's play button.
 - `generateBaseHtml(...)` — scaffold an empty composition (lower-level)
 
 **HTML parsing and mutation — use these to update a stored HTML string:**
+
 - `parseHtml(html)` → `{ elements, gsapScript, keyframes, … }`
 - `updateElementInHtml(html, id, updates)` → updated HTML string
 - `addElementToHtml(html, element)` → `{ html, id }`
@@ -37,6 +40,7 @@ HTML generation, GSAP, or element mutation code.**
 `type` is required. Do not invent field names — read the type.
 
 **GSAP script editing:**
+
 - `parseGsapScript(script)` → `GsapAnimation[]`
 - `serializeGsapAnimations(anims)` → script string
 - `updateAnimationInScript(script, id, updates)` → updated script
@@ -44,6 +48,7 @@ HTML generation, GSAP, or element mutation code.**
 - `keyframesToGsapAnimations(keyframes)` → `GsapAnimation[]`
 
 **Validation:**
+
 - `lintHyperframeHtml(html)` → lint findings
 
 ---
@@ -54,12 +59,14 @@ React components and hooks for building HyperFrames editors. **Use these directl
 do not reimplement player, timeline, or controls.**
 
 **Components in use:**
+
 - `PlayerControls` — play/pause/seek bar. Requires `onTogglePlay` and `onSeek`
   props; reads current time and duration from `usePlayerStore`.
 
 **Hooks in use:**
+
 - `useTimelinePlayer()` — call once in `Studio.tsx`. Returns `{ iframeRef,
-  togglePlay, seek, … }`. Polls the iframe for `window.__timelines` (GSAP) or
+togglePlay, seek, … }`. Polls the iframe for `window.__timelines` (GSAP) or
   `window.__player`; sets `timelineReady = true` when found. **The play button is
   only enabled when `timelineReady` is true, which requires `generateHyperframesHtml`
   to have produced the composition HTML.**
@@ -91,7 +98,7 @@ Dexie (browser persistence)
   media table:     blobs for video, audio, images
   characters:      character definitions (parts, layout, rig)
   motionPresets:   keyframe data for character animation
-  savedVoices:     generated voice audio metadata
+  savedVoices:     pinned ElevenLabs voice ids/names for reuse
 
 Zustand (in-memory UI state)
   project          ← loaded from Dexie, kept in sync
@@ -198,9 +205,11 @@ character: {
 }
 ```
 
-Generated speech audio is serialized inside the character sub-composition as a
-HyperFrames `<audio>` clip that references `asset:<lipSyncAudioId>`. Do not add a
-locked root audio sibling for character speech.
+Speech audio is reusable media. Viseme timing and transcript metadata live on the
+audio `MediaAsset`; character clips place one or more speech entries through
+`character.speeches`. The character sub-composition serializes each placed speech
+as a HyperFrames `<audio>` clip. Do not add locked root audio siblings for
+character speech.
 
 The generated character source must contain explicit puppet DOM, stable
 `data-character-*` attrs, `asset:<id>` media refs, base transforms/pivots, and a
@@ -247,22 +256,26 @@ ClipEditorMeta {
 
 ## Important files
 
-| File | Role |
-|------|------|
-| `src/studio/types.ts` | `Project`, `HFAsset`, `ProjectEditorMeta`, `ClipEditorMeta`, `deriveEditorClips` |
-| `src/studio/store.ts` | Zustand store: edit actions, HTML mutation, UI state |
-| `src/studio/db.ts` | Dexie: project and blob persistence |
-| `src/studio/character/` | Character builder utilities and rig definitions |
-| `src/studio/lipsync/elevenlabs.ts` | Voice generation; updates `editorMeta` |
-| `src/studio/components/Stage.tsx` | HyperFrames player iframe via `srcdoc`, `resolveIframe`, `useElementPicker`, editor chrome only |
-| `src/studio/components/Timeline.tsx` | Timeline UI; `PlayerControls` |
-| `src/studio/Studio.tsx` | Calls `useTimelinePlayer()` once; distributes `iframeRef`, `togglePlay`, `seek` |
-| `src/studio/hyperframes/assets.ts` | Generic `project.hf.assets` registration/pruning helpers |
-| `src/studio/hyperframes/html.ts` | Parser adapter for current `@hyperframes/core` boundary behavior |
-| `src/studio/hyperframes/native.ts` | Native HTML normalization boundary for root/stage/viewport metadata and export parity |
-| `src/studio/hyperframes/player-editing.ts` | Live player edit boundary for real iframe elements during stage manipulation |
-| `src/studio/hyperframes/root-composition.ts` | Root composition creation and root metadata updates |
-| `src/studio/character/composition.ts` | Native character composition builder for puppet DOM, speech audio, visemes, blink, and motion timelines |
+| File                                             | Role                                                                                                                                           |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/studio/types.ts`                            | `Project`, `HFAsset`, `ProjectEditorMeta`, `ClipEditorMeta`, `deriveEditorClips`                                                               |
+| `src/studio/store.ts`                            | Zustand store: edit actions, HTML mutation, UI state                                                                                           |
+| `src/studio/db.ts`                               | Dexie: project and blob persistence                                                                                                            |
+| `src/studio/character/`                          | Character builder utilities and rig definitions                                                                                                |
+| `src/studio/lipsync/elevenlabs.ts`               | Speech generation/import/alignment helpers; saves reusable audio media and rebuilds character speech                                           |
+| `src/studio/lipsync/tts.functions.ts`            | Browser-side calls to local `/api/elevenlabs/*` endpoints                                                                                      |
+| `src/studio/hyperframes/render-plugin.ts`        | Local render/preview-bundle middleware plus server-side ElevenLabs proxy                                                                       |
+| `src/studio/components/Stage.tsx`                | HyperFrames player iframe via `srcdoc`, `resolveIframe`, `useElementPicker`, editor chrome only                                                |
+| `src/studio/components/Timeline.tsx`             | Timeline UI; `PlayerControls`                                                                                                                  |
+| `src/studio/components/VoiceLipSyncPanel.tsx`    | Character Speech inspector tab: voice library, TTS, upload, forced alignment, speech placement                                                 |
+| `src/studio/components/Library.tsx`              | Media, text presets, characters, motion presets, and custom HyperFrames block import                                                           |
+| `src/studio/Studio.tsx`                          | Calls `useTimelinePlayer()` once; distributes `iframeRef`, `togglePlay`, `seek`                                                                |
+| `src/studio/hyperframes/assets.ts`               | Generic `project.hf.assets` registration/pruning helpers                                                                                       |
+| `src/studio/hyperframes/html.ts`                 | Parser adapter for current `@hyperframes/core` boundary behavior                                                                               |
+| `src/studio/hyperframes/native.ts`               | Native HTML normalization boundary for root/stage/viewport metadata and export parity                                                          |
+| `src/studio/hyperframes/player-editing.ts`       | Live player edit boundary for real iframe elements during stage manipulation                                                                   |
+| `src/studio/hyperframes/root-composition.ts`     | Root composition creation and root metadata updates                                                                                            |
+| `src/studio/character/composition.ts`            | Native character composition builder for puppet DOM, speech audio, visemes, blink, and motion timelines                                        |
 | `docs/ai-generated-hyperframes-clips-roadmap.md` | Roadmap for AI-generated clips, source-visible custom HyperFrames blocks, native text/composition clip support, and nested composition editing |
 
 ---
@@ -279,3 +292,5 @@ ClipEditorMeta {
 - Always use `@hyperframes/core` functions to mutate HTML — never string-splice.
 - `@hyperframes/core` does not load in raw Node.js ESM (extensionless imports). Mock
   it in Vitest tests using `vi.mock('@hyperframes/core', ...)`.
+- Keep provider API keys server-side. ElevenLabs uses `ELEVENLABS_API_KEY` through
+  the local Vite middleware; do not read it from client code or a `VITE_` variable.

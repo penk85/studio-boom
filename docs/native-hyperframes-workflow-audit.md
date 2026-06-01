@@ -34,6 +34,16 @@ movie. `editorMeta` is editor-only intent and UI state.
 - Character composition builder: `character/composition.ts` generates native
   HyperFrames sub-composition HTML for Studio Boom puppet rigs. Root character
   clips are regular composition clips with `compositionKind: "character"`.
+- Speech/lip-sync boundary: character speech audio is reusable library media.
+  Speech placement lives in character clip metadata, viseme timing lives on the
+  audio `MediaAsset`, and `character/composition.ts` serializes placed speech as
+  internal HyperFrames `<audio>` clips in the character sub-composition.
+- ElevenLabs boundary: `render-plugin.ts` exposes local `/api/elevenlabs/*`
+  endpoints during development. The API key is read from server-side
+  `ELEVENLABS_API_KEY` and is not bundled into browser code.
+- Source block boundary: Library -> Blocks validates and previews custom
+  HyperFrames composition HTML before adding it to `project.hf.compositionHtml`.
+  Inspector source editing uses the same Validate -> Preview -> Apply rule.
 - Removable extra surface: ZIP download support has been removed; MP4 download is the only user-facing export path.
 
 ## Guardrails
@@ -56,19 +66,22 @@ movie. `editorMeta` is editor-only intent and UI state.
   controls should update canonical `rootHtml` z-index values.
 - Undo/redo should restore canonical `Project` snapshots and must not rebuild
   render output from React-only state.
+- Same-track overlap validation should run per staged project file before
+  bundling. Root clips and internal sub-composition clips may reuse track indexes
+  because they live in separate HyperFrames composition files.
+- Secrets must stay server-side. Do not read provider API keys from client code or
+  `VITE_` environment variables.
 
 ## Next Priorities
 
-- Native clip model alignment: add first-class `text` clips and non-character
-  `composition` clips before AI-generated clip work.
-- Source-visible custom HyperFrames blocks: follow
-  `docs/ai-generated-hyperframes-clips-roadmap.md` and keep all generated output
-  in `project.hf`.
-- Stage authoring polish: manual resize feel refinements.
+- Source-visible custom HyperFrames blocks: polish the existing Blocks tab and
+  Inspector source panels while keeping all generated output in `project.hf`.
+- Prompt pack and validation feedback for external AI workflows.
+- Editable HyperFrames clip-set import after custom block import is stable.
 - Crop and mirror only after confirming the native HyperFrames representation; do
   not fake them with a second renderer.
 - Timeline control polish: reset to start and draggable seek needle.
-- Audio alignment cleanup for generic audio clips; character speech audio now
-  lives inside the character sub-composition.
-- Character rig tool polish: richer rig editing, drag/drop motion authoring, and
-  lip-sync inspection on top of the native character composition contract.
+- Voice library polish: editing/removing reusable voice assets, clearer speech
+  placement controls, and generic audio alignment cleanup.
+- Character rig tool polish: richer rig editing and drag/drop motion authoring on
+  top of the native character composition contract.

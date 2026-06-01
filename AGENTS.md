@@ -20,8 +20,8 @@ Protect this flow:
 editorMeta
   editable creative intent
 
-bake / boundary helpers
-  convert intent into renderable HyperFrames data where still needed
+boundary helpers
+  mutate canonical HyperFrames HTML and rebuild native sub-compositions where needed
 
 project.hf
   preview and export source of truth
