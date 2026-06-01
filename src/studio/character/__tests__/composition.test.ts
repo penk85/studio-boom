@@ -293,6 +293,53 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).toContain('"y":12');
   });
 
+  it("emits one audio per speech at its own start time", () => {
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_clip-1",
+      clipId: "clip-1",
+      width: 300,
+      height: 450,
+      duration: 10,
+      character: makeCharacter(),
+      meta: { characterId: "char-1", poses: {}, autoBlink: false },
+      motionPresets: new Map(),
+      speeches: [
+        { audioId: "voice-a", start: 0, duration: 2, visemes: [{ t: 0.4, v: "A" }] },
+        { audioId: "voice-b", start: 4, duration: 3, visemes: [{ t: 0.4, v: "O" }] },
+      ],
+    });
+
+    expect((html.match(/data-character-speech="true"/g) ?? []).length).toBe(2);
+    expect(html).toContain('src="asset:voice-a"');
+    expect(html).toContain('src="asset:voice-b"');
+    // Second speech sits at its start offset, not at 0.
+    expect(html).toContain('data-start="4"');
+  });
+
+  it("allows time-overlapping speeches (distinct track lanes, no composition error)", () => {
+    // buildCharacterCompositionHtml runs @hyperframes/core validation and throws if
+    // the HTML is invalid — so a successful build proves overlapping audio is fine.
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_clip-1",
+      clipId: "clip-1",
+      width: 300,
+      height: 450,
+      duration: 10,
+      character: makeCharacter(),
+      meta: { characterId: "char-1", poses: {}, autoBlink: false },
+      motionPresets: new Map(),
+      speeches: [
+        { audioId: "voice-a", start: 0, duration: 6, visemes: [{ t: 1, v: "A" }] },
+        { audioId: "voice-b", start: 3, duration: 6, visemes: [{ t: 1, v: "O" }] }, // overlaps A
+      ],
+    });
+
+    expect((html.match(/data-character-speech="true"/g) ?? []).length).toBe(2);
+    // Each clip on its own track lane, so overlapping in time is not a same-track clash.
+    expect(html).toContain('data-track-index="0"');
+    expect(html).toContain('data-track-index="1"');
+  });
+
   it("matches expression recorder face turns in the generated timeline", () => {
     const preset: MotionPreset = {
       id: "expression-turn",

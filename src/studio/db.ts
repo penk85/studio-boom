@@ -8,6 +8,8 @@ import type {
   MediaBlobRow,
   Project,
   SavedVoice,
+  VisemeEntry,
+  VoiceLineMeta,
 } from "./types";
 
 class StudioDB extends Dexie {
@@ -141,6 +143,19 @@ export async function deleteMedia(id: string) {
     await db.media.delete(id);
     await db.mediaBlobs.delete(id);
   });
+}
+
+/**
+ * Persist canonical lip-sync data on an audio asset so it can be reattached to
+ * any character without regenerating timing. Returns the updated asset (or null
+ * if the asset no longer exists).
+ */
+export async function setMediaVoiceData(
+  id: string,
+  data: { visemes?: VisemeEntry[]; voiceLine?: VoiceLineMeta },
+): Promise<MediaAsset | null> {
+  await db.media.update(id, { visemes: data.visemes, voiceLine: data.voiceLine });
+  return (await db.media.get(id)) ?? null;
 }
 
 export type MediaUsageKind = "project-asset" | "character-part" | "head-variant";

@@ -309,7 +309,7 @@ describe("stage helpers", () => {
     </body></html>`);
     iframe.contentDocument?.close();
 
-    const inner = iframe.contentDocument?.getElementById("inside-frame");
+    const inner = iframe.contentDocument?.getElementById("inside-frame") ?? null;
 
     expect(resolveTargetClipId(inner, new Set(["clip-9"]))).toBe("clip-9");
     iframe.remove();

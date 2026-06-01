@@ -24,7 +24,7 @@ import type {
   TrackKind,
   TrackMeta,
 } from "./types";
-import { deriveEditorClips } from "./types";
+import { characterSpeeches, deriveEditorClips, isCharacterCompositionClip } from "./types";
 import { pruneHfAssets, registerHfAsset } from "./hyperframes/assets";
 import {
   addStudioElementToHtml,
@@ -65,6 +65,7 @@ import {
   buildCharacterCompositionHtml,
   characterAssetIds,
   defaultCharacterCompositionId,
+  type ResolvedSpeech,
 } from "./character/composition";
 
 // ─── Defaults ──────────────────────────────────────────────────────────────────
@@ -268,6 +269,29 @@ function isCharacterMeta(meta: ClipEditorMeta | undefined): meta is ClipEditorMe
   );
 }
 
+/**
+ * Resolve a character's speeches against their audio assets for the composition
+ * builder: each speech carries its start plus the asset-owned visemes + duration
+ * (so reattaching a voice never regenerates timing). The legacy single-voice clip
+ * falls back to its own clip-level visemes when the asset has none.
+ */
+function resolveSpeechesForBuild(
+  characterMeta: CharacterClipMeta,
+  mediaAssets: Map<string, MediaAsset>,
+): ResolvedSpeech[] {
+  return characterSpeeches(characterMeta).map((speech) => {
+    const asset = mediaAssets.get(speech.audioId);
+    const legacyVisemes =
+      speech.audioId === characterMeta.lipSyncAudioId ? (characterMeta.visemes ?? []) : [];
+    return {
+      audioId: speech.audioId,
+      start: speech.start,
+      duration: asset?.duration ?? 0,
+      visemes: asset?.visemes ?? legacyVisemes,
+    };
+  });
+}
+
 function rebuildCharacterCompositionInProject(
   project: Project,
   clipId: string,
@@ -290,6 +314,7 @@ function rebuildCharacterCompositionInProject(
     height: clip.height || project.hf.height,
     character,
     meta: meta.character,
+    speeches: resolveSpeechesForBuild(meta.character, mediaAssets),
     motionPresets,
   });
   let hf: HyperFramesProject = {
@@ -657,6 +682,21 @@ interface StudioState {
 
   addClip: (clip: AnyClip) => void;
   updateClip: (id: string, patch: Partial<AnyClip>, options?: ProjectMutationOptions) => void;
+  /** Append an existing audio asset (library voice) as a new speech on a character
+   *  clip, after the last one. Lip-sync data is reused from the asset — no regen. */
+  attachVoiceToCharacter: (clipId: string, audioId: string) => void;
+  /** Move a speech to a new start time (s) within the character clip. */
+  moveSpeech: (
+    clipId: string,
+    speechId: string,
+    start: number,
+    options?: ProjectMutationOptions,
+  ) => void;
+  /** Remove a speech from a character clip (keeps the audio in the library). */
+  removeSpeech: (clipId: string, speechId: string) => void;
+  /** Rebuild every character clip whose speeches reference this audio asset (used
+   *  after the asset's visemes change). */
+  rebuildClipsUsingAudio: (audioId: string) => void;
   removeClip: (id: string) => void;
   bringClipForward: (id: string) => void;
   sendClipBackward: (id: string) => void;
@@ -1050,6 +1090,7 @@ export const useStudio = create<StudioState>((set, get) => ({
           height: compositionClip.height || currentProject.hf.height,
           character,
           meta: meta.character,
+          speeches: resolveSpeechesForBuild(meta.character, state.mediaAssets),
           motionPresets: state.motionPresets,
         });
         hf = registerCharacterAssets(hf, character, meta.character, state.mediaAssets);
@@ -1115,7 +1156,9 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (options?.history !== false) get().checkpointHistory();
 
     const existingMeta = p.editorMeta.clips[id] ?? {};
-    const previousLipSyncAudioId = existingMeta.character?.lipSyncAudioId;
+    const previousAudioIds = new Set(
+      characterSpeeches(existingMeta.character).map((speech) => speech.audioId),
+    );
 
     const newMeta = { ...existingMeta };
 
@@ -1155,9 +1198,11 @@ export const useStudio = create<StudioState>((set, get) => ({
       }
     }
     const removedCharacterAudioIds = new Set<string>();
-    const nextLipSyncAudioId = newMeta.character?.lipSyncAudioId;
-    if (previousLipSyncAudioId && previousLipSyncAudioId !== nextLipSyncAudioId) {
-      removedCharacterAudioIds.add(previousLipSyncAudioId);
+    const nextAudioIds = new Set(
+      characterSpeeches(newMeta.character).map((speech) => speech.audioId),
+    );
+    for (const audioId of previousAudioIds) {
+      if (!nextAudioIds.has(audioId)) removedCharacterAudioIds.add(audioId);
     }
 
     const editorMeta: ProjectEditorMeta = {
@@ -1189,6 +1234,89 @@ export const useStudio = create<StudioState>((set, get) => ({
     }
     set({ project: newProject, tracks: newProject.editorMeta.tracks });
     scheduleSave(get);
+  },
+
+  attachVoiceToCharacter(clipId, audioId) {
+    const state = get();
+    if (!state.project) return;
+    const clip = deriveEditorClips(state.project).find((candidate) => candidate.id === clipId);
+    if (!isCharacterCompositionClip(clip)) return;
+    const asset = state.mediaAssets.get(audioId);
+    if (!asset || asset.kind !== "audio") return;
+    // Append a speech after the last one ends (clamped to the clip). Reuses
+    // updateClip, which rebuilds the sub-composition (visemes hydrate from the
+    // asset — no regeneration) and manifest-prunes any newly-unreferenced audio.
+    const existing = characterSpeeches(clip.character);
+    const lastEnd = existing.reduce(
+      (max, speech) =>
+        Math.max(max, speech.start + (state.mediaAssets.get(speech.audioId)?.duration ?? 0)),
+      0,
+    );
+    const start = Math.max(0, Math.min(clip.duration, lastEnd));
+    const speeches = [...existing, { id: uid(), audioId, start }];
+    get().updateClip(clipId, {
+      character: {
+        ...clip.character,
+        speeches,
+        lipSyncAudioId: undefined,
+        visemes: undefined,
+        voiceLine: asset.voiceLine ?? { text: "", source: "audio-file", audioName: asset.name },
+      },
+      duration: Math.max(clip.duration, start + (asset.duration ?? 0)),
+    } as Partial<CompositionClip>);
+    get().selectClip(clipId);
+  },
+
+  moveSpeech(clipId, speechId, start, options) {
+    const state = get();
+    if (!state.project) return;
+    const clip = deriveEditorClips(state.project).find((candidate) => candidate.id === clipId);
+    if (!isCharacterCompositionClip(clip)) return;
+    const clamped = Math.max(0, Math.min(clip.duration, start));
+    const speeches = characterSpeeches(clip.character).map((speech) =>
+      speech.id === speechId ? { ...speech, start: clamped } : speech,
+    );
+    get().updateClip(
+      clipId,
+      {
+        character: { ...clip.character, speeches, lipSyncAudioId: undefined },
+      } as Partial<CompositionClip>,
+      options,
+    );
+  },
+
+  removeSpeech(clipId, speechId) {
+    const state = get();
+    if (!state.project) return;
+    const clip = deriveEditorClips(state.project).find((candidate) => candidate.id === clipId);
+    if (!isCharacterCompositionClip(clip)) return;
+    const speeches = characterSpeeches(clip.character).filter((speech) => speech.id !== speechId);
+    // Keep the audio blob (reusable voice); updateClip manifest-prunes the now
+    // unreferenced asset from the export manifest only.
+    get().updateClip(clipId, {
+      character: { ...clip.character, speeches, lipSyncAudioId: undefined },
+    } as Partial<CompositionClip>);
+  },
+
+  rebuildClipsUsingAudio(audioId) {
+    const state = get();
+    if (!state.project) return;
+    let project = state.project;
+    for (const [clipId, meta] of Object.entries(project.editorMeta.clips)) {
+      if (!isCharacterMeta(meta)) continue;
+      if (!characterSpeeches(meta.character).some((speech) => speech.audioId === audioId)) continue;
+      project = rebuildCharacterCompositionInProject(
+        project,
+        clipId,
+        state.characters,
+        state.mediaAssets,
+        state.motionPresets,
+      );
+    }
+    if (project !== state.project) {
+      set({ project: { ...project, updatedAt: Date.now() }, tracks: project.editorMeta.tracks });
+      scheduleSave(get);
+    }
   },
 
   repairTimelineLanes() {
@@ -1241,9 +1369,8 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (typeof window !== "undefined") {
       const removedMediaIds = new Set<string>();
       if (existingMeta?.mediaId) removedMediaIds.add(existingMeta.mediaId);
-      if (existingMeta?.character?.lipSyncAudioId) {
-        removedMediaIds.add(existingMeta.character.lipSyncAudioId);
-      }
+      // Character voices stay in the library as reusable assets; only the manifest
+      // entry is pruned above (pruneHfAssets). Don't delete their blobs here.
 
       if (removedMediaIds.size > 0) {
         window.setTimeout(() => {

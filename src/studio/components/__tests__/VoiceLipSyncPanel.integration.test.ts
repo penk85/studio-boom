@@ -10,12 +10,12 @@ describe("Voice lip sync panel integration", () => {
     const panelSource = readFileSync(panelPath, "utf8");
     const helperSource = readFileSync(helperPath, "utf8");
 
-    expect(panelSource).toContain("alignAttachedAudioLipSyncForClip");
-    expect(panelSource).toContain("onAlignAttachedAudio");
-    expect(panelSource).toContain("No lip sync timing yet");
-    expect(panelSource).toContain("Create lip sync from transcript");
-    expect(panelSource).toContain("Re-align lip sync from transcript");
-    expect(helperSource).toContain("db.mediaBlobs.get(mediaId)");
+    expect(panelSource).toContain("alignVoiceForClip");
+    expect(panelSource).toContain("onGenerateLipSync");
+    expect(panelSource).toContain("No timing yet");
+    expect(panelSource).toContain("Generate lip sync");
+    expect(panelSource).toContain("Re-generate lip sync");
+    expect(helperSource).toContain("db.mediaBlobs.get(args.audioId)");
     expect(helperSource).toContain("forcedAlignAudioWithText({ file, text: transcript })");
   });
 });

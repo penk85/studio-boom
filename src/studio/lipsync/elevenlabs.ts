@@ -1,5 +1,5 @@
-import { db, deleteMediaIfUnused, importMediaFile } from "../db";
-import type { CompositionClip, MediaAsset } from "../types";
+import { db, importMediaFile, setMediaVoiceData } from "../db";
+import type { CompositionClip, MediaAsset, VoiceLineMeta } from "../types";
 import { deriveEditorClips, isCharacterCompositionClip } from "../types";
 import { useStudio } from "../store";
 import { forcedAlignAudioWithText, generateTtsWithTimestamps } from "./tts.functions";
@@ -29,8 +29,9 @@ export interface ApplyAudioLipSyncArgs {
   transcript?: string;
 }
 
-export interface AlignAttachedAudioLipSyncArgs {
+export interface AlignVoiceForClipArgs {
   clipId: string;
+  audioId: string;
   transcript: string;
 }
 
@@ -72,36 +73,23 @@ export async function generateLipSyncForClip(args: GenerateLipSyncArgs) {
     ends.length ? ends[ends.length - 1] + 0.1 : 0,
   );
 
-  const staleMediaIds = new Set<string>();
-  if (clip.character.lipSyncAudioId && clip.character.lipSyncAudioId !== asset.id) {
-    staleMediaIds.add(clip.character.lipSyncAudioId);
-  }
+  const voiceLine: VoiceLineMeta = {
+    source: "elevenlabs-tts",
+    text: args.text,
+    voiceId: args.voiceId,
+    voiceName: args.voiceName,
+    modelId: args.modelId ?? "eleven_multilingual_v2",
+    stability: args.stability ?? 0.5,
+    similarityBoost: args.similarityBoost ?? 0.75,
+    audioName: asset.name,
+  };
+  // Canonical lip-sync data lives on the audio asset so the voice is reusable.
+  const voiced = await setMediaVoiceData(asset.id, { visemes, voiceLine });
+  if (voiced) useStudio.getState().registerMediaAsset(voiced);
 
-  useStudio.getState().updateClip(clip.id, {
-    character: {
-      ...clip.character,
-      lipSyncAudioId: asset.id,
-      visemes,
-      voiceLine: {
-        source: "elevenlabs-tts",
-        text: args.text,
-        voiceId: args.voiceId,
-        voiceName: args.voiceName,
-        modelId: args.modelId ?? "eleven_multilingual_v2",
-        stability: args.stability ?? 0.5,
-        similarityBoost: args.similarityBoost ?? 0.75,
-        audioName: asset.name,
-      },
-    },
-    duration: Math.max(clip.duration, audioDuration),
-  } as Partial<CompositionClip>);
-
-  useStudio.getState().selectClip(clip.id);
-
+  // Append it as a new speech after the last one on the character.
+  useStudio.getState().attachVoiceToCharacter(clip.id, asset.id);
   await useStudio.getState().saveProject();
-  await Promise.all(
-    Array.from(staleMediaIds).map((id) => deleteMediaIfUnused(id, { internalOnly: true })),
-  );
   return { asset, visemes, audioDuration };
 }
 
@@ -133,52 +121,32 @@ export async function applyAudioLipSyncForClip(args: ApplyAudioLipSyncArgs) {
   const visemes = alignment ? alignmentToVisemes(alignment) : undefined;
   const audioDuration = durationFromAssetAndAlignment(asset, alignment);
 
-  const staleMediaIds = new Set<string>();
-  if (clip.character.lipSyncAudioId && clip.character.lipSyncAudioId !== asset.id) {
-    staleMediaIds.add(clip.character.lipSyncAudioId);
-  }
+  const voiceLine: VoiceLineMeta = {
+    source: "audio-file",
+    text: transcript,
+    audioName: asset.name,
+  };
+  // Canonical lip-sync data lives on the audio asset so the voice is reusable.
+  const voiced = await setMediaVoiceData(asset.id, { visemes, voiceLine });
+  if (voiced) useStudio.getState().registerMediaAsset(voiced);
 
-  useStudio.getState().updateClip(clip.id, {
-    character: {
-      ...clip.character,
-      lipSyncAudioId: asset.id,
-      visemes,
-      voiceLine: {
-        source: "audio-file",
-        text: transcript,
-        audioName: asset.name,
-      },
-    },
-    duration: Math.max(clip.duration, audioDuration),
-  } as Partial<CompositionClip>);
-
-  useStudio.getState().selectClip(clip.id);
-
+  // Append it as a new speech after the last one on the character.
+  useStudio.getState().attachVoiceToCharacter(clip.id, asset.id);
   await useStudio.getState().saveProject();
-  await Promise.all(
-    Array.from(staleMediaIds).map((id) => deleteMediaIfUnused(id, { internalOnly: true })),
-  );
   return { asset, visemes, audioDuration, alignmentError };
 }
 
-export async function alignAttachedAudioLipSyncForClip(args: AlignAttachedAudioLipSyncArgs) {
+export async function alignVoiceForClip(args: AlignVoiceForClipArgs) {
   const transcript = args.transcript.trim();
   if (!transcript) throw new Error("Transcript text is required for lip sync");
 
-  const state = useStudio.getState();
-  if (!state.project) throw new Error("No project loaded");
-  const clip = deriveEditorClips(state.project).find((c) => c.id === args.clipId);
-  if (!isCharacterCompositionClip(clip)) {
-    throw new Error("Clip is not a character clip");
-  }
-  const mediaId = clip.character.lipSyncAudioId;
-  if (!mediaId) throw new Error("Attach an audio file before creating lip sync");
+  const [asset, row] = await Promise.all([
+    db.media.get(args.audioId),
+    db.mediaBlobs.get(args.audioId),
+  ]);
+  if (!asset || !row) throw new Error("Voice audio could not be found in the library");
+  if (asset.kind !== "audio") throw new Error("Selected media is not an audio file");
 
-  const [asset, row] = await Promise.all([db.media.get(mediaId), db.mediaBlobs.get(mediaId)]);
-  if (!asset || !row) throw new Error("Attached audio file could not be found in the library");
-  if (asset.kind !== "audio") throw new Error("Attached speech media is not an audio file");
-
-  useStudio.getState().registerMediaAsset(asset);
   const file = new File([row.blob], asset.filename || `${asset.name}.mp3`, {
     type: asset.mimeType || row.blob.type || "audio/mpeg",
   });
@@ -186,22 +154,18 @@ export async function alignAttachedAudioLipSyncForClip(args: AlignAttachedAudioL
   const visemes = alignmentToVisemes(alignment);
   const audioDuration = durationFromAssetAndAlignment(asset, alignment);
 
-  useStudio.getState().updateClip(clip.id, {
-    character: {
-      ...clip.character,
-      lipSyncAudioId: asset.id,
-      visemes,
-      voiceLine: {
-        ...(clip.character.voiceLine ?? {}),
-        source: "audio-file",
-        text: transcript,
-        audioName: asset.name,
-      },
-    },
-    duration: Math.max(clip.duration, audioDuration),
-  } as Partial<CompositionClip>);
+  const voiceLine: VoiceLineMeta = {
+    ...(asset.voiceLine ?? {}),
+    source: "audio-file",
+    text: transcript,
+    audioName: asset.name,
+  };
+  // Canonical lip-sync data is owned by the audio asset; rebuild the clips that use it.
+  const voiced = await setMediaVoiceData(asset.id, { visemes, voiceLine });
+  if (voiced) useStudio.getState().registerMediaAsset(voiced);
+  useStudio.getState().rebuildClipsUsingAudio(asset.id);
 
-  useStudio.getState().selectClip(clip.id);
+  useStudio.getState().selectClip(args.clipId);
   await useStudio.getState().saveProject();
   return { asset, visemes, audioDuration };
 }

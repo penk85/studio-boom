@@ -7,6 +7,7 @@ import {
   Plus,
   SkipBack,
   TriangleAlert,
+  X,
 } from "lucide-react";
 import {
   useCallback,
@@ -35,9 +36,10 @@ import type {
   ClipMotionStep,
   CompositionClip,
   EditorClip,
+  MediaAsset,
   Project,
 } from "../types";
-import { deriveEditorClips, isCharacterCompositionClip } from "../types";
+import { characterSpeeches, deriveEditorClips, isCharacterCompositionClip } from "../types";
 import { fmtTime } from "../timeline-utils";
 
 const TRACK_HEIGHT = 44;
@@ -109,6 +111,8 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const moveClipMotionStep = useStudio((s) => s.moveClipMotionStep);
   const moveClipMotionCheckpoint = useStudio((s) => s.moveClipMotionCheckpoint);
   const removeClipMotionStep = useStudio((s) => s.removeClipMotionStep);
+  const moveSpeech = useStudio((s) => s.moveSpeech);
+  const removeSpeech = useStudio((s) => s.removeSpeech);
 
   const playheadRef = useRef<HTMLDivElement>(null);
   const timeDisplayRef = useRef<HTMLSpanElement>(null);
@@ -138,6 +142,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const queriedPresets = useLiveQuery(() => db.motionPresets.toArray(), []);
   const presets = useMemo(() => queriedPresets ?? [], [queriedPresets]);
   const presetMap = useMemo(() => new Map(presets.map((p) => [p.id, p] as const)), [presets]);
+  const mediaAssets = useStudio((s) => s.mediaAssets);
   const mediaHealth = useHfMediaHealth(project?.hf);
   const projectDuration = project?.hf.duration ?? 0;
 
@@ -244,14 +249,22 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const timelineClips = clips;
   const compositionSourceErrorsByClipId = buildCompositionSourceErrors(project, timelineClips);
   const expandedMotionClips = clips.filter(
-    (clip) => isKeyframeEditableClip(clip) && expandedClipIds.has(clip.id),
+    (clip) =>
+      isKeyframeEditableClip(clip) &&
+      // Character clips use the richer character expansion (voice + motion
+      // groups) below — don't also give them the generic motion lane, which
+      // would duplicate the parent-name header.
+      !isCharacterCompositionClip(clip) &&
+      expandedClipIds.has(clip.id),
   );
   const expandedCharacters = clips.filter(
     (clip): clip is CharacterCompositionClip =>
       isCharacterCompositionClip(clip) && expandedClipIds.has(clip.id),
   );
   const expandedLayouts = new Map<string, ExpandedClipLayout>(
-    expandedCharacters.map((clip) => [clip.id, buildExpandedClipLayout(clip, presetMap)] as const),
+    expandedCharacters.map(
+      (clip) => [clip.id, buildExpandedClipLayout(clip, presetMap, mediaAssets)] as const,
+    ),
   );
   const trackLayouts = tracks.map((track, trackIndex) =>
     buildTrackLayout({
@@ -560,6 +573,11 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                             character: { ...row.clip.character, motions },
                           } as Partial<CompositionClip>)
                         }
+                        onMoveVoice={(speechId, start, options) =>
+                          moveSpeech(row.clip.id, speechId, start, options)
+                        }
+                        onRemoveVoice={(speechId) => removeSpeech(row.clip.id, speechId)}
+                        onVoiceHistoryCheckpoint={checkpointHistory}
                         createMotionId={uid}
                         presetMap={presetMap}
                       />
@@ -1489,12 +1507,14 @@ interface MotionGroupLayout {
 }
 
 interface ExpandedClipLayout {
-  voice?: VoiceLaneSummary;
+  voices: VoiceLaneSummary[];
   groups: MotionGroupLayout[];
   height: number;
 }
 
 interface VoiceLaneSummary {
+  id: string;
+  start: number;
   name: string;
   duration: number;
 }
@@ -1518,13 +1538,16 @@ function CharacterMotionHeader({
         <span className="text-muted-foreground">↳</span>
         <span className="min-w-0 flex-1 truncate">{clip.name}</span>
       </div>
-      {layout.voice && (
+      {layout.voices.length > 0 && (
         <div
           style={{ height: MOTION_ROW_HEIGHT }}
           className="flex items-center gap-1 border-t border-border/40 px-3 pl-6 text-muted-foreground"
         >
           <Mic2 size={10} />
-          <span className="truncate">Voice / lip sync</span>
+          <span className="truncate">
+            Voice / lip sync
+            {layout.voices.length > 1 ? ` (${layout.voices.length})` : ""}
+          </span>
         </div>
       )}
       {layout.groups.map((group) =>
@@ -1555,6 +1578,9 @@ function MotionLaneSet({
   onSelect,
   onSelectMotion,
   onChange,
+  onMoveVoice,
+  onRemoveVoice,
+  onVoiceHistoryCheckpoint,
   createMotionId,
   presetMap,
 }: {
@@ -1566,6 +1592,9 @@ function MotionLaneSet({
   onSelect: () => void;
   onSelectMotion: (id: string | null) => void;
   onChange: (motions: AppliedMotion[]) => void;
+  onMoveVoice: (speechId: string, start: number, options?: ProjectMutationOptions) => void;
+  onRemoveVoice: (speechId: string) => void;
+  onVoiceHistoryCheckpoint: () => void;
   createMotionId: () => string;
   presetMap: Map<string, MotionPreset>;
 }) {
@@ -1589,7 +1618,7 @@ function MotionLaneSet({
     if (selectedMotionId === id) onSelectMotion(null);
   };
   const voiceTop = MOTION_PARENT_HEIGHT;
-  let groupTop = MOTION_PARENT_HEIGHT + (layout.voice ? MOTION_ROW_HEIGHT : 0);
+  let groupTop = MOTION_PARENT_HEIGHT + (layout.voices.length > 0 ? MOTION_ROW_HEIGHT : 0);
   return (
     <div
       className="absolute left-0 right-0 border-t border-border/60 bg-panel/30"
@@ -1604,12 +1633,22 @@ function MotionLaneSet({
           bottom: 3,
         }}
       />
-      {layout.voice && (
+      {layout.voices.length > 0 && (
         <div
           className="absolute left-0 right-0 border-t border-border/40"
           style={{ top: voiceTop, height: MOTION_ROW_HEIGHT }}
         >
-          <VoiceBlock clip={clip} voice={layout.voice} zoom={zoom} />
+          {layout.voices.map((voice) => (
+            <VoiceBlock
+              key={voice.id}
+              clip={clip}
+              voice={voice}
+              zoom={zoom}
+              onMove={(start, options) => onMoveVoice(voice.id, start, options)}
+              onRemove={() => onRemoveVoice(voice.id)}
+              onHistoryCheckpoint={onVoiceHistoryCheckpoint}
+            />
+          ))}
         </div>
       )}
       {layout.groups.map((group) => {
@@ -1758,27 +1797,70 @@ function VoiceBlock({
   clip,
   voice,
   zoom,
+  onMove,
+  onRemove,
+  onHistoryCheckpoint,
 }: {
   clip: CharacterCompositionClip;
   voice: VoiceLaneSummary;
   zoom: number;
+  onMove: (start: number, options?: ProjectMutationOptions) => void;
+  onRemove: () => void;
+  onHistoryCheckpoint: () => void;
 }) {
-  const offset = 0;
-  const end = Math.min(clip.duration, voice.duration);
-  const width = Math.max(8, Math.max(0.05, end - offset) * zoom);
-  const trimmed = voice.duration > Math.max(0, clip.duration - offset) + 0.01;
+  const end = Math.min(clip.duration, voice.start + voice.duration);
+  const width = Math.max(8, Math.max(0.05, end - voice.start) * zoom);
+  const trimmed = voice.start + voice.duration > clip.duration + 0.01;
+
+  const startDrag = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    const downX = e.clientX;
+    const originalStart = voice.start;
+    let moved = false;
+    const move = (ev: PointerEvent) => {
+      const dx = (ev.clientX - downX) / zoom;
+      if (!moved && Math.abs(ev.clientX - downX) < CLIP_DRAG_THRESHOLD_PX) return;
+      if (!moved) {
+        moved = true;
+        onHistoryCheckpoint();
+      }
+      onMove(Math.max(0, Math.min(clip.duration, originalStart + dx)), { history: false });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
   return (
     <div
-      className="absolute top-1 flex h-5 items-center gap-1 overflow-hidden rounded border border-cyan-300/80 bg-cyan-500/70 px-1.5 text-[10px] text-foreground shadow-sm"
+      onPointerDown={startDrag}
+      className="group absolute top-1 flex h-5 cursor-ew-resize items-center gap-1 overflow-hidden rounded border border-cyan-300/80 bg-cyan-500/70 px-1.5 text-[10px] text-foreground shadow-sm"
       style={{
-        left: (clip.start + offset) * zoom,
+        left: (clip.start + voice.start) * zoom,
         width,
       }}
       title={`${voice.name}${trimmed ? " (trimmed by character clip)" : ""}`}
     >
       <Mic2 size={10} className="shrink-0" />
       <span className="min-w-0 truncate">{voice.name.replace(/^Voice:\s*/, "")}</span>
-      {trimmed && <span className="ml-auto shrink-0 text-[9px]">trim</span>}
+      {trimmed && <span className="shrink-0 text-[9px]">trim</span>}
+      <button
+        type="button"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove();
+        }}
+        title="Remove speech from this character"
+        aria-label="Remove speech from this character"
+        className="ml-auto hidden shrink-0 rounded px-0.5 text-foreground/80 hover:bg-black/30 hover:text-foreground group-hover:block"
+      >
+        <X size={10} />
+      </button>
     </div>
   );
 }
@@ -1786,26 +1868,20 @@ function VoiceBlock({
 function buildExpandedClipLayout(
   clip: CharacterCompositionClip,
   presetMap: Map<string, MotionPreset>,
+  mediaAssets: Map<string, MediaAsset>,
 ): ExpandedClipLayout {
   const motions = clip.character.motions ?? [];
-  const voice = voiceSummaryForCharacterClip(clip);
+  const voices = voicesForCharacterClip(clip, mediaAssets);
+  const voiceRows = voices.length > 0 ? 1 : 0;
   if (motions.length === 0) {
-    if (voice) {
-      return {
-        voice,
-        groups: [],
-        height: MOTION_PARENT_HEIGHT + MOTION_ROW_HEIGHT,
-      };
+    if (voiceRows > 0) {
+      return { voices, groups: [], height: MOTION_PARENT_HEIGHT + MOTION_ROW_HEIGHT };
     }
-    const emptyGroup: MotionGroupLayout = {
-      category: "custom",
-      label: "Motions",
-      rows: [[]],
-    };
+    const emptyGroup: MotionGroupLayout = { category: "custom", label: "Motions", rows: [[]] };
     return {
-      voice,
+      voices,
       groups: [emptyGroup],
-      height: MOTION_PARENT_HEIGHT + (voice ? MOTION_ROW_HEIGHT : 0) + MOTION_ROW_HEIGHT,
+      height: MOTION_PARENT_HEIGHT + MOTION_ROW_HEIGHT,
     };
   }
 
@@ -1825,30 +1901,31 @@ function buildExpandedClipLayout(
 
   const rowCount = groups.reduce((sum, group) => sum + group.rows.length, 0);
   return {
-    voice,
+    voices,
     groups,
     height:
       MOTION_PARENT_HEIGHT +
-      (voice ? MOTION_ROW_HEIGHT : 0) +
+      voiceRows * MOTION_ROW_HEIGHT +
       Math.max(1, rowCount) * MOTION_ROW_HEIGHT,
   };
 }
 
-function voiceSummaryForCharacterClip(
+// One voice bar per speech (start + own audio length). The bar spans the audio's
+// length, not the whole character clip — VoiceBlock clamps width + flags "trim".
+function voicesForCharacterClip(
   clip: CharacterCompositionClip,
-): VoiceLaneSummary | undefined {
-  if (
-    !clip.character.lipSyncAudioId &&
-    !clip.character.voiceLine &&
-    !clip.character.visemes?.length
-  ) {
-    return undefined;
-  }
-  const line = clip.character.voiceLine?.text?.trim();
-  return {
-    name: line ? `Voice: ${line}` : "Voice / lip sync",
-    duration: clip.duration,
-  };
+  mediaAssets: Map<string, MediaAsset>,
+): VoiceLaneSummary[] {
+  return characterSpeeches(clip.character).map((speech) => {
+    const asset = mediaAssets.get(speech.audioId);
+    const line = asset?.voiceLine?.text?.trim() ?? clip.character.voiceLine?.text?.trim();
+    return {
+      id: speech.id,
+      start: speech.start,
+      name: line ? `Voice: ${line}` : (asset?.name ?? "Voice / lip sync"),
+      duration: asset?.duration && asset.duration > 0 ? asset.duration : clip.duration,
+    };
+  });
 }
 
 function packMotionsForRows(

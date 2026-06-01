@@ -7,7 +7,9 @@ import type {
   MouthPose,
   MouthViseme,
   PartRole,
+  VisemeEntry,
 } from "../types";
+import { characterSpeeches } from "../types";
 import { validateCompositionSourceHtml } from "../hyperframes/composition-source";
 import { normalizeNativeHyperframesHtml } from "../hyperframes/native";
 import {
@@ -46,6 +48,20 @@ interface BuildCharacterCompositionArgs {
   character: CharacterPreset;
   meta: CharacterClipMeta;
   motionPresets: Map<string, MotionPreset>;
+  /** Speeches placed on the character, resolved against their audio assets. Each
+   *  emits an `<audio>` at its start and contributes offset visemes to the mouth.
+   *  When omitted, falls back to the legacy single `meta.lipSyncAudioId`. */
+  speeches?: ResolvedSpeech[];
+  /** @deprecated Legacy single-speech length; superseded by `speeches`. */
+  speechDuration?: number;
+}
+
+/** A speech resolved for the builder: audio ref + start + length + its viseme track. */
+export interface ResolvedSpeech {
+  audioId: string;
+  start: number;
+  duration: number;
+  visemes: VisemeEntry[];
 }
 
 interface MotionTarget {
@@ -127,7 +143,7 @@ export function characterAssetIds(
     for (const part of character.parts) ids.add(part.mediaId);
     for (const variant of character.headVariants ?? []) ids.add(variant.mediaId);
   }
-  if (meta?.lipSyncAudioId) ids.add(meta.lipSyncAudioId);
+  for (const speech of characterSpeeches(meta)) ids.add(speech.audioId);
   return ids;
 }
 
@@ -151,12 +167,25 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
 
   stage.innerHTML = "";
   stage.insertAdjacentHTML("beforeend", dom.html.join("\n"));
-  if (args.meta.lipSyncAudioId) {
+
+  // Each speech becomes its own <audio> at its start (clamped to the clip), and
+  // contributes its visemes offset by that start to a combined mouth track.
+  const { audioSpeeches, combinedVisemes } = resolveSpeechTimeline(args, duration);
+  audioSpeeches.forEach((speech, index) => {
+    // Each speech is its own timeline clip on its own track lane (HyperFrames
+    // assigns a distinct data-track-index per clip).
     stage.insertAdjacentHTML(
       "beforeend",
-      buildSpeechAudio(args.compositionId, args.meta.lipSyncAudioId, duration),
+      buildSpeechAudio(
+        `${args.compositionId}-speech-${index}`,
+        speech.audioId,
+        speech.start,
+        speech.duration,
+        index,
+      ),
     );
-  }
+  });
+  const effectiveMeta: CharacterClipMeta = { ...args.meta, visemes: combinedVisemes };
 
   appendCharacterStyles(doc);
   appendCharacterTimelineScript(doc, {
@@ -165,7 +194,7 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
     duration,
     scaleX,
     scaleY,
-    meta: args.meta,
+    meta: effectiveMeta,
     motionPresets: args.motionPresets,
     motionTargets: dom.motionTargets,
     canvasWidth: args.character.canvasWidth,
@@ -835,10 +864,58 @@ function motionTargetFor(
   };
 }
 
-function buildSpeechAudio(compositionId: string, mediaId: string, duration: number): string {
-  return `<audio id="${esc(safeId(`${compositionId}-speech`))}" data-character-speech="true" data-start="0" data-duration="${esc(
-    duration,
-  )}" data-track-index="0" src="asset:${esc(mediaId)}" preload="auto"></audio>`;
+function buildSpeechAudio(
+  id: string,
+  mediaId: string,
+  start: number,
+  duration: number,
+  trackIndex: number,
+): string {
+  return `<audio id="${esc(safeId(id))}" data-character-speech="true" data-start="${esc(
+    start,
+  )}" data-duration="${esc(duration)}" data-track-index="${esc(
+    trackIndex,
+  )}" src="asset:${esc(mediaId)}" preload="auto"></audio>`;
+}
+
+/**
+ * Resolve the build's speeches (or the legacy single voice) into the `<audio>`
+ * clips to emit and a single combined viseme track for the mouth. Multi-speech
+ * offsets each speech's visemes by its start and closes the mouth (rest) after
+ * each; the legacy path is preserved byte-for-byte.
+ */
+function resolveSpeechTimeline(
+  args: BuildCharacterCompositionArgs,
+  duration: number,
+): {
+  audioSpeeches: Array<{ audioId: string; start: number; duration: number }>;
+  combinedVisemes: VisemeEntry[];
+} {
+  const clampT = (t: number) => Math.max(0, Math.min(duration, t));
+  if (args.speeches && args.speeches.length > 0) {
+    const audioSpeeches: Array<{ audioId: string; start: number; duration: number }> = [];
+    const combinedVisemes: VisemeEntry[] = [];
+    for (const speech of args.speeches) {
+      const start = clampT(speech.start);
+      const length = Math.min(duration - start, positiveNumber(speech.duration, duration));
+      if (length <= 0) continue;
+      audioSpeeches.push({ audioId: speech.audioId, start, duration: length });
+      for (const entry of speech.visemes) {
+        combinedVisemes.push({ t: clampT(entry.t + start), v: entry.v });
+      }
+      combinedVisemes.push({ t: clampT(start + length), v: "rest" });
+    }
+    combinedVisemes.sort((a, b) => a.t - b.t);
+    return { audioSpeeches, combinedVisemes };
+  }
+  if (args.meta.lipSyncAudioId) {
+    const length = Math.min(duration, positiveNumber(args.speechDuration ?? duration, duration));
+    return {
+      audioSpeeches: [{ audioId: args.meta.lipSyncAudioId, start: 0, duration: length }],
+      combinedVisemes: args.meta.visemes ?? [],
+    };
+  }
+  return { audioSpeeches: [], combinedVisemes: args.meta.visemes ?? [] };
 }
 
 function appendCharacterTimelineScript(

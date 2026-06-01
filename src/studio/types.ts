@@ -22,6 +22,9 @@ export interface SavedVoice {
   createdAt: number;
 }
 
+/** A single viseme keyframe on a lip-sync track: time (s) → mouth shape. */
+export type VisemeEntry = { t: number; v: MouthViseme };
+
 /** Unit of media stored in IndexedDB. The Blob lives in `mediaBlobs` table. */
 export interface MediaAsset {
   id: ID;
@@ -38,6 +41,13 @@ export interface MediaAsset {
   height?: number;
   /** Duration in seconds for audio & video. */
   duration?: number;
+  /**
+   * Canonical lip-sync data for audio assets used as character voices. Owned by
+   * the asset (not the character clip) so a voice can be reattached without
+   * regenerating the timing. Character clips reference this via `lipSyncAudioId`.
+   */
+  visemes?: VisemeEntry[];
+  voiceLine?: VoiceLineMeta;
   createdAt: number;
 }
 
@@ -432,15 +442,43 @@ export interface VoiceLineMeta {
   audioName?: string;
 }
 
+/** A speech placed on a character: references the voice asset + a start offset (s). */
+export interface CharacterSpeech {
+  id: ID;
+  audioId: ID;
+  /** Start time in seconds within the character clip. */
+  start: number;
+}
+
 export interface CharacterClipMeta {
   characterId: ID;
   poses: Record<string, string>;
   motions?: AppliedMotion[];
-  visemes?: { t: number; v: MouthViseme }[];
+  /** Speech clips placed along the character's duration (canonical). */
+  speeches?: CharacterSpeech[];
+  /**
+   * @deprecated Display cache / legacy fallback. Canonical lip-sync data lives on
+   * the audio `MediaAsset` (`visemes`/`voiceLine`), keyed by `lipSyncAudioId`.
+   */
+  visemes?: VisemeEntry[];
   autoBlink?: boolean;
-  /** Editor authoring reference for generated voice audio. */
+  /** @deprecated Single-voice reference; migrated to `speeches` by `characterSpeeches`. */
   lipSyncAudioId?: ID;
+  /** Display cache of the attached voice's metadata; canonical copy is on the asset. */
   voiceLine?: VoiceLineMeta;
+}
+
+/**
+ * Canonical list of a character's speeches. Migrates a legacy single
+ * `lipSyncAudioId` to one speech at start 0 so old projects keep working.
+ */
+export function characterSpeeches(meta: CharacterClipMeta | undefined): CharacterSpeech[] {
+  if (!meta) return [];
+  if (meta.speeches && meta.speeches.length > 0) return meta.speeches;
+  if (meta.lipSyncAudioId) {
+    return [{ id: `speech-${meta.lipSyncAudioId}`, audioId: meta.lipSyncAudioId, start: 0 }];
+  }
+  return [];
 }
 
 /** Per-clip authoring state — character clips generate native sub-compositions. */

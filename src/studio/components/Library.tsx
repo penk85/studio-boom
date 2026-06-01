@@ -376,7 +376,7 @@ function CharacterThumbnail({ character }: { character: CharacterPreset }) {
             eyeState: slot.role === "eye" ? "open" : undefined,
           }),
         )
-        .filter((part): part is CharacterPart => Boolean(part) && part.visible !== false)
+        .filter((part): part is CharacterPart => part != null && part.visible !== false)
         .sort((a, b) => a.zIndex - b.zIndex),
     [slots],
   );

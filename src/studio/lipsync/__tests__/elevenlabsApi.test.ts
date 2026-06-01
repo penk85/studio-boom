@@ -53,7 +53,7 @@ describe("ElevenLabs API helpers", () => {
   });
 
   it("converts forced alignment characters into the viseme alignment shape", async () => {
-    const fetchMock = vi.fn(
+    const fetchMock = vi.fn<typeof fetch>(
       async () =>
         new Response(
           JSON.stringify({
@@ -89,7 +89,7 @@ describe("ElevenLabs API helpers", () => {
   });
 
   it("generates timestamped speech through the local proxy", async () => {
-    const fetchMock = vi.fn(
+    const fetchMock = vi.fn<typeof fetch>(
       async () =>
         new Response(
           JSON.stringify({

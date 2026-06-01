@@ -2,10 +2,20 @@
 // Generates or imports speech audio, then applies character-timed visemes.
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
-import { RefreshCw, Save, Trash2, Upload, X } from "lucide-react";
-import type { CharacterCompositionClip, CompositionClip, MouthViseme, SavedVoice } from "../types";
+import {
+  ChevronDown,
+  ChevronRight,
+  Pause,
+  Play,
+  RefreshCw,
+  Save,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
+import type { CharacterCompositionClip, CompositionClip, SavedVoice } from "../types";
 import { useStudio } from "../store";
-import { db, deleteMediaIfUnused, deleteSavedVoice, getSavedVoices, saveVoice } from "../db";
+import { db, deleteSavedVoice, getMediaUrl, getSavedVoices, saveVoice } from "../db";
 import {
   DEFAULT_VOICE_ID,
   ELEVENLABS_MODELS,
@@ -13,19 +23,40 @@ import {
   type ElevenLabsVoiceOption,
 } from "../lipsync/voices";
 import {
-  alignAttachedAudioLipSyncForClip,
+  alignVoiceForClip,
   applyAudioLipSyncForClip,
   generateLipSyncForClip,
 } from "../lipsync/elevenlabs";
 import { listElevenLabsVoices } from "../lipsync/tts.functions";
-import { MOUTH_VISEMES, MOUTH_VISEME_DESCRIPTIONS } from "../lipsync/viseme-schema";
+import { characterSpeeches } from "../types";
 
 export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) {
-  const update = useStudio((s) => s.updateClip);
+  const attachVoice = useStudio((s) => s.attachVoiceToCharacter);
+  const moveSpeech = useStudio((s) => s.moveSpeech);
+  const removeSpeech = useStudio((s) => s.removeSpeech);
   const saveProject = useStudio((s) => s.saveProject);
-  const initial = clip.character.voiceLine;
+  const queriedAudio = useLiveQuery(() => db.media.where("kind").equals("audio").toArray(), []);
+  const audioAssets = useMemo(
+    () => (queriedAudio ?? []).slice().sort((a, b) => b.createdAt - a.createdAt),
+    [queriedAudio],
+  );
+  const speeches = useMemo(() => characterSpeeches(clip.character), [clip.character]);
+  const [selectedSpeechId, setSelectedSpeechId] = useState<string | null>(null);
+  const selectedSpeech = useMemo(
+    () => speeches.find((s) => s.id === selectedSpeechId) ?? speeches[0] ?? null,
+    [speeches, selectedSpeechId],
+  );
+  const selectedAsset = useMemo(
+    () => (selectedSpeech ? audioAssets.find((a) => a.id === selectedSpeech.audioId) : undefined),
+    [audioAssets, selectedSpeech],
+  );
+  const initial = selectedAsset?.voiceLine ?? clip.character.voiceLine;
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [text, setText] = useState(initial?.text ?? "");
+  // Three scoped transcript inputs: TTS line, the attached voice's lip-sync
+  // transcript, and the upload transcript — each with its own button.
+  const [ttsText, setTtsText] = useState("");
+  const [voiceText, setVoiceText] = useState(initial?.text ?? "");
+  const [uploadText, setUploadText] = useState("");
   const [voiceId, setVoiceId] = useState(initial?.voiceId ?? DEFAULT_VOICE_ID);
   const [modelId, setModelId] = useState(initial?.modelId ?? "eleven_multilingual_v2");
   const [stability, setStability] = useState(initial?.stability ?? 0.5);
@@ -37,15 +68,15 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
   const [draggingAudio, setDraggingAudio] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const character = useLiveQuery(
-    () => db.characters.get(clip.character.characterId),
-    [clip.character.characterId],
-  );
+  const [libraryOpen, setLibraryOpen] = useState(true);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [previewId, setPreviewId] = useState<string | null>(null);
+  const previewRef = useRef<HTMLAudioElement>(null);
   const queriedSavedVoices = useLiveQuery(() => getSavedVoices(), []);
   const savedVoices = useMemo(() => queriedSavedVoices ?? [], [queriedSavedVoices]);
 
   useEffect(() => {
-    setText(initial?.text ?? "");
+    setVoiceText(initial?.text ?? "");
     setVoiceId(initial?.voiceId ?? DEFAULT_VOICE_ID);
     setModelId(initial?.modelId ?? "eleven_multilingual_v2");
     setStability(initial?.stability ?? 0.5);
@@ -83,16 +114,8 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
     if (!voiceOptions.some((voice) => voice.id === voiceId)) setVoiceId(selectedVoice.id);
   }, [selectedVoice, voiceId, voiceOptions]);
 
-  const visemeCount = clip.character.visemes?.length ?? 0;
-  const audioName = clip.character.voiceLine?.audioName;
-  const hasAttachedAudio = Boolean(clip.character.lipSyncAudioId);
-  const availableMouthShapes = useMemo(() => {
-    const shapes = new Set<MouthViseme>();
-    for (const part of character?.parts ?? []) {
-      if (part.role === "mouth" && part.viseme) shapes.add(part.viseme);
-    }
-    return shapes;
-  }, [character?.parts]);
+  // Lip-sync data is owned by the audio asset of the selected speech.
+  const visemeCount = selectedAsset?.visemes?.length ?? 0;
 
   const onGenerate = async () => {
     setError(null);
@@ -103,7 +126,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
       if (!voice) throw new Error("No ElevenLabs voice is selected");
       const result = await generateLipSyncForClip({
         clipId: clip.id,
-        text: text.trim(),
+        text: ttsText.trim(),
         voiceId: voice.id,
         voiceName: voice.name,
         modelId,
@@ -125,12 +148,12 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
     if (!file) return;
     setError(null);
     setNotice(null);
-    setBusyLabel(text.trim() ? "Aligning audio" : "Importing audio");
+    setBusyLabel(uploadText.trim() ? "Aligning audio" : "Importing audio");
     try {
       const result = await applyAudioLipSyncForClip({
         clipId: clip.id,
         file,
-        transcript: text,
+        transcript: uploadText,
       });
       setNotice(
         result.alignmentError
@@ -147,14 +170,16 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
     }
   };
 
-  const onAlignAttachedAudio = async () => {
+  const onGenerateLipSync = async () => {
+    if (!selectedSpeech) return;
     setError(null);
     setNotice(null);
     setBusyLabel("Creating lip sync");
     try {
-      const result = await alignAttachedAudioLipSyncForClip({
+      const result = await alignVoiceForClip({
         clipId: clip.id,
-        transcript: text,
+        audioId: selectedSpeech.audioId,
+        transcript: voiceText,
       });
       setNotice(
         `Assigned ${result.visemes.length} viseme keys to "${result.asset.name}" from the transcript.`,
@@ -166,22 +191,44 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
     }
   };
 
-  const onClear = async () => {
-    const mediaIds = new Set<string>();
-    if (clip.character.lipSyncAudioId) mediaIds.add(clip.character.lipSyncAudioId);
-    update(clip.id, {
-      character: {
-        ...clip.character,
-        visemes: undefined,
-        lipSyncAudioId: undefined,
-        voiceLine: undefined,
-      },
-    } as Partial<CompositionClip>);
+  const onRemoveSpeech = async (speechId: string) => {
+    setError(null);
+    setNotice(null);
+    removeSpeech(clip.id, speechId);
     await saveProject();
-    await Promise.all(
-      Array.from(mediaIds).map((id) => deleteMediaIfUnused(id, { internalOnly: true })),
+    setNotice("Removed the voice from this character. It stays in your library to reuse.");
+  };
+
+  const onAttachVoice = async (audioId: string) => {
+    setError(null);
+    setNotice(null);
+    attachVoice(clip.id, audioId);
+    await saveProject();
+    const asset = audioAssets.find((a) => a.id === audioId);
+    setNotice(
+      asset?.visemes?.length
+        ? `Added "${asset.name}" with ${asset.visemes.length} viseme keys.`
+        : `Added "${asset?.name ?? "audio"}". Add a transcript to create lip sync timing.`,
     );
-    setNotice("Removed speech from this character clip.");
+  };
+
+  const togglePreview = async (audioId: string) => {
+    const el = previewRef.current;
+    if (!el) return;
+    if (previewId === audioId) {
+      el.pause();
+      setPreviewId(null);
+      return;
+    }
+    const url = await getMediaUrl(audioId);
+    if (!url) return;
+    el.src = url;
+    setPreviewId(audioId);
+    try {
+      await el.play();
+    } catch {
+      setPreviewId(null);
+    }
   };
 
   const onDragOver = (event: DragEvent<HTMLDivElement>) => {
@@ -206,190 +253,103 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
         )}
       </div>
 
-      {audioName && (
-        <div className="flex items-center justify-between gap-2 rounded border border-border bg-panel px-2 py-1.5">
-          <div className="min-w-0">
-            <div className="truncate text-[11px] text-muted-foreground">{audioName}</div>
-            {visemeCount === 0 && (
-              <div className="text-[10px] text-amber-100">No lip sync timing yet</div>
-            )}
-          </div>
-          <button
-            type="button"
-            onClick={onClear}
-            className="rounded p-1 text-muted-foreground hover:bg-panel-2 hover:text-destructive"
-            title="Remove speech from this clip"
-          >
-            <X size={14} />
-          </button>
-        </div>
-      )}
-
-      {character && (
+      {speeches.length > 0 && (
         <div className="rounded border border-border bg-panel p-2">
           <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Mouth shapes
+            Voices on this character
           </div>
-          <div className="flex flex-wrap gap-1">
-            {MOUTH_VISEMES.map((shape) => {
-              const available = availableMouthShapes.has(shape);
+          <ul className="space-y-1">
+            {speeches.map((speech) => {
+              const asset = audioAssets.find((a) => a.id === speech.audioId);
+              const playing = previewId === speech.audioId;
+              const isSelected = selectedSpeech?.id === speech.id;
+              const ready = (asset?.visemes?.length ?? 0) > 0;
               return (
-                <span
-                  key={shape}
-                  className={`rounded px-1.5 py-0.5 text-[10px] ${
-                    available
-                      ? "bg-primary/25 text-foreground"
-                      : "border border-border text-muted-foreground"
+                <li
+                  key={speech.id}
+                  className={`flex items-center gap-1 rounded border px-1.5 py-1 ${
+                    isSelected ? "border-primary bg-primary/15" : "border-border bg-panel-2"
                   }`}
-                  title={`${available ? "Available for lip sync" : "Missing mouth variant"}\n${MOUTH_VISEME_DESCRIPTIONS[shape]}`}
                 >
-                  {shape}
-                </span>
+                  <button
+                    type="button"
+                    onClick={() => void togglePreview(speech.audioId)}
+                    title={playing ? "Pause" : "Play"}
+                    aria-label={playing ? "Pause preview" : "Play preview"}
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-panel hover:text-foreground"
+                  >
+                    {playing ? <Pause size={12} /> : <Play size={12} />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedSpeechId(speech.id)}
+                    title="Edit lip sync"
+                    className="min-w-0 flex-1 truncate text-left text-[11px] text-foreground"
+                  >
+                    {asset?.name ?? "Voice"}
+                  </button>
+                  <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground">
+                    start
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={Number(speech.start.toFixed(2))}
+                      onChange={(e) => moveSpeech(clip.id, speech.id, Number(e.target.value))}
+                      className="w-12 rounded border border-border bg-input px-1 py-0.5 text-right text-foreground"
+                    />
+                    s
+                  </label>
+                  {ready && (
+                    <span
+                      className="shrink-0 text-[10px] text-primary"
+                      title={`${asset?.visemes?.length} viseme keys`}
+                    >
+                      ♪
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void onRemoveSpeech(speech.id)}
+                    title="Remove voice (keeps it in your library)"
+                    aria-label="Remove voice"
+                    className="shrink-0 rounded p-1 text-muted-foreground hover:text-destructive"
+                  >
+                    <X size={12} />
+                  </button>
+                </li>
               );
             })}
-          </div>
-          {availableMouthShapes.size === 0 && (
-            <p className="mt-2 text-[10px] leading-relaxed text-muted-foreground">
-              Default generated mouth shapes will be used near the character&apos;s mouth.
-            </p>
+          </ul>
+          {selectedSpeech && (
+            <div className="mt-2 border-t border-border pt-2">
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Lip sync — {selectedAsset?.name ?? "voice"}
+              </div>
+              <textarea
+                value={voiceText}
+                onChange={(e) => setVoiceText(e.target.value)}
+                rows={2}
+                placeholder="Transcript of what this voice says…"
+                className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+              />
+              <div className="mt-1 flex items-center justify-between gap-2">
+                <span className="text-[10px] text-muted-foreground">
+                  {visemeCount > 0 ? `${visemeCount} viseme keys` : "No timing yet"}
+                </span>
+                <button
+                  type="button"
+                  onClick={onGenerateLipSync}
+                  disabled={!!busyLabel || !voiceText.trim()}
+                  className="rounded bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                >
+                  {visemeCount > 0 ? "Re-generate lip sync" : "Generate lip sync"}
+                </button>
+              </div>
+            </div>
           )}
         </div>
       )}
-
-      <label className="block">
-        <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
-          Line / transcript
-        </span>
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          rows={3}
-          placeholder="What should this character say?"
-          className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
-        />
-      </label>
-
-      <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
-        <label className="block">
-          <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
-            ElevenLabs voice
-          </span>
-          <select
-            value={selectedVoice?.id ?? ""}
-            onChange={(e) => setVoiceId(e.target.value)}
-            className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
-          >
-            {voiceOptions.map((voice) => (
-              <option key={voice.id} value={voice.id}>
-                {formatVoiceLabel(voice)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          type="button"
-          onClick={() => void loadVoices()}
-          disabled={voicesBusy}
-          className="mt-5 flex h-8 w-8 items-center justify-center rounded border border-border text-muted-foreground hover:bg-panel disabled:opacity-50"
-          title="Refresh ElevenLabs voices"
-        >
-          <RefreshCw size={14} className={voicesBusy ? "animate-spin" : ""} />
-        </button>
-      </div>
-
-      {voicesError && (
-        <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-100">
-          {voicesError}
-        </div>
-      )}
-
-      <div className="grid grid-cols-2 gap-2">
-        <label className="block">
-          <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
-            Model
-          </span>
-          <select
-            value={modelId}
-            onChange={(e) => setModelId(e.target.value)}
-            className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
-          >
-            {ELEVENLABS_MODELS.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <PinnedVoiceControls
-          savedVoices={savedVoices}
-          selectedVoice={selectedVoice}
-          onSelect={setVoiceId}
-        />
-      </div>
-
-      <div className="grid grid-cols-2 gap-2">
-        <label className="block">
-          <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
-            Stability {stability.toFixed(2)}
-          </span>
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.05}
-            value={stability}
-            onChange={(e) => setStability(Number(e.target.value))}
-            className="w-full"
-          />
-        </label>
-        <label className="block">
-          <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
-            Similarity {similarity.toFixed(2)}
-          </span>
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.05}
-            value={similarity}
-            onChange={(e) => setSimilarity(Number(e.target.value))}
-            className="w-full"
-          />
-        </label>
-      </div>
-
-      <div
-        onDragOver={onDragOver}
-        onDragLeave={() => setDraggingAudio(false)}
-        onDrop={onDrop}
-        className={`rounded border border-dashed px-3 py-3 text-center text-[11px] ${
-          draggingAudio
-            ? "border-primary bg-primary/10 text-foreground"
-            : "border-border bg-panel text-muted-foreground"
-        }`}
-      >
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={!!busyLabel}
-          className="inline-flex items-center gap-1.5 rounded border border-border bg-panel-2 px-2 py-1 text-xs text-foreground hover:bg-panel disabled:opacity-50"
-        >
-          <Upload size={14} />
-          Drop or choose audio
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="audio/*"
-          className="hidden"
-          onChange={(e) => void onAudioFiles(e.target.files)}
-        />
-        <div className="mt-1">
-          {text.trim()
-            ? "Uses the line above as the transcript for timing."
-            : "Adds audio now; add a transcript afterward to create timing."}
-        </div>
-      </div>
 
       {error && (
         <div className="rounded bg-destructive/20 px-2 py-1 text-[11px] text-destructive-foreground">
@@ -402,38 +362,257 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
         </div>
       )}
 
-      <div className="flex gap-2">
+      <audio ref={previewRef} className="hidden" onEnded={() => setPreviewId(null)} />
+
+      <div className="rounded border border-border">
         <button
           type="button"
-          onClick={onGenerate}
-          disabled={!!busyLabel || !text.trim() || !selectedVoice}
-          className="flex-1 rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+          onClick={() => setLibraryOpen((v) => !v)}
+          className="flex w-full items-center gap-1 px-2 py-1.5"
         >
-          {busyLabel ??
-            (visemeCount > 0 ? "Regenerate voice + lip sync" : "Generate voice + lip sync")}
+          {libraryOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          <span className="flex-1 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Voice library
+          </span>
+          <span className="text-[10px] text-muted-foreground">{audioAssets.length}</span>
         </button>
-        {visemeCount > 0 && (
-          <button
-            type="button"
-            onClick={onClear}
-            className="rounded border border-border px-3 py-1.5 text-xs hover:bg-panel"
-          >
-            Clear
-          </button>
+        {libraryOpen && (
+          <div className="px-2 pb-2">
+            {audioAssets.length === 0 ? (
+              <button
+                type="button"
+                onClick={() => setCreateOpen(true)}
+                className="w-full rounded border border-dashed border-border bg-panel px-2 py-2 text-left text-[10px] text-muted-foreground hover:text-foreground"
+              >
+                No voices yet. Open “Create a new voice” below to generate or upload one.
+              </button>
+            ) : (
+              <ul className="max-h-44 space-y-1 overflow-auto">
+                {audioAssets.map((asset) => {
+                  const inUse = speeches.some((s) => s.audioId === asset.id);
+                  const ready = (asset.visemes?.length ?? 0) > 0;
+                  const playing = previewId === asset.id;
+                  return (
+                    <li
+                      key={asset.id}
+                      className={`flex items-center gap-1.5 rounded border px-1.5 py-1 ${
+                        inUse ? "border-primary/40 bg-primary/5" : "border-border bg-panel"
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => void togglePreview(asset.id)}
+                        title={playing ? "Pause" : "Play"}
+                        aria-label={playing ? "Pause preview" : "Play preview"}
+                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-panel-2 hover:text-foreground"
+                      >
+                        {playing ? <Pause size={12} /> : <Play size={12} />}
+                      </button>
+                      <span className="min-w-0 flex-1 truncate text-[11px] text-foreground">
+                        {asset.name}
+                      </span>
+                      {asset.duration ? (
+                        <span className="shrink-0 text-[10px] text-muted-foreground">
+                          {asset.duration.toFixed(1)}s
+                        </span>
+                      ) : null}
+                      {ready && (
+                        <span
+                          className="shrink-0 text-[10px] text-primary"
+                          title={`${asset.visemes?.length} viseme keys`}
+                        >
+                          ♪
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void onAttachVoice(asset.id)}
+                        disabled={!!busyLabel}
+                        title={inUse ? "Add another instance of this voice" : "Add this voice"}
+                        className="shrink-0 rounded border border-border px-2 py-0.5 text-[10px] hover:bg-panel-2 disabled:opacity-50"
+                      >
+                        Add
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
         )}
       </div>
-      {hasAttachedAudio && (
+
+      <div className="rounded border border-border">
         <button
           type="button"
-          onClick={onAlignAttachedAudio}
-          disabled={!!busyLabel || !text.trim()}
-          className="w-full rounded border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-panel disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={() => setCreateOpen((v) => !v)}
+          className="flex w-full items-center gap-1 px-2 py-1.5"
         >
-          {visemeCount > 0
-            ? "Re-align lip sync from transcript"
-            : "Create lip sync from transcript"}
+          {createOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          <span className="flex-1 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Create a new voice
+          </span>
         </button>
-      )}
+        {createOpen && (
+          <div className="space-y-3 px-2 pb-2">
+            <div className="space-y-2">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Text to speech
+              </div>
+              <textarea
+                value={ttsText}
+                onChange={(e) => setTtsText(e.target.value)}
+                rows={3}
+                placeholder="What should this character say?"
+                className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+              />
+
+              <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+                <label className="block">
+                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+                    ElevenLabs voice
+                  </span>
+                  <select
+                    value={selectedVoice?.id ?? ""}
+                    onChange={(e) => setVoiceId(e.target.value)}
+                    className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+                  >
+                    {voiceOptions.map((voice) => (
+                      <option key={voice.id} value={voice.id}>
+                        {formatVoiceLabel(voice)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void loadVoices()}
+                  disabled={voicesBusy}
+                  className="mt-5 flex h-8 w-8 items-center justify-center rounded border border-border text-muted-foreground hover:bg-panel disabled:opacity-50"
+                  title="Refresh ElevenLabs voices"
+                >
+                  <RefreshCw size={14} className={voicesBusy ? "animate-spin" : ""} />
+                </button>
+              </div>
+
+              {voicesError && (
+                <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-100">
+                  {voicesError}
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-2">
+                <label className="block">
+                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Model
+                  </span>
+                  <select
+                    value={modelId}
+                    onChange={(e) => setModelId(e.target.value)}
+                    className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+                  >
+                    {ELEVENLABS_MODELS.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <PinnedVoiceControls
+                  savedVoices={savedVoices}
+                  selectedVoice={selectedVoice}
+                  onSelect={setVoiceId}
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <label className="block">
+                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Stability {stability.toFixed(2)}
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={stability}
+                    onChange={(e) => setStability(Number(e.target.value))}
+                    className="w-full"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Similarity {similarity.toFixed(2)}
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={similarity}
+                    onChange={(e) => setSimilarity(Number(e.target.value))}
+                    className="w-full"
+                  />
+                </label>
+              </div>
+
+              <button
+                type="button"
+                onClick={onGenerate}
+                disabled={!!busyLabel || !ttsText.trim() || !selectedVoice}
+                className="w-full rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+              >
+                {busyLabel === "Generating voice" ? busyLabel : "Generate voice"}
+              </button>
+            </div>
+
+            <div className="space-y-2 border-t border-border pt-3">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Upload audio
+              </div>
+              <div
+                onDragOver={onDragOver}
+                onDragLeave={() => setDraggingAudio(false)}
+                onDrop={onDrop}
+                className={`rounded border border-dashed px-3 py-3 text-center text-[11px] ${
+                  draggingAudio
+                    ? "border-primary bg-primary/10 text-foreground"
+                    : "border-border bg-panel text-muted-foreground"
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={!!busyLabel}
+                  className="inline-flex items-center gap-1.5 rounded border border-border bg-panel-2 px-2 py-1 text-xs text-foreground hover:bg-panel disabled:opacity-50"
+                >
+                  <Upload size={14} />
+                  Drop or choose audio
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="audio/*"
+                  className="hidden"
+                  onChange={(e) => void onAudioFiles(e.target.files)}
+                />
+              </div>
+              <label className="block">
+                <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+                  Transcript (optional)
+                </span>
+                <textarea
+                  value={uploadText}
+                  onChange={(e) => setUploadText(e.target.value)}
+                  rows={2}
+                  placeholder="Add a transcript to create lip-sync timing on upload…"
+                  className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+                />
+              </label>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
