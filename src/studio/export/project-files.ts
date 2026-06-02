@@ -76,6 +76,10 @@ export function resolvePackagedRuntimeRefs(
 
   for (const script of Array.from(doc.querySelectorAll<HTMLScriptElement>("script[src]"))) {
     const src = script.getAttribute("src") ?? "";
+    if (isHyperframesRuntimeScriptSrc(src)) {
+      script.remove();
+      continue;
+    }
     if (!isGsapScriptSrc(src)) continue;
     if (options.gsap === "omit") {
       script.remove();
@@ -170,6 +174,11 @@ function isGsapScriptSrc(src: string): boolean {
   return /(?:^|\/)gsap(?:\.min)?\.js(?:[?#].*)?$/.test(value);
 }
 
+function isHyperframesRuntimeScriptSrc(src: string): boolean {
+  const value = src.trim().toLowerCase();
+  return /(?:^|\/)hyperframes?-runtime(?:\.min)?\.js(?:[?#].*)?$/.test(value);
+}
+
 function resolvePackagedRuntimeRefsFallback(
   html: string,
   options: { gsap: "root" | "omit" },
@@ -178,7 +187,11 @@ function resolvePackagedRuntimeRefsFallback(
     /<link\b(?=[^>]*\bhref=["'][^"']*fonts\.(?:googleapis|gstatic)\.com[^"']*["'])[^>]*>\s*/gi,
     "",
   );
-  return withoutFonts.replace(
+  const withoutHyperframesRuntime = withoutFonts.replace(
+    /<script\b(?=[^>]*\bsrc=["'][^"']*hyperframes?-runtime(?:\.min)?\.js(?:[?#][^"']*)?["'])[^>]*>\s*<\/script>/gi,
+    "",
+  );
+  return withoutHyperframesRuntime.replace(
     /<script\b([^>]*?)\bsrc=["']([^"']*(?:cdn\.jsdelivr\.net\/npm\/gsap@[^"']*\/dist\/gsap|unpkg\.com\/gsap@[^"']*\/dist\/gsap|(?:^|\/)gsap(?:\.min)?\.js)[^"']*)["']([^>]*)>\s*<\/script>/gi,
     options.gsap === "omit" ? "" : '<script$1src="gsap.min.js"$3></script>',
   );

@@ -44,6 +44,7 @@ function makeProject(): Project {
     <img id="image-1" class="clip" data-start="0" data-duration="5" data-track-index="0" src="asset:image-1" />
     <div id="char-1" class="clip" data-type="composition" data-composition-id="comp_char-1" data-composition-src="compositions/comp_char-1.html" data-start="0" data-duration="5" data-track-index="1"></div>
   </div>
+  <script src="hyperframe-runtime.js"></script>
 </body>
 </html>`,
       compositionHtml: {
@@ -53,6 +54,7 @@ function makeProject(): Project {
   <div id="stage">
     <img id="part-1" class="clip" data-start="0" data-duration="5" data-track-index="0" src="asset:image-1" />
   </div>
+  <script src="../hyperframe-runtime.js"></script>
 </body>
 </html>`,
       },
@@ -100,10 +102,12 @@ describe("buildHyperframesProjectFiles", () => {
     expect(textByPath.get("index.html")).toContain('data-duration="5"');
     expect(textByPath.get("index.html")).not.toContain("editor-only-character");
     expect(textByPath.get("index.html")).not.toContain("this must not render");
+    expect(textByPath.get("index.html")).not.toContain("hyperframe-runtime.js");
 
     expect(textByPath.get("compositions/comp_char-1.html")).toContain(
       'src="../assets/image-1.png"',
     );
+    expect(textByPath.get("compositions/comp_char-1.html")).not.toContain("hyperframe-runtime.js");
     expect(files.binaryFiles.map((file) => file.path)).toEqual(["assets/image-1.png"]);
   });
 

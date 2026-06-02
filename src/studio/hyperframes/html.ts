@@ -13,6 +13,7 @@ export type StudioTimelineElement = TimelineElement & {
   sourceHeight?: number;
   renderTrackIndex?: number;
   rotation?: number;
+  volume?: number;
   content?: string;
   color?: string;
   fontSize?: number;
@@ -26,6 +27,7 @@ type StudioElementUpdates = Partial<StudioTimelineElement> & {
   sourceHeight?: number;
   renderTrackIndex?: number;
   rotation?: number;
+  volume?: number;
   content?: string;
   color?: string;
   fontSize?: number;
@@ -44,11 +46,15 @@ export function parseStudioHtml(html: string): ParsedHtml {
   if (!html || typeof DOMParser === "undefined") return parsed;
 
   const doc = new DOMParser().parseFromString(html, "text/html");
+  const patchedElements = parsed.elements
+    .filter((element) => !isCompositionRootMarker(element, doc))
+    .map((element) => patchElementFromNativeAttrs(element, doc));
+  const patchedIds = new Set(patchedElements.map((element) => element.id));
+  const fallbackElements = collectNativeFallbackElements(doc, patchedIds);
+
   return {
     ...parsed,
-    elements: parsed.elements
-      .filter((element) => !isCompositionRootMarker(element, doc))
-      .map((element) => patchElementFromNativeAttrs(element, doc)),
+    elements: sortElementsByDocumentOrder([...patchedElements, ...fallbackElements], doc),
   };
 }
 
@@ -105,6 +111,11 @@ function patchStudioElementInHtml(
   setNumericAttr(el, "data-scale", updates.scale);
   setNumericAttr(el, STUDIO_ROTATION_ATTR, updates.rotation);
   setNumericAttr(el, "data-opacity", updates.opacity);
+  if ("volume" in updates && updates.volume !== undefined) {
+    // Generator omits data-volume at the default of 1; mirror that on mutation.
+    if (updates.volume === 1) el.removeAttribute("data-volume");
+    else el.setAttribute("data-volume", String(updates.volume));
+  }
   setNumericAttr(el, "data-source-width", updates.sourceWidth);
   setNumericAttr(el, "data-source-height", updates.sourceHeight);
   setNumericAttr(el, "data-width", updates.sourceWidth);
@@ -136,7 +147,130 @@ function patchStudioElementInHtml(
 
 function isCompositionRootMarker(element: TimelineElement, doc: Document): boolean {
   const el = doc.getElementById(element.id);
-  return element.id === "stage" && el?.hasAttribute("data-composition-id") === true;
+  if (el?.hasAttribute("data-composition-id") !== true) return false;
+  const root = findNativeCompositionRoot(doc);
+  if (el === root) return true;
+  const rootCompositionId = root?.getAttribute("data-composition-id");
+  return el.id === "stage" && el.getAttribute("data-composition-id") === rootCompositionId;
+}
+
+function collectNativeFallbackElements(doc: Document, parsedIds: Set<string>): TimelineElement[] {
+  const root = findNativeCompositionRoot(doc);
+  const elements: TimelineElement[] = [];
+  for (const el of Array.from(
+    doc.querySelectorAll<HTMLElement>("[id][data-start], [id][data-duration]"),
+  )) {
+    if (parsedIds.has(el.id)) continue;
+    if (el === root || isCompositionStageRootMarker(el) || isIgnoredTimelineTag(el)) continue;
+    const fallback = buildNativeFallbackElement(el);
+    if (fallback) elements.push(patchElementFromNativeAttrs(fallback, doc));
+  }
+  return elements;
+}
+
+function findNativeCompositionRoot(doc: Document): Element | null {
+  if (doc.documentElement.hasAttribute("data-composition-id")) return doc.documentElement;
+  const stage = doc.getElementById("stage");
+  if (stage?.hasAttribute("data-composition-id")) return stage;
+  return (
+    Array.from(doc.body?.children ?? []).find((el) => isNativeCompositionRootCandidate(el)) ?? null
+  );
+}
+
+function isNativeCompositionRootCandidate(el: Element): boolean {
+  if (!el.hasAttribute("data-composition-id")) return false;
+  if (readNativeCompositionSrc(el)) return false;
+  if (el.id === "root") return true;
+  return hasTimedDescendantClip(el);
+}
+
+function hasTimedDescendantClip(el: Element): boolean {
+  return Array.from(el.querySelectorAll<HTMLElement>("[id][data-start], [id][data-duration]"))
+    .filter((child) => !isIgnoredTimelineTag(child))
+    .some((child) => child !== el);
+}
+
+function isIgnoredTimelineTag(el: Element): boolean {
+  return ["SCRIPT", "STYLE", "TEMPLATE"].includes(el.tagName);
+}
+
+function isCompositionStageRootMarker(el: Element): boolean {
+  return el.id === "stage" && el.hasAttribute("data-composition-id");
+}
+
+function buildNativeFallbackElement(el: HTMLElement): TimelineElement | null {
+  const type = inferNativeFallbackType(el);
+  if (!type) return null;
+
+  const startTime = parseFiniteNumber(el.getAttribute("data-start")) ?? 0;
+  const end = parseFiniteNumber(el.getAttribute("data-end"));
+  const duration =
+    parseFiniteNumber(el.getAttribute("data-duration")) ??
+    (end !== undefined ? Math.max(0.1, end - startTime) : 1);
+  const sourceWidth =
+    parseFiniteNumber(el.getAttribute("data-source-width")) ??
+    parseFiniteNumber(el.getAttribute("data-width")) ??
+    0;
+  const sourceHeight =
+    parseFiniteNumber(el.getAttribute("data-source-height")) ??
+    parseFiniteNumber(el.getAttribute("data-height")) ??
+    0;
+  const src = readNativeCompositionSrc(el) ?? el.getAttribute("src") ?? undefined;
+
+  return {
+    id: el.id,
+    type,
+    name: el.getAttribute("data-name") ?? el.getAttribute("data-composition-id") ?? el.id,
+    startTime,
+    duration,
+    zIndex:
+      parseFiniteNumber(el.style.zIndex) ??
+      parseFiniteNumber(el.getAttribute("data-track-index")) ??
+      0,
+    x: parseFiniteNumber(el.getAttribute("data-x")) ?? 0,
+    y: parseFiniteNumber(el.getAttribute("data-y")) ?? 0,
+    scale: parseFiniteNumber(el.getAttribute("data-scale")) ?? 1,
+    opacity: parseFiniteNumber(el.getAttribute("data-opacity")) ?? 1,
+    sourceWidth,
+    sourceHeight,
+    ...(src ? { src } : {}),
+    ...(type === "text" ? { content: el.textContent?.trim() ?? "" } : {}),
+  } as unknown as TimelineElement;
+}
+
+function inferNativeFallbackType(el: Element): TimelineElement["type"] | null {
+  const explicitType = el.getAttribute("data-type");
+  if (
+    explicitType === "image" ||
+    explicitType === "video" ||
+    explicitType === "audio" ||
+    explicitType === "text" ||
+    explicitType === "composition"
+  ) {
+    return explicitType;
+  }
+  if (
+    readNativeCompositionSrc(el) ||
+    (el.getAttribute("data-composition-id") && hasElementTiming(el)) ||
+    isStructuredTimedHtmlClip(el)
+  ) {
+    return "composition";
+  }
+  if (el.tagName === "IMG") return "image";
+  if (el.tagName === "VIDEO") return "video";
+  if (el.tagName === "AUDIO") return "audio";
+  if (el.tagName === "DIV") return "text";
+  return null;
+}
+
+function sortElementsByDocumentOrder(
+  elements: TimelineElement[],
+  doc: Document,
+): TimelineElement[] {
+  const order = new Map(
+    Array.from(doc.querySelectorAll<HTMLElement>("[id]")).map((el, index) => [el.id, index]),
+  );
+  return elements.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
 }
 
 function patchElementFromNativeAttrs(element: TimelineElement, doc: Document): TimelineElement {
@@ -159,9 +293,13 @@ function patchElementFromNativeAttrs(element: TimelineElement, doc: Document): T
     parseFiniteNumber(el.getAttribute("data-height"));
   const fontSize = parseFiniteNumber(el.getAttribute("data-font-size"));
   const fontWeight = parseFiniteNumber(el.getAttribute("data-font-weight"));
+  const volume = parseFiniteNumber(el.getAttribute("data-volume"));
   const nativeCompositionSrc = readNativeCompositionSrc(el);
   const nativeCompositionId = el.getAttribute("data-composition-id") ?? undefined;
-  const isNativeCompositionHost = Boolean(nativeCompositionId && nativeCompositionSrc);
+  const explicitType = el.getAttribute("data-type");
+  const isNativeCompositionHost =
+    explicitType !== "text" &&
+    (Boolean(nativeCompositionId && hasElementTiming(el)) || isStructuredTimedHtmlClip(el));
 
   const patched = {
     ...element,
@@ -178,6 +316,7 @@ function patchElementFromNativeAttrs(element: TimelineElement, doc: Document): T
     fontFamily: el.getAttribute("data-font-family") ?? getElementFontFamily(element),
     fitToBounds:
       el.getAttribute("data-fit-to-bounds") === "true" ? true : getElementFitToBounds(element),
+    volume: volume ?? (element as { volume?: number }).volume,
   } as unknown as TimelineElement;
 
   if (!isNativeCompositionHost) return patched;
@@ -186,8 +325,8 @@ function patchElementFromNativeAttrs(element: TimelineElement, doc: Document): T
     ...patched,
     type: "composition",
     name: el.getAttribute("data-name") ?? nativeCompositionId ?? element.name,
-    src: nativeCompositionSrc,
-    compositionId: nativeCompositionId,
+    ...(nativeCompositionSrc ? { src: nativeCompositionSrc } : {}),
+    ...(nativeCompositionId ? { compositionId: nativeCompositionId } : {}),
     sourceWidth: sourceWidth ?? getElementSourceWidth(element),
     sourceHeight: sourceHeight ?? getElementSourceHeight(element),
   } as unknown as TimelineElement;
@@ -201,6 +340,50 @@ function readNativeCompositionSrc(el: Element): string | undefined {
     el.getAttribute("src") ??
     undefined
   );
+}
+
+function hasElementTiming(el: Element): boolean {
+  return el.hasAttribute("data-start") || el.hasAttribute("data-duration");
+}
+
+function isStructuredTimedHtmlClip(el: Element): boolean {
+  if (el.getAttribute("data-type")) return false;
+  if (!hasElementTiming(el)) return false;
+  if (!isGenericHtmlContainer(el)) return false;
+  if (el.id === "stage") return false;
+
+  const children = Array.from(el.children).filter(
+    (child) => !["SCRIPT", "STYLE", "TEMPLATE"].includes(child.tagName),
+  );
+  if (children.length === 0) return false;
+  if (children.length > 1) return true;
+  const [child] = children;
+  return child ? isBlockLikeElement(child) || hasElementTiming(child) : false;
+}
+
+function isGenericHtmlContainer(el: Element): boolean {
+  return ["DIV", "SECTION", "ARTICLE", "MAIN", "ASIDE", "HEADER", "FOOTER"].includes(el.tagName);
+}
+
+function isBlockLikeElement(el: Element): boolean {
+  return !new Set([
+    "A",
+    "ABBR",
+    "B",
+    "BR",
+    "CITE",
+    "CODE",
+    "EM",
+    "I",
+    "MARK",
+    "SMALL",
+    "SPAN",
+    "STRONG",
+    "SUB",
+    "SUP",
+    "TIME",
+    "U",
+  ]).has(el.tagName);
 }
 
 function getElementSourceWidth(element: TimelineElement): number | undefined {

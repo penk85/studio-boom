@@ -288,6 +288,7 @@ function resolveSpeechesForBuild(
       start: speech.start,
       duration: asset?.duration ?? 0,
       visemes: asset?.visemes ?? legacyVisemes,
+      volume: speech.volume,
     };
   });
 }
@@ -610,6 +611,7 @@ function buildElementUpdates(patch: Partial<AnyClip>): Partial<StudioTimelineEle
   if (patch.name !== undefined) updates.name = patch.name;
   if (patch.width !== undefined) updates.sourceWidth = patch.width;
   if (patch.height !== undefined) updates.sourceHeight = patch.height;
+  if ("volume" in patch && patch.volume !== undefined) updates.volume = patch.volume;
   if ("content" in patch && patch.content !== undefined) updates.content = patch.content;
   if ("color" in patch && patch.color !== undefined) updates.color = patch.color;
   if ("fontSize" in patch && patch.fontSize !== undefined) updates.fontSize = patch.fontSize;
@@ -751,6 +753,8 @@ interface StudioState {
     start: number,
     options?: ProjectMutationOptions,
   ) => void;
+  /** Set a speech's playback volume (0–1). */
+  setSpeechVolume: (clipId: string, speechId: string, volume: number) => void;
   /** Remove a speech from a character clip (keeps the audio in the library). */
   removeSpeech: (clipId: string, speechId: string) => void;
   /** Rebuild every character clip whose speeches reference this audio asset (used
@@ -1377,6 +1381,20 @@ export const useStudio = create<StudioState>((set, get) => ({
       } as Partial<CompositionClip>,
       options,
     );
+  },
+
+  setSpeechVolume(clipId, speechId, volume) {
+    const state = get();
+    if (!state.project) return;
+    const clip = deriveEditorClips(state.project).find((candidate) => candidate.id === clipId);
+    if (!isCharacterCompositionClip(clip)) return;
+    const clamped = Math.max(0, Math.min(1, volume));
+    const speeches = characterSpeeches(clip.character).map((speech) =>
+      speech.id === speechId ? { ...speech, volume: clamped } : speech,
+    );
+    get().updateClip(clipId, {
+      character: { ...clip.character, speeches, lipSyncAudioId: undefined },
+    } as Partial<CompositionClip>);
   },
 
   removeSpeech(clipId, speechId) {

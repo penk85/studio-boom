@@ -7,6 +7,8 @@ import {
   Plus,
   SkipBack,
   TriangleAlert,
+  Volume2,
+  VolumeX,
   X,
 } from "lucide-react";
 import {
@@ -726,7 +728,13 @@ function ClipBlock({
     compositionSourceErrors.length > 0
       ? `Malformed composition source:\n${compositionSourceErrors.join("\n")}`
       : undefined;
-  const clipTitle = [clip.name, missingMediaTitle, malformedCompositionTitle]
+  const clipVolume = clip.volume ?? 1;
+  const clipTitle = [
+    clip.name,
+    clip.kind === "audio" ? `Volume ${Math.round(clipVolume * 100)}%` : undefined,
+    missingMediaTitle,
+    malformedCompositionTitle,
+  ]
     .filter(Boolean)
     .join("\n");
 
@@ -849,7 +857,18 @@ function ClipBlock({
             {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           </button>
         )}
+        {clip.kind === "audio" &&
+          (clipVolume === 0 ? (
+            <VolumeX size={12} className="shrink-0" />
+          ) : (
+            <Volume2 size={12} className="shrink-0" />
+          ))}
         <span className="truncate">{clip.name}</span>
+        {clip.kind === "audio" && clipVolume < 1 && (
+          <span className="shrink-0 text-[10px] text-foreground/80">
+            {Math.round(clipVolume * 100)}%
+          </span>
+        )}
         {(missingMediaIds.length > 0 ||
           compositionSourceErrors.length > 0 ||
           clipMotions.length > 0) && (
@@ -1517,6 +1536,7 @@ interface VoiceLaneSummary {
   start: number;
   name: string;
   duration: number;
+  volume: number;
 }
 
 function CharacterMotionHeader({
@@ -1843,10 +1863,20 @@ function VoiceBlock({
         left: (clip.start + voice.start) * zoom,
         width,
       }}
-      title={`${voice.name}${trimmed ? " (trimmed by character clip)" : ""}`}
+      title={`${voice.name} · volume ${Math.round(voice.volume * 100)}%${
+        trimmed ? " (trimmed by character clip)" : ""
+      }`}
     >
       <Mic2 size={10} className="shrink-0" />
       <span className="min-w-0 truncate">{voice.name.replace(/^Voice:\s*/, "")}</span>
+      {voice.volume < 1 &&
+        (voice.volume === 0 ? (
+          <VolumeX size={10} className="shrink-0" />
+        ) : (
+          <span className="shrink-0 text-[9px] text-foreground/80">
+            {Math.round(voice.volume * 100)}%
+          </span>
+        ))}
       {trimmed && <span className="shrink-0 text-[9px]">trim</span>}
       <button
         type="button"
@@ -1924,6 +1954,7 @@ function voicesForCharacterClip(
       start: speech.start,
       name: line ? `Voice: ${line}` : (asset?.name ?? "Voice / lip sync"),
       duration: asset?.duration && asset.duration > 0 ? asset.duration : clip.duration,
+      volume: speech.volume ?? 1,
     };
   });
 }

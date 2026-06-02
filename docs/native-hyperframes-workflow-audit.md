@@ -16,6 +16,12 @@ movie. `editorMeta` is editor-only intent and UI state.
 
 - Necessary adapter: `Stage.tsx` resolves `asset:<id>` and composition file references to local blob URLs for browser preview.
 - Necessary adapter: `project-files.ts` stages `project.hf` as a temporary HyperFrames project directory for the CLI.
+- Runtime packaging boundary: `project-files.ts` strips packaged
+  `hyperframe-runtime.js` script tags from stored/imported HTML before preview or
+  render staging. Studio Boom lets the official HyperFrames bundler inject the
+  runtime with `bundleToSingleHtml(..., { runtime: "inline" })`, so project
+  source should not depend on a sibling runtime file being served by the Studio
+  app.
 - Necessary adapter: `render-plugin.ts` writes staged files to `/tmp` and invokes `hyperframes render`.
 - Stage interaction adapter: `player-editing.ts` previews drag/resize/rotate on
   the real player iframe element, using `PlayerAPI` first where available and a
@@ -78,6 +84,10 @@ movie. `editorMeta` is editor-only intent and UI state.
   Inspector source panels while keeping all generated output in `project.hf`.
 - Prompt pack and validation feedback for external AI workflows.
 - Editable HyperFrames clip-set import after custom block import is stable.
+- Runtime script cleanup: audit whether `hyperframe-runtime.js` stripping should
+  happen during ZIP import as canonical source normalization, stay only at
+  preview/render staging for backwards compatibility, or move upstream into the
+  HyperFrames bundler's embedded-runtime stripping list.
 - Crop and mirror only after confirming the native HyperFrames representation; do
   not fake them with a second renderer.
 - Timeline control polish: reset to start and draggable seek needle.

@@ -62,6 +62,8 @@ export interface ResolvedSpeech {
   start: number;
   duration: number;
   visemes: VisemeEntry[];
+  /** Playback volume, 0–1 (default 1). */
+  volume?: number;
 }
 
 interface MotionTarget {
@@ -182,6 +184,7 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
         speech.start,
         speech.duration,
         index,
+        speech.volume,
       ),
     );
   });
@@ -870,13 +873,17 @@ function buildSpeechAudio(
   start: number,
   duration: number,
   trackIndex: number,
+  volume?: number,
 ): string {
+  const volumeAttr = volume !== undefined && volume !== 1 ? ` data-volume="${esc(volume)}"` : "";
   return `<audio id="${esc(safeId(id))}" data-character-speech="true" data-start="${esc(
     start,
   )}" data-duration="${esc(duration)}" data-track-index="${esc(
     trackIndex,
-  )}" src="asset:${esc(mediaId)}" preload="auto"></audio>`;
+  )}"${volumeAttr} src="asset:${esc(mediaId)}" preload="auto"></audio>`;
 }
+
+type ResolvedAudioSpeech = { audioId: string; start: number; duration: number; volume?: number };
 
 /**
  * Resolve the build's speeches (or the legacy single voice) into the `<audio>`
@@ -888,18 +895,23 @@ function resolveSpeechTimeline(
   args: BuildCharacterCompositionArgs,
   duration: number,
 ): {
-  audioSpeeches: Array<{ audioId: string; start: number; duration: number }>;
+  audioSpeeches: ResolvedAudioSpeech[];
   combinedVisemes: VisemeEntry[];
 } {
   const clampT = (t: number) => Math.max(0, Math.min(duration, t));
   if (args.speeches && args.speeches.length > 0) {
-    const audioSpeeches: Array<{ audioId: string; start: number; duration: number }> = [];
+    const audioSpeeches: ResolvedAudioSpeech[] = [];
     const combinedVisemes: VisemeEntry[] = [];
     for (const speech of args.speeches) {
       const start = clampT(speech.start);
       const length = Math.min(duration - start, positiveNumber(speech.duration, duration));
       if (length <= 0) continue;
-      audioSpeeches.push({ audioId: speech.audioId, start, duration: length });
+      audioSpeeches.push({
+        audioId: speech.audioId,
+        start,
+        duration: length,
+        volume: speech.volume,
+      });
       for (const entry of speech.visemes) {
         combinedVisemes.push({ t: clampT(entry.t + start), v: entry.v });
       }

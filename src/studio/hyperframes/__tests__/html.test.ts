@@ -107,6 +107,138 @@ describe("parseStudioHtml", () => {
     });
   });
 
+  it("does not expose body root composition wrappers as timeline clips", () => {
+    const parsed = parseStudioHtml(`<!DOCTYPE html>
+<html lang="en">
+  <body>
+    <div
+      id="root"
+      data-composition-id="project-1"
+      data-width="1280"
+      data-height="720"
+      data-start="0"
+      data-duration="5"
+    >
+      <div
+        id="scene-1"
+        data-composition-id="scene-1"
+        data-composition-src="compositions/scene-1.html"
+        data-start="0"
+        data-duration="5"
+        data-track-index="0"
+      ></div>
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      window.__timelines["project-1"] = gsap.timeline({ paused: true });
+    </script>
+  </body>
+</html>`);
+
+    expect(parsed.elements).toHaveLength(1);
+    expect(parsed.elements[0]).toMatchObject({
+      id: "scene-1",
+      type: "composition",
+      compositionId: "scene-1",
+      src: "compositions/scene-1.html",
+    });
+  });
+
+  it("recognizes native inline composition clips without external sources", () => {
+    const parsed = parseStudioHtml(`<!DOCTYPE html>
+<html data-composition-id="project-1" data-composition-duration="5">
+  <body>
+    <div id="stage" data-composition-id="project-1">
+      <section
+        id="beat-phones"
+        data-composition-id="beat-phones"
+        data-start="0"
+        data-duration="5"
+        data-track-index="1"
+        data-width="1280"
+        data-height="720"
+      >
+        <div class="phones-grid">
+          <div>Phone one</div>
+          <div>Phone two</div>
+          <div>Phone three</div>
+        </div>
+      </section>
+    </div>
+  </body>
+</html>`);
+
+    expect(parsed.elements).toHaveLength(1);
+    expect(parsed.elements[0]).toMatchObject({
+      id: "beat-phones",
+      type: "composition",
+      compositionId: "beat-phones",
+      sourceWidth: 1280,
+      sourceHeight: 720,
+    });
+    expect("src" in parsed.elements[0]).toBe(false);
+  });
+
+  it("recognizes structured native timed HTML groups as composition clips", () => {
+    const parsed = parseStudioHtml(`<!DOCTYPE html>
+<html data-composition-id="project-1" data-composition-duration="5">
+  <body>
+    <div id="stage" data-composition-id="project-1">
+      <div
+        id="text-beat"
+        data-name="Intro text beat"
+        data-start="0"
+        data-duration="5"
+        data-track-index="1"
+        data-width="1280"
+        data-height="720"
+      >
+        <div class="scene-content">
+          <h1>Launch day</h1>
+          <p>Three screens, one story.</p>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>`);
+
+    expect(parsed.elements).toHaveLength(1);
+    expect(parsed.elements[0]).toMatchObject({
+      id: "text-beat",
+      type: "composition",
+      name: "Intro text beat",
+      sourceWidth: 1280,
+      sourceHeight: 720,
+    });
+  });
+
+  it("keeps simple native timed divs as text clips", () => {
+    const parsed = parseStudioHtml(`<!DOCTYPE html>
+<html data-composition-id="project-1" data-composition-duration="5">
+  <body>
+    <div id="stage" data-composition-id="project-1">
+      <div
+        id="caption"
+        data-start="0"
+        data-duration="5"
+        data-track-index="1"
+        data-width="1280"
+        data-height="120"
+      >Simple caption</div>
+    </div>
+  </body>
+</html>`);
+
+    expect(parsed.elements).toHaveLength(1);
+    expect(parsed.elements[0]).toMatchObject({
+      id: "caption",
+      type: "text",
+      content: "Simple caption",
+      sourceWidth: 1280,
+      sourceHeight: 120,
+    });
+  });
+
   it("patches native media sizing attrs for editor stage overlays", () => {
     const parsed = parseStudioHtml(`<!DOCTYPE html>
 <html data-composition-id="project-1" data-composition-duration="5">

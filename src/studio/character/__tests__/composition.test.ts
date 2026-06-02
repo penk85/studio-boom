@@ -340,6 +340,27 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).toContain('data-track-index="1"');
   });
 
+  it("emits data-volume on a speech below full volume, none at 1", () => {
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_clip-1",
+      clipId: "clip-1",
+      width: 300,
+      height: 450,
+      duration: 10,
+      character: makeCharacter(),
+      meta: { characterId: "char-1", poses: {}, autoBlink: false },
+      motionPresets: new Map(),
+      speeches: [
+        { audioId: "voice-quiet", start: 0, duration: 3, visemes: [{ t: 1, v: "A" }], volume: 0.4 },
+        { audioId: "voice-full", start: 4, duration: 3, visemes: [{ t: 1, v: "O" }], volume: 1 },
+      ],
+    });
+
+    expect(html).toContain('data-volume="0.4"');
+    // Full-volume speech omits data-volume (matches the core generator's rule).
+    expect(html).not.toContain('data-volume="1"');
+  });
+
   it("matches expression recorder face turns in the generated timeline", () => {
     const preset: MotionPreset = {
       id: "expression-turn",

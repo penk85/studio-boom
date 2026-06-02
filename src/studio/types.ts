@@ -448,6 +448,8 @@ export interface CharacterSpeech {
   audioId: ID;
   /** Start time in seconds within the character clip. */
   start: number;
+  /** Playback volume, 0–1 (default 1). */
+  volume?: number;
 }
 
 export interface CharacterClipMeta {
@@ -569,6 +571,8 @@ export interface EditorClip {
   character?: CharacterClipMeta;
   // Media-specific
   mediaId?: string;
+  /** Audio/video playback volume, 0–1 (default 1). */
+  volume?: number;
 }
 
 export type CharacterCompositionClip = EditorClip & {
@@ -613,7 +617,7 @@ export function deriveEditorClips(project: Project): EditorClip[] {
               ? "text"
               : "image");
     const scale = el.scale ?? 1;
-    const mediaEl = el as { sourceWidth?: number; sourceHeight?: number };
+    const mediaEl = el as { sourceWidth?: number; sourceHeight?: number; volume?: number };
     const studioEl = el as TimelineElement & { rotation?: number };
     const textEl = el as {
       content?: string;
@@ -656,6 +660,7 @@ export function deriveEditorClips(project: Project): EditorClip[] {
       compositionKind: meta.compositionKind,
       character: meta.character,
       mediaId: meta.mediaId,
+      volume: mediaEl.volume ?? 1,
     } satisfies EditorClip;
 
     return {
@@ -688,6 +693,8 @@ export interface BaseClip {
 export interface MediaClip extends BaseClip {
   kind: "image" | "video" | "audio";
   mediaId: ID;
+  /** Audio/video playback volume, 0–1 (default 1). */
+  volume?: number;
 }
 
 export interface TextClip extends BaseClip {

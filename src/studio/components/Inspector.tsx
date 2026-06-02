@@ -22,6 +22,7 @@ import {
   Sparkles,
   Trash2,
   Type,
+  Volume2,
   WandSparkles,
 } from "lucide-react";
 import { db } from "../db";
@@ -300,40 +301,59 @@ function ClipInspectorTab({ clip, onUpdate }: { clip: EditorClip; onUpdate: Clip
         </div>
       </PanelSection>
 
-      <PanelSection title="Frame" icon={Move}>
-        <div className="grid grid-cols-2 gap-2">
-          <Field label="X">
-            <NumberInput value={clip.x} onChange={(value) => onUpdate({ x: value })} />
-          </Field>
-          <Field label="Y">
-            <NumberInput value={clip.y} onChange={(value) => onUpdate({ y: value })} />
-          </Field>
-          <Field label="Width">
-            <NumberInput value={clip.width} onChange={(value) => onUpdate({ width: value })} />
-          </Field>
-          <Field label="Height">
-            <NumberInput value={clip.height} onChange={(value) => onUpdate({ height: value })} />
-          </Field>
-          <Field label="Rotation°">
-            <NumberInput
-              value={clip.rotation}
-              onChange={(value) => onUpdate({ rotation: value })}
-            />
-          </Field>
-        </div>
-      </PanelSection>
+      {clip.kind === "audio" ? (
+        <PanelSection title="Audio" icon={Volume2}>
+          <RangeField
+            label="Volume"
+            value={clip.volume ?? 1}
+            min={0}
+            max={1}
+            step={0.05}
+            displayValue={`${Math.round((clip.volume ?? 1) * 100)}%`}
+            onChange={(value) => onUpdate({ volume: value })}
+          />
+        </PanelSection>
+      ) : (
+        <>
+          <PanelSection title="Frame" icon={Move}>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="X">
+                <NumberInput value={clip.x} onChange={(value) => onUpdate({ x: value })} />
+              </Field>
+              <Field label="Y">
+                <NumberInput value={clip.y} onChange={(value) => onUpdate({ y: value })} />
+              </Field>
+              <Field label="Width">
+                <NumberInput value={clip.width} onChange={(value) => onUpdate({ width: value })} />
+              </Field>
+              <Field label="Height">
+                <NumberInput
+                  value={clip.height}
+                  onChange={(value) => onUpdate({ height: value })}
+                />
+              </Field>
+              <Field label="Rotation°">
+                <NumberInput
+                  value={clip.rotation}
+                  onChange={(value) => onUpdate({ rotation: value })}
+                />
+              </Field>
+            </div>
+          </PanelSection>
 
-      <PanelSection title="Look" icon={Paintbrush}>
-        <RangeField
-          label="Opacity"
-          value={clip.opacity}
-          min={0}
-          max={1}
-          step={0.05}
-          displayValue={`${Math.round(clip.opacity * 100)}%`}
-          onChange={(value) => onUpdate({ opacity: value })}
-        />
-      </PanelSection>
+          <PanelSection title="Look" icon={Paintbrush}>
+            <RangeField
+              label="Opacity"
+              value={clip.opacity}
+              min={0}
+              max={1}
+              step={0.05}
+              displayValue={`${Math.round(clip.opacity * 100)}%`}
+              onChange={(value) => onUpdate({ opacity: value })}
+            />
+          </PanelSection>
+        </>
+      )}
 
       {clip.kind === "text" && (
         <TextInspector

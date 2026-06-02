@@ -11,6 +11,7 @@ import {
   Save,
   Trash2,
   Upload,
+  Volume2,
   X,
 } from "lucide-react";
 import type { CharacterCompositionClip, CompositionClip, SavedVoice } from "../types";
@@ -34,6 +35,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
   const attachVoice = useStudio((s) => s.attachVoiceToCharacter);
   const moveSpeech = useStudio((s) => s.moveSpeech);
   const removeSpeech = useStudio((s) => s.removeSpeech);
+  const setSpeechVolume = useStudio((s) => s.setSpeechVolume);
   const saveProject = useStudio((s) => s.saveProject);
   const queriedAudio = useLiveQuery(() => db.media.where("kind").equals("audio").toArray(), []);
   const audioAssets = useMemo(
@@ -323,6 +325,24 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
           </ul>
           {selectedSpeech && (
             <div className="mt-2 border-t border-border pt-2">
+              <label className="mb-2 flex items-center gap-2 text-[10px] text-muted-foreground">
+                <Volume2 size={12} className="shrink-0" />
+                <span className="shrink-0">Volume</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={selectedSpeech.volume ?? 1}
+                  onChange={(e) =>
+                    setSpeechVolume(clip.id, selectedSpeech.id, Number(e.target.value))
+                  }
+                  className="flex-1"
+                />
+                <span className="w-8 shrink-0 text-right text-foreground">
+                  {Math.round((selectedSpeech.volume ?? 1) * 100)}%
+                </span>
+              </label>
               <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                 Lip sync — {selectedAsset?.name ?? "voice"}
               </div>

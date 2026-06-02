@@ -87,10 +87,82 @@ describe("createProjectFromHyperframesHtml", () => {
 });
 
 describe("createProjectFromHyperframesZip", () => {
+  it("imports native root wrapper projects as their scene clips", async () => {
+    const file = makeZipFile(
+      {
+        "index.html": `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Fitness App Showcase</title>
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="fitness-app-showcase"
+      data-width="1920"
+      data-height="1080"
+      data-duration="5.5"
+      data-start="0"
+    >
+      <div
+        id="scene-3"
+        data-composition-id="scene-3-phones"
+        data-composition-src="compositions/scene-3-phones.html"
+        data-start="0"
+        data-duration="5.5"
+        data-track-index="0"
+      ></div>
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      var tl = gsap.timeline({ paused: true });
+      window.__timelines["fitness-app-showcase"] = tl;
+    </script>
+    <script src="hyperframe-runtime.js"></script>
+  </body>
+</html>`,
+        "compositions/scene-3-phones.html": makeCompositionHtml("scene-3-phones", ""),
+      },
+      "Fitness App Showcase.zip",
+    );
+
+    const imported = await createProjectFromHyperframesZip(file, {
+      id: "zip-project",
+      now: 20,
+    });
+
+    expect(imported.clipCount).toBe(1);
+    expect(imported.project.name).toBe("Fitness App Showcase");
+    expect(imported.project.editorMeta.clips.root).toBeUndefined();
+    expect(imported.project.editorMeta.clips["scene-3"]).toMatchObject({
+      kind: "composition",
+      compositionId: "scene-3-phones",
+    });
+    expect(imported.project.hf.compositionHtml["scene-3-phones"]).toContain(
+      'data-composition-id="scene-3-phones"',
+    );
+  });
+
   it("imports root HTML, nested compositions, and local media from a ZIP", async () => {
     const file = makeZipFile(
       {
         "showcase/index.html": makeRootHtml(`
+          <div
+            id="text-beat"
+            data-name="Text beat"
+            data-start="0"
+            data-duration="4"
+            data-track-index="1"
+            data-width="1280"
+            data-height="720"
+          >
+            <div class="scene-content">
+              <h1>Three phones</h1>
+              <p>One coordinated launch.</p>
+            </div>
+          </div>
           <img
             id="visual"
             data-start="0"
@@ -144,6 +216,8 @@ describe("createProjectFromHyperframesZip", () => {
       'data-composition-file="compositions/card.html"',
     );
     expect(imported.project.hf.compositionHtml.card).toMatch(/url\(['"]asset:/);
+    expect(imported.project.editorMeta.clips["text-beat"]?.kind).toBe("composition");
+    expect(imported.project.editorMeta.clips["text-beat"]?.compositionId).toBeUndefined();
     expect(imported.project.editorMeta.clips.visual?.kind).toBe("image");
     expect(imported.project.editorMeta.clips["card-host"]?.kind).toBe("composition");
     expect(imported.project.editorMeta.clips["card-host"]?.compositionId).toBe("card");

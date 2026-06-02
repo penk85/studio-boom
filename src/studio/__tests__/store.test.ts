@@ -485,6 +485,30 @@ describe("createBlankProject", () => {
     });
   });
 
+  it("serializes media clip volume to data-volume and reads it back", () => {
+    const project = createBlankProject("Volume");
+    const asset = makeMediaAsset("media-1", "Clip");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([[asset.id, asset]]),
+    });
+    useStudio.getState().addMediaToTimeline(asset);
+    const clipId = deriveEditorClips(useStudio.getState().project!)[0]!.id;
+
+    useStudio.getState().updateClip(clipId, { volume: 0.5 });
+    let html = useStudio.getState().project!.hf.rootHtml;
+    expect(html).toContain('data-volume="0.5"');
+    expect(
+      deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clipId)!.volume,
+    ).toBe(0.5);
+
+    // Back to full volume removes the attribute (1 is the default).
+    useStudio.getState().updateClip(clipId, { volume: 1 });
+    html = useStudio.getState().project!.hf.rootHtml;
+    expect(html).not.toContain("data-volume=");
+  });
+
   it("keeps HyperFrames render tracks separate from visual z-index", () => {
     const project = createBlankProject("Track mapping");
     useStudio.setState({
