@@ -159,9 +159,13 @@ function patchElementFromNativeAttrs(element: TimelineElement, doc: Document): T
     parseFiniteNumber(el.getAttribute("data-height"));
   const fontSize = parseFiniteNumber(el.getAttribute("data-font-size"));
   const fontWeight = parseFiniteNumber(el.getAttribute("data-font-weight"));
+  const nativeCompositionSrc = readNativeCompositionSrc(el);
+  const nativeCompositionId = el.getAttribute("data-composition-id") ?? undefined;
+  const isNativeCompositionHost = Boolean(nativeCompositionId && nativeCompositionSrc);
 
-  return {
+  const patched = {
     ...element,
+    type: isNativeCompositionHost ? "composition" : element.type,
     duration: duration ?? element.duration,
     zIndex: visualZIndex ?? trackIndex ?? element.zIndex,
     x: x ?? element.x,
@@ -175,6 +179,28 @@ function patchElementFromNativeAttrs(element: TimelineElement, doc: Document): T
     fitToBounds:
       el.getAttribute("data-fit-to-bounds") === "true" ? true : getElementFitToBounds(element),
   } as unknown as TimelineElement;
+
+  if (!isNativeCompositionHost) return patched;
+
+  return {
+    ...patched,
+    type: "composition",
+    name: el.getAttribute("data-name") ?? nativeCompositionId ?? element.name,
+    src: nativeCompositionSrc,
+    compositionId: nativeCompositionId,
+    sourceWidth: sourceWidth ?? getElementSourceWidth(element),
+    sourceHeight: sourceHeight ?? getElementSourceHeight(element),
+  } as unknown as TimelineElement;
+}
+
+function readNativeCompositionSrc(el: Element): string | undefined {
+  return (
+    el.getAttribute("data-composition-src") ??
+    el.getAttribute("data-composition-file") ??
+    el.querySelector("iframe[src]")?.getAttribute("src") ??
+    el.getAttribute("src") ??
+    undefined
+  );
 }
 
 function getElementSourceWidth(element: TimelineElement): number | undefined {

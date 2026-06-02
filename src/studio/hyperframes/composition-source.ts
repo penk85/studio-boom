@@ -31,7 +31,8 @@ export function validateCompositionSourceHtml(
     return { ok: false, errors: ["DOMParser is not available in this environment."] };
   }
 
-  const doc = new DOMParser().parseFromString(trimmed, "text/html");
+  const validationSource = unwrapSingleTemplateForValidation(trimmed);
+  const doc = new DOMParser().parseFromString(validationSource, "text/html");
   const parserError = doc.querySelector("parsererror");
   if (parserError) errors.push("HTML could not be parsed.");
 
@@ -95,7 +96,10 @@ export function validateCompositionSourceHtml(
     return { ok: false, errors, compositionId, duration, width, height };
   }
 
-  const normalized = normalizeNativeHyperframesHtml(trimmed, { width, height });
+  const normalized =
+    validationSource === trimmed
+      ? normalizeNativeHyperframesHtml(trimmed, { width, height })
+      : serializeHtmlDocument(trimmed);
   return {
     ok: true,
     errors: [],
@@ -119,9 +123,41 @@ ${html}`;
 
 function findCompositionRoot(doc: Document): Element | null {
   if (doc.documentElement.hasAttribute("data-composition-id")) return doc.documentElement;
-  const templateRoot = doc.querySelector("template [data-composition-id]");
-  if (templateRoot) return templateRoot;
   return doc.querySelector("[data-composition-id]");
+}
+
+function unwrapSingleTemplateForValidation(html: string): string {
+  if (!html.toLowerCase().includes("<template")) return html;
+
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const container = doc.body ?? doc.documentElement;
+  const template =
+    getSingleMeaningfulElementChild(container) ?? getOnlyTemplateWhenBodyIsEmpty(doc);
+  if (template?.tagName !== "TEMPLATE") return html;
+  return (template as HTMLTemplateElement).innerHTML.trim();
+}
+
+function getOnlyTemplateWhenBodyIsEmpty(doc: Document): Element | null {
+  if (getSingleMeaningfulElementChild(doc.body)) return null;
+  const templates = Array.from(doc.querySelectorAll("template"));
+  return templates.length === 1 ? (templates[0] ?? null) : null;
+}
+
+function getSingleMeaningfulElementChild(container: ParentNode): Element | null {
+  let child: Element | null = null;
+  for (const node of Array.from(container.childNodes)) {
+    if (node.nodeType === Node.TEXT_NODE && !(node.textContent ?? "").trim()) continue;
+    if (node.nodeType === Node.COMMENT_NODE) continue;
+    if (node.nodeType !== Node.ELEMENT_NODE) return null;
+    if (child) return null;
+    child = node as Element;
+  }
+  return child;
+}
+
+function serializeHtmlDocument(html: string): string {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  return `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`;
 }
 
 function parsePositiveNumber(value: string | null | undefined): number | undefined {

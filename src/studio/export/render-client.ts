@@ -36,6 +36,29 @@ export async function renderProjectToMp4(project: Project): Promise<RenderProjec
   return result;
 }
 
+export async function renderProjectThumbnail(project: Project): Promise<Blob> {
+  const files = await buildHyperframesProjectFiles(project);
+  const form = new FormData();
+
+  for (const file of files.textFiles) {
+    form.append("file", new Blob([file.contents], { type: file.mimeType }), file.path);
+  }
+  for (const file of files.binaryFiles) {
+    form.append("file", file.blob, file.path);
+  }
+
+  const response = await fetch("/api/hyperframes/thumbnail", {
+    method: "POST",
+    body: form,
+  });
+
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+
+  return response.blob();
+}
+
 function downloadResult(url: string, filename: string): void {
   const anchor = document.createElement("a");
   anchor.href = url;

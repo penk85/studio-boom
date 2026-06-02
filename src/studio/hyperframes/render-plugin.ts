@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { build as buildWithEsbuild, transformSync } from "esbuild";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { parseHTML } from "linkedom";
+import puppeteer from "puppeteer";
 import type { Plugin } from "vite";
 import { findInlineScripts } from "./script-blocks";
 
@@ -65,6 +66,11 @@ export function hyperframesRenderPlugin(options: HyperframesRenderPluginOptions 
 
           if (req.method === "POST" && pathname === "/api/hyperframes/preview-bundle") {
             await handlePreviewBundle(req, res);
+            return;
+          }
+
+          if (req.method === "POST" && pathname === "/api/hyperframes/thumbnail") {
+            await handleThumbnail(req, res);
             return;
           }
 
@@ -253,6 +259,78 @@ async function handleRender(req: IncomingMessage, res: ServerResponse): Promise<
 
   rememberRenderResult(id, { outputPath, createdAt: Date.now(), log });
   sendJson(res, { url: `/api/hyperframes/result/${id}`, log });
+}
+
+async function handleThumbnail(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const id = randomUUID();
+  const rootDir = path.join(tmpdir(), "studio-boom-hyperframes", id);
+  const projectDir = path.join(rootDir, "project");
+  await writePostedProjectFiles(req, projectDir);
+  await assertProjectFilesNoTrackOverlaps(projectDir);
+  const scaleHints = await readCompositionScaleHints(projectDir);
+  const bundleToSingleHtml = await loadHyperframesBundler();
+  const bundledHtml = applyCompositionScaleWrappers(
+    await bundleToSingleHtml(projectDir, { runtime: "inline" }),
+    scaleHints,
+  );
+  assertInlineScriptSyntax(bundledHtml);
+  await writeFile(path.join(projectDir, "index.html"), bundledHtml);
+
+  const png = await captureProjectThumbnail(projectDir, bundledHtml);
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "image/png");
+  res.setHeader("Cache-Control", "no-store");
+  res.end(png);
+}
+
+async function captureProjectThumbnail(projectDir: string, html: string): Promise<Buffer> {
+  const dimensions = readRootCompositionDimensions(html);
+  const browser = await puppeteer.launch({
+    headless: "new",
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-crash-reporter"],
+  });
+
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({
+      width: dimensions.width,
+      height: dimensions.height,
+      deviceScaleFactor: 0.25,
+    });
+    await page.goto(pathToFileURL(path.join(projectDir, "index.html")).href, {
+      waitUntil: "networkidle0",
+      timeout: 10000,
+    });
+    await page.evaluate(() => {
+      const timelines = Object.values(window.__timelines || {}) as Array<{
+        pause?: () => void;
+        seek?: (time: number) => void;
+      }>;
+      for (const timeline of timelines) {
+        timeline.pause?.();
+        timeline.seek?.(0);
+      }
+    });
+    const png = await page.screenshot({ type: "png" });
+    return Buffer.from(png);
+  } finally {
+    await browser.close();
+  }
+}
+
+function readRootCompositionDimensions(html: string): { width: number; height: number } {
+  const { document } = parseHTML(html);
+  const root = document.querySelector("[data-composition-id]") ?? document.documentElement;
+  return {
+    width:
+      parsePositiveNumber(root.getAttribute("data-width")) ??
+      parsePositiveNumber(document.documentElement.getAttribute("data-width")) ??
+      1920,
+    height:
+      parsePositiveNumber(root.getAttribute("data-height")) ??
+      parsePositiveNumber(document.documentElement.getAttribute("data-height")) ??
+      1080,
+  };
 }
 
 async function writePostedProjectFiles(

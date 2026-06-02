@@ -58,6 +58,15 @@ HTML generation, GSAP, or element mutation code.**
 React components and hooks for building HyperFrames editors. **Use these directly —
 do not reimplement player, timeline, or controls.**
 
+Studio Boom should wrap and extend HyperFrames Studio primitives rather than
+recreating working generic editor mechanics. Before adding custom timeline,
+preview, source-editing, property-panel, file-tree, nested composition, or playback
+behavior, audit whether `@hyperframes/studio`, `@hyperframes/core`,
+`@hyperframes/player`, the HyperFrames CLI, or registry tooling already provides a
+solid primitive. Keep custom Studio Boom code focused on local-first persistence,
+media/blob management, character rigs, speech/lip-sync workflows, dashboard/project
+UX, import/export UX, and higher-level creator workflows.
+
 **Components in use:**
 
 - `PlayerControls` — play/pause/seek bar. Requires `onTogglePlay` and `onSeek`

@@ -32,6 +32,27 @@ describe("validateCompositionSourceHtml", () => {
     expect(result.html).toContain('data-composition-id="ai-title"');
   });
 
+  it("accepts a template-wrapped reusable HyperFrames composition source", () => {
+    const result = validateCompositionSourceHtml(
+      `<template id="ai-title-template">
+        <div data-composition-id="ai-title" data-width="1920" data-height="1080">
+          <div class="title">AI Title</div>
+          <script>
+            const tl = gsap.timeline({ paused: true });
+            window.__timelines = window.__timelines || {};
+            window.__timelines["ai-title"] = tl;
+          </script>
+        </div>
+      </template>`,
+      defaults,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.compositionId).toBe("ai-title");
+    expect(result.html).toContain("<template");
+    expect(result.html).toContain('data-composition-id="ai-title"');
+  });
+
   it("rejects timed child clips without track indexes", () => {
     const result = validateCompositionSourceHtml(
       `<!DOCTYPE html>

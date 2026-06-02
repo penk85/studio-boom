@@ -14,6 +14,7 @@ import type {
 
 class StudioDB extends Dexie {
   projects!: Table<Project, string>;
+  projectThumbnails!: Table<ProjectThumbnailRow, string>;
   characters!: Table<CharacterPreset, string>;
   motionPresets!: Table<MotionPreset, string>;
   media!: Table<MediaAsset, string>;
@@ -31,10 +32,28 @@ class StudioDB extends Dexie {
       savedVoices: "id, voiceId, name, createdAt",
       movements: null,
     });
+    this.version(9).stores({
+      projects: "id, name, updatedAt",
+      projectThumbnails: "projectId, cacheKey, generatedAt",
+      characters: "id, name, updatedAt",
+      motionPresets: "id, name, category, createdAt",
+      media: "id, name, kind, createdAt",
+      mediaBlobs: "id",
+      savedVoices: "id, voiceId, name, createdAt",
+      movements: null,
+    });
   }
 }
 
 export const db = new StudioDB();
+
+export interface ProjectThumbnailRow {
+  projectId: string;
+  cacheKey: string;
+  blob: Blob;
+  mimeType: string;
+  generatedAt: number;
+}
 
 export const uid = () => {
   const uuid =

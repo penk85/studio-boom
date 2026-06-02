@@ -77,6 +77,36 @@ describe("parseStudioHtml", () => {
     expect(html).toContain('data-height="600"');
   });
 
+  it("recognizes native HyperFrames composition hosts without data-type", () => {
+    const parsed = parseStudioHtml(`<!DOCTYPE html>
+<html data-composition-id="project-1" data-composition-duration="5">
+  <body>
+    <div id="stage" data-composition-id="project-1">
+      <div
+        id="scene-1"
+        data-composition-id="scene-1"
+        data-composition-src="compositions/scene-1.html"
+        data-start="0"
+        data-duration="5"
+        data-track-index="1"
+        data-width="1280"
+        data-height="720"
+      ></div>
+    </div>
+  </body>
+</html>`);
+
+    expect(parsed.elements).toHaveLength(1);
+    expect(parsed.elements[0]).toMatchObject({
+      id: "scene-1",
+      type: "composition",
+      src: "compositions/scene-1.html",
+      compositionId: "scene-1",
+      sourceWidth: 1280,
+      sourceHeight: 720,
+    });
+  });
+
   it("patches native media sizing attrs for editor stage overlays", () => {
     const parsed = parseStudioHtml(`<!DOCTYPE html>
 <html data-composition-id="project-1" data-composition-duration="5">

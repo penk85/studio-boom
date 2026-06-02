@@ -446,6 +446,7 @@ function laneHasOverlap(
 export function syncProjectRenderTrackIndices(project: Project): Project {
   if (!project.hf.rootHtml || typeof DOMParser === "undefined") return project;
 
+  project = repairProjectClipMetadataFromHtml(project);
   project = repairProjectTimelineLanes(project);
   const doc = new DOMParser().parseFromString(project.hf.rootHtml, "text/html");
   let changed = false;
@@ -473,6 +474,59 @@ export function syncProjectRenderTrackIndices(project: Project): Project {
       rootHtml: normalizedRootHtml,
     },
   };
+}
+
+function repairProjectClipMetadataFromHtml(project: Project): Project {
+  const { elements } = parseStudioHtml(project.hf.rootHtml);
+  if (elements.length === 0) return project;
+
+  const nextClipsMeta: Record<string, ClipEditorMeta> = { ...project.editorMeta.clips };
+  let changed = false;
+
+  for (const element of elements) {
+    const canonicalKind = clipKindForTimelineElement(element);
+    const existingMeta = nextClipsMeta[element.id] ?? {};
+    let nextMeta = existingMeta;
+
+    if (nextMeta.kind !== canonicalKind) {
+      nextMeta = { ...nextMeta, kind: canonicalKind };
+      changed = true;
+    }
+
+    if (canonicalKind === "composition") {
+      const compositionId =
+        "compositionId" in element && typeof element.compositionId === "string"
+          ? element.compositionId
+          : undefined;
+      if (compositionId && nextMeta.compositionId !== compositionId) {
+        nextMeta = { ...nextMeta, compositionId };
+        changed = true;
+      }
+      if (!nextMeta.compositionKind) {
+        nextMeta = { ...nextMeta, compositionKind: "user-composition" };
+        changed = true;
+      }
+    }
+
+    if (nextMeta !== existingMeta) nextClipsMeta[element.id] = nextMeta;
+  }
+
+  if (!changed) return project;
+  return {
+    ...project,
+    editorMeta: {
+      ...project.editorMeta,
+      clips: nextClipsMeta,
+    },
+  };
+}
+
+function clipKindForTimelineElement(element: TimelineElement): NonNullable<ClipEditorMeta["kind"]> {
+  if (element.type === "composition") return "composition";
+  if (element.type === "audio") return "audio";
+  if (element.type === "video") return "video";
+  if (element.type === "text") return "text";
+  return "image";
 }
 
 function buildTimelineElement(
@@ -647,6 +701,8 @@ export interface ProjectMutationOptions {
   history?: boolean;
 }
 
+export type SaveStatus = "saved" | "saving" | "error";
+
 export type ClipKeyframeValuePatch = ClipKeyframeDisplayValues & {
   ease?: string;
 };
@@ -665,6 +721,9 @@ interface StudioState {
   zoom: number;
   historyPast: HistoryEntry[];
   historyFuture: HistoryEntry[];
+  saveStatus: SaveStatus;
+  lastSavedAt: number | null;
+  saveError: string | null;
 
   currentModal: ModalState;
   openModal: (modal: Exclude<ModalState, null>) => void;
@@ -672,7 +731,7 @@ interface StudioState {
 
   loadProject: (id: string) => Promise<void>;
   newProject: () => Promise<void>;
-  saveProject: () => Promise<void>;
+  saveProject: (expectedGeneration?: number) => Promise<void>;
 
   selectClip: (id: string | null) => void;
   selectKeyframe: (selection: ClipKeyframeSelection | null) => void;
@@ -798,11 +857,15 @@ interface StudioState {
 
 const HISTORY_LIMIT = 50;
 let saveTimer: number | undefined;
-const scheduleSave = (get: () => StudioState) => {
+let saveGeneration = 0;
+const scheduleSave = (get: () => StudioState, set: (partial: Partial<StudioState>) => void) => {
   if (typeof window === "undefined") return;
+  saveGeneration += 1;
+  const generation = saveGeneration;
+  set({ saveStatus: "saving", saveError: null });
   clearTimeout(saveTimer);
   saveTimer = window.setTimeout(() => {
-    void get().saveProject();
+    void get().saveProject(generation);
   }, 500);
 };
 
@@ -831,7 +894,7 @@ function applyClipLayerMove(
     updatedAt: Date.now(),
   };
   set({ project: newProject });
-  scheduleSave(get);
+  scheduleSave(get, set);
 }
 
 const trackIndexFor = (tracks: TrackMeta[], kind: TrackKind) =>
@@ -872,6 +935,9 @@ export const useStudio = create<StudioState>((set, get) => ({
   zoom: 60,
   historyPast: [],
   historyFuture: [],
+  saveStatus: "saved",
+  lastSavedAt: null,
+  saveError: null,
   currentModal: null,
   openModal(modal) {
     set({ currentModal: modal });
@@ -885,6 +951,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (!storedProject) return;
     if (!isCurrentProjectShape(storedProject)) {
       await db.projects.delete(id);
+      await db.projectThumbnails.delete(id);
       await get().newProject();
       return;
     }
@@ -918,6 +985,9 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedKeyframe: null,
       historyPast: [],
       historyFuture: [],
+      saveStatus: "saved",
+      lastSavedAt: Date.now(),
+      saveError: null,
     });
   },
 
@@ -934,14 +1004,38 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedKeyframe: null,
       historyPast: [],
       historyFuture: [],
+      saveStatus: "saved",
+      lastSavedAt: Date.now(),
+      saveError: null,
     });
   },
 
-  async saveProject() {
+  async saveProject(expectedGeneration) {
     const p = get().project;
     if (!p) return;
+    const generation = expectedGeneration ?? saveGeneration;
+    if (expectedGeneration === undefined) clearTimeout(saveTimer);
+    set({ saveStatus: "saving", saveError: null });
     const updated = { ...p, updatedAt: Date.now() };
-    await db.projects.put(updated);
+    try {
+      await db.projects.put(updated);
+      const current = get().project;
+      const hasNewerEdits = saveGeneration !== generation;
+      set({
+        project: current === p ? updated : current,
+        saveStatus: hasNewerEdits ? "saving" : "saved",
+        lastSavedAt: Date.now(),
+        saveError: null,
+      });
+    } catch (error) {
+      if (saveGeneration === generation) {
+        set({
+          saveStatus: "error",
+          saveError: error instanceof Error ? error.message : String(error),
+        });
+      }
+      throw error;
+    }
   },
 
   selectClip(id) {
@@ -983,7 +1077,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       historyPast: state.historyPast.slice(0, -1),
       historyFuture: trimHistory([...state.historyFuture, current]),
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   redo() {
@@ -1001,7 +1095,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       historyPast: trimHistory([...state.historyPast, current]),
       historyFuture: state.historyFuture.slice(0, -1),
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   addClip(clip) {
@@ -1146,7 +1240,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedClipId: insertedId,
       selectedKeyframe: null,
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   updateClip(id, patch, options) {
@@ -1233,7 +1327,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       };
     }
     set({ project: newProject, tracks: newProject.editorMeta.tracks });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   attachVoiceToCharacter(clipId, audioId) {
@@ -1315,7 +1409,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     }
     if (project !== state.project) {
       set({ project: { ...project, updatedAt: Date.now() }, tracks: project.editorMeta.tracks });
-      scheduleSave(get);
+      scheduleSave(get, set);
     }
   },
 
@@ -1326,7 +1420,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (repaired === p) return false;
     const newProject = { ...repaired, updatedAt: Date.now() };
     set({ project: newProject, tracks: newProject.editorMeta.tracks });
-    scheduleSave(get);
+    scheduleSave(get, set);
     return true;
   },
 
@@ -1364,7 +1458,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedClipId: state.selectedClipId === id ? null : state.selectedClipId,
       selectedKeyframe: state.selectedKeyframe?.clipId === id ? null : state.selectedKeyframe,
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
 
     if (typeof window !== "undefined") {
       const removedMediaIds = new Set<string>();
@@ -1437,7 +1531,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedClipId: clipId,
       selectedKeyframe,
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
     return result.keyframeId;
   },
 
@@ -1470,7 +1564,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedClipId: selection.clipId,
       selectedKeyframe: selection,
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   moveClipKeyframe(selection, time, options) {
@@ -1503,7 +1597,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedClipId: selection.clipId,
       selectedKeyframe,
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   removeClipKeyframe(selection, options) {
@@ -1528,7 +1622,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       },
       selectedKeyframe: null,
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   addClipMotionStep(clipId, time, options) {
@@ -1565,7 +1659,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedClipId: clipId,
       selectedKeyframe,
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
     return selectedKeyframe;
   },
 
@@ -1604,7 +1698,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedClipId: clipId,
       selectedKeyframe,
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
     return selectedKeyframe;
   },
 
@@ -1639,7 +1733,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedClipId: clipId,
       selectedKeyframe,
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
     return selectedKeyframe;
   },
 
@@ -1674,7 +1768,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedClipId: clipId,
       selectedKeyframe,
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
     return selectedKeyframe;
   },
 
@@ -1701,7 +1795,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       },
       selectedClipId: clipId,
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   setClipMotionStepPathStyle(clipId, motionId, pathStyle, options) {
@@ -1727,7 +1821,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       },
       selectedClipId: clipId,
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   removeClipMotionStep(clipId, motionId, options) {
@@ -1754,7 +1848,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedClipId: clipId,
       selectedKeyframe: null,
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   removeClipMotionCheckpoint(clipId, motionId, checkpointId, options) {
@@ -1781,7 +1875,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedClipId: clipId,
       selectedKeyframe: null,
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   updateRootHtml(html, options) {
@@ -1798,7 +1892,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         updatedAt: Date.now(),
       },
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   updateCompositionHtml(compositionId, html, options) {
@@ -1831,7 +1925,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         updatedAt: Date.now(),
       },
     });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   addMediaToTimeline(asset, trackIndex, insertAtTime = 0) {
@@ -1883,7 +1977,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       ? refreshProjectAssets(state.project, state.characters, mediaAssets)
       : null;
     set({ mediaAssets, project });
-    if (project && project !== state.project) scheduleSave(get);
+    if (project && project !== state.project) scheduleSave(get, set);
   },
 
   syncMediaAssets(assets) {
@@ -1916,7 +2010,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       ? refreshProjectAssets(state.project, state.characters, mediaAssets)
       : null;
     set({ mediaAssets, project });
-    if (project && project !== state.project) scheduleSave(get);
+    if (project && project !== state.project) scheduleSave(get, set);
   },
 
   registerCharacterPreset(character) {
@@ -1933,7 +2027,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         )
       : null;
     set({ characters, project });
-    if (project && project !== state.project) scheduleSave(get);
+    if (project && project !== state.project) scheduleSave(get, set);
   },
 
   unregisterCharacterPreset(id) {
@@ -1973,7 +2067,7 @@ export const useStudio = create<StudioState>((set, get) => ({
           )
         : null;
       set({ characters, project });
-      if (project && project !== state.project) scheduleSave(get);
+      if (project && project !== state.project) scheduleSave(get, set);
     }
   },
 
@@ -1990,7 +2084,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         )
       : null;
     set({ motionPresets, project });
-    if (project && project !== state.project) scheduleSave(get);
+    if (project && project !== state.project) scheduleSave(get, set);
   },
 
   syncMotionPresets(presets) {
@@ -2022,7 +2116,7 @@ export const useStudio = create<StudioState>((set, get) => ({
           )
         : null;
       set({ motionPresets, project });
-      if (project && project !== state.project) scheduleSave(get);
+      if (project && project !== state.project) scheduleSave(get, set);
     }
   },
 
@@ -2036,7 +2130,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     const editorMeta = { ...p.editorMeta, tracks: newTracks };
     const newProject: Project = { ...p, editorMeta, updatedAt: Date.now() };
     set({ project: newProject, tracks: newTracks });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   removeLane(trackIndex, laneIndex) {
@@ -2069,7 +2163,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     const editorMeta = { ...p.editorMeta, tracks: newTracks, clips: newClipsMeta };
     const newProject: Project = { ...p, editorMeta, updatedAt: Date.now() };
     set({ project: newProject, tracks: newTracks });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   setProjectMeta(patch, options) {
@@ -2091,7 +2185,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       updatedAt: Date.now(),
     };
     set({ project: newProject });
-    scheduleSave(get);
+    scheduleSave(get, set);
   },
 
   setZoom(z) {

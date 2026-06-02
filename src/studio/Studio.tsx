@@ -1,7 +1,6 @@
 // The studio shell — three-pane layout with a timeline at the bottom.
 import { useEffect } from "react";
 import { useTimelinePlayer } from "@hyperframes/studio";
-import { db, garbageCollectUnusedInternalMedia } from "./db";
 import { useStudio } from "./store";
 import { Library } from "./components/Library";
 import { Stage } from "./components/Stage";
@@ -9,7 +8,11 @@ import { Inspector } from "./components/Inspector";
 import { Timeline } from "./components/Timeline";
 import { TopBar } from "./components/TopBar";
 
-export function Studio() {
+interface StudioProps {
+  onBackToProjects?: () => void;
+}
+
+export function Studio({ onBackToProjects }: StudioProps) {
   const project = useStudio((s) => s.project);
   const undo = useStudio((s) => s.undo);
   const redo = useStudio((s) => s.redo);
@@ -17,15 +20,6 @@ export function Studio() {
   // PlayerControls and usePlayerStore. Stage bridges this ref to the
   // <hyperframes-player> iframe; Timeline passes togglePlay/seek to PlayerControls.
   const { iframeRef, togglePlay, seek, onIframeLoad } = useTimelinePlayer();
-
-  useEffect(() => {
-    (async () => {
-      const recent = await db.projects.orderBy("updatedAt").reverse().first();
-      if (recent) await useStudio.getState().loadProject(recent.id);
-      else await useStudio.getState().newProject();
-      void garbageCollectUnusedInternalMedia();
-    })();
-  }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -60,7 +54,7 @@ export function Studio() {
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
-      <TopBar />
+      <TopBar onBackToProjects={onBackToProjects} />
       <div className="flex min-h-0 flex-1">
         <aside className="w-60 shrink-0 border-r border-border">
           <Library />

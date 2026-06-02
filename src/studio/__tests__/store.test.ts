@@ -588,6 +588,52 @@ describe("createBlankProject", () => {
     expect(doc.getElementById("image-b")?.getAttribute("data-track-index")).toBe("1004");
   });
 
+  it("repairs stale editor metadata for native composition hosts", () => {
+    const project = createBlankProject("Composition metadata repair");
+    const rootHtml = `<!DOCTYPE html>
+<html data-composition-id="${project.id}" data-composition-duration="8">
+  <body>
+    <div id="stage" data-composition-id="${project.id}" data-start="0" data-duration="8">
+      <div
+        id="scene-host"
+        data-composition-id="scene-1"
+        data-composition-src="compositions/scene-1.html"
+        data-start="0"
+        data-duration="8"
+        data-track-index="1000"
+        data-width="1280"
+        data-height="720"
+      ></div>
+    </div>
+  </body>
+</html>`;
+
+    const repaired = syncProjectRenderTrackIndices({
+      ...project,
+      hf: {
+        ...project.hf,
+        rootHtml,
+        compositionHtml: { "scene-1": "<template></template>" },
+      },
+      editorMeta: {
+        ...project.editorMeta,
+        clips: {
+          "scene-host": {
+            kind: "text",
+            uiTrackIndex: 1,
+            uiLaneIndex: 0,
+          },
+        },
+      },
+    });
+
+    expect(repaired.editorMeta.clips["scene-host"]).toMatchObject({
+      kind: "composition",
+      compositionKind: "user-composition",
+      compositionId: "scene-1",
+    });
+  });
+
   it("adds text clips through canonical rootHtml", () => {
     const project = createBlankProject("Text clip");
     useStudio.setState({

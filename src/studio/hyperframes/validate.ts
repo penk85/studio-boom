@@ -72,8 +72,12 @@ function validateCompositionFileReferences(hf: HyperFramesProject): string[] {
     Object.keys(hf.compositionHtml).map((id) => `compositions/${id}.html`),
   );
 
-  for (const el of Array.from(doc.querySelectorAll("[data-composition-src]"))) {
-    const src = el.getAttribute("data-composition-src")?.trim();
+  for (const el of Array.from(
+    doc.querySelectorAll("[data-composition-src], [data-composition-file]"),
+  )) {
+    const src =
+      el.getAttribute("data-composition-src")?.trim() ||
+      el.getAttribute("data-composition-file")?.trim();
     if (!src) continue;
     if (stagedCompositionPaths.has(src)) continue;
 

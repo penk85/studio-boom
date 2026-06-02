@@ -15,6 +15,13 @@ React is for editing the movie.
 HyperFrames is the movie.
 ```
 
+The product rule:
+
+```text
+Wrap and extend HyperFrames Studio primitives.
+Do not recreate working HyperFrames editor mechanics inside Studio Boom.
+```
+
 Studio Boom does not wait until export to convert React state into a video. The
 project you edit is already a HyperFrames project:
 
@@ -216,6 +223,25 @@ User edits in React
 React may draw editor chrome such as outlines, handles, and controls. It must not draw
 a second copy of the movie. Stage edits preview against the real player iframe element
 and commit back into canonical HTML.
+
+### Reuse-First Audit Rule
+
+Studio Boom should stay HyperFrames-first by using existing HyperFrames packages for
+generic editor mechanics whenever they are solid and exposed. Before adding or
+deepening timeline, preview, source-editing, property-panel, file-tree, nested
+composition, or playback behavior, audit whether `@hyperframes/studio`,
+`@hyperframes/core`, `@hyperframes/player`, the HyperFrames CLI, or registry tools
+already provide the primitive.
+
+Studio Boom should own the local-first product layer around those primitives:
+dashboard/project library, IndexedDB persistence, media blob management, character
+rigging, speech/lip-sync workflows, project import/export UX, creator-friendly
+starters, and higher-level beat/scene workflows.
+
+Custom Studio Boom editor code is justified when HyperFrames does not expose the
+behavior, when local-first persistence requires app-specific plumbing, or when the
+feature belongs to Studio Boom's creative workflow rather than generic HyperFrames
+editing.
 
 ## Development Scripts
 
