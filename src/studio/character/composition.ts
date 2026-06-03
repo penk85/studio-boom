@@ -14,6 +14,7 @@ import { validateCompositionSourceHtml } from "../hyperframes/composition-source
 import { normalizeNativeHyperframesHtml } from "../hyperframes/native";
 import {
   composeMotionsAt,
+  deltaForBone,
   deltaFor,
   generateMotionOccurrences,
   poseSwapFor,
@@ -33,6 +34,12 @@ import {
   poseToTransforms,
   type RigTransforms,
 } from "./mouth-libraries";
+import {
+  normalizeCharacterRig,
+  resolveSlotBinding,
+  slotDrawIndex,
+  type ResolvedSlotBinding,
+} from "./rig";
 
 const VISEMES: MouthViseme[] = ["rest", "A", "E", "O", "U", "MBP", "FV", "L", "WQ", "Smile"];
 const MOTION_SAMPLE_FPS = 12;
@@ -69,8 +76,10 @@ export interface ResolvedSpeech {
 }
 
 interface MotionTarget {
+  kind: "slot" | "bone";
   id: string;
   selector: string;
+  boneId?: string;
   slotId: string;
   role: PartRole;
   basePart?: CharacterPart;
@@ -79,6 +88,7 @@ interface MotionTarget {
   baseRotation: number;
   baseAnchorX: number;
   baseAnchorY: number;
+  depth?: number;
 }
 
 interface SlotTimeline {
@@ -293,6 +303,17 @@ function appendCharacterStyles(doc: Document): void {
   overflow: visible;
   pointer-events: none;
 }
+[data-character-bone] {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  overflow: visible;
+  pointer-events: none;
+  transform-origin: 0 0;
+  will-change: transform;
+}
 [data-character-slot] {
   position: absolute;
   overflow: visible;
@@ -327,11 +348,21 @@ function buildPuppetDom(
   scaleX: number,
   scaleY: number,
 ): PuppetDom {
+  const rig = normalizeCharacterRig(character);
   const out: PuppetDom = {
-    html: ['<div data-character-root="true" data-character-id="' + esc(character.id) + '">'],
+    html: [
+      `<div data-character-root="true" data-character-id="${esc(
+        character.id,
+      )}" data-character-rig-version="${esc(rig.version)}" data-character-angle="${esc(
+        rig.activeAngle,
+      )}">`,
+    ],
     motionTargets: [],
     slotTimelines: [],
   };
+  const slotHtmlByBone = new Map<string, string[]>();
+  const slotTargets: MotionTarget[] = [];
+  const boneTargets: MotionTarget[] = [];
 
   const slots = listCharacterSlots(character.parts).filter((slot) =>
     roleEnabledByManifest(slot.role, character.manifest),
@@ -341,9 +372,22 @@ function buildPuppetDom(
   );
 
   for (const slot of slots) {
-    if (slot.role === "eye") buildEyeSlot(out, slot, scaleX, scaleY);
-    else if (slot.role === "mouth") buildMouthSlot(out, character, slot, scaleX, scaleY);
-    else buildGenericSlot(out, slot, meta.poses, scaleX, scaleY);
+    const binding = resolveSlotBinding(rig, slot.id);
+    if (binding && !binding.visible) continue;
+    const beforeHtml = out.html.length;
+    const beforeTargets = out.motionTargets.length;
+    if (slot.role === "eye") buildEyeSlot(out, slot, scaleX, scaleY, binding, rig);
+    else if (slot.role === "mouth")
+      buildMouthSlot(out, character, slot, scaleX, scaleY, binding, rig);
+    else buildGenericSlot(out, slot, meta.poses, scaleX, scaleY, binding, rig);
+    const chunks = out.html.splice(beforeHtml);
+    const newTargets = out.motionTargets.splice(beforeTargets);
+    const boneId = binding?.effectiveBoneId ?? "bone:root";
+    slotHtmlByBone.set(boneId, [...(slotHtmlByBone.get(boneId) ?? []), ...chunks]);
+    slotTargets.push(...newTargets);
+    if (binding && newTargets[0]) {
+      boneTargets.push(boneTargetForSlotTarget(newTargets[0], binding));
+    }
   }
 
   if (!hasMouthSlot && character.mouthRig && character.mouthStyle !== "images") {
@@ -359,8 +403,90 @@ function buildPuppetDom(
     buildFallbackMouthRig(out, character, scaleX, scaleY);
   }
 
+  renderBoneTree(out.html, rig, slotHtmlByBone, scaleX, scaleY);
+  out.motionTargets.push(...uniqueMotionTargets([...slotTargets, ...boneTargets]));
   out.html.push("</div>");
   return out;
+}
+
+function renderBoneTree(
+  html: string[],
+  rig: ReturnType<typeof normalizeCharacterRig>,
+  slotHtmlByBone: Map<string, string[]>,
+  scaleX: number,
+  scaleY: number,
+): void {
+  const byParent = new Map<string, typeof rig.bones>();
+  for (const bone of rig.bones) {
+    const parent = bone.parentId ?? "__root__";
+    byParent.set(parent, [...(byParent.get(parent) ?? []), bone]);
+  }
+  const renderBone = (bone: (typeof rig.bones)[number]) => {
+    const override = bone.angleOverrides?.[rig.activeAngle];
+    const localX = override?.x ?? bone.x;
+    const localY = override?.y ?? bone.y;
+    const rotation = override?.rotation ?? bone.rotation;
+    const depth = override?.depth ?? bone.depth ?? 0;
+    const id = boneElementId(bone.id);
+    html.push(
+      `<div id="${esc(id)}" data-character-bone="true" data-character-bone-id="${esc(bone.id)}"${
+        bone.parentId ? ` data-character-parent-bone-id="${esc(bone.parentId)}"` : ""
+      } data-character-role="${esc(bone.role)}" data-character-depth="${esc(
+        depth,
+      )}" data-character-draw-order-index="${esc(boneZIndex(rig, bone.id))}" style="${esc(
+        styleString({
+          left: localX * scaleX,
+          top: localY * scaleY,
+          "z-index": boneZIndex(rig, bone.id),
+          transform: `rotate(${rotation}deg)`,
+        }),
+      )}">`,
+    );
+    for (const chunk of slotHtmlByBone.get(bone.id) ?? []) html.push(chunk);
+    for (const child of byParent.get(bone.id) ?? []) renderBone(child);
+    html.push("</div>");
+  };
+  const roots = byParent.get("__root__") ?? [];
+  for (const root of roots) renderBone(root);
+  for (const [boneId, chunks] of slotHtmlByBone.entries()) {
+    if (rig.bones.some((bone) => bone.id === boneId)) continue;
+    html.push(...chunks);
+  }
+}
+
+function boneTargetForSlotTarget(
+  target: MotionTarget,
+  binding: ResolvedSlotBinding | undefined,
+): MotionTarget {
+  if (!binding) return target;
+  return {
+    ...target,
+    kind: "bone",
+    id: boneElementId(binding.effectiveBoneId),
+    selector: `#${boneElementId(binding.effectiveBoneId)}`,
+    boneId: binding.effectiveBoneId,
+    baseRotation: 0,
+    baseAnchorX: 0,
+    baseAnchorY: 0,
+    depth: binding.effectiveDepth,
+  };
+}
+
+function uniqueMotionTargets(targets: MotionTarget[]): MotionTarget[] {
+  const out = new Map<string, MotionTarget>();
+  for (const target of targets) {
+    if (!out.has(target.selector)) out.set(target.selector, target);
+  }
+  return Array.from(out.values());
+}
+
+function boneZIndex(rig: ReturnType<typeof normalizeCharacterRig>, boneId: string): number {
+  const binding = rig.slotBindings.find((candidate) => candidate.boneId === boneId);
+  return binding ? slotDrawIndex(rig, binding.slotId, 0) : 0;
+}
+
+function boneElementId(boneId: string): string {
+  return `char-bone-${safeId(boneId)}`;
 }
 
 function lipSyncOwnsMouth(meta: CharacterClipMeta): boolean {
@@ -372,17 +498,27 @@ function buildEyeSlot(
   slot: CharacterSlotRef,
   scaleX: number,
   scaleY: number,
+  binding: ResolvedSlotBinding | undefined,
+  rig: ReturnType<typeof normalizeCharacterRig>,
 ): void {
   const variants = eyeVariantsForSlot(slot);
+  const anglePart = binding?.effectivePartId
+    ? slot.parts.find((part) => part.id === binding.effectivePartId)
+    : undefined;
   const openVariant = variants.find((variant) => variant.state === "open");
-  const basePart = openVariant?.part ?? variants[0]?.part;
+  const basePart = anglePart ?? openVariant?.part ?? variants[0]?.part;
   if (!basePart) return;
 
   const containerId = slotContainerId(slot.id);
   const variantIds: Record<string, string> = {};
   const variantParts: Record<string, CharacterPart> = {};
-  const activeState = openVariant?.state ?? variants[0].state;
-  out.html.push(openSlotContainer(containerId, slot, basePart, scaleX, scaleY));
+  const activeState =
+    anglePart?.eyeState ??
+    anglePart?.pose ??
+    anglePart?.id ??
+    openVariant?.state ??
+    variants[0].state;
+  out.html.push(openSlotContainer(containerId, slot, basePart, scaleX, scaleY, binding, rig));
   for (const { state, part } of variants) {
     const id = partElementId(slot.id, state);
     const keys = [state, part.id];
@@ -392,7 +528,16 @@ function buildEyeSlot(
       variantIds[key] = id;
       variantParts[key] = part;
     }
-    out.html.push(renderPartElement(id, part, basePart, state === activeState, scaleX, scaleY));
+    out.html.push(
+      renderPartElement(
+        id,
+        part,
+        basePart,
+        part.id === anglePart?.id || state === activeState,
+        scaleX,
+        scaleY,
+      ),
+    );
   }
   out.html.push("</div>");
   out.motionTargets.push({
@@ -417,22 +562,38 @@ function buildMouthSlot(
   slot: CharacterSlotRef,
   scaleX: number,
   scaleY: number,
+  binding: ResolvedSlotBinding | undefined,
+  rig: ReturnType<typeof normalizeCharacterRig>,
 ): void {
   if (character.mouthRig && character.mouthStyle === "rig") {
-    buildGeneratedMouthSlot(out, character, character.mouthRig.placement, slot.id, scaleX, scaleY);
+    buildGeneratedMouthSlot(
+      out,
+      character,
+      character.mouthRig.placement,
+      slot.id,
+      scaleX,
+      scaleY,
+      binding,
+      rig,
+    );
     return;
   }
 
   const visibleParts = slot.parts.filter((part) => part.visible);
+  const anglePart = binding?.effectivePartId
+    ? visibleParts.find((part) => part.id === binding.effectivePartId)
+    : undefined;
   const restPart =
-    visibleParts.find((part) => part.viseme === "rest" || part.pose === "rest") ?? visibleParts[0];
+    anglePart ??
+    visibleParts.find((part) => part.viseme === "rest" || part.pose === "rest") ??
+    visibleParts[0];
   if (!restPart) return;
 
   const containerId = slotContainerId(slot.id);
   const variants: Record<string, string> = {};
   const variantParts: Record<string, CharacterPart> = {};
   const renderedIds = new Set<string>();
-  out.html.push(openSlotContainer(containerId, slot, restPart, scaleX, scaleY));
+  out.html.push(openSlotContainer(containerId, slot, restPart, scaleX, scaleY, binding, rig));
   for (const viseme of VISEMES) {
     const part = visibleParts.find(
       (candidate) => candidate.viseme === viseme || candidate.pose === viseme,
@@ -495,6 +656,8 @@ function buildGeneratedMouthSlot(
   slotId: string,
   scaleX: number,
   scaleY: number,
+  binding?: ResolvedSlotBinding,
+  rig?: ReturnType<typeof normalizeCharacterRig>,
 ): void {
   const mouthRig = character.mouthRig;
   if (!mouthRig) return;
@@ -508,18 +671,29 @@ function buildGeneratedMouthSlot(
     teeth: `char-generated-mouth-${safeSlot}-teeth`,
     tongue: `char-generated-mouth-${safeSlot}-tongue`,
   };
+  const host = rig?.hostConstraints.find((constraint) => constraint.slotId === slotId);
+  const drawIndex = rig ? slotDrawIndex(rig, slotId, placement.zIndex) : placement.zIndex;
   const style = styleString({
-    left: placement.x * scaleX,
-    top: placement.y * scaleY,
+    left: (binding?.x ?? placement.x) * scaleX,
+    top: (binding?.y ?? placement.y) * scaleY,
     width: placement.width * scaleX,
     height: placement.height * scaleY,
-    "z-index": placement.zIndex,
+    "z-index": drawIndex,
     "transform-origin": "50% 50%",
+    transform: `rotate(${binding?.rotation ?? 0}deg) scale(${binding?.scaleX ?? 1}, ${
+      binding?.scaleY ?? 1
+    })`,
   });
   out.html.push(
     `<div id="${esc(containerId)}" data-character-slot="true" data-character-slot-id="${esc(
       slotId,
-    )}" data-character-role="mouth" data-character-generated-mouth="true" style="${esc(style)}">`,
+    )}" data-character-role="mouth" data-character-generated-mouth="true"${
+      binding ? ` data-character-bound-bone-id="${esc(binding.effectiveBoneId)}"` : ""
+    } data-character-depth="${esc(binding?.effectiveDepth ?? ("depth" in placement ? placement.depth : 0))}"${
+      host?.hostSlotId ? ` data-character-host-slot-id="${esc(host.hostSlotId)}"` : ""
+    }${host?.hostBoneId ? ` data-character-host-bone-id="${esc(host.hostBoneId)}"` : ""} data-character-draw-order-index="${esc(
+      drawIndex,
+    )}" style="${esc(style)}">`,
   );
   out.html.push(
     renderGeneratedMouthComponent(
@@ -566,6 +740,7 @@ function buildGeneratedMouthSlot(
   out.html.push("</div>");
   const targetPart = generatedMouthMotionTargetPart(slotId, placement);
   out.motionTargets.push({
+    kind: "slot",
     id: containerId,
     selector: `#${containerId}`,
     slotId,
@@ -662,6 +837,7 @@ function buildFallbackMouthRig(
   out.html.push("</div>");
   const targetPart = generatedMouthMotionTargetPart(slotId, placement);
   out.motionTargets.push({
+    kind: "slot",
     id: containerId,
     selector: `#${containerId}`,
     slotId,
@@ -694,20 +870,26 @@ function buildGenericSlot(
   poses: Record<string, string>,
   scaleX: number,
   scaleY: number,
+  binding: ResolvedSlotBinding | undefined,
+  rig: ReturnType<typeof normalizeCharacterRig>,
 ): void {
   const visibleParts = slot.parts.filter((part) => part.visible);
-  const activePose = poses[slot.id];
+  const activePose = binding?.effectivePartId ?? poses[slot.id];
   const activePart =
     (activePose
       ? visibleParts.find((part) => part.id === activePose || part.pose === activePose)
-      : undefined) ?? visibleParts[0];
+      : undefined) ??
+    (rig.activeAngle
+      ? visibleParts.find((part) => part.pose === rig.activeAngle || part.name === rig.activeAngle)
+      : undefined) ??
+    visibleParts[0];
   if (!activePart) return;
 
   const containerId = slotContainerId(slot.id);
   const variants: Record<string, string> = {};
   const variantParts: Record<string, CharacterPart> = {};
   const activeKey = variantKeyForPart(activePart);
-  out.html.push(openSlotContainer(containerId, slot, activePart, scaleX, scaleY));
+  out.html.push(openSlotContainer(containerId, slot, activePart, scaleX, scaleY, binding, rig));
   for (const part of visibleParts) {
     const key = variantKeyForPart(part);
     const id = partElementId(slot.id, key);
@@ -742,20 +924,34 @@ function openSlotContainer(
   basePart: CharacterPart,
   scaleX: number,
   scaleY: number,
+  binding: ResolvedSlotBinding | undefined,
+  rig: ReturnType<typeof normalizeCharacterRig>,
 ): string {
+  const host = rig.hostConstraints.find((constraint) => constraint.slotId === slot.id);
+  const drawIndex = slotDrawIndex(rig, slot.id, basePart.zIndex);
+  const left = binding ? binding.x : basePart.x;
+  const top = binding ? binding.y : basePart.y;
+  const rotation = binding ? binding.rotation : basePart.rotation;
+  const depth = binding ? binding.effectiveDepth : basePart.depth;
   return `<div id="${esc(containerId)}" data-character-slot="true" data-character-slot-id="${esc(
     slot.id,
+  )}"${
+    binding ? ` data-character-bound-bone-id="${esc(binding.effectiveBoneId)}"` : ""
+  } data-character-depth="${esc(depth)}"${
+    host?.hostSlotId ? ` data-character-host-slot-id="${esc(host.hostSlotId)}"` : ""
+  }${host?.hostBoneId ? ` data-character-host-bone-id="${esc(host.hostBoneId)}"` : ""} data-character-draw-order-index="${esc(
+    drawIndex,
   )}" data-character-role="${esc(slot.role)}" data-character-side="${esc(
     basePart.side ?? "",
   )}" style="${esc(
     styleString({
-      left: basePart.x * scaleX,
-      top: basePart.y * scaleY,
+      left: left * scaleX,
+      top: top * scaleY,
       width: basePart.width * scaleX,
       height: basePart.height * scaleY,
-      "z-index": basePart.zIndex,
+      "z-index": drawIndex,
       "transform-origin": `${basePart.anchorX * 100}% ${basePart.anchorY * 100}%`,
-      transform: `rotate(${basePart.rotation}deg)`,
+      transform: `rotate(${rotation}deg) scale(${binding?.scaleX ?? 1}, ${binding?.scaleY ?? 1})`,
     }),
   )}">`;
 }
@@ -859,6 +1055,7 @@ function motionTargetFor(
   basePart: CharacterPart,
 ): MotionTarget {
   return {
+    kind: "slot",
     id,
     selector: `#${id}`,
     slotId: slot.id,
@@ -1113,12 +1310,18 @@ function buildMotionFrame(
     time,
     slotStates,
     targets: motionTargets.map((target) => {
-      const delta = deltaFor(composed, target.role, target.slotId);
+      const delta =
+        target.kind === "bone"
+          ? deltaForBone(composed, target.role, target.slotId, target.boneId)
+          : deltaFor(composed, target.role, target.slotId);
       const activePart = activePartForMotionTarget(target, composed, slotStates);
       const turn = activePart
         ? faceTurnMotionForPart(activePart, composed.faceTurnX, canvasWidth)
         : null;
-      const { originX, originY } = transformOriginForMotionTarget(target, activePart, delta);
+      const { originX, originY } =
+        target.kind === "bone"
+          ? { originX: 0, originY: 0 }
+          : transformOriginForMotionTarget(target, activePart, delta);
       const vars: GsapVars = {
         x: round((delta.dx + (turn?.dx ?? 0)) * scaleX, 3),
         y: round((delta.dy + (turn?.dy ?? 0)) * scaleY, 3),
@@ -1162,13 +1365,23 @@ function activePartForMotionTarget(
   slotStates: Map<string, string>,
 ): CharacterPart | undefined {
   const state = slotStates.get(target.slotId);
-  if (state && target.variantParts?.[state]) return target.variantParts[state];
+  if (state && target.variantParts?.[state])
+    return partWithTargetDepth(target.variantParts[state], target);
   const swap = poseSwapFor(composed, target.role, target.slotId);
-  if (swap && target.variantParts?.[swap]) return target.variantParts[swap];
+  if (swap && target.variantParts?.[swap])
+    return partWithTargetDepth(target.variantParts[swap], target);
   if (target.defaultVariantKey && target.variantParts?.[target.defaultVariantKey]) {
-    return target.variantParts[target.defaultVariantKey];
+    return partWithTargetDepth(target.variantParts[target.defaultVariantKey], target);
   }
-  return target.basePart;
+  return partWithTargetDepth(target.basePart, target);
+}
+
+function partWithTargetDepth(
+  part: CharacterPart | undefined,
+  target: MotionTarget,
+): CharacterPart | undefined {
+  if (!part || target.depth === undefined) return part;
+  return { ...part, depth: target.depth };
 }
 
 function transformOriginForMotionTarget(

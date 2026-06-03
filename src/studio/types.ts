@@ -198,6 +198,98 @@ export interface HeadVariant {
   featureOffsetY?: number;
 }
 
+export type CharacterAngle = HeadDirection;
+
+export interface CharacterAngleTransformOverride {
+  x?: number;
+  y?: number;
+  rotation?: number;
+  scaleX?: number;
+  scaleY?: number;
+  depth?: number;
+  visible?: boolean;
+}
+
+export interface CharacterBone {
+  id: ID;
+  name: string;
+  role: PartRole | "root";
+  side?: CharacterPart["side"];
+  parentId?: ID;
+  /** Local rest position relative to parent bone, in character canvas pixels. */
+  x: number;
+  y: number;
+  rotation: number;
+  length?: number;
+  /** Parallax depth override for content driven by this bone. */
+  depth?: number;
+  angleOverrides?: Partial<Record<CharacterAngle, CharacterAngleTransformOverride>>;
+}
+
+export interface CharacterSlotBinding {
+  slotId: ID;
+  boneId: ID;
+  /** Local attachment position relative to the bound bone, in character canvas pixels. */
+  x: number;
+  y: number;
+  rotation: number;
+  scaleX: number;
+  scaleY: number;
+  depth: number;
+  /** Active variant part for this binding, mostly used by discrete angle states. */
+  partId?: ID;
+  angleOverrides?: Partial<
+    Record<
+      CharacterAngle,
+      CharacterAngleTransformOverride & {
+        boneId?: ID;
+        partId?: ID;
+        hostConstraintId?: ID;
+      }
+    >
+  >;
+}
+
+export interface CharacterHostConstraint {
+  id: ID;
+  slotId: ID;
+  hostSlotId?: ID;
+  hostBoneId?: ID;
+  mode: "bounds" | "mask";
+  padding?: number;
+  angleOverrides?: Partial<
+    Record<
+      CharacterAngle,
+      {
+        hostSlotId?: ID;
+        hostBoneId?: ID;
+        mode?: "bounds" | "mask";
+        padding?: number;
+      }
+    >
+  >;
+}
+
+export interface CharacterRig {
+  version: 1;
+  activeAngle: CharacterAngle;
+  bones: CharacterBone[];
+  slotBindings: CharacterSlotBinding[];
+  drawOrder: ID[];
+  hostConstraints: CharacterHostConstraint[];
+  /** Reserved shape for future mesh/control-point binding support. */
+  mesh?: {
+    version: 1;
+    controlBindings: Array<{
+      id: ID;
+      boneId: ID;
+      x: number;
+      y: number;
+      weight: number;
+    }>;
+  };
+}
+
 /** Pose parameters for one generated mouth viseme. All values 0..1 unless noted. */
 export interface MouthPose {
   open: number; // 0=closed → 1=max jaw drop
@@ -266,6 +358,8 @@ export interface CharacterPreset {
   parallaxEnabled?: boolean;
   /** Per-character parallax config. */
   parallax: ParallaxConfig;
+  /** True FK skeleton, slot attachments, draw order, host constraints, and angle metadata. */
+  rig?: CharacterRig;
   /** Optional head variants for head-turn animations. */
   headVariants?: HeadVariant[];
   /** Where generated fallback lip-sync mouth shapes should appear. */
@@ -298,6 +392,10 @@ export interface MotionKeyframe {
 
 /** Per-part transform track inside a reusable motion preset. */
 export interface MotionTrack {
+  /** Rig V1 target. Defaults to "slot" for older part/slot tracks. */
+  target?: "slot" | "bone" | "camera";
+  /** Exact bone target when `target` is "bone". */
+  boneId?: ID;
   /** Which part role to drive (e.g. "mouth", "armR", "brow"). */
   partRole: PartRole | "__camera";
   /** Optional exact slot target for character-specific presets. */
@@ -318,6 +416,10 @@ export type MotionCategory =
 /** Recorded pose snapshot used by the Motion Preset Recorder.
  *  Each part override stores a *delta* relative to that part's rest pose. */
 export interface RecordedPartOverride {
+  /** Rig V1 target. Defaults to "slot" for older part/slot overrides. */
+  target?: "slot" | "bone";
+  /** Exact bone target when `target` is "bone". */
+  boneId?: ID;
   partRole: PartRole;
   /** Exact slot target when this was recorded against a specific character. */
   slotId?: ID;

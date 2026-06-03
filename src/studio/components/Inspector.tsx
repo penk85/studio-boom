@@ -29,6 +29,7 @@ import { db } from "../db";
 import { useStudio } from "../store";
 import type {
   AnyClip,
+  CharacterAngle,
   CharacterCompositionClip,
   ClipKeyframeSelection,
   CharacterPreset,
@@ -54,6 +55,13 @@ import {
   type ClipMotionCheckpoint,
 } from "../hyperframes/keyframes";
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
+import {
+  CHARACTER_ANGLES,
+  buildDefaultRig,
+  normalizeCharacterRig,
+  setBoneDepth,
+  setSlotDepth,
+} from "../character/rig";
 
 type InspectorTab = "clip" | "speech" | "motion" | "advanced";
 type ClipUpdater = (patch: Partial<AnyClip>) => void;
@@ -134,7 +142,10 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
             />
 
             {activeTab === "clip" && (
-              <ClipInspectorTab clip={clip} onUpdate={(patch) => update(clip.id, patch)} />
+              <>
+                <ClipInspectorTab clip={clip} onUpdate={(patch) => update(clip.id, patch)} />
+                {characterClip && character && <CharacterRigPresetPanel character={character} />}
+              </>
             )}
 
             {activeTab === "speech" && characterClip && <VoiceLipSyncPanel clip={characterClip} />}
@@ -430,8 +441,73 @@ function CharacterMotionTab({
           }
         />
       </PanelSection>
+      {character && <CharacterRigPresetPanel character={character} />}
       {character && <MotionPanel clip={characterClip} character={character} />}
     </>
+  );
+}
+
+function CharacterRigPresetPanel({ character }: { character: CharacterPreset }) {
+  const registerCharacterPreset = useStudio((s) => s.registerCharacterPreset);
+  const rig = normalizeCharacterRig(character);
+  const rootBone = rig.bones.find((bone) => bone.role === "root") ?? rig.bones[0];
+  const firstBinding = rig.slotBindings[0];
+  const saveCharacterPatch = (patch: Partial<CharacterPreset>) => {
+    const next: CharacterPreset = { ...character, ...patch, updatedAt: Date.now() };
+    void db.characters.put(next).then(() => registerCharacterPreset(next));
+  };
+
+  return (
+    <PanelSection title="Rig" icon={SlidersHorizontal}>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Angle">
+          <select
+            value={rig.activeAngle}
+            onChange={(event) =>
+              saveCharacterPatch({
+                rig: { ...rig, activeAngle: event.target.value as CharacterAngle },
+              })
+            }
+            className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+          >
+            {CHARACTER_ANGLES.map((angle) => (
+              <option key={angle} value={angle}>
+                {angle}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Bones">
+          <button
+            type="button"
+            onClick={() => saveCharacterPatch({ rig: buildDefaultRig(character) })}
+            className="w-full rounded border border-border px-2 py-1 hover:bg-panel-2"
+          >
+            Rebuild {rig.bones.length}
+          </button>
+        </Field>
+        {rootBone && (
+          <Field label="Root Depth">
+            <NumberInput
+              value={rootBone.angleOverrides?.[rig.activeAngle]?.depth ?? rootBone.depth ?? 0}
+              onChange={(depth) =>
+                saveCharacterPatch({ rig: setBoneDepth(rig, rootBone.id, depth) })
+              }
+            />
+          </Field>
+        )}
+        {firstBinding && (
+          <Field label="Slot Depth">
+            <NumberInput
+              value={firstBinding.angleOverrides?.[rig.activeAngle]?.depth ?? firstBinding.depth}
+              onChange={(depth) =>
+                saveCharacterPatch({ rig: setSlotDepth(rig, firstBinding.slotId, depth) })
+              }
+            />
+          </Field>
+        )}
+      </div>
+    </PanelSection>
   );
 }
 

@@ -5,6 +5,7 @@ import { createBlankCharacter, makePart } from "../character-utils";
 import { buildCharacterCompositionHtml } from "../composition";
 import { blinkWindowsForClip } from "../eye-state";
 import { createDefaultMouthRig } from "../mouth-libraries";
+import { buildDefaultRig } from "../rig";
 
 function makeCharacter() {
   return {
@@ -103,6 +104,9 @@ function extractScene(html: string) {
   expect(match).not.toBeNull();
   return JSON.parse(match![1]) as {
     initialTargets: Array<{ selector: string; vars: Record<string, number | string> }>;
+    motionSegments: Array<{
+      targets: Array<{ selector: string; vars: Record<string, number | string> }>;
+    }>;
     slotEvents: Array<{
       slotId: string;
       key: string;
@@ -138,6 +142,231 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).toContain("tl.to({}, { duration: S.duration }, 0);");
     expect(html).not.toMatch(/repeat\s*:\s*-1/);
     expect(html).not.toMatch(/\basync\b/);
+  });
+
+  it("emits nested rig, host, depth, angle, and draw-order metadata", () => {
+    const characterBase = {
+      ...createBlankCharacter("Rig actor"),
+      id: "rig-char",
+      parts: [
+        makePart("body", "body-media", {
+          id: "body",
+          slotId: "role:body",
+          x: 80,
+          y: 130,
+          width: 180,
+          height: 280,
+          zIndex: 1,
+        }),
+        makePart("head", "head-media", {
+          id: "head",
+          slotId: "role:head",
+          x: 110,
+          y: 70,
+          width: 120,
+          height: 120,
+          zIndex: 4,
+        }),
+        makePart("eye", "eye-media", {
+          id: "eye",
+          slotId: "slot:left-eye",
+          side: "left",
+          eyeState: "open",
+          x: 140,
+          y: 112,
+          width: 32,
+          height: 20,
+          zIndex: 6,
+          depth: 5,
+        }),
+      ],
+    };
+    const rig = buildDefaultRig(characterBase);
+    const character = {
+      ...characterBase,
+      rig: {
+        ...rig,
+        activeAngle: "3qL" as const,
+        slotBindings: rig.slotBindings.map((binding) =>
+          binding.slotId === "slot:left-eye"
+            ? { ...binding, depth: 5, angleOverrides: { "3qL": { depth: 7 } } }
+            : binding,
+        ),
+      },
+    };
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_rig_meta",
+      clipId: "clip-rig-meta",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character,
+      meta: {
+        characterId: "rig-char",
+        poses: {},
+        autoBlink: false,
+      },
+      motionPresets: new Map(),
+    });
+
+    expect(html).toContain('data-character-rig-version="1"');
+    expect(html).toContain('data-character-angle="3qL"');
+    expect(html).toContain('data-character-bone="true"');
+    expect(html).toContain('data-character-bone-id="bone:role:head"');
+    expect(html).toContain('data-character-parent-bone-id="bone:role:body"');
+    expect(html).toContain('data-character-slot-id="slot:left-eye"');
+    expect(html).toContain('data-character-bound-bone-id="bone:slot:left-eye"');
+    expect(html).toContain('data-character-host-slot-id="role:head"');
+    expect(html).toContain('data-character-host-bone-id="bone:role:head"');
+    expect(html).toContain('data-character-depth="7"');
+    expect(html).toContain('data-character-draw-order-index="');
+  });
+
+  it("uses an active angle part override for slot variants", () => {
+    const characterBase = {
+      ...createBlankCharacter("Angle actor"),
+      id: "angle-char",
+      parts: [
+        makePart("body", "body-front-media", {
+          id: "body-front",
+          slotId: "role:body",
+          pose: "front",
+          x: 80,
+          y: 120,
+          width: 180,
+          height: 280,
+          zIndex: 1,
+        }),
+        makePart("body", "body-3ql-media", {
+          id: "body-3ql",
+          slotId: "role:body",
+          pose: "3qL",
+          x: 82,
+          y: 120,
+          width: 176,
+          height: 280,
+          zIndex: 1,
+        }),
+      ],
+    };
+    const rig = buildDefaultRig(characterBase);
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_angle_variant",
+      clipId: "clip-angle-variant",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character: {
+        ...characterBase,
+        rig: {
+          ...rig,
+          activeAngle: "3qL",
+          slotBindings: rig.slotBindings.map((binding) =>
+            binding.slotId === "role:body"
+              ? { ...binding, angleOverrides: { "3qL": { partId: "body-3ql" } } }
+              : binding,
+          ),
+        },
+      },
+      meta: {
+        characterId: "angle-char",
+        poses: {},
+        autoBlink: false,
+      },
+      motionPresets: new Map(),
+    });
+    const scene = extractScene(html);
+
+    expect(scene.slotEvents.some((event) => event.variant?.show?.includes("3qL"))).toBe(true);
+    expect(html).toContain('src="asset:body-3ql-media"');
+  });
+
+  it("targets bone groups for bone-aware motion while descendants inherit through DOM nesting", () => {
+    const character = {
+      ...createBlankCharacter("Walker"),
+      id: "walker-char",
+      parts: [
+        makePart("body", "body-media", {
+          id: "body",
+          slotId: "role:body",
+          x: 100,
+          y: 120,
+          width: 180,
+          height: 260,
+          zIndex: 1,
+        }),
+        makePart("leg", "leg-media", {
+          id: "left-leg",
+          slotId: "slot:left-leg",
+          side: "left",
+          x: 120,
+          y: 350,
+          width: 44,
+          height: 140,
+          zIndex: 0,
+        }),
+        makePart("foot", "foot-media", {
+          id: "left-foot",
+          slotId: "slot:left-foot",
+          side: "left",
+          x: 120,
+          y: 480,
+          width: 72,
+          height: 32,
+          zIndex: 0,
+        }),
+      ],
+    };
+    const preset: MotionPreset = {
+      id: "kick",
+      name: "Kick",
+      category: "gesture",
+      duration: 1,
+      loop: false,
+      tracks: [
+        {
+          target: "bone",
+          boneId: "bone:slot:left-leg",
+          partRole: "leg",
+          keyframes: [
+            { t: 0, rotation: 0, ease: "linear" },
+            { t: 1, rotation: -30, ease: "linear" },
+          ],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_bone_motion",
+      clipId: "clip-bone-motion",
+      width: 300,
+      height: 450,
+      duration: 2,
+      character,
+      meta: {
+        characterId: "walker-char",
+        poses: {},
+        autoBlink: false,
+        motions: [{ id: "applied-kick", presetId: "kick", offset: 0, intensity: 1 }],
+      },
+      motionPresets: new Map([["kick", preset]]),
+    });
+    const scene = extractScene(html);
+    const legBoneIndex = html.indexOf('data-character-bone-id="bone:slot:left-leg"');
+    const footSlotIndex = html.indexOf('data-character-slot-id="slot:left-foot"');
+    const animatedSelectors = scene.motionSegments.flatMap((segment) =>
+      segment.targets.map((target) => target.selector),
+    );
+
+    expect(legBoneIndex).toBeGreaterThan(-1);
+    expect(footSlotIndex).toBeGreaterThan(legBoneIndex);
+    expect(
+      animatedSelectors.some((selector) => selector.includes("char-bone-bone-slot-left-leg")),
+    ).toBe(true);
+    expect(
+      animatedSelectors.some((selector) => selector.includes("char-slot-slot-left-foot")),
+    ).toBe(false);
   });
 
   it("keeps generated DOM ids unique when slot ids sanitize to the same text", () => {

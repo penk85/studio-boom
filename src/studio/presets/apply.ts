@@ -28,6 +28,8 @@ export interface ComposedDelta {
 export interface ComposedMotions {
   /** role:<partRole> or slot:<slotId> -> delta */
   perPart: Map<string, ComposedDelta>;
+  /** bone:<boneId> -> delta */
+  perBone: Map<string, ComposedDelta>;
   /** role:<partRole> or slot:<slotId> -> pose name to swap to */
   poseSwap: Map<string, string>;
   /** Camera transform (for scene parallax). */
@@ -195,11 +197,27 @@ function slotKey(slotId: string) {
   return `slot:${slotId}`;
 }
 
-function trackTargetKey(track: { partRole: PartRole | "__camera"; slotId?: string }) {
+function boneKey(boneId: string) {
+  return `bone:${boneId}`;
+}
+
+function trackTargetKey(track: {
+  target?: "slot" | "bone" | "camera";
+  partRole: PartRole | "__camera";
+  slotId?: string;
+  boneId?: string;
+}) {
+  if (track.target === "bone" && track.boneId) return boneKey(track.boneId);
   return track.slotId ? slotKey(track.slotId) : roleKey(track.partRole as PartRole);
 }
 
-function overrideTargetKey(override: { partRole: PartRole; slotId?: string }) {
+function overrideTargetKey(override: {
+  target?: "slot" | "bone";
+  partRole: PartRole;
+  slotId?: string;
+  boneId?: string;
+}) {
+  if (override.target === "bone" && override.boneId) return boneKey(override.boneId);
   return override.slotId ? slotKey(override.slotId) : roleKey(override.partRole);
 }
 
@@ -213,6 +231,7 @@ export function composeMotionsAt(
 ): ComposedMotions {
   const out: ComposedMotions = {
     perPart: new Map(),
+    perBone: new Map(),
     poseSwap: new Map(),
     camera: { dx: 0, dy: 0, zoom: 1 },
     faceTurnX: 0,
@@ -265,9 +284,14 @@ export function composeMotionsAt(
         continue;
       }
       const key = trackTargetKey(track);
-      const prev = out.perPart.get(key) ?? emptyDelta();
-      out.perPart.set(key, combine(prev, sample));
-      if (track.poseSwap) out.poseSwap.set(key, track.poseSwap);
+      if (track.target === "bone" && track.boneId) {
+        const prev = out.perBone.get(key) ?? emptyDelta();
+        out.perBone.set(key, combine(prev, sample));
+      } else {
+        const prev = out.perPart.get(key) ?? emptyDelta();
+        out.perPart.set(key, combine(prev, sample));
+        if (track.poseSwap) out.poseSwap.set(key, track.poseSwap);
+      }
     }
   }
   return out;
@@ -369,10 +393,15 @@ function applyKeyposes(
           : lerp(pa?.opacity, pb?.opacity, 1),
     };
     const scaled = applyIntensity(sample, intensity);
-    const prev = out.perPart.get(key) ?? emptyDelta();
-    out.perPart.set(key, combine(prev, scaled));
+    if (key.startsWith("bone:")) {
+      const prev = out.perBone.get(key) ?? emptyDelta();
+      out.perBone.set(key, combine(prev, scaled));
+    } else {
+      const prev = out.perPart.get(key) ?? emptyDelta();
+      out.perPart.set(key, combine(prev, scaled));
+    }
     const swap = (u >= 0.5 ? pb?.poseSwap : pa?.poseSwap) ?? pa?.poseSwap ?? pb?.poseSwap;
-    if (swap) out.poseSwap.set(key, swap);
+    if (swap && !key.startsWith("bone:")) out.poseSwap.set(key, swap);
   }
 }
 
@@ -437,6 +466,17 @@ export function deltaFor(
   const roleDelta = composed.perPart.get(roleKey(role)) ?? emptyDelta();
   const slotDelta = slotId ? composed.perPart.get(slotKey(slotId)) : undefined;
   return slotDelta ? combine(roleDelta, slotDelta) : roleDelta;
+}
+
+export function deltaForBone(
+  composed: ComposedMotions,
+  role: PartRole,
+  slotId?: string,
+  boneId?: string,
+): ComposedDelta {
+  const slotDelta = deltaFor(composed, role, slotId);
+  const boneDelta = boneId ? composed.perBone.get(boneKey(boneId)) : undefined;
+  return boneDelta ? combine(slotDelta, boneDelta) : slotDelta;
 }
 
 export function poseSwapFor(

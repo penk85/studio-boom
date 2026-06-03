@@ -8,6 +8,7 @@ import {
   generateMotionOccurrences,
   expandKeyposesWithAnticipation,
   deltaFor,
+  deltaForBone,
   type ComposedDelta,
 } from "../apply";
 import type { MotionKeyframe, MotionPreset, AppliedMotion } from "../../types";
@@ -357,6 +358,42 @@ describe("composeMotionsAt", () => {
     const headDelta = deltaFor(result, "head");
     // At u=1, dy=100*0.5 intensity = 50
     expect(headDelta.dy).toBeCloseTo(50, 0);
+  });
+
+  it("keeps bone-targeted motion on per-bone deltas without creating pose swaps", () => {
+    const preset = makePreset({
+      tracks: [
+        {
+          target: "bone",
+          boneId: "bone:slot:left-leg",
+          partRole: "leg",
+          keyframes: [
+            makeKeyframe(0, { rotation: 0, ease: "linear" }),
+            makeKeyframe(1, { rotation: 40, ease: "linear" }),
+          ],
+        },
+        {
+          target: "slot",
+          slotId: "role:mouth",
+          partRole: "mouth",
+          poseSwap: "Smile",
+          keyframes: [makeKeyframe(0, {})],
+        },
+      ],
+    });
+    const motion = makeAppliedMotion({ offset: 0, intensity: 1 });
+    const result = composeMotionsAt(
+      makeClip({ motions: [motion] }),
+      0.5,
+      new Map([["p1", preset]]),
+    );
+
+    expect(deltaForBone(result, "leg", "slot:left-leg", "bone:slot:left-leg").rotation).toBeCloseTo(
+      20,
+    );
+    expect(deltaFor(result, "leg", "slot:left-leg").rotation).toBe(0);
+    expect(result.poseSwap.get("bone:bone:slot:left-leg")).toBeUndefined();
+    expect(result.poseSwap.get("slot:role:mouth")).toBe("Smile");
   });
 
   it("accumulates two non-exclusive motions on the same part", () => {
