@@ -68,6 +68,7 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
   const updateCompositionHtml = useStudio((s) => s.updateCompositionHtml);
   const selectedKeyframe = useStudio((s) => s.selectedKeyframe);
   const selectKeyframe = useStudio((s) => s.selectKeyframe);
+  const speechFocusRequest = useStudio((s) => s.speechFocusRequest);
   const addClipMotionStep = useStudio((s) => s.addClipMotionStep);
   const addClipMotionCheckpoint = useStudio((s) => s.addClipMotionCheckpoint);
   const updateClipKeyframe = useStudio((s) => s.updateClipKeyframe);
@@ -104,6 +105,13 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
       setActiveTab("clip");
     }
   }, [activeTab, characterClip, clip?.kind]);
+
+  // Timeline "speech settings" shortcut: jump straight to the Speech tab. Declared
+  // last so it wins over the clip-change reset above when both fire in one render.
+  // Self-correcting: the guard effect resets to "clip" if the focused clip isn't a character.
+  useEffect(() => {
+    if (speechFocusRequest > 0) setActiveTab("speech");
+  }, [speechFocusRequest]);
 
   if (!project) return null;
 
@@ -302,17 +310,49 @@ function ClipInspectorTab({ clip, onUpdate }: { clip: EditorClip; onUpdate: Clip
       </PanelSection>
 
       {clip.kind === "audio" ? (
-        <PanelSection title="Audio" icon={Volume2}>
-          <RangeField
-            label="Volume"
-            value={clip.volume ?? 1}
-            min={0}
-            max={1}
-            step={0.05}
-            displayValue={`${Math.round((clip.volume ?? 1) * 100)}%`}
-            onChange={(value) => onUpdate({ volume: value })}
-          />
-        </PanelSection>
+        <>
+          <PanelSection title="Audio" icon={Volume2}>
+            <RangeField
+              label="Volume"
+              value={clip.volume ?? 1}
+              min={0}
+              max={1}
+              step={0.05}
+              displayValue={`${Math.round((clip.volume ?? 1) * 100)}%`}
+              onChange={(value) => onUpdate({ volume: value })}
+            />
+          </PanelSection>
+          {clip.sourceDuration != null && (
+            <PanelSection title="Trim" icon={Clock3}>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="In-point (s)">
+                  <NumberInput
+                    value={Number((clip.mediaStartTime ?? 0).toFixed(2))}
+                    onChange={(v) => {
+                      const max = Math.max(0, (clip.sourceDuration ?? 0) - clip.duration);
+                      onUpdate({ mediaStartTime: Math.max(0, Math.min(max, v)) });
+                    }}
+                  />
+                </Field>
+                <Field label="Length (s)">
+                  <NumberInput
+                    value={Number(clip.duration.toFixed(2))}
+                    onChange={(v) => {
+                      const max = Math.max(
+                        0.1,
+                        (clip.sourceDuration ?? Infinity) - (clip.mediaStartTime ?? 0),
+                      );
+                      onUpdate({ duration: Math.max(0.1, Math.min(max, v)) });
+                    }}
+                  />
+                </Field>
+              </div>
+              <div className="mt-1 text-[10px] text-muted-foreground">
+                Source length {clip.sourceDuration.toFixed(2)}s
+              </div>
+            </PanelSection>
+          )}
+        </>
       ) : (
         <>
           <PanelSection title="Frame" icon={Move}>

@@ -361,6 +361,61 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).not.toContain('data-volume="1"');
   });
 
+  it("emits data-media-start on a trimmed (in-pointed) speech, none at 0", () => {
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_clip-1",
+      clipId: "clip-1",
+      width: 300,
+      height: 450,
+      duration: 10,
+      character: makeCharacter(),
+      meta: { characterId: "char-1", poses: {}, autoBlink: false },
+      motionPresets: new Map(),
+      speeches: [
+        // In-point 1.5s into the source, plays for 2s.
+        {
+          audioId: "voice-trim",
+          start: 0,
+          duration: 2,
+          visemes: [{ t: 1, v: "A" }],
+          mediaStartTime: 1.5,
+        },
+        { audioId: "voice-head", start: 4, duration: 2, visemes: [{ t: 0.4, v: "O" }] },
+      ],
+    });
+
+    expect(html).toContain('data-media-start="1.5"');
+    // The untrimmed speech omits data-media-start.
+    expect((html.match(/data-media-start=/g) ?? []).length).toBe(1);
+  });
+
+  it("clamps a trimmed speech's audio duration to the trimmed length", () => {
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_clip-1",
+      clipId: "clip-1",
+      width: 300,
+      height: 450,
+      duration: 10,
+      character: makeCharacter(),
+      meta: { characterId: "char-1", poses: {}, autoBlink: false },
+      motionPresets: new Map(),
+      speeches: [
+        // Full source is 8s, but trimmed to play only 3s from an in-point of 2s.
+        {
+          audioId: "voice-trim",
+          start: 1,
+          duration: 3,
+          visemes: [{ t: 2.5, v: "A" }],
+          mediaStartTime: 2,
+        },
+      ],
+    });
+
+    // The emitted <audio> plays the trimmed length, not the full source.
+    expect(html).toMatch(/data-character-speech="true"[^>]*data-duration="3"/);
+    expect(html).toMatch(/data-character-speech="true"[^>]*data-media-start="2"/);
+  });
+
   it("matches expression recorder face turns in the generated timeline", () => {
     const preset: MotionPreset = {
       id: "expression-turn",

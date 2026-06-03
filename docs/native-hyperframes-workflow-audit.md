@@ -82,6 +82,11 @@ movie. `editorMeta` is editor-only intent and UI state.
 
 - Source-visible custom HyperFrames blocks: polish the existing Blocks tab and
   Inspector source panels while keeping all generated output in `project.hf`.
+- Upstream primitive audit: revisit HyperFrames Studio picker, property-panel,
+  file-tree, and nested composition primitives behind a feature flag or isolated
+  prototype before wiring them into the stable Stage. The first direct
+  picker/property-panel attempt interfered with root clip selection and was
+  backed out.
 - Prompt pack and validation feedback for external AI workflows.
 - Editable HyperFrames clip-set import after custom block import is stable.
 - Runtime script cleanup: audit whether `hyperframe-runtime.js` stripping should
@@ -95,3 +100,25 @@ movie. `editorMeta` is editor-only intent and UI state.
   placement controls, and generic audio alignment cleanup.
 - Character rig tool polish: richer rig editing and drag/drop motion authoring on
   top of the native character composition contract.
+
+## Deferred Audio Capabilities (gain > 100% and fades)
+
+Two requested audio features are **shelved** because HyperFrames audio volume is a
+single static native value with no amplification and no automation:
+
+- **Volume above 100% (amplification).** The runtime applies volume as
+  `audioElement.volume = data-volume` (no clamping), and the HTML media `.volume`
+  property is spec-capped at `0.0–1.0` — a value `> 1` throws in the browser and
+  would break playback/render. So the volume slider stays `0–100%`.
+- **Fade in / fade out.** HyperFrames cannot express an audio-volume envelope (no
+  volume keyframes; the GSAP adapter does not animate volume), so a fade would only
+  affect the Studio preview and would not render in the exported MP4.
+
+**Potential later add-on — bake gain into the audio.** The only path that renders
+everywhere is to process the samples themselves: decode the blob via Web Audio,
+apply a gain factor (or a fade envelope), re-encode, and store a derived audio asset
+whose native `data-volume` stays `≤ 1`. Costs: per-clip re-encode, possible clipping
+on amplification, and a derived blob to manage. Revisit if/when HyperFrames adds
+audio-volume automation, or build the gain/envelope-baking pipeline here. Applies to
+both regular audio clips and character speech. See the volume/trim work in
+`store.ts`, `character/composition.ts`, and `components/Timeline.tsx`.

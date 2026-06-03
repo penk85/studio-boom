@@ -36,6 +36,8 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
   const moveSpeech = useStudio((s) => s.moveSpeech);
   const removeSpeech = useStudio((s) => s.removeSpeech);
   const setSpeechVolume = useStudio((s) => s.setSpeechVolume);
+  const selectedSpeechId = useStudio((s) => s.selectedSpeechId);
+  const selectSpeech = useStudio((s) => s.selectSpeech);
   const saveProject = useStudio((s) => s.saveProject);
   const queriedAudio = useLiveQuery(() => db.media.where("kind").equals("audio").toArray(), []);
   const audioAssets = useMemo(
@@ -43,7 +45,6 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
     [queriedAudio],
   );
   const speeches = useMemo(() => characterSpeeches(clip.character), [clip.character]);
-  const [selectedSpeechId, setSelectedSpeechId] = useState<string | null>(null);
   const selectedSpeech = useMemo(
     () => speeches.find((s) => s.id === selectedSpeechId) ?? speeches[0] ?? null,
     [speeches, selectedSpeechId],
@@ -284,7 +285,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
                   </button>
                   <button
                     type="button"
-                    onClick={() => setSelectedSpeechId(speech.id)}
+                    onClick={() => selectSpeech(speech.id)}
                     title="Edit lip sync"
                     className="min-w-0 flex-1 truncate text-left text-[11px] text-foreground"
                   >

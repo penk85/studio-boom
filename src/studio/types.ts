@@ -450,6 +450,10 @@ export interface CharacterSpeech {
   start: number;
   /** Playback volume, 0–1 (default 1). */
   volume?: number;
+  /** In-point into the source audio in seconds (trim start; default 0). */
+  mediaStartTime?: number;
+  /** Trimmed playback length in seconds (default = full source duration). */
+  duration?: number;
 }
 
 export interface CharacterClipMeta {
@@ -573,6 +577,10 @@ export interface EditorClip {
   mediaId?: string;
   /** Audio/video playback volume, 0–1 (default 1). */
   volume?: number;
+  /** In-point: where playback starts within the source (seconds, default 0). */
+  mediaStartTime?: number;
+  /** Natural length of the source media (seconds); bounds trimming. */
+  sourceDuration?: number;
 }
 
 export type CharacterCompositionClip = EditorClip & {
@@ -617,7 +625,13 @@ export function deriveEditorClips(project: Project): EditorClip[] {
               ? "text"
               : "image");
     const scale = el.scale ?? 1;
-    const mediaEl = el as { sourceWidth?: number; sourceHeight?: number; volume?: number };
+    const mediaEl = el as {
+      sourceWidth?: number;
+      sourceHeight?: number;
+      volume?: number;
+      mediaStartTime?: number;
+      sourceDuration?: number;
+    };
     const studioEl = el as TimelineElement & { rotation?: number };
     const textEl = el as {
       content?: string;
@@ -661,6 +675,8 @@ export function deriveEditorClips(project: Project): EditorClip[] {
       character: meta.character,
       mediaId: meta.mediaId,
       volume: mediaEl.volume ?? 1,
+      mediaStartTime: mediaEl.mediaStartTime ?? 0,
+      sourceDuration: mediaEl.sourceDuration,
     } satisfies EditorClip;
 
     return {
@@ -695,6 +711,10 @@ export interface MediaClip extends BaseClip {
   mediaId: ID;
   /** Audio/video playback volume, 0–1 (default 1). */
   volume?: number;
+  /** In-point: where playback starts within the source (seconds, default 0). */
+  mediaStartTime?: number;
+  /** Natural length of the source media (seconds); bounds trimming. */
+  sourceDuration?: number;
 }
 
 export interface TextClip extends BaseClip {

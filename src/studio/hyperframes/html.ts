@@ -14,6 +14,8 @@ export type StudioTimelineElement = TimelineElement & {
   renderTrackIndex?: number;
   rotation?: number;
   volume?: number;
+  mediaStartTime?: number;
+  sourceDuration?: number;
   content?: string;
   color?: string;
   fontSize?: number;
@@ -28,6 +30,8 @@ type StudioElementUpdates = Partial<StudioTimelineElement> & {
   renderTrackIndex?: number;
   rotation?: number;
   volume?: number;
+  mediaStartTime?: number;
+  sourceDuration?: number;
   content?: string;
   color?: string;
   fontSize?: number;
@@ -116,6 +120,12 @@ function patchStudioElementInHtml(
     if (updates.volume === 1) el.removeAttribute("data-volume");
     else el.setAttribute("data-volume", String(updates.volume));
   }
+  if ("mediaStartTime" in updates && updates.mediaStartTime !== undefined) {
+    // Generator omits data-media-start at the default of 0.
+    if (updates.mediaStartTime === 0) el.removeAttribute("data-media-start");
+    else el.setAttribute("data-media-start", String(updates.mediaStartTime));
+  }
+  setNumericAttr(el, "data-source-duration", updates.sourceDuration);
   setNumericAttr(el, "data-source-width", updates.sourceWidth);
   setNumericAttr(el, "data-source-height", updates.sourceHeight);
   setNumericAttr(el, "data-width", updates.sourceWidth);
@@ -294,6 +304,8 @@ function patchElementFromNativeAttrs(element: TimelineElement, doc: Document): T
   const fontSize = parseFiniteNumber(el.getAttribute("data-font-size"));
   const fontWeight = parseFiniteNumber(el.getAttribute("data-font-weight"));
   const volume = parseFiniteNumber(el.getAttribute("data-volume"));
+  const mediaStartTime = parseFiniteNumber(el.getAttribute("data-media-start"));
+  const sourceDuration = parseFiniteNumber(el.getAttribute("data-source-duration"));
   const nativeCompositionSrc = readNativeCompositionSrc(el);
   const nativeCompositionId = el.getAttribute("data-composition-id") ?? undefined;
   const explicitType = el.getAttribute("data-type");
@@ -317,6 +329,8 @@ function patchElementFromNativeAttrs(element: TimelineElement, doc: Document): T
     fitToBounds:
       el.getAttribute("data-fit-to-bounds") === "true" ? true : getElementFitToBounds(element),
     volume: volume ?? (element as { volume?: number }).volume,
+    mediaStartTime: mediaStartTime ?? (element as { mediaStartTime?: number }).mediaStartTime,
+    sourceDuration: sourceDuration ?? (element as { sourceDuration?: number }).sourceDuration,
   } as unknown as TimelineElement;
 
   if (!isNativeCompositionHost) return patched;

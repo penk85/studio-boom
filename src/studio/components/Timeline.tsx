@@ -6,6 +6,7 @@ import {
   Minus,
   Plus,
   SkipBack,
+  SlidersHorizontal,
   TriangleAlert,
   Volume2,
   VolumeX,
@@ -26,6 +27,10 @@ import { generateMotionOccurrences } from "../presets/apply";
 import { resolveExclusiveMotionOverlaps } from "../presets/motion-scheduling";
 import { useStudio, type ProjectMutationOptions } from "../store";
 import { useHfMediaHealth } from "../hooks/useHfMediaHealth";
+import {
+  extractCompositionOutline,
+  type CompositionOutlineItem,
+} from "../hyperframes/composition-outline";
 import { validateCompositionSourceHtml } from "../hyperframes/composition-source";
 import { type ClipMotionCheckpoint, type ClipMotionEndpoint } from "../hyperframes/keyframes";
 import type {
@@ -45,6 +50,8 @@ import { characterSpeeches, deriveEditorClips, isCharacterCompositionClip } from
 import { fmtTime } from "../timeline-utils";
 
 const TRACK_HEIGHT = 44;
+const COMPOSITION_OUTLINE_PARENT_HEIGHT = 24;
+const COMPOSITION_OUTLINE_ROW_HEIGHT = 26;
 const VISUAL_MOTION_ROW_HEIGHT = 30;
 const VISUAL_MOTION_PARENT_HEIGHT = 24;
 const MOTION_ROW_HEIGHT = 28;
@@ -114,6 +121,8 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const moveClipMotionCheckpoint = useStudio((s) => s.moveClipMotionCheckpoint);
   const removeClipMotionStep = useStudio((s) => s.removeClipMotionStep);
   const moveSpeech = useStudio((s) => s.moveSpeech);
+  const trimSpeech = useStudio((s) => s.trimSpeech);
+  const openSpeechSettings = useStudio((s) => s.openSpeechSettings);
   const removeSpeech = useStudio((s) => s.removeSpeech);
 
   const playheadRef = useRef<HTMLDivElement>(null);
@@ -147,6 +156,13 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const mediaAssets = useStudio((s) => s.mediaAssets);
   const mediaHealth = useHfMediaHealth(project?.hf);
   const projectDuration = project?.hf.duration ?? 0;
+  const compositionOutlinesByClipId = useMemo(
+    () =>
+      project
+        ? buildCompositionOutlines(project, clips)
+        : new Map<string, CompositionOutlineItem[]>(),
+    [project, clips],
+  );
 
   const seekFromClientX = useCallback(
     (clientX: number) => {
@@ -250,6 +266,13 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const totalWidth = Math.max(1200, project.hf.duration * zoom);
   const timelineClips = clips;
   const compositionSourceErrorsByClipId = buildCompositionSourceErrors(project, timelineClips);
+  const expandedCompositionOutlines = clips.filter(
+    (clip) =>
+      clip.kind === "composition" &&
+      !isCharacterCompositionClip(clip) &&
+      expandedClipIds.has(clip.id) &&
+      (compositionOutlinesByClipId.get(clip.id)?.length ?? 0) > 0,
+  );
   const expandedMotionClips = clips.filter(
     (clip) =>
       isKeyframeEditableClip(clip) &&
@@ -257,6 +280,9 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
       // groups) below — don't also give them the generic motion lane, which
       // would duplicate the parent-name header.
       !isCharacterCompositionClip(clip) &&
+      !(
+        clip.kind === "composition" && (compositionOutlinesByClipId.get(clip.id)?.length ?? 0) > 0
+      ) &&
       expandedClipIds.has(clip.id),
   );
   const expandedCharacters = clips.filter(
@@ -273,6 +299,8 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
       trackIndex,
       laneCount: Math.max(1, track.lanes ?? 1),
       expandedMotionClips,
+      expandedCompositionOutlines,
+      compositionOutlinesByClipId,
       expandedCharacters,
       expandedLayouts,
     }),
@@ -414,6 +442,13 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                           </div>
                           {lane.visualMotionRows.map((row) => (
                             <VisualMotionLaneHeader key={`${row.clip.id}-motion`} clip={row.clip} />
+                          ))}
+                          {lane.compositionOutlineRows.map((row) => (
+                            <CompositionOutlineHeader
+                              key={`${row.clip.id}-contents`}
+                              clip={row.clip}
+                              outline={row.outline}
+                            />
                           ))}
                           {lane.motionRows.map((row) => (
                             <CharacterMotionHeader
@@ -560,6 +595,18 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                     )),
                   )}
                   {lanes.flatMap((lane) =>
+                    lane.compositionOutlineRows.map((row) => (
+                      <CompositionOutlineLaneSet
+                        key={`${row.clip.id}-contents`}
+                        clip={row.clip}
+                        outline={row.outline}
+                        zoom={zoom}
+                        top={row.top}
+                        onSelect={() => selectClip(row.clip.id)}
+                      />
+                    )),
+                  )}
+                  {lanes.flatMap((lane) =>
                     lane.motionRows.map((row) => (
                       <MotionLaneSet
                         key={row.clip.id}
@@ -577,6 +624,12 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                         }
                         onMoveVoice={(speechId, start, options) =>
                           moveSpeech(row.clip.id, speechId, start, options)
+                        }
+                        onTrimVoice={(speechId, patch, options) =>
+                          trimSpeech(row.clip.id, speechId, patch, options)
+                        }
+                        onOpenVoiceSettings={(speechId) =>
+                          openSpeechSettings(row.clip.id, speechId)
                         }
                         onRemoveVoice={(speechId) => removeSpeech(row.clip.id, speechId)}
                         onVoiceHistoryCheckpoint={checkpointHistory}
@@ -669,6 +722,26 @@ function buildCompositionSourceErrors(
     if (!result.ok) errorsByClipId.set(clip.id, result.errors);
   }
   return errorsByClipId;
+}
+
+function buildCompositionOutlines(
+  project: Project,
+  clips: EditorClip[],
+): Map<string, CompositionOutlineItem[]> {
+  const outlines = new Map<string, CompositionOutlineItem[]>();
+  for (const clip of clips) {
+    if (clip.kind !== "composition" || isCharacterCompositionClip(clip) || !clip.compositionId) {
+      continue;
+    }
+    const source = project.hf.compositionHtml[clip.compositionId];
+    if (!source) continue;
+    const outline = extractCompositionOutline(source, {
+      compositionId: clip.compositionId,
+      duration: clip.duration,
+    });
+    if (outline.length > 0) outlines.set(clip.id, outline);
+  }
+  return outlines;
 }
 
 function ClipBlock({
@@ -771,17 +844,26 @@ function ClipBlock({
     window.addEventListener("mouseup", up);
   };
 
+  // Audio/video clips trim against their source: the out-point can't exceed the
+  // source length, and trimming the left edge moves the in-point (mediaStartTime).
+  const isTrimMedia = clip.kind === "audio" || clip.kind === "video";
+  const sourceDuration = clip.sourceDuration;
+
   const onResizeRight = (e: React.MouseEvent) => {
     e.stopPropagation();
     const sx = e.clientX,
       od = clip.duration;
+    const mediaStart = clip.mediaStartTime ?? 0;
     let checkpointed = false;
     const move = (ev: MouseEvent) => {
       if (!checkpointed) {
         onHistoryCheckpoint();
         checkpointed = true;
       }
-      const nd = Math.max(0.1, Math.min(duration - clip.start, od + (ev.clientX - sx) / zoom));
+      let nd = Math.max(0.1, Math.min(duration - clip.start, od + (ev.clientX - sx) / zoom));
+      if (isTrimMedia && sourceDuration != null) {
+        nd = Math.min(nd, Math.max(0.1, sourceDuration - mediaStart));
+      }
       onChange({ duration: nd }, { history: false });
     };
     const up = () => {
@@ -796,7 +878,8 @@ function ClipBlock({
     e.stopPropagation();
     const sx = e.clientX,
       ostart = clip.start,
-      od = clip.duration;
+      od = clip.duration,
+      oMediaStart = clip.mediaStartTime ?? 0;
     let checkpointed = false;
     const move = (ev: MouseEvent) => {
       if (!checkpointed) {
@@ -804,9 +887,16 @@ function ClipBlock({
         checkpointed = true;
       }
       const dx = (ev.clientX - sx) / zoom;
-      const ns = Math.max(0, Math.min(ostart + od - 0.1, ostart + dx));
+      // Don't extend earlier than the source's own start (in-point can't go below 0).
+      const minStart = isTrimMedia ? Math.max(0, ostart - oMediaStart) : 0;
+      const ns = Math.max(minStart, Math.min(ostart + od - 0.1, ostart + dx));
       const nd = od - (ns - ostart);
-      onChange({ start: ns, duration: nd }, { history: false });
+      if (isTrimMedia) {
+        const newMediaStart = Math.max(0, oMediaStart + (ns - ostart));
+        onChange({ start: ns, duration: nd, mediaStartTime: newMediaStart }, { history: false });
+      } else {
+        onChange({ start: ns, duration: nd }, { history: false });
+      }
     };
     const up = () => {
       window.removeEventListener("mousemove", move);
@@ -851,8 +941,8 @@ function ClipBlock({
               onToggleExpanded();
             }}
             className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-black/20"
-            aria-label={expanded ? "Collapse motion lane" : "Expand motion lane"}
-            title={expanded ? "Hide motion lane" : "Show motion lane"}
+            aria-label={expanded ? "Collapse clip details" : "Expand clip details"}
+            title={expanded ? "Hide details" : "Show details"}
           >
             {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           </button>
@@ -911,12 +1001,18 @@ function ClipBlock({
       </div>
       <div
         onMouseDown={onResizeLeft}
-        className="absolute left-0 top-0 h-full w-1.5 cursor-ew-resize bg-black/30 opacity-0 group-hover:opacity-100"
-      />
+        title={isTrimMedia ? "Trim start (in-point)" : "Resize start"}
+        className="absolute left-0 top-0 z-10 flex h-full w-2.5 cursor-ew-resize items-center justify-center rounded-l bg-black/45 opacity-0 group-hover:opacity-100"
+      >
+        <span className="h-1/2 w-0.5 rounded-full bg-white/80" />
+      </div>
       <div
         onMouseDown={onResizeRight}
-        className="absolute right-0 top-0 h-full w-1.5 cursor-ew-resize bg-black/30 opacity-0 group-hover:opacity-100"
-      />
+        title={isTrimMedia ? "Trim end (out-point)" : "Resize end"}
+        className="absolute right-0 top-0 z-10 flex h-full w-2.5 cursor-ew-resize items-center justify-center rounded-r bg-black/45 opacity-0 group-hover:opacity-100"
+      >
+        <span className="h-1/2 w-0.5 rounded-full bg-white/80" />
+      </div>
     </div>
   );
 }
@@ -932,6 +1028,12 @@ interface ExpandedKeyframeRow {
   top: number;
 }
 
+interface ExpandedCompositionOutlineRow {
+  clip: EditorClip;
+  outline: CompositionOutlineItem[];
+  top: number;
+}
+
 interface VisualMotionPacking {
   rowByMotionId: Map<string, number>;
   rowCount: number;
@@ -942,6 +1044,7 @@ interface LaneLayout {
   index: number;
   top: number;
   visualMotionRows: ExpandedKeyframeRow[];
+  compositionOutlineRows: ExpandedCompositionOutlineRow[];
   motionRows: ExpandedClipRow[];
 }
 
@@ -954,12 +1057,16 @@ function buildTrackLayout({
   trackIndex,
   laneCount,
   expandedMotionClips,
+  expandedCompositionOutlines,
+  compositionOutlinesByClipId,
   expandedCharacters,
   expandedLayouts,
 }: {
   trackIndex: number;
   laneCount: number;
   expandedMotionClips: EditorClip[];
+  expandedCompositionOutlines: EditorClip[];
+  compositionOutlinesByClipId: Map<string, CompositionOutlineItem[]>;
   expandedCharacters: CharacterCompositionClip[];
   expandedLayouts: Map<string, ExpandedClipLayout>;
 }): TrackLayout {
@@ -967,6 +1074,7 @@ function buildTrackLayout({
   const lanes: LaneLayout[] = [];
   for (let laneIndex = 0; laneIndex < laneCount; laneIndex++) {
     const visualMotionRows: ExpandedKeyframeRow[] = [];
+    const compositionOutlineRows: ExpandedCompositionOutlineRow[] = [];
     const motionRows: ExpandedClipRow[] = [];
     const laneTop = top;
     top += TRACK_HEIGHT;
@@ -979,6 +1087,17 @@ function buildTrackLayout({
       visualMotionRows.push({ clip, top });
       top += visualMotionLaneHeight(clip);
     }
+    const expandedOutlinesInLane = expandedCompositionOutlines
+      .filter(
+        (clip) => clip.trackIndex === trackIndex && Math.max(0, clip.laneIndex ?? 0) === laneIndex,
+      )
+      .sort((a, b) => a.start - b.start || a.id.localeCompare(b.id));
+    for (const clip of expandedOutlinesInLane) {
+      const outline = compositionOutlinesByClipId.get(clip.id) ?? [];
+      if (outline.length === 0) continue;
+      compositionOutlineRows.push({ clip, outline, top });
+      top += compositionOutlineLaneHeight(outline);
+    }
     const expandedInLane = expandedCharacters
       .filter(
         (clip) => clip.trackIndex === trackIndex && Math.max(0, clip.laneIndex ?? 0) === laneIndex,
@@ -990,7 +1109,13 @@ function buildTrackLayout({
       motionRows.push({ clip, layout, top });
       top += layout.height;
     }
-    lanes.push({ index: laneIndex, top: laneTop, visualMotionRows, motionRows });
+    lanes.push({
+      index: laneIndex,
+      top: laneTop,
+      visualMotionRows,
+      compositionOutlineRows,
+      motionRows,
+    });
   }
   return { lanes, height: top };
 }
@@ -1031,6 +1156,139 @@ function packVisualMotionRows(motions: ClipMotionStep[]): VisualMotionPacking {
 function visualMotionLaneHeight(clip?: EditorClip): number {
   const rowCount = clip ? packVisualMotionRows(clip.motionSteps).rowCount : 1;
   return VISUAL_MOTION_PARENT_HEIGHT + rowCount * VISUAL_MOTION_ROW_HEIGHT;
+}
+
+function compositionOutlineLaneHeight(outline: CompositionOutlineItem[]): number {
+  return (
+    COMPOSITION_OUTLINE_PARENT_HEIGHT + Math.max(1, outline.length) * COMPOSITION_OUTLINE_ROW_HEIGHT
+  );
+}
+
+function CompositionOutlineHeader({
+  clip,
+  outline,
+}: {
+  clip: EditorClip;
+  outline: CompositionOutlineItem[];
+}) {
+  return (
+    <div
+      style={{ height: compositionOutlineLaneHeight(outline) }}
+      className="border-t border-border/60 bg-panel/50"
+    >
+      <div
+        className="flex items-center gap-1 px-3 text-[10px] text-foreground"
+        style={{ height: COMPOSITION_OUTLINE_PARENT_HEIGHT }}
+      >
+        <span className="text-muted-foreground">↳</span>
+        <span className="min-w-0 flex-1 truncate">{clip.name}</span>
+        <span className="shrink-0 text-muted-foreground">{outline.length}</span>
+      </div>
+      {outline.map((item) => (
+        <div
+          key={item.id}
+          style={{ height: COMPOSITION_OUTLINE_ROW_HEIGHT, paddingLeft: 24 + item.depth * 10 }}
+          className="flex items-center gap-1 border-t border-border/40 pr-3 text-[10px] text-muted-foreground"
+        >
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${outlineDotColor(item.kind)}`} />
+          <span className="min-w-0 flex-1 truncate">{item.name}</span>
+          <span className="shrink-0 uppercase tracking-[0.08em] text-muted-foreground/70">
+            {item.timed ? item.kind : "layer"}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CompositionOutlineLaneSet({
+  clip,
+  outline,
+  zoom,
+  top,
+  onSelect,
+}: {
+  clip: EditorClip;
+  outline: CompositionOutlineItem[];
+  zoom: number;
+  top: number;
+  onSelect: () => void;
+}) {
+  return (
+    <div
+      className="absolute left-0 right-0 border-t border-border/60 bg-panel/25"
+      style={{ top, height: compositionOutlineLaneHeight(outline) }}
+    >
+      <div
+        className="absolute rounded border border-primary/20 bg-primary/5"
+        style={{
+          left: clip.start * zoom,
+          top: COMPOSITION_OUTLINE_PARENT_HEIGHT + 3,
+          width: Math.max(8, clip.duration * zoom),
+          bottom: 3,
+        }}
+      />
+      {outline.map((item, index) => (
+        <button
+          key={item.id}
+          type="button"
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onSelect();
+          }}
+          className={`absolute h-5 overflow-hidden rounded border px-1.5 text-left text-[10px] text-foreground/90 shadow-sm ${outlineBlockColor(
+            item.kind,
+          )}`}
+          style={{
+            left: (clip.start + (item.timed ? item.start : 0)) * zoom,
+            top: COMPOSITION_OUTLINE_PARENT_HEIGHT + index * COMPOSITION_OUTLINE_ROW_HEIGHT + 3,
+            width: Math.max(12, (item.timed ? item.duration : clip.duration) * zoom),
+          }}
+          title={`${item.name} (${item.timed ? `${formatSeconds(item.start)}-${formatSeconds(item.start + item.duration)}` : "DOM layer"})`}
+          aria-label={`Select parent composition for ${item.name}`}
+        >
+          <span className="block truncate leading-5">{item.name}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function outlineDotColor(kind: CompositionOutlineItem["kind"]): string {
+  switch (kind) {
+    case "audio":
+      return "bg-clip-audio";
+    case "composition":
+      return "bg-indigo-300";
+    case "image":
+      return "bg-clip-bg";
+    case "text":
+      return "bg-fuchsia-300";
+    case "video":
+      return "bg-clip";
+    case "layer":
+    default:
+      return "bg-slate-400";
+  }
+}
+
+function outlineBlockColor(kind: CompositionOutlineItem["kind"]): string {
+  switch (kind) {
+    case "audio":
+      return "border-cyan-300/70 bg-cyan-500/45";
+    case "composition":
+      return "border-indigo-300/70 bg-indigo-500/45";
+    case "image":
+      return "border-emerald-300/70 bg-emerald-500/45";
+    case "text":
+      return "border-fuchsia-300/70 bg-fuchsia-500/45";
+    case "video":
+      return "border-purple-300/70 bg-purple-500/45";
+    case "layer":
+    default:
+      return "border-slate-300/60 bg-slate-500/35";
+  }
 }
 
 function VisualMotionLaneHeader({ clip }: { clip: EditorClip }) {
@@ -1537,6 +1795,10 @@ interface VoiceLaneSummary {
   name: string;
   duration: number;
   volume: number;
+  /** In-point into the source audio (s); 0 = no trim. */
+  mediaStart: number;
+  /** Full source audio length (s), used to bound trim; undefined when unknown. */
+  sourceDuration?: number;
 }
 
 function CharacterMotionHeader({
@@ -1599,6 +1861,8 @@ function MotionLaneSet({
   onSelectMotion,
   onChange,
   onMoveVoice,
+  onTrimVoice,
+  onOpenVoiceSettings,
   onRemoveVoice,
   onVoiceHistoryCheckpoint,
   createMotionId,
@@ -1613,6 +1877,12 @@ function MotionLaneSet({
   onSelectMotion: (id: string | null) => void;
   onChange: (motions: AppliedMotion[]) => void;
   onMoveVoice: (speechId: string, start: number, options?: ProjectMutationOptions) => void;
+  onTrimVoice: (
+    speechId: string,
+    patch: { start?: number; mediaStartTime?: number; duration?: number },
+    options?: ProjectMutationOptions,
+  ) => void;
+  onOpenVoiceSettings: (speechId: string) => void;
   onRemoveVoice: (speechId: string) => void;
   onVoiceHistoryCheckpoint: () => void;
   createMotionId: () => string;
@@ -1665,6 +1935,8 @@ function MotionLaneSet({
               voice={voice}
               zoom={zoom}
               onMove={(start, options) => onMoveVoice(voice.id, start, options)}
+              onTrim={(patch, options) => onTrimVoice(voice.id, patch, options)}
+              onOpenSettings={() => onOpenVoiceSettings(voice.id)}
               onRemove={() => onRemoveVoice(voice.id)}
               onHistoryCheckpoint={onVoiceHistoryCheckpoint}
             />
@@ -1818,6 +2090,8 @@ function VoiceBlock({
   voice,
   zoom,
   onMove,
+  onTrim,
+  onOpenSettings,
   onRemove,
   onHistoryCheckpoint,
 }: {
@@ -1825,12 +2099,18 @@ function VoiceBlock({
   voice: VoiceLaneSummary;
   zoom: number;
   onMove: (start: number, options?: ProjectMutationOptions) => void;
+  onTrim: (
+    patch: { start?: number; mediaStartTime?: number; duration?: number },
+    options?: ProjectMutationOptions,
+  ) => void;
+  onOpenSettings: () => void;
   onRemove: () => void;
   onHistoryCheckpoint: () => void;
 }) {
   const end = Math.min(clip.duration, voice.start + voice.duration);
   const width = Math.max(8, Math.max(0.05, end - voice.start) * zoom);
   const trimmed = voice.start + voice.duration > clip.duration + 0.01;
+  const inPointed = voice.mediaStart > 0.01;
 
   const startDrag = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
@@ -1855,18 +2135,93 @@ function VoiceBlock({
     window.addEventListener("pointerup", up);
   };
 
+  // Trim out-point: drag the right edge to shorten/lengthen playback, bounded by
+  // the remaining source after the in-point and by the host character clip.
+  const startTrimRight = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    const downX = e.clientX;
+    const od = voice.duration;
+    const ms = voice.mediaStart;
+    let checkpointed = false;
+    const move = (ev: PointerEvent) => {
+      if (!checkpointed) {
+        onHistoryCheckpoint();
+        checkpointed = true;
+      }
+      let nd = Math.max(
+        0.1,
+        Math.min(clip.duration - voice.start, od + (ev.clientX - downX) / zoom),
+      );
+      if (voice.sourceDuration != null) {
+        nd = Math.min(nd, Math.max(0.1, voice.sourceDuration - ms));
+      }
+      onTrim({ duration: nd }, { history: false });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  // Trim in-point: drag the left edge to move where the audio starts playing. The
+  // right edge stays anchored; mediaStart can't drop below 0 (source start).
+  const startTrimLeft = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    const downX = e.clientX;
+    const ostart = voice.start;
+    const od = voice.duration;
+    const oMediaStart = voice.mediaStart;
+    let checkpointed = false;
+    const move = (ev: PointerEvent) => {
+      if (!checkpointed) {
+        onHistoryCheckpoint();
+        checkpointed = true;
+      }
+      const dx = (ev.clientX - downX) / zoom;
+      const minStart = Math.max(0, ostart - oMediaStart);
+      const ns = Math.max(minStart, Math.min(ostart + od - 0.1, ostart + dx));
+      const nd = od - (ns - ostart);
+      const newMediaStart = Math.max(0, oMediaStart + (ns - ostart));
+      onTrim({ start: ns, duration: nd, mediaStartTime: newMediaStart }, { history: false });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
   return (
     <div
       onPointerDown={startDrag}
-      className="group absolute top-1 flex h-5 cursor-ew-resize items-center gap-1 overflow-hidden rounded border border-cyan-300/80 bg-cyan-500/70 px-1.5 text-[10px] text-foreground shadow-sm"
+      className="group absolute top-1 flex h-5 cursor-grab items-center gap-1 overflow-hidden rounded border border-cyan-300/80 bg-cyan-500/70 px-1.5 text-[10px] text-foreground shadow-sm"
       style={{
         left: (clip.start + voice.start) * zoom,
         width,
       }}
       title={`${voice.name} · volume ${Math.round(voice.volume * 100)}%${
-        trimmed ? " (trimmed by character clip)" : ""
-      }`}
+        inPointed ? ` · in ${voice.mediaStart.toFixed(1)}s` : ""
+      }${trimmed ? " (trimmed by character clip)" : ""}`}
     >
+      <div
+        onPointerDown={startTrimLeft}
+        title="Trim start (in-point)"
+        className="absolute left-0 top-0 z-10 flex h-full w-2 cursor-ew-resize items-center justify-center rounded-l bg-black/35 opacity-0 group-hover:opacity-100"
+      >
+        <span className="h-1/2 w-0.5 rounded-full bg-white/80" />
+      </div>
+      <div
+        onPointerDown={startTrimRight}
+        title="Trim end (out-point)"
+        className="absolute right-0 top-0 z-10 flex h-full w-2 cursor-ew-resize items-center justify-center rounded-r bg-black/35 opacity-0 group-hover:opacity-100"
+      >
+        <span className="h-1/2 w-0.5 rounded-full bg-white/80" />
+      </div>
       <Mic2 size={10} className="shrink-0" />
       <span className="min-w-0 truncate">{voice.name.replace(/^Voice:\s*/, "")}</span>
       {voice.volume < 1 &&
@@ -1883,11 +2238,24 @@ function VoiceBlock({
         onPointerDown={(e) => e.stopPropagation()}
         onClick={(e) => {
           e.stopPropagation();
+          onOpenSettings();
+        }}
+        title="Open speech settings (volume, lip sync, transcript)"
+        aria-label="Open speech settings"
+        className="ml-auto hidden shrink-0 rounded px-0.5 text-foreground/80 hover:bg-black/30 hover:text-foreground group-hover:block"
+      >
+        <SlidersHorizontal size={10} />
+      </button>
+      <button
+        type="button"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
           onRemove();
         }}
         title="Remove speech from this character"
         aria-label="Remove speech from this character"
-        className="ml-auto hidden shrink-0 rounded px-0.5 text-foreground/80 hover:bg-black/30 hover:text-foreground group-hover:block"
+        className="hidden shrink-0 rounded px-0.5 text-foreground/80 hover:bg-black/30 hover:text-foreground group-hover:block"
       >
         <X size={10} />
       </button>
@@ -1949,12 +2317,20 @@ function voicesForCharacterClip(
   return characterSpeeches(clip.character).map((speech) => {
     const asset = mediaAssets.get(speech.audioId);
     const line = asset?.voiceLine?.text?.trim() ?? clip.character.voiceLine?.text?.trim();
+    const sourceDuration = asset?.duration && asset.duration > 0 ? asset.duration : undefined;
+    const mediaStart = Math.max(0, speech.mediaStartTime ?? 0);
+    // Trimmed length when set; otherwise the remaining source after the in-point.
+    const duration =
+      speech.duration ??
+      (sourceDuration !== undefined ? sourceDuration - mediaStart : clip.duration);
     return {
       id: speech.id,
       start: speech.start,
       name: line ? `Voice: ${line}` : (asset?.name ?? "Voice / lip sync"),
-      duration: asset?.duration && asset.duration > 0 ? asset.duration : clip.duration,
+      duration,
       volume: speech.volume ?? 1,
+      mediaStart,
+      sourceDuration,
     };
   });
 }

@@ -283,12 +283,15 @@ function resolveSpeechesForBuild(
     const asset = mediaAssets.get(speech.audioId);
     const legacyVisemes =
       speech.audioId === characterMeta.lipSyncAudioId ? (characterMeta.visemes ?? []) : [];
+    const sourceDuration = asset?.duration ?? 0;
     return {
       audioId: speech.audioId,
       start: speech.start,
-      duration: asset?.duration ?? 0,
+      // Trimmed length when set; otherwise the full source.
+      duration: speech.duration ?? sourceDuration,
       visemes: asset?.visemes ?? legacyVisemes,
       volume: speech.volume,
+      mediaStartTime: speech.mediaStartTime,
     };
   });
 }
@@ -595,6 +598,9 @@ function buildTimelineElement(
     sourceHeight: clip.height,
     rotation: clip.rotation,
     opacity: clip.opacity,
+    volume: clip.volume,
+    mediaStartTime: clip.mediaStartTime,
+    sourceDuration: clip.sourceDuration,
   };
 }
 
@@ -612,6 +618,12 @@ function buildElementUpdates(patch: Partial<AnyClip>): Partial<StudioTimelineEle
   if (patch.width !== undefined) updates.sourceWidth = patch.width;
   if (patch.height !== undefined) updates.sourceHeight = patch.height;
   if ("volume" in patch && patch.volume !== undefined) updates.volume = patch.volume;
+  if ("mediaStartTime" in patch && patch.mediaStartTime !== undefined) {
+    updates.mediaStartTime = patch.mediaStartTime;
+  }
+  if ("sourceDuration" in patch && patch.sourceDuration !== undefined) {
+    updates.sourceDuration = patch.sourceDuration;
+  }
   if ("content" in patch && patch.content !== undefined) updates.content = patch.content;
   if ("color" in patch && patch.color !== undefined) updates.color = patch.color;
   if ("fontSize" in patch && patch.fontSize !== undefined) updates.fontSize = patch.fontSize;
@@ -720,6 +732,10 @@ interface StudioState {
 
   selectedClipId: string | null;
   selectedKeyframe: ClipKeyframeSelection | null;
+  /** Speech selected inside the character Speech inspector tab. */
+  selectedSpeechId: string | null;
+  /** Bumped to request the inspector jump to the Speech tab (e.g. from the timeline). */
+  speechFocusRequest: number;
   zoom: number;
   historyPast: HistoryEntry[];
   historyFuture: HistoryEntry[];
@@ -737,6 +753,10 @@ interface StudioState {
 
   selectClip: (id: string | null) => void;
   selectKeyframe: (selection: ClipKeyframeSelection | null) => void;
+  /** Select a speech within the currently open character Speech tab. */
+  selectSpeech: (speechId: string | null) => void;
+  /** Open a character's Speech tab focused on a specific speech (timeline shortcut). */
+  openSpeechSettings: (clipId: string, speechId: string) => void;
   checkpointHistory: () => void;
   undo: () => void;
   redo: () => void;
@@ -755,6 +775,14 @@ interface StudioState {
   ) => void;
   /** Set a speech's playback volume (0–1). */
   setSpeechVolume: (clipId: string, speechId: string, volume: number) => void;
+  /** Trim a speech: in-point (`mediaStartTime`), trimmed `duration`, and/or `start`,
+   *  bounded by the source audio length and the host clip. */
+  trimSpeech: (
+    clipId: string,
+    speechId: string,
+    patch: { start?: number; mediaStartTime?: number; duration?: number },
+    options?: ProjectMutationOptions,
+  ) => void;
   /** Remove a speech from a character clip (keeps the audio in the library). */
   removeSpeech: (clipId: string, speechId: string) => void;
   /** Rebuild every character clip whose speeches reference this audio asset (used
@@ -936,6 +964,8 @@ export const useStudio = create<StudioState>((set, get) => ({
   mediaAssets: new Map(),
   selectedClipId: null,
   selectedKeyframe: null,
+  selectedSpeechId: null,
+  speechFocusRequest: 0,
   zoom: 60,
   historyPast: [],
   historyFuture: [],
@@ -1047,6 +1077,19 @@ export const useStudio = create<StudioState>((set, get) => ({
       selectedClipId: id,
       selectedKeyframe: null,
     });
+  },
+
+  selectSpeech(speechId) {
+    set({ selectedSpeechId: speechId });
+  },
+
+  openSpeechSettings(clipId, speechId) {
+    set((state) => ({
+      selectedClipId: clipId,
+      selectedKeyframe: null,
+      selectedSpeechId: speechId,
+      speechFocusRequest: state.speechFocusRequest + 1,
+    }));
   },
 
   selectKeyframe(selection) {
@@ -1347,7 +1390,10 @@ export const useStudio = create<StudioState>((set, get) => ({
     const existing = characterSpeeches(clip.character);
     const lastEnd = existing.reduce(
       (max, speech) =>
-        Math.max(max, speech.start + (state.mediaAssets.get(speech.audioId)?.duration ?? 0)),
+        Math.max(
+          max,
+          speech.start + (speech.duration ?? state.mediaAssets.get(speech.audioId)?.duration ?? 0),
+        ),
       0,
     );
     const start = Math.max(0, Math.min(clip.duration, lastEnd));
@@ -1395,6 +1441,42 @@ export const useStudio = create<StudioState>((set, get) => ({
     get().updateClip(clipId, {
       character: { ...clip.character, speeches, lipSyncAudioId: undefined },
     } as Partial<CompositionClip>);
+  },
+
+  trimSpeech(clipId, speechId, patch, options) {
+    const state = get();
+    if (!state.project) return;
+    const clip = deriveEditorClips(state.project).find((candidate) => candidate.id === clipId);
+    if (!isCharacterCompositionClip(clip)) return;
+    const speeches = characterSpeeches(clip.character).map((speech) => {
+      if (speech.id !== speechId) return speech;
+      const asset = state.mediaAssets.get(speech.audioId);
+      const source = asset?.duration && asset.duration > 0 ? asset.duration : undefined;
+      const next = { ...speech };
+      if (patch.start !== undefined) {
+        next.start = Math.max(0, Math.min(clip.duration, patch.start));
+      }
+      if (patch.mediaStartTime !== undefined) {
+        const max =
+          source !== undefined ? Math.max(0, source - 0.1) : Math.max(0, patch.mediaStartTime);
+        next.mediaStartTime = Math.max(0, Math.min(max, patch.mediaStartTime));
+      }
+      if (patch.duration !== undefined) {
+        const ms = next.mediaStartTime ?? 0;
+        const maxBySource = source !== undefined ? source - ms : Infinity;
+        const maxByClip = clip.duration - (next.start ?? 0);
+        const max = Math.min(maxBySource, maxByClip);
+        next.duration = Math.max(0.1, Math.min(max, patch.duration));
+      }
+      return next;
+    });
+    get().updateClip(
+      clipId,
+      {
+        character: { ...clip.character, speeches, lipSyncAudioId: undefined },
+      } as Partial<CompositionClip>,
+      options,
+    );
   },
 
   removeSpeech(clipId, speechId) {
@@ -1983,6 +2065,8 @@ export const useStudio = create<StudioState>((set, get) => ({
       rotation: 0,
       opacity: 1,
       zIndex: currentClips.length,
+      mediaStartTime: 0,
+      sourceDuration: asset.duration && asset.duration > 0 ? asset.duration : undefined,
     };
     get().addClip(clip);
   },

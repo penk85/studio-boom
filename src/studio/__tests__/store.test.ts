@@ -509,6 +509,30 @@ describe("createBlankProject", () => {
     expect(html).not.toContain("data-volume=");
   });
 
+  it("serializes media trim (in-point + source length) and reads it back", () => {
+    const project = createBlankProject("Trim");
+    const asset = { ...makeMediaAsset("audio-1", "Clip"), kind: "audio" as const, duration: 30 };
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([[asset.id, asset]]),
+    });
+    useStudio.getState().addMediaToTimeline(asset);
+    let added = deriveEditorClips(useStudio.getState().project!)[0]!;
+    // Defaults: full source length, in-point 0.
+    expect(added.sourceDuration).toBe(30);
+    expect(added.mediaStartTime).toBe(0);
+    expect(added.duration).toBe(30);
+
+    useStudio.getState().updateClip(added.id, { mediaStartTime: 5, duration: 10 });
+    const html = useStudio.getState().project!.hf.rootHtml;
+    expect(html).toContain('data-media-start="5"');
+    expect(html).toContain('data-source-duration="30"');
+    added = deriveEditorClips(useStudio.getState().project!).find((c) => c.id === added.id)!;
+    expect(added.mediaStartTime).toBe(5);
+    expect(added.duration).toBe(10);
+  });
+
   it("keeps HyperFrames render tracks separate from visual z-index", () => {
     const project = createBlankProject("Track mapping");
     useStudio.setState({
@@ -1098,6 +1122,84 @@ describe("createBlankProject", () => {
     expect(state.project!.hf.compositionHtml[`char_${clip.id}`]).not.toContain(
       'data-character-speech="true"',
     );
+  });
+
+  it("trims a character speech: writes data-media-start + trimmed duration to the composition", () => {
+    const project = createBlankProject("Speech trim");
+    const body = makeMediaAsset("body-a", "body-a");
+    const voice: MediaAsset = {
+      ...makeMediaAsset("voice-trim", "voice-trim"),
+      kind: "audio",
+      scope: "generated-audio",
+      filename: "voice-trim.mp3",
+      mimeType: "audio/mpeg",
+      duration: 8,
+    };
+    const character = {
+      ...createBlankCharacter("Actor"),
+      id: "character-source-1",
+      parts: [
+        makePart("body", body.id, {
+          id: "part-a",
+          name: "Body",
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 100,
+          zIndex: 1,
+        }),
+      ],
+    };
+    const clip: CompositionClip = {
+      id: "character-voice",
+      kind: "composition",
+      compositionKind: "character",
+      character: {
+        characterId: character.id,
+        poses: {},
+        autoBlink: false,
+        speeches: [{ id: "speech-1", audioId: voice.id, start: 0 }],
+      },
+      name: "Actor",
+      trackIndex: 0,
+      start: 0,
+      duration: 10,
+      x: 10,
+      y: 20,
+      width: 300,
+      height: 450,
+      rotation: 0,
+      opacity: 1,
+      zIndex: 0,
+    };
+
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      characters: new Map([[character.id, character]]),
+      mediaAssets: new Map([
+        [body.id, body],
+        [voice.id, voice],
+      ]),
+    });
+
+    useStudio.getState().addClip(clip);
+    // Untrimmed: plays the full 8s source, no in-point.
+    let html = useStudio.getState().project!.hf.compositionHtml[`char_${clip.id}`];
+    expect(html).toMatch(/data-character-speech="true"[^>]*data-duration="8"/);
+    expect(html).not.toContain("data-media-start=");
+
+    // Trim: in-point 2s into the source, play 3s.
+    useStudio.getState().trimSpeech(clip.id, "speech-1", { mediaStartTime: 2, duration: 3 });
+
+    html = useStudio.getState().project!.hf.compositionHtml[`char_${clip.id}`];
+    expect(html).toMatch(/data-character-speech="true"[^>]*data-duration="3"/);
+    expect(html).toMatch(/data-character-speech="true"[^>]*data-media-start="2"/);
+
+    // The trimmed length round-trips into the canonical speech meta.
+    const speech = useStudio.getState().project!.editorMeta.clips[clip.id].character!.speeches![0];
+    expect(speech.mediaStartTime).toBe(2);
+    expect(speech.duration).toBe(3);
   });
 
   it("mutates root HTML through core helpers instead of regenerating the composition", () => {

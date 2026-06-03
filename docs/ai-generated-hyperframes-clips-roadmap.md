@@ -244,6 +244,27 @@ Acceptance criteria:
 - Existing native character composition clips keep working inside the nested
   composition editing model.
 
+Effort estimate:
+
+- Read-only nested outline in the root timeline: small. Show timed internal
+  clips when they exist, and otherwise show useful DOM layers from rich custom
+  compositions. This is visibility only; edits still apply to the parent
+  composition source.
+- Enter/open composition mode for timed internal clips: medium. Reuse the
+  existing timeline mechanics against `compositionHtml[compositionId]` instead
+  of `rootHtml`, with active-composition selection, source validation, undo/redo,
+  and stage targeting.
+- Stage selection/editing for nested internal elements: medium to large. The
+  Stage must target the real nested element inside the bundled HyperFrames
+  iframe and commit mutations back to the correct composition HTML.
+- Rich DOM layer editing for generated scenes: large. DOM parts such as phone
+  frames, SVG rings, labels, and graph lines are not necessarily HyperFrames
+  timed clips, so editing them needs a layer/tree model and source-level style or
+  transform mutations.
+- Promote/break generated parts into first-class clips: large. This requires a
+  decomposition policy so Studio Boom can turn selected DOM groups into scheduled
+  HyperFrames clips without changing render behavior.
+
 ## Phase 7: Catalog Effects And Keyframes
 
 Defer broad catalog infrastructure until there is a concrete need.
@@ -267,8 +288,9 @@ The original first slice has landed. A useful next slice is:
 3. Support importing simple generated top-level clip sets as individual editable
    clips, while falling back to a single composition block for complex HTML.
 4. Add source-edit test coverage around Validate -> Preview -> Apply.
-5. Start nested composition timeline editing only after the source workflow is
-   stable.
+5. Expand composition clips in the timeline with a read-only nested outline.
+6. Start full nested composition timeline editing only after the source workflow
+   and read-only outline are stable.
 
 ## Assumptions
 

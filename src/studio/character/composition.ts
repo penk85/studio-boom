@@ -64,6 +64,8 @@ export interface ResolvedSpeech {
   visemes: VisemeEntry[];
   /** Playback volume, 0–1 (default 1). */
   volume?: number;
+  /** In-point into the source audio in seconds (trim start; default 0). */
+  mediaStartTime?: number;
 }
 
 interface MotionTarget {
@@ -185,6 +187,7 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
         speech.duration,
         index,
         speech.volume,
+        speech.mediaStart,
       ),
     );
   });
@@ -874,16 +877,25 @@ function buildSpeechAudio(
   duration: number,
   trackIndex: number,
   volume?: number,
+  mediaStart?: number,
 ): string {
   const volumeAttr = volume !== undefined && volume !== 1 ? ` data-volume="${esc(volume)}"` : "";
+  const mediaStartAttr =
+    mediaStart !== undefined && mediaStart > 0 ? ` data-media-start="${esc(mediaStart)}"` : "";
   return `<audio id="${esc(safeId(id))}" data-character-speech="true" data-start="${esc(
     start,
   )}" data-duration="${esc(duration)}" data-track-index="${esc(
     trackIndex,
-  )}"${volumeAttr} src="asset:${esc(mediaId)}" preload="auto"></audio>`;
+  )}"${volumeAttr}${mediaStartAttr} src="asset:${esc(mediaId)}" preload="auto"></audio>`;
 }
 
-type ResolvedAudioSpeech = { audioId: string; start: number; duration: number; volume?: number };
+type ResolvedAudioSpeech = {
+  audioId: string;
+  start: number;
+  duration: number;
+  volume?: number;
+  mediaStart?: number;
+};
 
 /**
  * Resolve the build's speeches (or the legacy single voice) into the `<audio>`
@@ -904,6 +916,7 @@ function resolveSpeechTimeline(
     const combinedVisemes: VisemeEntry[] = [];
     for (const speech of args.speeches) {
       const start = clampT(speech.start);
+      const mediaStart = Math.max(0, speech.mediaStartTime ?? 0);
       const length = Math.min(duration - start, positiveNumber(speech.duration, duration));
       if (length <= 0) continue;
       audioSpeeches.push({
@@ -911,9 +924,13 @@ function resolveSpeechTimeline(
         start,
         duration: length,
         volume: speech.volume,
+        mediaStart,
       });
+      // Visemes are timed against the source audio; an in-point shifts them earlier
+      // and drops any that fall outside the trimmed [mediaStart, mediaStart+length) window.
       for (const entry of speech.visemes) {
-        combinedVisemes.push({ t: clampT(entry.t + start), v: entry.v });
+        if (entry.t < mediaStart - 1e-6 || entry.t > mediaStart + length + 1e-6) continue;
+        combinedVisemes.push({ t: clampT(start + (entry.t - mediaStart)), v: entry.v });
       }
       combinedVisemes.push({ t: clampT(start + length), v: "rest" });
     }
