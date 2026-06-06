@@ -360,6 +360,28 @@ describe("composeMotionsAt", () => {
     expect(headDelta.dy).toBeCloseTo(50, 0);
   });
 
+  it("collects out-of-bounds layers from an active movement", () => {
+    const preset = makePreset({
+      allowOutOfBounds: ["slot:left-eye", "head"],
+      tracks: [
+        { partRole: "head", keyframes: [makeKeyframe(0, { dy: 0 }), makeKeyframe(1, { dy: 5 })] },
+      ],
+    });
+    const clip = makeClip({ motions: [makeAppliedMotion({ offset: 0, intensity: 1 })] });
+    const presets = new Map([["p1", preset]]);
+
+    // Active at t=0.5 → its overrides are collected.
+    expect(composeMotionsAt(clip, 0.5, presets).unclampedLayers).toEqual(
+      new Set(["slot:left-eye", "head"]),
+    );
+    // Not active before its occurrence → no overrides.
+    const late = makeAppliedMotion({ offset: 5, intensity: 1 });
+    expect(
+      composeMotionsAt(makeClip({ motions: [late] }), 0.5, new Map([["p1", preset]]))
+        .unclampedLayers,
+    ).toEqual(new Set());
+  });
+
   it("keeps bone-targeted motion on per-bone deltas without creating pose swaps", () => {
     const preset = makePreset({
       tracks: [

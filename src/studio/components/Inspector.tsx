@@ -13,6 +13,7 @@ import {
   Clock3,
   Code2,
   Layers,
+  Lock,
   Mic2,
   Move,
   Paintbrush,
@@ -22,6 +23,7 @@ import {
   Sparkles,
   Trash2,
   Type,
+  Unlock,
   Volume2,
   WandSparkles,
 } from "lucide-react";
@@ -526,6 +528,7 @@ function AdvancedInspectorTab({
   onRemove: () => void;
   updateCompositionHtml: (compositionId: string, html: string) => void;
 }) {
+  const toggleClipLock = useStudio((s) => s.toggleClipLock);
   const compositionClip =
     clip.kind === "composition" && clip.compositionId && !isCharacterCompositionClip(clip)
       ? (clip as EditorClip & { kind: "composition"; compositionId: string })
@@ -552,6 +555,19 @@ function AdvancedInspectorTab({
             </select>
           </Field>
         </div>
+        <button
+          type="button"
+          onClick={() => toggleClipLock(clip.id)}
+          className={`mt-2 flex w-full items-center justify-center gap-2 rounded border px-3 py-1.5 text-xs font-medium ${
+            clip.locked
+              ? "border-primary/60 bg-primary/15 text-foreground"
+              : "border-border text-muted-foreground hover:bg-panel-2 hover:text-foreground"
+          }`}
+          title="Locked layers ignore canvas clicks and drags (still selectable here and in the timeline)"
+        >
+          {clip.locked ? <Lock size={13} /> : <Unlock size={13} />}
+          {clip.locked ? "Locked" : "Lock layer"}
+        </button>
       </PanelSection>
 
       {compositionClip && (

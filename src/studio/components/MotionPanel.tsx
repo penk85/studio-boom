@@ -54,7 +54,9 @@ export function MotionPanel({
   const [recording, setRecording] = useState(false);
   const [editingPreset, setEditingPreset] = useState<MotionPreset | null>(null);
   const [editingMotionId, setEditingMotionId] = useState<string | null>(null);
+  const [applyEditedPresetOnSave, setApplyEditedPresetOnSave] = useState(false);
   const [selectedMotionId, setSelectedMotionId] = useState<string | null>(null);
+  const [panelStatus, setPanelStatus] = useState("");
 
   useEffect(() => {
     void ensureMotionPresetsSeeded();
@@ -87,6 +89,8 @@ export function MotionPanel({
   }, [appliedMotions, selectedMotionId]);
 
   const addMotion = (preset: MotionPreset) => {
+    const nextPresetMap = new Map(presetMap);
+    nextPresetMap.set(preset.id, preset);
     const motion: AppliedMotion = {
       id: uid(),
       presetId: preset.id,
@@ -97,13 +101,14 @@ export function MotionPanel({
     const motions = resolveExclusiveMotionOverlaps({
       motions: [...appliedMotions, motion],
       editedMotionId: motion.id,
-      presetMap,
+      presetMap: nextPresetMap,
       clipDuration: clip.duration,
       createId: uid,
     });
     update(clip.id, { character: { ...clip.character, motions } } as Partial<CompositionClip>);
     setSelectedMotionId(motion.id);
     setPicking(false);
+    setPanelStatus(`Added "${preset.name}" to this character clip.`);
   };
 
   const updateMotion = (id: string, patch: Partial<AppliedMotion>) => {
@@ -130,9 +135,14 @@ export function MotionPanel({
     if (selectedMotionId === id) setSelectedMotionId(null);
   };
 
-  const editPreset = (preset: MotionPreset, motionId: string | null = null) => {
+  const editPreset = (
+    preset: MotionPreset,
+    motionId: string | null = null,
+    applyOnSave = false,
+  ) => {
     setEditingPreset(preset);
     setEditingMotionId(motionId);
+    setApplyEditedPresetOnSave(applyOnSave);
     setRecording(false);
   };
 
@@ -143,12 +153,21 @@ export function MotionPanel({
         initialPreset={editingPreset ?? undefined}
         copyOnSave={!!editingMotionId}
         onSaved={(preset) => {
-          if (editingMotionId) updateMotion(editingMotionId, { presetId: preset.id });
+          if (editingMotionId) {
+            updateMotion(editingMotionId, { presetId: preset.id });
+            setPanelStatus(`Saved "${preset.name}" and updated the selected movement.`);
+          } else if (recording || applyEditedPresetOnSave) {
+            addMotion(preset);
+            setPanelStatus(`Saved and applied "${preset.name}" at the playhead.`);
+          } else {
+            setPanelStatus(`Saved "${preset.name}" to reusable presets.`);
+          }
         }}
         onClose={() => {
           setRecording(false);
           setEditingPreset(null);
           setEditingMotionId(null);
+          setApplyEditedPresetOnSave(false);
         }}
       />
     );
@@ -158,7 +177,7 @@ export function MotionPanel({
     <div className="rounded border border-border bg-panel-2 p-2">
       <div className="mb-2 flex items-center justify-between">
         <span className="font-semibold uppercase tracking-wider text-muted-foreground">
-          Applied motions
+          Clip movements
         </span>
         <div className="flex items-center gap-1">
           <button
@@ -168,16 +187,25 @@ export function MotionPanel({
             }}
             className="rounded border border-border bg-panel px-2 py-0.5 text-[10px] text-foreground hover:bg-panel-2"
           >
-            New motion preset
+            Create movement
           </button>
           <button
             onClick={() => setPicking((v) => !v)}
             className="rounded bg-primary/30 px-2 py-0.5 text-[10px] text-foreground hover:bg-primary/50"
           >
-            {picking ? "Cancel" : "+ Apply preset"}
+            {picking ? "Cancel" : "+ Add saved preset"}
           </button>
         </div>
       </div>
+      <div className="mb-2 rounded border border-border bg-panel px-2 py-1 text-[10px] text-muted-foreground">
+        These are movements applied to this character clip. Create a movement to preview, save, and
+        apply it here; saved presets can be reused later.
+      </div>
+      {panelStatus && (
+        <div className="mb-2 rounded border border-primary/30 bg-primary/10 px-2 py-1 text-[10px] text-foreground">
+          {panelStatus}
+        </div>
+      )}
 
       {picking && (
         <div className="mb-2 rounded border border-border bg-panel">
@@ -222,15 +250,15 @@ export function MotionPanel({
                   </div>
                 </button>
                 <button
-                  onClick={() => editPreset(p)}
+                  onClick={() => editPreset(p, null, true)}
                   className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-panel-2 hover:text-foreground"
                 >
-                  Edit
+                  Customize & add
                 </button>
               </div>
             ))}
             {filteredPresets.length === 0 && (
-              <div className="p-2 text-[11px] text-muted-foreground">No motion presets match.</div>
+              <div className="p-2 text-[11px] text-muted-foreground">No saved presets match.</div>
             )}
           </div>
         </div>
@@ -240,7 +268,7 @@ export function MotionPanel({
         <div className="space-y-1">
           {appliedMotions.length === 0 && (
             <div className="rounded border border-dashed border-border p-2 text-center text-[11px] text-muted-foreground">
-              No motions applied.
+              No clip movements yet.
             </div>
           )}
 
@@ -281,7 +309,7 @@ export function MotionPanel({
                 onClick={() => editPreset(selectedPreset, selectedMotion.id)}
                 className="text-muted-foreground hover:text-foreground"
               >
-                Edit preset copy
+                Customize movement
               </button>
               <button onClick={() => removeMotion(selectedMotion.id)} className="text-destructive">
                 Remove

@@ -85,6 +85,62 @@ export function getPartSlotId(part: CharacterPart): ID {
   return defaultSlotIdForRole(part.role, part.id, part.side);
 }
 
+export function inferHumanParentPartId(
+  parts: CharacterPart[],
+  part: CharacterPart,
+): ID | undefined {
+  if (part.parentId) return part.parentId;
+  const sameSide = part.side === "left" || part.side === "right" ? part.side : undefined;
+  const candidates = parts
+    .filter((candidate) => candidate.id !== part.id)
+    .slice()
+    .sort((a, b) => Number(b.visible) - Number(a.visible) || b.zIndex - a.zIndex);
+  const pick = (role: PartRole, side?: CharacterPart["side"]) =>
+    candidates.find(
+      (candidate) =>
+        candidate.role === role &&
+        (!side || candidate.side === side) &&
+        getPartSlotId(candidate) !== getPartSlotId(part),
+    )?.id;
+  const pickAny = (role: PartRole) =>
+    candidates.find(
+      (candidate) => candidate.role === role && getPartSlotId(candidate) !== getPartSlotId(part),
+    )?.id;
+
+  switch (part.role) {
+    case "head":
+      return pickAny("body");
+    case "eye":
+    case "eyebrow":
+    case "mouth":
+    case "hair":
+      return pickAny("head") ?? pickAny("body");
+    case "arm":
+    case "leg":
+      return pickAny("body");
+    case "hand":
+      return (sameSide ? pick("arm", sameSide) : undefined) ?? pickAny("arm") ?? pickAny("body");
+    case "foot":
+      return (sameSide ? pick("leg", sameSide) : undefined) ?? pickAny("leg") ?? pickAny("body");
+    case "accessory":
+      return pickAny("head") ?? pickAny("body");
+    default:
+      return undefined;
+  }
+}
+
+export function withInferredHumanParentIds(character: CharacterPreset): CharacterPreset {
+  let changed = false;
+  const parts = character.parts.map((part) => {
+    if (part.parentId) return part;
+    const parentId = inferHumanParentPartId(character.parts, part);
+    if (!parentId) return part;
+    changed = true;
+    return { ...part, parentId };
+  });
+  return changed ? { ...character, parts } : character;
+}
+
 export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
   const restMouth = c.parts.find(
     (p) => normalizePartRole(p.role as string) === "mouth" && legacyVisemeToStandard(p.viseme),

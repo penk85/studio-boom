@@ -216,8 +216,6 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).toContain('data-character-parent-bone-id="bone:role:body"');
     expect(html).toContain('data-character-slot-id="slot:left-eye"');
     expect(html).toContain('data-character-bound-bone-id="bone:slot:left-eye"');
-    expect(html).toContain('data-character-host-slot-id="role:head"');
-    expect(html).toContain('data-character-host-bone-id="bone:role:head"');
     expect(html).toContain('data-character-depth="7"');
     expect(html).toContain('data-character-draw-order-index="');
   });

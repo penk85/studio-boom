@@ -1,7 +1,7 @@
 // Built-in Motion Preset library — seeded into IndexedDB on first run.
-// These are character-agnostic: they target part roles and apply deltas
-// relative to each part's rest pose, so they work on any character that
-// has those roles enabled in its manifest.
+// These are character-agnostic: they target part roles and apply parent-relative
+// deltas. Under the skeleton runtime, parent motion belongs on parent controls;
+// children inherit it through the rig instead of restating the same transform.
 import { db, uid } from "../db";
 import type { MotionPreset, MotionTrack } from "../types";
 
@@ -29,7 +29,7 @@ function preset(
   };
 }
 
-const STARTERS: MotionPreset[] = [
+export const BUILTIN_MOTION_PRESETS: MotionPreset[] = [
   // Expressions ------------------------------------------------------------
   preset(
     "Surprised",
@@ -264,14 +264,6 @@ const STARTERS: MotionPreset[] = [
           { t: 1, dy: 0 },
         ],
       },
-      {
-        partRole: "head",
-        keyframes: [
-          { t: 0, dy: 0 },
-          { t: 0.5, dy: -3 },
-          { t: 1, dy: 0 },
-        ],
-      },
     ],
     { loop: true, description: "Subtle breathing." },
   ),
@@ -288,26 +280,10 @@ const STARTERS: MotionPreset[] = [
       ],
     },
     {
-      partRole: "head",
-      keyframes: [
-        { t: 0, dy: 0 },
-        { t: 0.5, dy: -60 },
-        { t: 1, dy: 0 },
-      ],
-    },
-    {
       partRole: "arm",
       keyframes: [
         { t: 0, rotation: 0 },
         { t: 0.5, rotation: 30 },
-        { t: 1, rotation: 0 },
-      ],
-    },
-    {
-      partRole: "arm",
-      keyframes: [
-        { t: 0, rotation: 0 },
-        { t: 0.5, rotation: -30 },
         { t: 1, rotation: 0 },
       ],
     },
@@ -425,7 +401,7 @@ let seedPromise: Promise<void> | null = null;
 export function ensureMotionPresetsSeeded(): Promise<void> {
   if (seedPromise) return seedPromise;
   seedPromise = (async () => {
-    for (const p of STARTERS) {
+    for (const p of BUILTIN_MOTION_PRESETS) {
       const existing = await db.motionPresets.get(p.id);
       if (!existing) {
         await db.motionPresets.put(p);

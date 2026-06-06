@@ -14,6 +14,7 @@ import {
   RotateCw,
   Scaling,
   SkipBack,
+  Unlock,
 } from "lucide-react";
 import { db, uid } from "../db";
 import { useMediaUrl } from "../hooks/useMediaUrl";
@@ -27,7 +28,20 @@ import { localAlphaBounds, pivotForPart } from "../character/alpha-bounds";
 import { faceTurnMotionForPart } from "../character/face-turn";
 import { RigPreview } from "../character/MouthCreator";
 import { RIG_STYLES, VISEME_POSES } from "../character/mouth-libraries";
+import {
+  angleRigJsonFromPreset,
+  characterJsonFromPreset,
+  motionJsonFilename,
+} from "../character-json/normalize";
+import { buildMotionRequestAiOut } from "../character-json/ai-context";
 import { expandKeyposesWithAnticipation } from "./apply";
+import { motionJsonToPreset, parseJsonArtifact, validateMotionJsonForAngle } from "./motion-json";
+import {
+  type DrillPick,
+  exceedsDragThreshold,
+  resolveDragSubject,
+  resolveDrillSelection,
+} from "../interaction/select-drag";
 import type {
   CharacterPart,
   CharacterPreset,
@@ -39,6 +53,7 @@ import type {
   RecordedKeypose,
   RecordedPartOverride,
 } from "../types";
+import type { MotionJson } from "../character-json/schema";
 
 const CATEGORIES: { value: MotionCategory; label: string }[] = [
   { value: "expression", label: "Expression" },
@@ -91,6 +106,11 @@ interface SelectPopover {
   slots: CharacterSlot[];
 }
 
+interface StatusMessage {
+  kind: "idle" | "success" | "error";
+  message: string;
+}
+
 export function MotionPresetRecorder({
   character,
   onClose,
@@ -119,7 +139,7 @@ export function MotionPresetRecorder({
   const [name, setName] = useState(
     initialPreset && (initialPreset.builtin || copyOnSave)
       ? customPresetName(initialPreset.name)
-      : (initialPreset?.name ?? "New motion preset"),
+      : (initialPreset?.name ?? "New movement"),
   );
   const [category, setCategory] = useState<MotionCategory>(initialPreset?.category ?? "expression");
   const [duration, setDuration] = useState(initialPreset?.duration ?? 1);
@@ -130,14 +150,24 @@ export function MotionPresetRecorder({
   const [overrides, setOverrides] = useState<Map<string, RecorderPartState>>(new Map());
   const [faceTurnX, setFaceTurnX] = useState(initialPreset?.keyposes?.[0]?.faceTurnX ?? 0);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
+  // Transient editor lock for this recording session — locked slots ignore canvas
+  // clicks/drags (still selectable from the part list). Parts locked in the character
+  // editor (part.locked) are also treated as locked here.
+  const [lockedSlotIds, setLockedSlotIds] = useState<Set<string>>(new Set());
   const [fitScale, setFitScale] = useState(0.5);
   const [previewMode, setPreviewMode] = useState<"fit" | "export">("fit");
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [selectPopover, setSelectPopover] = useState<SelectPopover | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiRequest, setAiRequest] = useState("Create a forward walk cycle.");
+  const [aiPaste, setAiPaste] = useState("");
+  const [aiStatus, setAiStatus] = useState<StatusMessage>({ kind: "idle", message: "" });
   const wrapRef = useRef<HTMLDivElement>(null);
   const planeRef = useRef<HTMLDivElement>(null);
-  const lastPickRef = useRef<{ x: number; y: number; key: string; index: number } | null>(null);
+  const lastPickRef = useRef<DrillPick | null>(null);
+  const characterJson = useMemo(() => characterJsonFromPreset(character), [character]);
+  const activeAngleRig = useMemo(() => angleRigJsonFromPreset(character), [character]);
   const activePartForSlot = useCallback(
     (slot: CharacterSlot, poseSwap?: string) => {
       if (usesGeneratedMouth && slot.role === "mouth" && generatedMouthPart)
@@ -217,8 +247,8 @@ export function MotionPresetRecorder({
         opacity: ov.opacity ?? 1,
       });
     }
-    setOverrides(next);
-    setFaceTurnX(interp.faceTurnX);
+    setOverrides((prev) => (recorderOverrideMapsEqual(prev, next) ? prev : next));
+    setFaceTurnX((prev) => (Object.is(prev, interp.faceTurnX) ? prev : interp.faceTurnX));
   }, [activePartForSlot, time, keyposes, usesGeneratedMouth, slots]);
 
   const displayScale = previewMode === "export" ? 1 : fitScale;
@@ -255,6 +285,21 @@ export function MotionPresetRecorder({
     });
   };
 
+  // A slot is locked if it's locked for this session or its active part is locked in the
+  // character editor — locked slots ignore canvas clicks/drags entirely.
+  const isSlotLocked = (slotId: string) =>
+    lockedSlotIds.has(slotId) ||
+    !!activePartForSlot(slots.find((slot) => slot.id === slotId)!, undefined)?.locked;
+
+  const toggleSlotLocked = (slotId: string) =>
+    setLockedSlotIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(slotId)) next.delete(slotId);
+      else next.add(slotId);
+      return next;
+    });
+
+  // Ordered stack of slots under a point, topmost first, with locked slots excluded.
   const slotsAtPoint = (clientX: number, clientY: number) => {
     const rect = planeRef.current?.getBoundingClientRect();
     if (!rect) return [];
@@ -263,7 +308,7 @@ export function MotionPresetRecorder({
     return slots
       .filter((slot) => {
         const part = activePartForSlot(slot, overrides.get(slot.id)?.poseSwap);
-        if (!part?.visible) return false;
+        if (!part?.visible || part.locked || lockedSlotIds.has(slot.id)) return false;
         const bounds = transformedBounds(
           part,
           overrides.get(slot.id),
@@ -279,21 +324,58 @@ export function MotionPresetRecorder({
       );
   };
 
-  const selectAtPoint = (clientX: number, clientY: number, altKey: boolean) => {
-    const candidates = slotsAtPoint(clientX, clientY);
-    if (candidates.length === 0) return;
-    if (altKey) {
-      setSelectPopover({ x: clientX, y: clientY, slots: candidates });
+  // Figma-style canvas select/drag (shared model — see select-drag.ts), centralized on the
+  // pose plane so the full z-stack is considered: a click selects the top slot and drills
+  // under it on a repeat click; a drag moves the already-selected slot from anywhere even
+  // when overlapped, or selects+drags an unselected slot in one gesture. Alt-click opens
+  // the candidate popover. Selection never changes mid-drag.
+  const handlePlanePointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    const candidates = slotsAtPoint(e.clientX, e.clientY);
+    if (e.altKey) {
+      e.stopPropagation();
+      if (candidates.length > 0)
+        setSelectPopover({ x: e.clientX, y: e.clientY, slots: candidates });
       return;
     }
-    const key = candidates.map((slot) => slot.id).join("|");
-    const last = lastPickRef.current;
-    const samePoint =
-      last && last.key === key && Math.hypot(clientX - last.x, clientY - last.y) < 6;
-    const index = samePoint ? (last.index + 1) % candidates.length : 0;
-    lastPickRef.current = { x: clientX, y: clientY, key, index };
-    setSelectedSlotId(candidates[index].id);
-    setSelectPopover(null);
+    const candidateIds = candidates.map((slot) => slot.id);
+    const subjectId = resolveDragSubject(candidateIds, selectedSlotId);
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const ox = subjectId ? (overrides.get(subjectId)?.dx ?? 0) : 0;
+    const oy = subjectId ? (overrides.get(subjectId)?.dy ?? 0) : 0;
+    let dragging = false;
+
+    const move = (ev: PointerEvent) => {
+      if (!subjectId) return;
+      if (!dragging) {
+        if (!exceedsDragThreshold({ x: startX, y: startY }, { x: ev.clientX, y: ev.clientY }))
+          return;
+        dragging = true;
+        if (subjectId !== selectedSlotId) setSelectedSlotId(subjectId);
+        setSelectPopover(null);
+      }
+      updateOverride(subjectId, {
+        dx: Math.round(ox + (ev.clientX - startX) / displayScale),
+        dy: Math.round(oy + (ev.clientY - startY) / displayScale),
+      });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      if (dragging) return;
+      const { id, nextPick } = resolveDrillSelection(candidateIds, lastPickRef.current, {
+        x: startX,
+        y: startY,
+      });
+      lastPickRef.current = nextPick;
+      if (id) {
+        setSelectedSlotId(id);
+        setSelectPopover(null);
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
   };
 
   const captureKeypose = () => {
@@ -351,7 +433,7 @@ export function MotionPresetRecorder({
     const savingCopy = !!initialPreset && (!!initialPreset.builtin || !!copyOnSave);
     const preset: MotionPreset = {
       id: savingCopy ? uid() : (initialPreset?.id ?? uid()),
-      name: name.trim() || "Untitled motion preset",
+      name: name.trim() || "Untitled movement",
       category,
       duration: Math.max(0.1, duration),
       loop: initialPreset?.loop ?? false,
@@ -367,6 +449,73 @@ export function MotionPresetRecorder({
     onClose();
   };
 
+  const copyAiPromptPackage = async () => {
+    const text = JSON.stringify(
+      buildMotionRequestAiOut({
+        character: characterJson,
+        activeAngle: activeAngleRig,
+        request: aiRequest,
+      }),
+      null,
+      2,
+    );
+    try {
+      await navigator.clipboard.writeText(text);
+      setAiStatus({
+        kind: "success",
+        message: "Copied AI prompt package. Paste it into your AI chat.",
+      });
+    } catch {
+      setAiPaste(text);
+      setAiStatus({
+        kind: "error",
+        message: "Clipboard access failed. The prompt package was placed below for manual copy.",
+      });
+    }
+  };
+
+  const loadAiSuggestion = () => {
+    const parsed = parseJsonArtifact(aiPaste);
+    if (parsed.error) {
+      setAiStatus({ kind: "error", message: `Invalid JSON: ${parsed.error}` });
+      return;
+    }
+    const motion = motionFromPastedJson(parsed.value);
+    if (!motion) {
+      setAiStatus({
+        kind: "error",
+        message: 'Paste kind "studioBoom.ai.motionSuggestion.v1" or "studioBoom.motion.v1".',
+      });
+      return;
+    }
+    const validation = validateMotionJsonForAngle(motion, activeAngleRig);
+    if (!validation.ok) {
+      setAiStatus({
+        kind: "error",
+        message: validation.errors.map((issue) => `${issue.path}: ${issue.message}`).join("\n"),
+      });
+      return;
+    }
+    const converted = motionJsonToPreset(motion, activeAngleRig, { id: uid() });
+    if (!converted.preset) {
+      setAiStatus({ kind: "error", message: converted.errors.join("\n") });
+      return;
+    }
+    setName(converted.preset.name);
+    setCategory(converted.preset.category);
+    setDuration(converted.preset.duration);
+    setKeyposes(cloneKeyposes(converted.preset.keyposes ?? []));
+    setTime(0);
+    setPreviewPlaying(false);
+    const warningText = converted.warnings.length
+      ? `\nWarnings:\n${converted.warnings.join("\n")}`
+      : "";
+    setAiStatus({
+      kind: "success",
+      message: `Loaded "${converted.preset.name}" into the editor. Preview, tweak, then save.${warningText}`,
+    });
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-background/90 p-6">
       <div className="flex w-full max-w-7xl flex-col overflow-hidden rounded-lg border border-border bg-panel">
@@ -377,7 +526,7 @@ export function MotionPresetRecorder({
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="Motion preset name"
+            placeholder="Movement name"
             className="rounded border border-border bg-input px-2 py-1 text-xs"
           />
           <select
@@ -437,10 +586,10 @@ export function MotionPresetRecorder({
               className="rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-90"
             >
               {initialPreset?.builtin || copyOnSave
-                ? "Save custom preset"
+                ? "Save custom movement"
                 : initialPreset
-                  ? "Update motion preset"
-                  : "Save motion preset"}
+                  ? "Update movement"
+                  : "Save movement"}
             </button>
           </div>
         </header>
@@ -452,6 +601,8 @@ export function MotionPresetRecorder({
               selectedSlotId={selectedSlotId}
               overrides={overrides}
               activePartForSlot={activePartForSlot}
+              isLocked={isSlotLocked}
+              onToggleLocked={toggleSlotLocked}
               onSelect={setSelectedSlotId}
               onToggleHidden={(slotId) => {
                 const slot = slots.find((item) => item.id === slotId);
@@ -479,6 +630,7 @@ export function MotionPresetRecorder({
             >
               <div
                 ref={planeRef}
+                onPointerDown={handlePlanePointerDown}
                 className="absolute left-0 top-0 origin-top-left"
                 style={{
                   width: character.canvasWidth,
@@ -495,18 +647,11 @@ export function MotionPresetRecorder({
                       part={part}
                       override={overrides.get(slot.id)}
                       selected={slot.id === selectedSlotId}
-                      stageScale={displayScale}
                       faceTurnX={faceTurnX}
                       canvasWidth={character.canvasWidth}
                       mouthRig={
                         usesGeneratedMouth && slot.role === "mouth" ? character.mouthRig : undefined
                       }
-                      onSelectAtPoint={selectAtPoint}
-                      onSelect={() => {
-                        setSelectedSlotId(slot.id);
-                        setSelectPopover(null);
-                      }}
-                      onChange={(patch) => updateOverride(slot.id, patch)}
                     />
                   );
                 })}
@@ -545,6 +690,18 @@ export function MotionPresetRecorder({
           </main>
 
           <aside className="w-72 shrink-0 overflow-auto border-l border-border bg-panel p-3 text-xs">
+            <AiMotionEditorPanel
+              open={aiOpen}
+              request={aiRequest}
+              paste={aiPaste}
+              status={aiStatus}
+              onOpenChange={setAiOpen}
+              onRequestChange={setAiRequest}
+              onPasteChange={setAiPaste}
+              onCopyPrompt={copyAiPromptPackage}
+              onLoadSuggestion={loadAiSuggestion}
+            />
+
             <PropertiesPanel
               slot={selectedSlot}
               part={selectedPart}
@@ -720,6 +877,8 @@ function PartList({
   selectedSlotId,
   overrides,
   activePartForSlot,
+  isLocked,
+  onToggleLocked,
   onSelect,
   onToggleHidden,
 }: {
@@ -727,6 +886,8 @@ function PartList({
   selectedSlotId: string | null;
   overrides: Map<string, RecorderPartState>;
   activePartForSlot: (slot: CharacterSlot) => CharacterPart | undefined;
+  isLocked: (id: string) => boolean;
+  onToggleLocked: (id: string) => void;
   onSelect: (id: string) => void;
   onToggleHidden: (id: string) => void;
 }) {
@@ -746,6 +907,7 @@ function PartList({
                 const override = overrides.get(slot.id);
                 const dirty = isDirtyOverride(override, part);
                 const hidden = (override?.opacity ?? 1) <= 0.01 || part?.visible === false;
+                const locked = isLocked(slot.id);
                 return (
                   <div
                     key={slot.id}
@@ -765,7 +927,19 @@ function PartList({
                         {slot.name ?? part?.name ?? roleLabel(slot.role)}
                       </span>
                       <span className="rounded bg-background/60 px-1 text-[9px]">{slot.role}</span>
-                      <Lock size={10} className="opacity-45" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onToggleLocked(slot.id);
+                      }}
+                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-background/70 ${
+                        locked ? "text-primary" : "text-muted-foreground"
+                      }`}
+                      title={locked ? "Unlock layer" : "Lock layer"}
+                    >
+                      {locked ? <Lock size={12} /> : <Unlock size={12} />}
                     </button>
                     <button
                       type="button"
@@ -787,6 +961,101 @@ function PartList({
           </section>
         );
       })}
+    </div>
+  );
+}
+
+function AiMotionEditorPanel({
+  open,
+  request,
+  paste,
+  status,
+  onOpenChange,
+  onRequestChange,
+  onPasteChange,
+  onCopyPrompt,
+  onLoadSuggestion,
+}: {
+  open: boolean;
+  request: string;
+  paste: string;
+  status: StatusMessage;
+  onOpenChange: (open: boolean) => void;
+  onRequestChange: (value: string) => void;
+  onPasteChange: (value: string) => void;
+  onCopyPrompt: () => void;
+  onLoadSuggestion: () => void;
+}) {
+  return (
+    <div className="mb-3 rounded border border-border bg-panel-2 p-3">
+      <button
+        type="button"
+        onClick={() => onOpenChange(!open)}
+        className="flex w-full items-center justify-between text-left"
+      >
+        <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+          AI Movement
+        </span>
+        <span className="text-[10px] text-muted-foreground">{open ? "Hide" : "Show"}</span>
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2">
+          <div className="rounded border border-border bg-panel p-2 text-[10px] text-muted-foreground">
+            Copy one prompt package. It includes the movement request, character JSON, active angle
+            rig, and return schema, so you do not need a separate character file. Paste the returned
+            movement JSON here to preview before saving.
+          </div>
+          <label className="block">
+            <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+              Describe movement
+            </span>
+            <textarea
+              value={request}
+              onChange={(e) => onRequestChange(e.target.value)}
+              rows={3}
+              className="w-full resize-y rounded border border-border bg-input px-2 py-1"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={onCopyPrompt}
+            className="w-full rounded bg-primary/30 px-2 py-1 text-foreground hover:bg-primary/50"
+          >
+            Copy AI prompt package
+          </button>
+          <label className="block">
+            <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+              Paste returned movement JSON
+            </span>
+            <textarea
+              value={paste}
+              onChange={(e) => onPasteChange(e.target.value)}
+              rows={5}
+              spellCheck={false}
+              placeholder={`Paste ${motionJsonFilename("AI movement")} or *.motion-suggestion.ai-in.json`}
+              className="w-full resize-y rounded border border-border bg-input px-2 py-1 font-mono text-[10px]"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={onLoadSuggestion}
+            className="w-full rounded border border-border bg-panel px-2 py-1 hover:bg-panel-2"
+          >
+            Load into preview
+          </button>
+          {status.message && (
+            <div
+              className={`whitespace-pre-wrap rounded border px-2 py-1 text-[10px] ${
+                status.kind === "error"
+                  ? "border-destructive/40 bg-destructive/10 text-destructive"
+                  : "border-primary/30 bg-primary/10 text-foreground"
+              }`}
+            >
+              {status.message}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1022,25 +1291,20 @@ function PoseLayer({
   part,
   override,
   selected,
-  stageScale,
   faceTurnX,
   canvasWidth,
   mouthRig,
-  onSelect,
-  onSelectAtPoint,
-  onChange,
 }: {
   part: CharacterPart;
   override?: RecorderPartState;
   selected: boolean;
-  stageScale: number;
   faceTurnX: number;
   canvasWidth: number;
   mouthRig?: CharacterPreset["mouthRig"];
-  onSelect: () => void;
-  onSelectAtPoint: (clientX: number, clientY: number, altKey: boolean) => void;
-  onChange: (patch: Partial<RecorderPartState>) => void;
 }) {
+  // Pure visual layer. Selection and dragging are handled centrally on the pose plane
+  // (`handlePlanePointerDown`) so the full z-stack is considered for drill-through and
+  // overlap-priority drag.
   const url = useMediaUrl(part.mediaId);
   const ov = override ?? defaultOverride(part.slotId, part);
   const turn = faceTurnMotionForPart(part, faceTurnX, canvasWidth);
@@ -1048,41 +1312,6 @@ function PoseLayer({
   const rigStyle = mouthRig
     ? (RIG_STYLES.find((style) => style.id === mouthRig.styleId) ?? RIG_STYLES[0])
     : null;
-
-  const onPointerDown = (e: React.PointerEvent) => {
-    e.stopPropagation();
-    if (e.button !== 0) return;
-    if (e.altKey) {
-      onSelectAtPoint(e.clientX, e.clientY, true);
-      return;
-    }
-    const sx = e.clientX;
-    const sy = e.clientY;
-    const ox = ov.dx;
-    const oy = ov.dy;
-    let dragging = selected;
-    let moved = false;
-    const move = (ev: PointerEvent) => {
-      const dist = Math.hypot(ev.clientX - sx, ev.clientY - sy);
-      if (!dragging && dist > 4) {
-        dragging = true;
-        onSelect();
-      }
-      if (!dragging) return;
-      moved = true;
-      onChange({
-        dx: Math.round(ox + (ev.clientX - sx) / stageScale),
-        dy: Math.round(oy + (ev.clientY - sy) / stageScale),
-      });
-    };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      if (!moved) onSelectAtPoint(sx, sy, false);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  };
 
   if (!part.visible) return null;
   return (
@@ -1148,15 +1377,13 @@ function PoseLayer({
         />
       ) : null}
       <div
-        onPointerDown={onPointerDown}
         className={`absolute ${selected ? "outline outline-1 outline-primary/80" : ""}`}
         style={{
           left: alphaRect.x,
           top: alphaRect.y,
           width: alphaRect.width,
           height: alphaRect.height,
-          cursor: "pointer",
-          pointerEvents: "auto",
+          pointerEvents: "none",
         }}
       />
     </div>
@@ -1453,13 +1680,13 @@ function editorTitle(category: MotionCategory) {
     case "gesture":
       return "Body Gesture Editor";
     case "full-body":
-      return "Full Body Motion Editor";
+      return "Full Body Movement Editor";
     case "camera":
-      return "Camera Motion Editor";
+      return "Camera Movement Editor";
     case "headTurn":
       return "Head Turn Editor";
     case "custom":
-      return "Custom Motion Editor";
+      return "Custom Movement Editor";
   }
 }
 
@@ -1655,6 +1882,49 @@ function defaultOverride(slotId: string, part?: CharacterPart): RecorderPartStat
     originY: part?.anchorY ?? 0.5,
     opacity: 1,
   };
+}
+
+function recorderOverrideMapsEqual(
+  a: Map<string, RecorderPartState>,
+  b: Map<string, RecorderPartState>,
+): boolean {
+  if (a.size !== b.size) return false;
+  for (const [key, av] of a.entries()) {
+    const bv = b.get(key);
+    if (!bv || !recorderOverridesEqual(av, bv)) return false;
+  }
+  return true;
+}
+
+function recorderOverridesEqual(a: RecorderPartState, b: RecorderPartState): boolean {
+  return (
+    a.slotId === b.slotId &&
+    a.poseSwap === b.poseSwap &&
+    Object.is(a.dx, b.dx) &&
+    Object.is(a.dy, b.dy) &&
+    Object.is(a.scale, b.scale) &&
+    Object.is(a.scaleX, b.scaleX) &&
+    Object.is(a.scaleY, b.scaleY) &&
+    Object.is(a.skewX, b.skewX) &&
+    Object.is(a.skewY, b.skewY) &&
+    Object.is(a.rotation, b.rotation) &&
+    Object.is(a.originX, b.originX) &&
+    Object.is(a.originY, b.originY) &&
+    Object.is(a.opacity, b.opacity)
+  );
+}
+
+function motionFromPastedJson(value: unknown): MotionJson | null {
+  if (!isRecord(value)) return null;
+  if (value.kind === "studioBoom.motion.v1") return value as MotionJson;
+  if (value.kind === "studioBoom.ai.motionSuggestion.v1" && isRecord(value.motion)) {
+    return value.motion as MotionJson;
+  }
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function generatedMouthPreviewPart(character: CharacterPreset): CharacterPart | null {

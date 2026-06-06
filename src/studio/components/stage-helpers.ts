@@ -400,6 +400,43 @@ function resolveElementClipId(node: Element | null, clipIds: Set<string>): strin
   return null;
 }
 
+/**
+ * Ordered stack of clip ids under a point, topmost first, with locked clips removed.
+ * This is the candidate list the Figma-style select/drag controller drills through.
+ *
+ * Hit-tests the parent-document `StageClickOverlay` rectangles (one `data-clip-id` rect
+ * per visible clip). `elementsFromPoint` returns them already z-ordered top→bottom, so a
+ * locked rect on top simply lets the click fall through to the unlocked clip beneath it.
+ */
+export function hitTestClipIdsAtPoint(
+  target: EventTarget | null,
+  clientX: number,
+  clientY: number,
+  clipIds: Set<string>,
+  isLocked: (id: string) => boolean,
+): string[] {
+  const el = asElement(target);
+  const doc = el?.ownerDocument ?? (typeof document !== "undefined" ? document : null);
+  if (!doc) return [];
+  const ids: string[] = [];
+  for (const node of doc.elementsFromPoint(clientX, clientY)) {
+    const id = resolveClipIdAttr(node, clipIds);
+    if (id && !isLocked(id) && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/** Walk up from a node to the nearest ancestor carrying a known `data-clip-id`. */
+function resolveClipIdAttr(node: Element | null, clipIds: Set<string>): string | null {
+  let current: Element | null = node;
+  while (current) {
+    const id = current.getAttribute?.("data-clip-id");
+    if (id && clipIds.has(id)) return id;
+    current = current.parentElement;
+  }
+  return null;
+}
+
 function asElement(value: unknown): Element | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as { nodeType?: number };

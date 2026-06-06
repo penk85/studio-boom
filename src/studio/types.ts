@@ -154,6 +154,8 @@ export interface CharacterPart {
   /** Parallax depth (-1 back .. 0 neutral .. +1 front). */
   depth: number;
   visible: boolean;
+  /** Editor lock: a locked part ignores canvas clicks/drags (still selectable from the list). */
+  locked?: boolean;
 }
 
 /** Manifest of which optional roles this character has. */
@@ -244,30 +246,27 @@ export interface CharacterSlotBinding {
       CharacterAngleTransformOverride & {
         boneId?: ID;
         partId?: ID;
-        hostConstraintId?: ID;
       }
     >
   >;
 }
 
-export interface CharacterHostConstraint {
+/**
+ * A layer's movement limits relative to its attach-to parent. The layer is carried by its parent
+ * (FK), and `reach`/`rotReach` cap how far it may additionally drift/twist on its own. Both are
+ * authored in the parent's frame so they ride along with the parent. Used as guides for generated
+ * motion; manual posing may exceed them.
+ */
+export interface CharacterReach {
   id: ID;
   slotId: ID;
-  hostSlotId?: ID;
-  hostBoneId?: ID;
-  mode: "bounds" | "mask";
-  padding?: number;
-  angleOverrides?: Partial<
-    Record<
-      CharacterAngle,
-      {
-        hostSlotId?: ID;
-        hostBoneId?: ID;
-        mode?: "bounds" | "mask";
-        padding?: number;
-      }
-    >
-  >;
+  /**
+   * Movement reach: an organic polygon (the outline traced by sweeping the layer to its extremes),
+   * as offsets from the layer's rest position. Undefined = unlimited drift.
+   */
+  reach?: { x: number; y: number }[];
+  /** Rotation reach: how far the layer may twist from rest, in degrees (min ≤ 0 ≤ max). */
+  rotReach?: { min: number; max: number };
 }
 
 export interface CharacterRig {
@@ -276,7 +275,7 @@ export interface CharacterRig {
   bones: CharacterBone[];
   slotBindings: CharacterSlotBinding[];
   drawOrder: ID[];
-  hostConstraints: CharacterHostConstraint[];
+  reaches: CharacterReach[];
   /** Reserved shape for future mesh/control-point binding support. */
   mesh?: {
     version: 1;
@@ -476,6 +475,11 @@ export interface MotionPreset {
   tracks: MotionTrack[];
   /** Visual recorder data — preferred over `tracks` when present. */
   keyposes?: RecordedKeypose[];
+  /**
+   * Layers (slotIds and/or part roles) this movement is allowed to push past the character's
+   * authored reach — the per-movement "allow out of bounds" escape hatch. Empty = fully clamped.
+   */
+  allowOutOfBounds?: ID[];
   /** Provisional head-turn data. A richer face-plane head-turn design is deferred. */
   headTurn?: HeadTurnSpec;
   /** Optional description for tooltips. */
@@ -603,6 +607,8 @@ export interface ClipEditorMeta {
   character?: CharacterClipMeta;
   // Media clips — id in Dexie mediaBlobs for blob copy on export
   mediaId?: string;
+  /** Editor lock: a locked clip ignores canvas clicks/drags (still selectable from the layer list). */
+  locked?: boolean;
 }
 
 export type { ClipKeyframeProperty, ClipMotionStep, ClipMotionStepMeta };
@@ -661,6 +667,8 @@ export interface EditorClip {
   rotation: number;
   opacity: number;
   zIndex: number;
+  /** Editor lock (per-clip OR inherited from a locked track). Excludes the clip from canvas hit-testing. */
+  locked: boolean;
   keyframes: Keyframe[];
   motionStepMetas: ClipMotionStepMeta[];
   motionSteps: ClipMotionStep[];
@@ -748,13 +756,16 @@ export function deriveEditorClips(project: Project): EditorClip[] {
 
     const keyframes = keyframesByClipId.get(el.id) ?? [];
     const motionStepMetas = motionStepMetasByClipId.get(el.id) ?? [];
+    const trackIndex = meta.uiTrackIndex ?? 0;
+    // Lock cascades: a clip is locked if it's locked directly or its track is locked.
+    const locked = !!meta.locked || !!project.editorMeta.tracks[trackIndex]?.locked;
     const clip = {
       id: el.id,
       name: meta.name ?? el.name ?? "",
       kind,
       start: el.startTime,
       duration: el.duration,
-      trackIndex: meta.uiTrackIndex ?? 0,
+      trackIndex,
       laneIndex: meta.uiLaneIndex ?? 0,
       x: el.x ?? 0,
       y: el.y ?? 0,
@@ -763,6 +774,7 @@ export function deriveEditorClips(project: Project): EditorClip[] {
       rotation: studioEl.rotation ?? 0,
       opacity: el.opacity ?? 1,
       zIndex: el.zIndex,
+      locked,
       keyframes,
       motionStepMetas,
       motionSteps: [],

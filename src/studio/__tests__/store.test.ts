@@ -1778,3 +1778,58 @@ describe("Studio cache sync", () => {
     expect(after).not.toBe(before);
   });
 });
+
+// ─── Layer locking ─────────────────────────────────────────────────────────────
+
+describe("layer locking", () => {
+  it("toggleClipLock flips the clip's own lock and surfaces on the derived clip", () => {
+    const project = createBlankProject("Lock");
+    const asset = makeMediaAsset("m-lock");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([[asset.id, asset]]),
+    });
+    useStudio.getState().addMediaToTimeline(asset, 0);
+    const clipId = deriveEditorClips(useStudio.getState().project!)[0]!.id;
+
+    expect(deriveEditorClips(useStudio.getState().project!)[0]!.locked).toBe(false);
+
+    useStudio.getState().toggleClipLock(clipId);
+    expect(useStudio.getState().project!.editorMeta.clips[clipId]?.locked).toBe(true);
+    expect(
+      deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clipId)!.locked,
+    ).toBe(true);
+    expect(useStudio.getState().isClipLocked(clipId)).toBe(true);
+
+    useStudio.getState().toggleClipLock(clipId);
+    expect(
+      deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clipId)!.locked,
+    ).toBe(false);
+    expect(useStudio.getState().isClipLocked(clipId)).toBe(false);
+  });
+
+  it("setTrackLock cascades lock to every clip on that track", () => {
+    const project = createBlankProject("Track lock");
+    const asset = makeMediaAsset("m-track");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      mediaAssets: new Map([[asset.id, asset]]),
+    });
+    useStudio.getState().addMediaToTimeline(asset, 0);
+    const clip = deriveEditorClips(useStudio.getState().project!)[0]!;
+    expect(clip.locked).toBe(false);
+
+    useStudio.getState().setTrackLock(clip.trackIndex, true);
+    expect(
+      deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clip.id)!.locked,
+    ).toBe(true);
+    expect(useStudio.getState().isClipLocked(clip.id)).toBe(true);
+
+    useStudio.getState().setTrackLock(clip.trackIndex, false);
+    expect(
+      deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clip.id)!.locked,
+    ).toBe(false);
+  });
+});

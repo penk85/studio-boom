@@ -2,12 +2,14 @@
 import {
   ChevronDown,
   ChevronRight,
+  Lock,
   Mic2,
   Minus,
   Plus,
   SkipBack,
   SlidersHorizontal,
   TriangleAlert,
+  Unlock,
   Volume2,
   VolumeX,
   X,
@@ -111,6 +113,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const updateClip = useStudio((s) => s.updateClip);
   const removeClip = useStudio((s) => s.removeClip);
   const addLane = useStudio((s) => s.addLane);
+  const setTrackLock = useStudio((s) => s.setTrackLock);
   const removeLane = useStudio((s) => s.removeLane);
   const checkpointHistory = useStudio((s) => s.checkpointHistory);
   const selectedKeyframe = useStudio((s) => s.selectedKeyframe);
@@ -402,6 +405,19 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                       }`}
                     />
                     <span className="flex-1 truncate text-foreground">{t.name}</span>
+                    <button
+                      onClick={() => setTrackLock(i, !t.locked)}
+                      title={
+                        t.locked
+                          ? "Unlock track (its clips ignore canvas clicks while locked)"
+                          : "Lock track (its clips ignore canvas clicks and drags)"
+                      }
+                      className={`rounded p-0.5 leading-none hover:bg-panel ${
+                        t.locked ? "text-primary" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {t.locked ? <Lock size={11} /> : <Unlock size={11} />}
+                    </button>
                     <button
                       onClick={() => addLane(i)}
                       title="Add a sub-track lane"

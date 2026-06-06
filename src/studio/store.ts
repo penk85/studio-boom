@@ -793,6 +793,12 @@ interface StudioState {
   sendClipBackward: (id: string) => void;
   bringClipToFront: (id: string) => void;
   sendClipToBack: (id: string) => void;
+  /** Toggle a clip's editor lock. Locked clips ignore canvas clicks but stay list-selectable. */
+  toggleClipLock: (id: string) => void;
+  /** Lock or unlock an entire editor track; cascades to every clip on that track. */
+  setTrackLock: (trackIndex: number, locked: boolean) => void;
+  /** True when a clip is locked directly or inherits lock from its track. */
+  isClipLocked: (id: string) => boolean;
   upsertClipKeyframe: (
     clipId: string,
     property: ClipKeyframeProperty,
@@ -1596,6 +1602,46 @@ export const useStudio = create<StudioState>((set, get) => ({
 
   sendClipToBack(id) {
     applyClipLayerMove(id, "back", get, set);
+  },
+
+  toggleClipLock(id) {
+    const p = get().project;
+    if (!p) return;
+    get().checkpointHistory();
+    const existingMeta = p.editorMeta.clips[id] ?? {};
+    const newMeta = { ...existingMeta, locked: !existingMeta.locked };
+    const newProject: Project = {
+      ...p,
+      editorMeta: { ...p.editorMeta, clips: { ...p.editorMeta.clips, [id]: newMeta } },
+      updatedAt: Date.now(),
+    };
+    set({ project: newProject });
+    scheduleSave(get, set);
+  },
+
+  setTrackLock(trackIndex, locked) {
+    const p = get().project;
+    if (!p || !p.editorMeta.tracks[trackIndex]) return;
+    get().checkpointHistory();
+    const tracks = p.editorMeta.tracks.map((track, index) =>
+      index === trackIndex ? { ...track, locked } : track,
+    );
+    const newProject: Project = {
+      ...p,
+      editorMeta: { ...p.editorMeta, tracks },
+      updatedAt: Date.now(),
+    };
+    set({ project: newProject, tracks });
+    scheduleSave(get, set);
+  },
+
+  isClipLocked(id) {
+    const p = get().project;
+    if (!p) return false;
+    const meta = p.editorMeta.clips[id];
+    if (meta?.locked) return true;
+    const trackIndex = meta?.uiTrackIndex ?? 0;
+    return !!p.editorMeta.tracks[trackIndex]?.locked;
   },
 
   upsertClipKeyframe(clipId, property, time, values, options) {

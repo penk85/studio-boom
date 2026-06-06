@@ -40,6 +40,8 @@ export interface ComposedMotions {
   headDirectionBlend?: { from: HeadDirection; to: HeadDirection; u: number };
   /** Semantic horizontal face turn, resolved to plain per-part transforms by render/export. */
   faceTurnX: number;
+  /** Layers (slotIds / roles) an active movement allows past the character's reach (no clamp). */
+  unclampedLayers: Set<string>;
 }
 
 const EASE: Record<string, (x: number) => number> = {
@@ -82,7 +84,7 @@ export function ease(name: string | undefined, x: number) {
   return (EASE[name ?? "easeInOut"] ?? EASE.easeInOut)(Math.max(0, Math.min(1, x)));
 }
 
-function emptyDelta(): ComposedDelta {
+export function emptyDelta(): ComposedDelta {
   return {
     dx: 0,
     dy: 0,
@@ -235,6 +237,7 @@ export function composeMotionsAt(
     poseSwap: new Map(),
     camera: { dx: 0, dy: 0, zoom: 1 },
     faceTurnX: 0,
+    unclampedLayers: new Set(),
   };
   const motions: AppliedMotion[] = clip.motions ?? [];
   const activeExclusiveMotionIds = activeExclusiveMotionsAt(
@@ -256,6 +259,7 @@ export function composeMotionsAt(
     const occurrences = generateMotionOccurrences(a, preset, clip.duration);
     const occurrence = occurrences.find((o) => tInClip >= o.start && tInClip <= o.end);
     if (!occurrence) continue;
+    for (const layer of preset.allowOutOfBounds ?? []) out.unclampedLayers.add(layer);
     const local = tInClip - occurrence.start;
     const u = dur > 0 ? Math.max(0, Math.min(1, local / dur)) : 0;
     const intensity = a.intensity ?? 1;
@@ -477,6 +481,11 @@ export function deltaForBone(
   const slotDelta = deltaFor(composed, role, slotId);
   const boneDelta = boneId ? composed.perBone.get(boneKey(boneId)) : undefined;
   return boneDelta ? combine(slotDelta, boneDelta) : slotDelta;
+}
+
+/** Bone-only delta (no slot/role fold) — for bone groups that just carry children via FK. */
+export function deltaForBoneOnly(composed: ComposedMotions, boneId?: string): ComposedDelta {
+  return (boneId ? composed.perBone.get(boneKey(boneId)) : undefined) ?? emptyDelta();
 }
 
 export function poseSwapFor(

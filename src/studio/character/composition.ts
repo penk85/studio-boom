@@ -3,6 +3,7 @@ import type {
   CharacterClipMeta,
   CharacterPart,
   CharacterPreset,
+  CharacterReach,
   MotionPreset,
   MouthPose,
   MouthViseme,
@@ -15,7 +16,9 @@ import { normalizeNativeHyperframesHtml } from "../hyperframes/native";
 import {
   composeMotionsAt,
   deltaForBone,
+  deltaForBoneOnly,
   deltaFor,
+  emptyDelta,
   generateMotionOccurrences,
   poseSwapFor,
 } from "../presets/apply";
@@ -35,6 +38,7 @@ import {
   type RigTransforms,
 } from "./mouth-libraries";
 import {
+  clampMotionDeltaToReach,
   normalizeCharacterRig,
   resolveSlotBinding,
   slotDrawIndex,
@@ -202,6 +206,7 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
     );
   });
   const effectiveMeta: CharacterClipMeta = { ...args.meta, visemes: combinedVisemes };
+  const characterRig = normalizeCharacterRig(args.character);
 
   appendCharacterStyles(doc);
   appendCharacterTimelineScript(doc, {
@@ -215,6 +220,10 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
     motionTargets: dom.motionTargets,
     canvasWidth: args.character.canvasWidth,
     slotTimelines: dom.slotTimelines,
+    reaches: characterRig.reaches,
+    parentBoneIds: new Set(
+      characterRig.bones.map((bone) => bone.parentId).filter((id): id is string => !!id),
+    ),
   });
 
   const normalized = normalizeNativeHyperframesHtml(
@@ -384,6 +393,9 @@ function buildPuppetDom(
     const newTargets = out.motionTargets.splice(beforeTargets);
     const boneId = binding?.effectiveBoneId ?? "bone:root";
     slotHtmlByBone.set(boneId, [...(slotHtmlByBone.get(boneId) ?? []), ...chunks]);
+    // Tag each slot target with the bone it lives in so the timeline can route parent motion to
+    // the bone group (children follow) and leaf motion to the slot element (anchor pivot).
+    for (const target of newTargets) target.boneId = binding?.effectiveBoneId;
     slotTargets.push(...newTargets);
     if (binding && newTargets[0]) {
       boneTargets.push(boneTargetForSlotTarget(newTargets[0], binding));
@@ -671,7 +683,6 @@ function buildGeneratedMouthSlot(
     teeth: `char-generated-mouth-${safeSlot}-teeth`,
     tongue: `char-generated-mouth-${safeSlot}-tongue`,
   };
-  const host = rig?.hostConstraints.find((constraint) => constraint.slotId === slotId);
   const drawIndex = rig ? slotDrawIndex(rig, slotId, placement.zIndex) : placement.zIndex;
   const style = styleString({
     left: (binding?.x ?? placement.x) * scaleX,
@@ -689,9 +700,7 @@ function buildGeneratedMouthSlot(
       slotId,
     )}" data-character-role="mouth" data-character-generated-mouth="true"${
       binding ? ` data-character-bound-bone-id="${esc(binding.effectiveBoneId)}"` : ""
-    } data-character-depth="${esc(binding?.effectiveDepth ?? ("depth" in placement ? placement.depth : 0))}"${
-      host?.hostSlotId ? ` data-character-host-slot-id="${esc(host.hostSlotId)}"` : ""
-    }${host?.hostBoneId ? ` data-character-host-bone-id="${esc(host.hostBoneId)}"` : ""} data-character-draw-order-index="${esc(
+    } data-character-depth="${esc(binding?.effectiveDepth ?? ("depth" in placement ? placement.depth : 0))}" data-character-draw-order-index="${esc(
       drawIndex,
     )}" style="${esc(style)}">`,
   );
@@ -927,7 +936,6 @@ function openSlotContainer(
   binding: ResolvedSlotBinding | undefined,
   rig: ReturnType<typeof normalizeCharacterRig>,
 ): string {
-  const host = rig.hostConstraints.find((constraint) => constraint.slotId === slot.id);
   const drawIndex = slotDrawIndex(rig, slot.id, basePart.zIndex);
   const left = binding ? binding.x : basePart.x;
   const top = binding ? binding.y : basePart.y;
@@ -937,9 +945,7 @@ function openSlotContainer(
     slot.id,
   )}"${
     binding ? ` data-character-bound-bone-id="${esc(binding.effectiveBoneId)}"` : ""
-  } data-character-depth="${esc(depth)}"${
-    host?.hostSlotId ? ` data-character-host-slot-id="${esc(host.hostSlotId)}"` : ""
-  }${host?.hostBoneId ? ` data-character-host-bone-id="${esc(host.hostBoneId)}"` : ""} data-character-draw-order-index="${esc(
+  } data-character-depth="${esc(depth)}" data-character-draw-order-index="${esc(
     drawIndex,
   )}" data-character-role="${esc(slot.role)}" data-character-side="${esc(
     basePart.side ?? "",
@@ -1157,6 +1163,8 @@ function appendCharacterTimelineScript(
     motionTargets: MotionTarget[];
     canvasWidth: number;
     slotTimelines: SlotTimeline[];
+    reaches: CharacterReach[];
+    parentBoneIds: Set<string>;
   },
 ): void {
   const blinkWindows = blinkWindowsForClip({
@@ -1164,6 +1172,7 @@ function appendCharacterTimelineScript(
     duration: args.duration,
     autoBlink: args.meta.autoBlink,
   });
+  const reachBySlot = new Map(args.reaches.map((reach) => [reach.slotId, reach]));
   const times = collectTimelineTimes(args.duration, args.meta, args.motionPresets, blinkWindows);
   const frames = times.map((time) =>
     buildMotionFrame(
@@ -1177,6 +1186,8 @@ function appendCharacterTimelineScript(
       args.canvasWidth,
       args.slotTimelines,
       blinkWindows,
+      reachBySlot,
+      args.parentBoneIds,
     ),
   );
   const slotEvents = buildSlotEvents(frames, args.slotTimelines);
@@ -1297,6 +1308,8 @@ function buildMotionFrame(
   canvasWidth: number,
   slots: SlotTimeline[],
   blinkWindows: Array<{ start: number; end: number }>,
+  reachBySlot: Map<string, CharacterReach>,
+  parentBoneIds: Set<string>,
 ) {
   const composed = composeMotionsAt({ duration, motions: meta.motions }, time, presets);
   const slotStates = resolveSlotStatesAt({
@@ -1310,10 +1323,33 @@ function buildMotionFrame(
     time,
     slotStates,
     targets: motionTargets.map((target) => {
-      const delta =
+      // A layer's motion drives exactly one element: the bone group when the bone carries children
+      // (so they follow, pivoting at the joint), otherwise the slot element (anchor pivot). This
+      // avoids the double-application that made layers race ahead of their children.
+      const boneCarriesChildren = !!target.boneId && parentBoneIds.has(target.boneId);
+      const rawDelta =
         target.kind === "bone"
-          ? deltaForBone(composed, target.role, target.slotId, target.boneId)
-          : deltaFor(composed, target.role, target.slotId);
+          ? boneCarriesChildren
+            ? deltaForBone(composed, target.role, target.slotId, target.boneId)
+            : deltaForBoneOnly(composed, target.boneId)
+          : boneCarriesChildren
+            ? emptyDelta()
+            : deltaFor(composed, target.role, target.slotId);
+      // Tone preset motion down to the layer's authored reach (drift polygon + twist range),
+      // unless an active movement opted this layer out of bounds (per-movement escape hatch).
+      const overridden =
+        composed.unclampedLayers.has(target.slotId) || composed.unclampedLayers.has(target.role);
+      const limited = overridden
+        ? { dx: rawDelta.dx, dy: rawDelta.dy, rotation: rawDelta.rotation, clamped: false }
+        : clampMotionDeltaToReach(
+            reachBySlot.get(target.slotId),
+            rawDelta.dx,
+            rawDelta.dy,
+            rawDelta.rotation,
+          );
+      const delta = limited.clamped
+        ? { ...rawDelta, dx: limited.dx, dy: limited.dy, rotation: limited.rotation }
+        : rawDelta;
       const activePart = activePartForMotionTarget(target, composed, slotStates);
       const turn = activePart
         ? faceTurnMotionForPart(activePart, composed.faceTurnX, canvasWidth)

@@ -4,12 +4,13 @@ import { createBlankCharacter, makePart } from "../character-utils";
 import {
   activeDepthForSlot,
   buildDefaultRig,
-  clampHostedPartPosition,
+  clampMotionDeltaToReach,
   computeBoneWorldTransforms,
   moveBoneForSlot,
   moveSlotBinding,
-  moveSlotParts,
   normalizeCharacterRig,
+  setSlotReach,
+  setSlotRotReach,
   validateCharacterRig,
 } from "../rig";
 
@@ -109,37 +110,6 @@ describe("CharacterRig V1", () => {
     expect(validation.errors.join("\n")).toContain("parent cycle");
   });
 
-  it("clamps hosted facial slots inside their host bounds", () => {
-    const character = makeRigCharacter();
-    const clamped = clampHostedPartPosition(character, "slot:left-eye", { x: 999, y: 999 });
-    const movedParts = moveSlotParts(character, "slot:left-eye", 999, 999, { clampToHost: true });
-    const movedEye = movedParts.find((part) => part.id === "left-eye");
-
-    expect(clamped.clamped).toBe(true);
-    expect(clamped.x).toBeLessThanOrEqual(239);
-    expect(clamped.y).toBeLessThanOrEqual(176);
-    expect(movedEye?.x).toBe(clamped.x);
-    expect(movedEye?.y).toBe(clamped.y);
-  });
-
-  it("keeps inferred host constraints when normalizing a partial rig", () => {
-    const character = makeRigCharacter();
-    const baseRig = buildDefaultRig(character);
-    const normalized = normalizeCharacterRig({
-      ...character,
-      rig: {
-        ...baseRig,
-        hostConstraints: baseRig.hostConstraints.filter(
-          (constraint) => constraint.slotId !== "slot:left-eye",
-        ),
-      },
-    });
-
-    expect(
-      normalized.hostConstraints.some((constraint) => constraint.slotId === "slot:left-eye"),
-    ).toBe(true);
-  });
-
   it("separates slot attachment moves from bone rest moves", () => {
     const rig = buildDefaultRig(makeRigCharacter());
     const footBone = rig.bones.find((bone) => bone.id === "bone:slot:left-foot");
@@ -163,6 +133,85 @@ describe("CharacterRig V1", () => {
     expect(boneMoved.bones.find((bone) => bone.id === "bone:slot:left-foot")?.x).toBe(
       (footBone?.x ?? 0) + 12,
     );
+  });
+
+  it("starts with no reaches and stores/clears a traced reach per slot", () => {
+    const base = buildDefaultRig(makeRigCharacter());
+    expect(base.reaches).toEqual([]);
+
+    const withReach = setSlotReach(base, "slot:left-eye", [
+      { x: -10, y: -8 },
+      { x: 10, y: -8 },
+      { x: 10, y: 8 },
+      { x: -10, y: 8 },
+    ]);
+    expect(withReach.reaches.find((r) => r.slotId === "slot:left-eye")?.reach).toHaveLength(4);
+
+    // Survives normalization.
+    const normalized = normalizeCharacterRig({ ...makeRigCharacter(), rig: withReach });
+    expect(normalized.reaches.some((r) => r.slotId === "slot:left-eye")).toBe(true);
+
+    // Fewer than three points clears it.
+    const cleared = setSlotReach(withReach, "slot:left-eye", [{ x: 0, y: 0 }]);
+    expect(cleared.reaches.find((r) => r.slotId === "slot:left-eye")?.reach).toBeUndefined();
+  });
+
+  it("stores a rotation reach with min ≤ 0 ≤ max and clears an empty one", () => {
+    const base = buildDefaultRig(makeRigCharacter());
+    const twisted = setSlotRotReach(base, "slot:left-eye", { min: -30, max: 45 });
+    expect(twisted.reaches.find((r) => r.slotId === "slot:left-eye")?.rotReach).toEqual({
+      min: -30,
+      max: 45,
+    });
+
+    // A same-sign range is clamped around rest (0).
+    const oneSided = setSlotRotReach(base, "slot:left-eye", { min: 10, max: 40 });
+    expect(oneSided.reaches.find((r) => r.slotId === "slot:left-eye")?.rotReach).toEqual({
+      min: 0,
+      max: 40,
+    });
+
+    const cleared = setSlotRotReach(twisted, "slot:left-eye", { min: 0, max: 0 });
+    expect(cleared.reaches.find((r) => r.slotId === "slot:left-eye")?.rotReach).toBeUndefined();
+  });
+
+  it("tones a sampled motion delta down to the layer's reach", () => {
+    const reach = {
+      id: "reach:slot:left-eye",
+      slotId: "slot:left-eye",
+      reach: [
+        { x: -10, y: -10 },
+        { x: 10, y: -10 },
+        { x: 10, y: 10 },
+        { x: -10, y: 10 },
+      ],
+      rotReach: { min: -20, max: 30 },
+    };
+
+    // Inside the drift box and twist range → untouched.
+    expect(clampMotionDeltaToReach(reach, 5, -5, 10)).toEqual({
+      dx: 5,
+      dy: -5,
+      rotation: 10,
+      clamped: false,
+    });
+
+    // Drift beyond the box → clamped onto its nearest edge.
+    const drift = clampMotionDeltaToReach(reach, 40, 0, 0);
+    expect(drift).toEqual({ dx: 10, dy: 0, rotation: 0, clamped: true });
+
+    // Twist beyond max → capped at the range.
+    const twist = clampMotionDeltaToReach(reach, 0, 0, 90);
+    expect(twist.rotation).toBe(30);
+    expect(twist.clamped).toBe(true);
+
+    // No reach authored → motion passes through untouched.
+    expect(clampMotionDeltaToReach(undefined, 99, 99, 99)).toEqual({
+      dx: 99,
+      dy: 99,
+      rotation: 99,
+      clamped: false,
+    });
   });
 
   it("uses the active angle depth override as the parallax depth", () => {

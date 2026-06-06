@@ -1,16 +1,16 @@
 import type {
   CharacterAngle,
   CharacterBone,
-  CharacterHostConstraint,
   CharacterPart,
   CharacterPreset,
+  CharacterReach,
   CharacterRig,
   CharacterSlotBinding,
   ID,
   PartRole,
 } from "../types";
 import { getPartSlotId, listCharacterSlots, roleLabel } from "./character-utils";
-import { localAlphaBounds, pivotForPart } from "./alpha-bounds";
+import { pivotForPart } from "./alpha-bounds";
 
 export const CHARACTER_ANGLES: CharacterAngle[] = ["front", "3qL", "3qR", "sideL", "sideR"];
 
@@ -33,7 +33,6 @@ export interface BoneWorldTransform {
 type SlotLike = ReturnType<typeof listCharacterSlots>[number];
 
 const ROOT_BONE_ID = "bone:root";
-const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
 export function normalizeCharacterRig(character: CharacterPreset): CharacterRig {
   const inferred = buildDefaultRig(character);
@@ -70,11 +69,7 @@ export function normalizeCharacterRig(character: CharacterPreset): CharacterRig 
     source.drawOrder?.length ? source.drawOrder : inferred.drawOrder,
     Array.from(bindingsBySlot.keys()),
   );
-  const hostConstraints = normalizeHostConstraints(
-    mergeHostConstraints(inferred.hostConstraints, source.hostConstraints ?? []),
-    new Set(bindingsBySlot.keys()),
-    new Set(bonesById.keys()),
-  );
+  const reaches = normalizeReaches(source.reaches ?? [], new Set(bindingsBySlot.keys()));
 
   const rig: CharacterRig = {
     version: 1,
@@ -82,7 +77,7 @@ export function normalizeCharacterRig(character: CharacterPreset): CharacterRig 
     bones: Array.from(bonesById.values()),
     slotBindings: Array.from(bindingsBySlot.values()),
     drawOrder,
-    hostConstraints,
+    reaches,
     mesh: source.mesh?.version === 1 ? source.mesh : undefined,
   };
   const validation = validateCharacterRig(rig);
@@ -119,16 +114,19 @@ export function buildDefaultRig(character: CharacterPreset): CharacterRig {
     const pivot = pivotForPart(part);
     const parentPart = parentSlotId ? reps.get(parentSlotId) : undefined;
     const parentPivot = parentPart ? pivotForPart(parentPart) : { x: 0, y: 0 };
+    const x = Math.round(pivot.x - parentPivot.x);
+    const y = Math.round(pivot.y - parentPivot.y);
+    const length = Math.round(Math.hypot(part.width, part.height) * 0.5);
     boneBySlot.set(slot.id, {
       id: `bone:${slot.id}`,
       name: slot.name ?? roleLabel(slot.role),
       role: slot.role,
       side: part.side,
       parentId: parentBoneId,
-      x: Math.round(pivot.x - parentPivot.x),
-      y: Math.round(pivot.y - parentPivot.y),
+      x,
+      y,
       rotation: 0,
-      length: Math.round(Math.hypot(part.width, part.height) * 0.5),
+      length,
       depth: part.depth,
     });
   }
@@ -165,7 +163,7 @@ export function buildDefaultRig(character: CharacterPreset): CharacterRig {
     bones: [root, ...Array.from(boneBySlot.values())],
     slotBindings: bindings,
     drawOrder,
-    hostConstraints: inferHostConstraints(slots, reps, boneBySlot),
+    reaches: [],
   };
 }
 
@@ -192,19 +190,9 @@ export function validateCharacterRig(rig: CharacterRig): { ok: boolean; errors: 
       errors.push(`Duplicate binding for slot "${binding.slotId}".`);
     bindingSlots.add(binding.slotId);
   }
-  for (const constraint of rig.hostConstraints) {
-    if (!bindingSlots.has(constraint.slotId)) {
-      errors.push(`Constraint "${constraint.id}" references missing slot "${constraint.slotId}".`);
-    }
-    if (constraint.hostSlotId && !bindingSlots.has(constraint.hostSlotId)) {
-      errors.push(
-        `Constraint "${constraint.id}" references missing host slot "${constraint.hostSlotId}".`,
-      );
-    }
-    if (constraint.hostBoneId && !boneIds.has(constraint.hostBoneId)) {
-      errors.push(
-        `Constraint "${constraint.id}" references missing host bone "${constraint.hostBoneId}".`,
-      );
+  for (const reach of rig.reaches) {
+    if (!bindingSlots.has(reach.slotId)) {
+      errors.push(`Reach "${reach.id}" references missing slot "${reach.slotId}".`);
     }
   }
   for (const bone of rig.bones) {
@@ -456,6 +444,115 @@ export function setBoneDepth(
   };
 }
 
+/** Create or update a slot's reach record. */
+function upsertSlotReach(
+  rig: CharacterRig,
+  slotId: ID,
+  patch: Partial<Pick<CharacterReach, "reach" | "rotReach">>,
+): CharacterRig {
+  const existing = rig.reaches.find((entry) => entry.slotId === slotId);
+  const base: CharacterReach = existing ?? { id: `reach:${slotId}`, slotId };
+  const next: CharacterReach = { ...base, ...patch };
+  const others = rig.reaches.filter((entry) => entry.slotId !== slotId);
+  return { ...rig, reaches: [...others, next] };
+}
+
+/**
+ * Set or clear a slot's traced movement reach (parent-frame offsets from its rest position).
+ * Fewer than three points clears it.
+ */
+export function setSlotReach(
+  rig: CharacterRig,
+  slotId: ID,
+  reach: { x: number; y: number }[] | undefined,
+): CharacterRig {
+  return upsertSlotReach(rig, slotId, {
+    reach: reach && reach.length >= 3 ? reach : undefined,
+  });
+}
+
+/** Set or clear a slot's rotation reach — how far it may twist from rest, in degrees. */
+export function setSlotRotReach(
+  rig: CharacterRig,
+  slotId: ID,
+  rotReach: { min: number; max: number } | undefined,
+): CharacterRig {
+  const next =
+    rotReach && (rotReach.min !== 0 || rotReach.max !== 0)
+      ? { min: Math.round(Math.min(0, rotReach.min)), max: Math.round(Math.max(0, rotReach.max)) }
+      : undefined;
+  return upsertSlotReach(rig, slotId, { rotReach: next });
+}
+
+type Point = { x: number; y: number };
+
+function pointInPolygon(p: Point, poly: Point[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i];
+    const b = poly[j];
+    const intersects =
+      a.y > p.y !== b.y > p.y &&
+      p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y || Number.EPSILON) + a.x;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function nearestPointOnSegment(p: Point, a: Point, b: Point): Point {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq <= Number.EPSILON) return { x: a.x, y: a.y };
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq));
+  return { x: a.x + t * dx, y: a.y + t * dy };
+}
+
+/** Clamp a point to lie within a polygon (nearest boundary point when outside). */
+export function clampPointToPolygon(p: Point, poly: Point[]): Point {
+  if (poly.length < 3 || pointInPolygon(p, poly)) return p;
+  let best = poly[0];
+  let bestDist = Infinity;
+  for (let i = 0; i < poly.length; i++) {
+    const q = nearestPointOnSegment(p, poly[i], poly[(i + 1) % poly.length]);
+    const dist = (q.x - p.x) ** 2 + (q.y - p.y) ** 2;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = q;
+    }
+  }
+  return best;
+}
+
+/**
+ * "Tone down" a sampled motion delta so it respects the layer's authored reach: clamp its
+ * drift (dx/dy) into the reach polygon and its rotation into the twist range. Returns the original
+ * values when no reach is set, plus a `clamped` flag for warnings.
+ */
+export function clampMotionDeltaToReach(
+  reach: CharacterReach | undefined,
+  dx: number,
+  dy: number,
+  rotation: number,
+): { dx: number; dy: number; rotation: number; clamped: boolean } {
+  let outX = dx;
+  let outY = dy;
+  let outR = rotation;
+  let clamped = false;
+  if (reach?.reach && reach.reach.length >= 3) {
+    const q = clampPointToPolygon({ x: dx, y: dy }, reach.reach);
+    if (q.x !== dx || q.y !== dy) clamped = true;
+    outX = q.x;
+    outY = q.y;
+  }
+  if (reach?.rotReach) {
+    const r = Math.max(reach.rotReach.min, Math.min(reach.rotReach.max, rotation));
+    if (r !== rotation) clamped = true;
+    outR = r;
+  }
+  return { dx: outX, dy: outY, rotation: outR, clamped };
+}
+
 export function slotIdsForBoneSubtree(
   rig: CharacterRig,
   boneId: string,
@@ -482,59 +579,22 @@ export function slotIdsForBoneSubtree(
   );
 }
 
-export function clampHostedPartPosition(
-  character: CharacterPreset,
-  slotId: string,
-  next: { x: number; y: number },
-  angle: CharacterAngle = character.rig?.activeAngle ?? "front",
-): { x: number; y: number; clamped: boolean } {
-  const rig = normalizeCharacterRig(character);
-  const constraint = resolveHostConstraint(rig, slotId, angle);
-  if (!constraint?.hostSlotId) return { ...next, clamped: false };
-  const slotPart = representativePartBySlotId(character.parts, slotId);
-  const hostPart = representativePartBySlotId(character.parts, constraint.hostSlotId);
-  if (!slotPart || !hostPart) return { ...next, clamped: false };
-
-  const slotBounds = localAlphaBounds(slotPart);
-  const hostBounds = localAlphaBounds(hostPart);
-  const padding = constraint.padding ?? 0;
-  const minX = hostPart.x + hostBounds.x + padding - slotBounds.x;
-  const minY = hostPart.y + hostBounds.y + padding - slotBounds.y;
-  const maxX =
-    hostPart.x + hostBounds.x + hostBounds.width - padding - (slotBounds.x + slotBounds.width);
-  const maxY =
-    hostPart.y + hostBounds.y + hostBounds.height - padding - (slotBounds.y + slotBounds.height);
-  const x = clamp(next.x, Math.min(minX, maxX), Math.max(minX, maxX));
-  const y = clamp(next.y, Math.min(minY, maxY), Math.max(minY, maxY));
-  return { x: Math.round(x), y: Math.round(y), clamped: x !== next.x || y !== next.y };
-}
-
 export function moveSlotParts(
   character: CharacterPreset,
   slotId: string,
   dx: number,
   dy: number,
-  options: { clampToHost?: boolean } = {},
 ): CharacterPart[] {
   const slotParts = character.parts.filter((part) => getPartSlotId(part) === slotId);
   if (slotParts.length === 0) return character.parts;
-  const representative = representativePartBySlotId(character.parts, slotId) ?? slotParts[0];
-  const nextPosition = options.clampToHost
-    ? clampHostedPartPosition(character, slotId, {
-        x: representative.x + dx,
-        y: representative.y + dy,
-      })
-    : { x: representative.x + dx, y: representative.y + dy };
-  const appliedDx = nextPosition.x - representative.x;
-  const appliedDy = nextPosition.y - representative.y;
   return character.parts.map((part) => {
     if (getPartSlotId(part) !== slotId) return part;
     const pivot = pivotForPart(part);
     return {
       ...part,
-      x: part.x + appliedDx,
-      y: part.y + appliedDy,
-      pivot: { x: pivot.x + appliedDx, y: pivot.y + appliedDy },
+      x: part.x + dx,
+      y: part.y + dy,
+      pivot: { x: pivot.x + dx, y: pivot.y + dy },
     };
   });
 }
@@ -569,7 +629,7 @@ Rules:
 - Bones must form an acyclic FK hierarchy.
 - slotBindings attach slots to bones using local offsets.
 - depth is parallax/2.5D only; drawOrder controls visual stacking.
-- hostConstraints keep hosted slots inside their hosts.
+- reaches[] limit how far a slot may drift/twist from its parent (movement guides).
 - Angles are discrete in V1: front, 3qL, 3qR, sideL, sideR.
 - The final character must remain HyperFrames-compatible.
 
@@ -615,19 +675,6 @@ function representativePart(slot: SlotLike): CharacterPart | undefined {
   );
 }
 
-function representativePartBySlotId(
-  parts: CharacterPart[],
-  slotId: string,
-): CharacterPart | undefined {
-  const slotParts = parts.filter((part) => getPartSlotId(part) === slotId);
-  return representativePart({
-    id: slotId,
-    role: slotParts[0]?.role ?? "custom",
-    name: slotParts[0]?.slotName ?? "Slot",
-    parts: slotParts,
-  });
-}
-
 function parentSlotIdFor(
   slot: SlotLike,
   part: CharacterPart,
@@ -668,50 +715,6 @@ function parentSlotIdFor(
   }
 }
 
-function inferHostConstraints(
-  slots: SlotLike[],
-  reps: Map<string, CharacterPart | undefined>,
-  boneBySlot: Map<string, CharacterBone>,
-): CharacterHostConstraint[] {
-  const headSlot = slots.find((slot) => slot.role === "head")?.id;
-  const bodySlot = slots.find((slot) => slot.role === "body")?.id;
-  const out: CharacterHostConstraint[] = [];
-  for (const slot of slots) {
-    const part = reps.get(slot.id);
-    if (!part) continue;
-    let hostSlotId: string | undefined;
-    if (["eye", "eyebrow", "mouth"].includes(slot.role)) hostSlotId = headSlot;
-    if (slot.role === "accessory") hostSlotId = headSlot ?? bodySlot;
-    if (!hostSlotId || hostSlotId === slot.id) continue;
-    out.push({
-      id: `constraint:${slot.id}:host`,
-      slotId: slot.id,
-      hostSlotId,
-      hostBoneId: boneBySlot.get(hostSlotId)?.id,
-      mode: "mask",
-      padding: 0,
-    });
-  }
-  return out;
-}
-
-function resolveHostConstraint(
-  rig: CharacterRig,
-  slotId: string,
-  angle: CharacterAngle,
-): CharacterHostConstraint | undefined {
-  const constraint = rig.hostConstraints.find((candidate) => candidate.slotId === slotId);
-  if (!constraint) return undefined;
-  const override = constraint.angleOverrides?.[angle];
-  return {
-    ...constraint,
-    hostSlotId: override?.hostSlotId ?? constraint.hostSlotId,
-    hostBoneId: override?.hostBoneId ?? constraint.hostBoneId,
-    mode: override?.mode ?? constraint.mode,
-    padding: override?.padding ?? constraint.padding,
-  };
-}
-
 function normalizeDrawOrder(drawOrder: string[], slotIds: string[]): string[] {
   const seen = new Set<string>();
   const out = drawOrder.filter((slotId) => {
@@ -725,26 +728,13 @@ function normalizeDrawOrder(drawOrder: string[], slotIds: string[]): string[] {
   return out;
 }
 
-function normalizeHostConstraints(
-  constraints: CharacterHostConstraint[],
-  slotIds: Set<string>,
-  boneIds: Set<string>,
-): CharacterHostConstraint[] {
-  return constraints.filter((constraint) => {
-    if (!constraint.id || !slotIds.has(constraint.slotId)) return false;
-    if (constraint.hostSlotId && !slotIds.has(constraint.hostSlotId)) return false;
-    if (constraint.hostBoneId && !boneIds.has(constraint.hostBoneId)) return false;
-    return true;
-  });
-}
-
-function mergeHostConstraints(
-  inferred: CharacterHostConstraint[],
-  source: CharacterHostConstraint[],
-): CharacterHostConstraint[] {
-  const out = new Map<string, CharacterHostConstraint>();
-  for (const constraint of inferred) out.set(constraint.slotId, constraint);
-  for (const constraint of source) out.set(constraint.slotId, constraint);
+/** Keep one reach record per known slot (latest wins), dropping any for missing slots. */
+function normalizeReaches(reaches: CharacterReach[], slotIds: Set<string>): CharacterReach[] {
+  const out = new Map<string, CharacterReach>();
+  for (const entry of reaches) {
+    if (!entry?.slotId || !slotIds.has(entry.slotId)) continue;
+    out.set(entry.slotId, { ...entry, id: entry.id || `reach:${entry.slotId}` });
+  }
   return Array.from(out.values());
 }
 

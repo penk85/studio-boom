@@ -52,6 +52,12 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(source).toContain("resolveTargetClipId(");
     expect(source).toContain("<StageClickOverlay");
     expect(source).toContain('data-stage-click-target=""');
+    // Figma-style select/drag: the overlay rects are pure hit targets and the controller
+    // reads the full z-stack under the pointer to drill, prefer the selection, and lock.
+    expect(source).toContain("data-clip-id={clip.id}");
+    expect(source).toContain("useSelectDrag(");
+    expect(source).toContain("hitTestClipIdsAtPoint(");
+    expect(source).toContain("onCanvasPointerDown={onCanvasPointerDown}");
     expect(source).toContain("renderedClickRects");
     expect(source).toContain("getRenderedElementRect(iframe, clip.id)");
     expect(source).toContain("getRenderedPixelCompositionRect(");

@@ -2,6 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { EYE_PRESETS, MOUTH_PRESETS, generatePresetBlob } from "./presets";
 import { clamp } from "./mouth-morph";
 import {
+  type DrillPick,
+  exceedsDragThreshold,
+  resolveDragSubject,
+  resolveDrillSelection,
+} from "../interaction/select-drag";
+import {
   ArrowDown,
   ArrowUp,
   ChevronDown,
@@ -10,11 +16,15 @@ import {
   Download,
   Eye,
   EyeOff,
+  Lock,
   Maximize2,
   Minimize2,
   MousePointer2,
   RotateCw,
+  Redo2,
   Trash2,
+  Unlock,
+  Undo2,
   Upload,
 } from "lucide-react";
 import { db, importMediaFile, uid } from "../db";
@@ -24,12 +34,14 @@ import {
   createBlankCharacter,
   defaultMotionBehaviorForRole,
   getPartSlotId,
+  listCharacterSlots,
   makePart,
   normalizeCharacterSlots,
   normalizePartManifest,
   roleEnabledByManifest,
   roleLabel,
   saveCharacter,
+  withInferredHumanParentIds,
 } from "./character-utils";
 import {
   alphaMaskContains,
@@ -62,7 +74,6 @@ import {
   bindSlotPartToAngle,
   buildDefaultRig,
   characterRigPrompt,
-  clampHostedPartPosition,
   computeBoneWorldTransforms,
   moveBone,
   moveBoneForSlot,
@@ -73,6 +84,8 @@ import {
   resolveSlotBinding,
   setBoneDepth,
   setSlotDepth,
+  setSlotReach,
+  setSlotRotReach,
   slotIdsForBoneSubtree,
   validateCharacterRig,
 } from "./rig";
@@ -136,6 +149,7 @@ const MOTION_BEHAVIOR_OPTIONS: Array<{ value: PartMotionBehavior; label: string 
 
 const SAMPLE_WORDS = ["Hello", "Shalom", "Mommy", "Welcome"];
 const EYE_STATES: EyeState[] = ["open", "half", "closed", "wink"];
+const HISTORY_LIMIT = 60;
 
 // Lip-sync test clips: drop audio files into ./lipsync-samples and they appear
 // automatically as test buttons on the mouth group inspector. (Vite glob — no
@@ -158,6 +172,11 @@ const LIPSYNC_SAMPLES = Object.entries(
   .sort((a, b) => a.name.localeCompare(b.name));
 
 type EditorMode = "select" | "pivot" | "bounds-rect" | "bounds-ellipse";
+
+/** Focus-mode state while editing a layer's reach (sweep the layer to trace its limit). */
+interface RangeEdit {
+  slotId: ID;
+}
 type EditorBoundsMode = "frame" | "art";
 
 export function CharacterEditor({ characterId, onClose }: Props) {
@@ -165,13 +184,22 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   const [selectedPartId, setSelectedPartId] = useState<ID | null>(null);
   const [selectedSlotId, setSelectedSlotId] = useState<ID | null>(null);
   const [selectedBoneId, setSelectedBoneId] = useState<ID | null>(null);
+  const [showBones, setShowBones] = useState(false);
   const [scale, setScale] = useState(0.7);
   const [mode, setMode] = useState<EditorMode>("select");
   const [boundsMode, setBoundsMode] = useState<EditorBoundsMode>("frame");
+  // Focus mode for editing a layer's reach (hides bones/chrome, shows the traced reach outline).
+  const [rangeEdit, setRangeEdit] = useState<RangeEdit | null>(null);
+  // The traced reach outline as absolute canvas points (convex hull), while editing.
+  const [reachDraft, setReachDraft] = useState<{ x: number; y: number }[] | null>(null);
+  // Live rotation reach (min/max degrees from rest) while twisting the layer.
+  const [rotDraft, setRotDraft] = useState<{ min: number; max: number } | null>(null);
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [, setPreviewTick] = useState(0);
   const [status, setStatus] = useState<string | null>(null);
   const [mouthTestPlaying, setMouthTestPlaying] = useState(false);
+  const [historyPast, setHistoryPast] = useState<CharacterPreset[]>([]);
+  const [historyFuture, setHistoryFuture] = useState<CharacterPreset[]>([]);
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const mouthAudioCtxRef = useRef<AudioContext | null>(null);
@@ -179,7 +207,21 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   const alphaBackfillRef = useRef<Set<string>>(new Set());
   const alphaMaskRef = useRef<Map<string, AlphaHitMask>>(new Map());
   const alphaMaskLoadingRef = useRef<Set<string>>(new Set());
+  // Remembers the last canvas click so a repeat click in the same spot drills the z-stack.
+  const canvasLastPickRef = useRef<DrillPick | null>(null);
+  const docRef = useRef<CharacterPreset | null>(null);
+  const historyPastRef = useRef<CharacterPreset[]>([]);
+  const historyFutureRef = useRef<CharacterPreset[]>([]);
+  const undoHistoryRef = useRef<() => void>(() => {});
+  const redoHistoryRef = useRef<() => void>(() => {});
   const [, setAlphaMaskTick] = useState(0);
+
+  // Leave reach-edit focus mode whenever the selection changes.
+  useEffect(() => {
+    setRangeEdit(null);
+    setReachDraft(null);
+    setRotDraft(null);
+  }, [selectedPartId, selectedSlotId]);
 
   useEffect(() => {
     (async () => {
@@ -190,10 +232,24 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         await db.characters.put(row);
         useStudio.getState().registerCharacterPreset(row);
       }
-      const normalized = normalizeCharacterSlots(row);
+      const normalized = withInferredHumanParentIds(normalizeCharacterSlots(row));
       setDoc({ ...normalized, rig: normalizeCharacterRig(normalized) });
+      setHistoryPast([]);
+      setHistoryFuture([]);
     })();
   }, [characterId]);
+
+  useEffect(() => {
+    docRef.current = doc;
+  }, [doc]);
+
+  useEffect(() => {
+    historyPastRef.current = historyPast;
+  }, [historyPast]);
+
+  useEffect(() => {
+    historyFutureRef.current = historyFuture;
+  }, [historyFuture]);
 
   useEffect(() => {
     if (!doc) return;
@@ -310,6 +366,69 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     };
   }, [preview]);
 
+  undoHistoryRef.current = undoCharacterHistory;
+  redoHistoryRef.current = redoCharacterHistory;
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      const key = event.key.toLowerCase();
+      if (key === "z" && event.shiftKey) {
+        event.preventDefault();
+        redoHistoryRef.current();
+      } else if (key === "z") {
+        event.preventDefault();
+        undoHistoryRef.current();
+      } else if (key === "y") {
+        event.preventDefault();
+        redoHistoryRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  function restoreCharacterSnapshot(next: CharacterPreset) {
+    setDoc(next);
+    setSelectedPartId((id) => (id && next.parts.some((part) => part.id === id) ? id : null));
+    setSelectedSlotId((id) =>
+      id && next.parts.some((part) => getPartSlotId(part) === id) ? id : null,
+    );
+    setSelectedBoneId((id) =>
+      id && normalizeCharacterRig(next).bones.some((bone) => bone.id === id) ? id : null,
+    );
+  }
+
+  function undoCharacterHistory() {
+    const current = docRef.current;
+    const past = historyPastRef.current;
+    if (!current || past.length === 0) return;
+    const previous = past[past.length - 1];
+    const nextPast = past.slice(0, -1);
+    const nextFuture = [current, ...historyFutureRef.current].slice(0, HISTORY_LIMIT);
+    setHistoryPast(nextPast);
+    setHistoryFuture(nextFuture);
+    historyPastRef.current = nextPast;
+    historyFutureRef.current = nextFuture;
+    restoreCharacterSnapshot(previous);
+    setStatus("Undone");
+  }
+
+  function redoCharacterHistory() {
+    const current = docRef.current;
+    const future = historyFutureRef.current;
+    if (!current || future.length === 0) return;
+    const next = future[0];
+    const nextPast = [...historyPastRef.current, current].slice(-HISTORY_LIMIT);
+    const nextFuture = future.slice(1);
+    setHistoryPast(nextPast);
+    setHistoryFuture(nextFuture);
+    historyPastRef.current = nextPast;
+    historyFutureRef.current = nextFuture;
+    restoreCharacterSnapshot(next);
+    setStatus("Redone");
+  }
+
   if (!doc) {
     return (
       <div className="flex h-screen items-center justify-center bg-background text-muted-foreground">
@@ -323,28 +442,81 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     rig: preserveRig ? normalizeCharacterRig(character) : buildDefaultRig(character),
   });
 
-  const updateDoc = (patch: Partial<CharacterPreset>) =>
-    setDoc((d) => (d ? withRig({ ...d, ...patch, updatedAt: Date.now() }, "rig" in patch) : d));
+  const pushUndoSnapshot = () => {
+    if (!docRef.current) return;
+    const snapshot = docRef.current;
+    const nextPast = [...historyPastRef.current, snapshot].slice(-HISTORY_LIMIT);
+    setHistoryPast(nextPast);
+    setHistoryFuture([]);
+    historyPastRef.current = nextPast;
+    historyFutureRef.current = [];
+  };
 
-  const updatePart = (id: ID, patch: Partial<CharacterPart>) =>
-    setDoc((d) =>
-      d
-        ? withRig({
-            ...d,
-            parts: d.parts.map((p) =>
-              p.id === id ? normalizePartPatch({ ...p, ...patch }, patch) : p,
-            ),
-            updatedAt: Date.now(),
-          })
-        : d,
-    );
+  const updateDoc = (patch: Partial<CharacterPreset>, options: { history?: boolean } = {}) => {
+    if (options.history !== false) pushUndoSnapshot();
+    setDoc((d) => (d ? withRig({ ...d, ...patch, updatedAt: Date.now() }, "rig" in patch) : d));
+  };
+
+  const updatePart = (
+    id: ID,
+    patch: Partial<CharacterPart>,
+    options: { history?: boolean } = {},
+  ) => {
+    if (options.history !== false) pushUndoSnapshot();
+    setDoc((d) => {
+      if (!d) return d;
+      const original = d.parts.find((part) => part.id === id);
+      const rotationDelta =
+        original && patch.rotation !== undefined && Number.isFinite(patch.rotation)
+          ? patch.rotation - original.rotation
+          : 0;
+      const parentPivot = original ? pivotForPart(original) : null;
+      const descendantIds =
+        original && rotationDelta !== 0 ? descendantPartIds(d.parts, new Set([id])) : new Set<ID>();
+      return withRig({
+        ...d,
+        parts: d.parts.map((part) => {
+          if (part.id === id) return normalizePartPatch({ ...part, ...patch }, patch);
+          if (!parentPivot || rotationDelta === 0 || !descendantIds.has(part.id)) return part;
+          const pivot = pivotForPart(part);
+          const rotatedPivot = rotateCanvasPointAroundPivot(pivot, parentPivot, rotationDelta);
+          const dx = rotatedPivot.x - pivot.x;
+          const dy = rotatedPivot.y - pivot.y;
+          return normalizePartPatch(
+            {
+              ...part,
+              x: Math.round(part.x + dx),
+              y: Math.round(part.y + dy),
+              pivot: { x: Math.round(rotatedPivot.x), y: Math.round(rotatedPivot.y) },
+              rotation: Math.round(part.rotation + rotationDelta),
+            },
+            {
+              x: part.x + dx,
+              y: part.y + dy,
+              pivot: rotatedPivot,
+              rotation: part.rotation + rotationDelta,
+            },
+          );
+        }),
+        updatedAt: Date.now(),
+      });
+    });
+  };
 
   const addPart = (part: CharacterPart) => {
-    setDoc((d) => (d ? withRig({ ...d, parts: [...d.parts, part], updatedAt: Date.now() }) : d));
+    pushUndoSnapshot();
+    setDoc((d) =>
+      d
+        ? withRig(
+            withInferredHumanParentIds({ ...d, parts: [...d.parts, part], updatedAt: Date.now() }),
+          )
+        : d,
+    );
     setSelectedPartId(part.id);
   };
 
   const removePart = (id: ID) => {
+    pushUndoSnapshot();
     setDoc((d) =>
       d
         ? withRig({
@@ -429,6 +601,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
   const toggleSlotVisible = (slotId: ID) => {
     const anyVisible = partsInSlot(slotId).some((p) => p.visible);
+    pushUndoSnapshot();
     setDoc((d) =>
       d
         ? withRig({
@@ -442,7 +615,26 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     );
   };
 
+  // Lock cascades across a slot's variants — a locked slot ignores canvas clicks/drags
+  // (still selectable from the Layers list so it can be unlocked).
+  const toggleSlotLocked = (slotId: ID) => {
+    const anyLocked = partsInSlot(slotId).some((p) => p.locked);
+    pushUndoSnapshot();
+    setDoc((d) =>
+      d
+        ? withRig({
+            ...d,
+            parts: d.parts.map((p) =>
+              getPartSlotId(p) === slotId ? { ...p, locked: !anyLocked } : p,
+            ),
+            updatedAt: Date.now(),
+          })
+        : d,
+    );
+  };
+
   const nudgeSlotZ = (slotId: ID, delta: number) => {
+    pushUndoSnapshot();
     setDoc((d) =>
       d
         ? withRig({
@@ -457,6 +649,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   };
 
   const removeSlot = (slotId: ID) => {
+    pushUndoSnapshot();
     setDoc((d) =>
       d
         ? withRig({
@@ -471,12 +664,13 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
   // Commit a one-shot group move (used by the Inspector numeric fields).
   const applyGroupMove = (slotId: ID, dx: number, dy: number) => {
+    pushUndoSnapshot();
     setDoc((d) =>
       d
         ? withRig(
             {
               ...d,
-              parts: moveSlotParts(d, slotId, dx, dy, { clampToHost: true }),
+              parts: moveSlotParts(d, slotId, dx, dy),
               rig: moveSlotBinding(normalizeCharacterRig(d), slotId, dx, dy),
               updatedAt: Date.now(),
             },
@@ -493,6 +687,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     scaleX: number,
     scaleY: number,
   ) => {
+    pushUndoSnapshot();
     setDoc((d) =>
       d
         ? withRig({
@@ -516,6 +711,33 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           })
         : d,
     );
+  };
+
+  const applyGroupRotate = (slotId: ID, anchor: { x: number; y: number }, degrees: number) => {
+    if (!Number.isFinite(degrees) || degrees === 0) return;
+    pushUndoSnapshot();
+    setDoc((d) => {
+      if (!d) return d;
+      const targetIds = partAndDescendantIdsForSlot(d.parts, slotId);
+      return withRig({
+        ...d,
+        parts: d.parts.map((part) => {
+          if (!targetIds.has(part.id)) return part;
+          const pivot = pivotForPart(part);
+          const rotatedPivot = rotateCanvasPointAroundPivot(pivot, anchor, degrees);
+          const dx = rotatedPivot.x - pivot.x;
+          const dy = rotatedPivot.y - pivot.y;
+          return {
+            ...part,
+            x: Math.round(part.x + dx),
+            y: Math.round(part.y + dy),
+            pivot: { x: Math.round(rotatedPivot.x), y: Math.round(rotatedPivot.y) },
+            rotation: Math.round(part.rotation + degrees),
+          };
+        }),
+        updatedAt: Date.now(),
+      });
+    });
   };
 
   // Representative (rest) part of a mouth slot — used as the talk preview target.
@@ -636,6 +858,10 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     : [];
   const selectedSlotBounds =
     selectedSlotParts.length > 0 ? unionFrameBounds(selectedSlotParts) : null;
+  // The layer that movement-range controls act on: a selected slot, or the slot of the
+  // selected part.
+  const restrictSlotId = selectedSlotId ?? (selectedPart ? getPartSlotId(selectedPart) : null);
+  const focusEditing = !!rangeEdit;
 
   const canvasPointFromEvent = (e: React.PointerEvent) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -647,18 +873,21 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   };
 
   const localPointForPart = (part: CharacterPart, point: { x: number; y: number }) =>
-    canvasPointToPartLocal(part, point, previewDelta(part, preview, previewParentPart));
+    canvasPointToPartLocal(part, point, previewDelta(part, preview, previewParentPart, doc.parts));
 
-  const pickPartAt = (point: { x: number; y: number }) => {
+  // Ordered stack of parts under a point, topmost first (alpha-exact before padded
+  // hits), with locked parts excluded — the candidate list the select/drag model
+  // drills through. `pickPartAt` keeps returning just the topmost for other callers.
+  const hitPartsAt = (point: { x: number; y: number }) => {
     const exact: CharacterPart[] = [];
     const padded: CharacterPart[] = [];
     const candidates = visibleEditorParts
-      .filter((part) => part.visible || part.id === selectedPartId)
+      .filter((part) => (part.visible || part.id === selectedPartId) && !part.locked)
       .slice()
       .sort((a, b) => b.zIndex - a.zIndex);
 
     for (const part of candidates) {
-      const transform = previewDelta(part, preview, previewParentPart);
+      const transform = previewDelta(part, preview, previewParentPart, doc.parts);
       if (transform.opacity <= 0.05 && part.id !== selectedPartId) continue;
       const local = canvasPointToPartLocal(part, point, transform);
       if (boundsMode === "frame") {
@@ -669,8 +898,10 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         padded.push(part);
       }
     }
-    return exact[0] ?? padded[0] ?? null;
+    return [...exact, ...padded];
   };
+
+  const pickPartAt = (point: { x: number; y: number }) => hitPartsAt(point)[0] ?? null;
 
   const startCanvasPartDrag = (
     e: React.PointerEvent,
@@ -707,6 +938,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       return;
     }
 
+    pushUndoSnapshot();
     const sx = e.clientX;
     const sy = e.clientY;
     const ox = part.x;
@@ -725,9 +957,10 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       const dy = Math.round((ev.clientY - sy) / scale);
       setDoc((d) => {
         if (!d) return d;
-        const clamped = clampHostedPartPosition(d, slotId, { x: ox + dx, y: oy + dy });
-        const appliedDx = clamped.x - ox;
-        const appliedDy = clamped.y - oy;
+        // Manual dragging is free (no cage) — a reach is a guide for generated motion, and the
+        // author may consciously move a part out of range. The reach overlay shows the limit.
+        const appliedDx = dx;
+        const appliedDy = dy;
         const snapshotParts = d.parts.map((currentPart) => {
           const snapshotPart = partSnapshot.get(currentPart.id);
           if (!snapshotPart) return currentPart;
@@ -740,9 +973,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         });
         const parts = movesBone
           ? movePartAndDescendants(snapshotParts, part.id, appliedDx, appliedDy)
-          : moveSlotParts({ ...d, parts: snapshotParts }, slotId, appliedDx, appliedDy, {
-              clampToHost: true,
-            });
+          : moveSlotParts({ ...d, parts: snapshotParts }, slotId, appliedDx, appliedDy);
         const rig = movesBone
           ? moveBoneForSlot(rigSnapshot, slotId, appliedDx, appliedDy)
           : moveSlotBinding(rigSnapshot, slotId, appliedDx, appliedDy);
@@ -760,6 +991,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   // Drag every variant in a slot together by the same canvas delta.
   const startGroupDrag = (e: React.PointerEvent, slotId: ID) => {
     if (e.button !== 0) return;
+    pushUndoSnapshot();
     const snapshot = new Map(
       partsInSlot(slotId).map((p) => {
         const pivot = pivotForPart(p);
@@ -789,7 +1021,6 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   slotId,
                   dx,
                   dy,
-                  { clampToHost: true },
                 ),
                 rig: moveSlotBinding(rigSnapshot, slotId, dx, dy),
                 updatedAt: Date.now(),
@@ -811,10 +1042,14 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
+    pushUndoSnapshot();
     selectBone(boneId);
     const sx = e.clientX;
     const sy = e.clientY;
+    // Bones drive the skeleton only; artwork stays put (drag layers with bones hidden instead).
+    const shouldMoveArt = false;
     const rigSnapshot = normalizeCharacterRig(doc);
+    const startBoneWorld = computeBoneWorldTransforms(rigSnapshot).get(boneId);
     const slotIds = slotIdsForBoneSubtree(rigSnapshot, boneId);
     const snapshot = doc.parts.map((part) => ({
       id: part.id,
@@ -825,13 +1060,21 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     const move = (ev: PointerEvent) => {
       const dx = Math.round((ev.clientX - sx) / scale);
       const dy = Math.round((ev.clientY - sy) / scale);
+      const rig = moveBone(rigSnapshot, boneId, dx, dy);
+      const movedBoneWorld = computeBoneWorldTransforms(rig).get(boneId);
+      const appliedDx =
+        startBoneWorld && movedBoneWorld ? Math.round(movedBoneWorld.x - startBoneWorld.x) : dx;
+      const appliedDy =
+        startBoneWorld && movedBoneWorld ? Math.round(movedBoneWorld.y - startBoneWorld.y) : dy;
       setDoc((d) =>
         d
           ? withRig(
               {
                 ...d,
-                parts: moveSlotSetFromSnapshot(d.parts, snapshot, slotIds, dx, dy),
-                rig: moveBone(rigSnapshot, boneId, dx, dy),
+                parts: shouldMoveArt
+                  ? moveSlotSetFromSnapshot(d.parts, snapshot, slotIds, appliedDx, appliedDy)
+                  : d.parts,
+                rig,
                 updatedAt: Date.now(),
               },
               true,
@@ -847,11 +1090,20 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     window.addEventListener("pointerup", up);
   };
 
+  const toggleBones = () => {
+    setShowBones((visible) => {
+      const next = !visible;
+      if (!next) setSelectedBoneId(null);
+      return next;
+    });
+  };
+
   // Resize a whole slot from a corner, scaling every variant around the
   // opposite (fixed) corner of the group's union bounds.
   const startGroupResize = (e: React.PointerEvent, slotId: ID, corner: ResizeCorner) => {
     if (e.button !== 0) return;
     e.stopPropagation();
+    pushUndoSnapshot();
     const parts = partsInSlot(slotId);
     const box = unionFrameBounds(parts);
     const anchor = {
@@ -907,29 +1159,390 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     window.addEventListener("pointerup", up);
   };
 
+  const startGroupRotate = (e: React.PointerEvent, slotId: ID) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    pushUndoSnapshot();
+    const canvas = e.currentTarget.closest("[data-editor-canvas]") as HTMLDivElement | null;
+    const rect = canvas?.getBoundingClientRect();
+    const parts = partsInSlot(slotId);
+    const box = unionFrameBounds(parts);
+    const anchor = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    if (!rect) return;
+    const anchorScreen = {
+      x: rect.left + anchor.x * scale,
+      y: rect.top + anchor.y * scale,
+    };
+    const startAngle = Math.atan2(e.clientY - anchorScreen.y, e.clientX - anchorScreen.x);
+    const targetIds = partAndDescendantIdsForSlot(doc.parts, slotId);
+    const snapshot = doc.parts
+      .filter((part) => targetIds.has(part.id))
+      .map((part) => ({
+        id: part.id,
+        x: part.x,
+        y: part.y,
+        pivot: pivotForPart(part),
+        rotation: part.rotation,
+      }));
+    const move = (ev: PointerEvent) => {
+      const nextAngle = Math.atan2(ev.clientY - anchorScreen.y, ev.clientX - anchorScreen.x);
+      const degrees = ((nextAngle - startAngle) * 180) / Math.PI;
+      setDoc((d) =>
+        d
+          ? withRig({
+              ...d,
+              parts: d.parts.map((part) => {
+                const base = snapshot.find((item) => item.id === part.id);
+                if (!base) return part;
+                const rotatedPivot = rotateCanvasPointAroundPivot(base.pivot, anchor, degrees);
+                const dx = rotatedPivot.x - base.pivot.x;
+                const dy = rotatedPivot.y - base.pivot.y;
+                return {
+                  ...part,
+                  x: Math.round(base.x + dx),
+                  y: Math.round(base.y + dy),
+                  pivot: { x: Math.round(rotatedPivot.x), y: Math.round(rotatedPivot.y) },
+                  rotation: Math.round(base.rotation + degrees),
+                };
+              }),
+              updatedAt: Date.now(),
+            })
+          : d,
+      );
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  // Once a select-mode drag actually begins, dispatch to a slot-group drag (multi-variant
+  // slots) or a single-part drag. Both select the subject and install their own listeners.
+  const startCanvasDragForSubject = (
+    e: React.PointerEvent,
+    part: CharacterPart,
+    point: { x: number; y: number },
+  ) => {
+    const slotId = getPartSlotId(part);
+    const editingVariant =
+      selectedPart && !selectedSlotId && getPartSlotId(selectedPart) === slotId;
+    if (!editingVariant && partsInSlot(slotId).length > 1) {
+      selectSlot(slotId);
+      startGroupDrag(e, slotId);
+      return;
+    }
+    startCanvasPartDrag(e, part, point);
+  };
+
+  // Rest reference (alpha center of the slot) that reach offsets are measured from.
+  const slotRestCenter = (parts: CharacterPart[]) => {
+    const b = parts.length > 0 ? unionAlphaBounds(parts) : { x: 0, y: 0, width: 0, height: 0 };
+    return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+  };
+
+  // Stored reach (parent-frame deltas) → absolute canvas polygon for display / continued editing.
+  const reachToCanvas = (slotId: ID): { x: number; y: number }[] | null => {
+    const constraint = normalizeCharacterRig(doc).reaches.find((c) => c.slotId === slotId);
+    if (!constraint?.reach || constraint.reach.length < 3) return null;
+    const center = slotRestCenter(doc.parts.filter((p) => getPartSlotId(p) === slotId));
+    return constraint.reach.map((pt) => ({ x: center.x + pt.x, y: center.y + pt.y }));
+  };
+
+  const enterReachEdit = () => {
+    if (!restrictSlotId) return;
+    setReachDraft(reachToCanvas(restrictSlotId));
+    setRotDraft(null);
+    setRangeEdit({ slotId: restrictSlotId });
+  };
+
+  const exitReachEdit = () => {
+    setRangeEdit(null);
+    setReachDraft(null);
+    setRotDraft(null);
+  };
+
+  const clearReach = (slotId: ID) => {
+    let rig = normalizeCharacterRig(doc);
+    rig = setSlotReach(rig, slotId, undefined);
+    rig = setSlotRotReach(rig, slotId, undefined);
+    updateDoc({ rig });
+    setReachDraft(null);
+    setRotDraft(null);
+    setStatus("Reach cleared");
+  };
+
+  // Twist the layer around its pivot to its extremes; the swept angle range becomes the rotation
+  // reach. Snaps back on release. Distinct from the position sweep — driven by the blue knob.
+  const startRotationTrace = (e: React.PointerEvent) => {
+    if (e.button !== 0 || !rangeEdit) return;
+    e.stopPropagation();
+    const slotId = rangeEdit.slotId;
+    const parts = doc.parts.filter((p) => getPartSlotId(p) === slotId);
+    const rep = parts.find((p) => p.visible) ?? parts[0];
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rep || !rect) return;
+    const anchor = pivotForPart(rep);
+    const anchorScreen = { x: rect.left + anchor.x * scale, y: rect.top + anchor.y * scale };
+    const startAngle = Math.atan2(e.clientY - anchorScreen.y, e.clientX - anchorScreen.x);
+    const snapshot = parts.map((p) => ({
+      id: p.id,
+      x: p.x,
+      y: p.y,
+      pivot: pivotForPart(p),
+      rotation: p.rotation,
+    }));
+    let minD = 0;
+    let maxD = 0;
+    pushUndoSnapshot();
+    setRotDraft({ min: 0, max: 0 });
+    const move = (ev: PointerEvent) => {
+      let degrees =
+        ((Math.atan2(ev.clientY - anchorScreen.y, ev.clientX - anchorScreen.x) - startAngle) *
+          180) /
+        Math.PI;
+      while (degrees > 180) degrees -= 360;
+      while (degrees < -180) degrees += 360;
+      minD = Math.min(minD, degrees);
+      maxD = Math.max(maxD, degrees);
+      setRotDraft({ min: Math.round(minD), max: Math.round(maxD) });
+      setDoc((d) => {
+        if (!d) return d;
+        const byId = new Map(snapshot.map((s) => [s.id, s]));
+        return {
+          ...d,
+          parts: d.parts.map((part) => {
+            const base = byId.get(part.id);
+            if (!base) return part;
+            const rp = rotateCanvasPointAroundPivot(base.pivot, anchor, degrees);
+            return {
+              ...part,
+              x: Math.round(base.x + (rp.x - base.pivot.x)),
+              y: Math.round(base.y + (rp.y - base.pivot.y)),
+              pivot: { x: Math.round(rp.x), y: Math.round(rp.y) },
+              rotation: Math.round(base.rotation + degrees),
+            };
+          }),
+        };
+      });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      const rotReach = { min: Math.round(minD), max: Math.round(maxD) };
+      setRotDraft(rotReach);
+      setDoc((d) => {
+        if (!d) return d;
+        const byId = new Map(snapshot.map((s) => [s.id, s]));
+        const restored = d.parts.map((p) => {
+          const base = byId.get(p.id);
+          return base
+            ? { ...p, x: base.x, y: base.y, pivot: base.pivot, rotation: base.rotation }
+            : p;
+        });
+        return withRig(
+          {
+            ...d,
+            parts: restored,
+            rig: setSlotRotReach(
+              normalizeCharacterRig({ ...d, parts: restored }),
+              slotId,
+              rotReach,
+            ),
+            updatedAt: Date.now(),
+          },
+          true,
+        );
+      });
+      setStatus(`Twist set — ${rotReach.min}° to ${rotReach.max}°`);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  // Set which layer a slot is attached to (the parent carries it). Stored on part.parentId.
+  const setSlotAttachTo = (slotId: ID, parentSlotId: ID | "") => {
+    const parentRep = parentSlotId
+      ? (doc.parts.find((p) => getPartSlotId(p) === parentSlotId && p.visible) ??
+        doc.parts.find((p) => getPartSlotId(p) === parentSlotId))
+      : undefined;
+    updateDoc({
+      parts: doc.parts.map((p) =>
+        getPartSlotId(p) === slotId ? { ...p, parentId: parentRep?.id } : p,
+      ),
+    });
+  };
+
+  // Sweep the layer around its extremes; the traced outline (convex hull of its swept footprint)
+  // becomes the reach. The layer snaps back on release — sweeping sets the limit, it doesn't pose.
+  const startReachSweep = (e: React.PointerEvent) => {
+    if (e.button !== 0 || !rangeEdit) return;
+    const slotId = rangeEdit.slotId;
+    const parts = doc.parts.filter((p) => getPartSlotId(p) === slotId);
+    if (parts.length === 0) return;
+    const rep = parts.find((p) => p.visible) ?? parts[0];
+    const alpha = localAlphaBounds(rep);
+    const footprint = (dx: number, dy: number) =>
+      [
+        [0, 0],
+        [1, 0],
+        [1, 1],
+        [0, 1],
+      ].map(([cx, cy]) => ({
+        x: rep.x + alpha.x + cx * alpha.width + dx,
+        y: rep.y + alpha.y + cy * alpha.height + dy,
+      }));
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const restSnapshot = new Map(
+      doc.parts.map((p) => [p.id, { x: p.x, y: p.y, pivot: pivotForPart(p) }] as const),
+    );
+    // Seed with the part's own footprint plus any existing reach, so sweeping only ever grows it.
+    const samples: { x: number; y: number }[] = [...footprint(0, 0), ...(reachDraft ?? [])];
+    pushUndoSnapshot();
+    setReachDraft(convexHull(samples));
+    const move = (ev: PointerEvent) => {
+      const dx = Math.round((ev.clientX - sx) / scale);
+      const dy = Math.round((ev.clientY - sy) / scale);
+      samples.push(...footprint(dx, dy));
+      setReachDraft(convexHull(samples));
+      setDoc((d) => {
+        if (!d) return d;
+        const restored = d.parts.map((p) => {
+          const snap = restSnapshot.get(p.id);
+          if (!snap) return p;
+          return { ...p, x: snap.x, y: snap.y, pivot: snap.pivot };
+        });
+        return { ...d, parts: moveSlotParts({ ...d, parts: restored }, slotId, dx, dy) };
+      });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      const hull = convexHull(samples);
+      const center = slotRestCenter(parts);
+      const deltas = hull.map((pt) => ({
+        x: Math.round(pt.x - center.x),
+        y: Math.round(pt.y - center.y),
+      }));
+      setReachDraft(hull);
+      // Snap the layer back to rest — sweeping sets the limit, it does not pose.
+      setDoc((d) => {
+        if (!d) return d;
+        const restored = d.parts.map((p) => {
+          const snap = restSnapshot.get(p.id);
+          if (!snap) return p;
+          return { ...p, x: snap.x, y: snap.y, pivot: snap.pivot };
+        });
+        return withRig(
+          {
+            ...d,
+            parts: restored,
+            rig: setSlotReach(normalizeCharacterRig({ ...d, parts: restored }), slotId, deltas),
+            updatedAt: Date.now(),
+          },
+          true,
+        );
+      });
+      setStatus("Reach set — sweep again to extend it");
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
   const handleCanvasPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
     const point = canvasPointFromEvent(e);
     if (!point) return;
-    const picked = pickPartAt(point);
-    if (!picked) {
-      setSelectedPartId(null);
-      setSelectedSlotId(null);
-      setSelectedBoneId(null);
+
+    // Reach-edit focus mode owns the canvas: dragging the layer sweeps out its reach. Normal
+    // selection / part dragging is locked out.
+    if (rangeEdit) {
+      startReachSweep(e);
       return;
     }
-    if (mode === "select") {
-      const slotId = getPartSlotId(picked);
-      // Keep editing a single variant if one of this slot is already picked.
-      const editingVariant =
-        selectedPart && !selectedSlotId && getPartSlotId(selectedPart) === slotId;
-      if (!editingVariant && partsInSlot(slotId).length > 1) {
-        selectSlot(slotId);
-        startGroupDrag(e, slotId);
+
+    // Pivot / bounds tools act on the topmost part immediately (one-shot).
+    if (mode !== "select") {
+      const picked = pickPartAt(point);
+      if (picked) startCanvasPartDrag(e, picked, point);
+      return;
+    }
+
+    // When the skeleton is shown the canvas manipulates bones (via their handles); layers are
+    // static. A click still selects a layer (for the inspector / movement range) but never drags
+    // it — to move a layer, hide the bones first.
+    if (showBones) {
+      const candidates = hitPartsAt(point);
+      const candidateIds = candidates.map((part) => part.id);
+      const { id, nextPick } = resolveDrillSelection(candidateIds, canvasLastPickRef.current, {
+        x: e.clientX,
+        y: e.clientY,
+      });
+      canvasLastPickRef.current = nextPick;
+      if (!id) {
+        setSelectedPartId(null);
+        setSelectedSlotId(null);
+        setSelectedBoneId(null);
         return;
       }
+      const part = candidates.find((candidate) => candidate.id === id);
+      const slotId = part ? getPartSlotId(part) : null;
+      if (slotId && partsInSlot(slotId).length > 1) selectSlot(slotId);
+      else selectPart(id);
+      return;
     }
-    startCanvasPartDrag(e, picked, point);
+
+    // Figma-style select/drag (shared model — see select-drag.ts): a click selects the
+    // top part and drills under it on a repeat click; a drag moves the already-selected
+    // part from anywhere even when overlapped, or selects+drags an unselected part in one
+    // gesture. Selection never changes mid-drag.
+    const dragPoint = point;
+    const candidates = hitPartsAt(dragPoint);
+    const candidateIds = candidates.map((part) => part.id);
+    const subjectId = resolveDragSubject(candidateIds, selectedPartId);
+    const subject = candidates.find((part) => part.id === subjectId) ?? null;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let dragging = false;
+
+    const cleanup = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    function onMove(ev: PointerEvent) {
+      if (dragging || !subject) return;
+      if (!exceedsDragThreshold({ x: startX, y: startY }, { x: ev.clientX, y: ev.clientY })) return;
+      dragging = true;
+      cleanup();
+      // Deltas are measured from the original pointerdown, so handing off here is seamless.
+      startCanvasDragForSubject(e, subject, dragPoint);
+    }
+    function onUp() {
+      cleanup();
+      if (dragging) return;
+      const { id, nextPick } = resolveDrillSelection(candidateIds, canvasLastPickRef.current, {
+        x: startX,
+        y: startY,
+      });
+      canvasLastPickRef.current = nextPick;
+      if (!id) {
+        setSelectedPartId(null);
+        setSelectedSlotId(null);
+        setSelectedBoneId(null);
+        return;
+      }
+      const part = candidates.find((candidate) => candidate.id === id);
+      const slotId = part ? getPartSlotId(part) : null;
+      const editingVariant =
+        selectedPart && !selectedSlotId && !!slotId && getPartSlotId(selectedPart) === slotId;
+      if (slotId && !editingVariant && partsInSlot(slotId).length > 1) selectSlot(slotId);
+      else selectPart(id);
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   };
 
   return (
@@ -947,6 +1560,26 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           className="min-w-0 rounded border border-transparent bg-transparent px-2 py-1 text-sm font-semibold hover:border-border focus:border-primary focus:outline-none"
         />
         <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={undoCharacterHistory}
+            disabled={historyPast.length === 0}
+            className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-panel-2 disabled:opacity-40"
+            title="Undo"
+          >
+            <Undo2 size={13} />
+            Undo
+          </button>
+          <button
+            type="button"
+            onClick={redoCharacterHistory}
+            disabled={historyFuture.length === 0}
+            className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-panel-2 disabled:opacity-40"
+            title="Redo"
+          >
+            <Redo2 size={13} />
+            Redo
+          </button>
           {CANVAS_PRESETS.map((preset) => (
             <button
               key={preset.label}
@@ -956,6 +1589,17 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               {preset.label}
             </button>
           ))}
+          <button
+            type="button"
+            onClick={toggleBones}
+            className={`flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-panel-2 ${
+              showBones ? "border-primary text-primary" : "border-border text-muted-foreground"
+            }`}
+            title={showBones ? "Hide bone controls" : "Show bone controls"}
+          >
+            {showBones ? <Eye size={13} /> : <EyeOff size={13} />}
+            Bones
+          </button>
           <button
             onClick={() => navigator.clipboard?.writeText(exportData)}
             className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-panel-2"
@@ -984,7 +1628,13 @@ export function CharacterEditor({ characterId, onClose }: Props) {
             manifest={manifest}
             onChange={(nextManifest) => updateDoc({ manifest: nextManifest })}
           />
-          <UploadSlots onImport={importSvg} parts={doc.parts} manifest={manifest} />
+          <UploadSlots
+            onImport={importSvg}
+            parts={doc.parts}
+            manifest={manifest}
+            canvasWidth={doc.canvasWidth}
+            canvasHeight={doc.canvasHeight}
+          />
           <LayerList
             parts={orderedParts}
             selectedId={selectedPartId}
@@ -994,6 +1644,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
             onChange={updatePart}
             onRemove={removePart}
             onToggleSlotVisible={toggleSlotVisible}
+            onToggleSlotLocked={toggleSlotLocked}
             onNudgeSlotZ={nudgeSlotZ}
             onRemoveSlot={removeSlot}
           />
@@ -1030,18 +1681,22 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   key={part.id}
                   part={part}
                   selected={part.id === selectedPartId}
+                  dimmed={focusEditing && getPartSlotId(part) !== rangeEdit?.slotId}
                   preview={preview}
                   previewParentPart={previewParentPart}
+                  allParts={doc.parts}
                 />
               ))}
-              <RigBonesOverlay
-                doc={doc}
-                selectedBoneId={selectedBoneId}
-                scale={scale}
-                onSelectBone={selectBone}
-                onStartBoneDrag={startBoneDrag}
-              />
-              {selectedEditorPart && (
+              {showBones && !focusEditing && (
+                <RigBonesOverlay
+                  doc={doc}
+                  selectedBoneId={selectedBoneId}
+                  scale={scale}
+                  onSelectBone={selectBone}
+                  onStartBoneDrag={startBoneDrag}
+                />
+              )}
+              {selectedEditorPart && !focusEditing && (
                 <PartControlsOverlay
                   part={selectedEditorPart}
                   canvasWidth={doc.canvasWidth}
@@ -1051,17 +1706,49 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   onBoundsModeChange={setBoundsMode}
                   preview={preview}
                   previewParentPart={previewParentPart}
-                  onChange={(patch) => updatePart(selectedEditorPart.id, patch)}
+                  allParts={doc.parts}
+                  onBeginChange={pushUndoSnapshot}
+                  onChange={(patch) => updatePart(selectedEditorPart.id, patch, { history: false })}
                 />
               )}
-              {selectedSlotId && selectedSlotBounds && (
+              {selectedSlotId && selectedSlotBounds && !focusEditing && (
                 <GroupControlsOverlay
                   bounds={selectedSlotBounds}
                   scale={scale}
                   onStartMove={(e) => startGroupDrag(e, selectedSlotId)}
                   onStartResize={(e, corner) => startGroupResize(e, selectedSlotId, corner)}
+                  onStartRotate={(e) => startGroupRotate(e, selectedSlotId)}
                 />
               )}
+              {rangeEdit && reachDraft && reachDraft.length >= 3 && (
+                <ReachOverlay
+                  points={reachDraft}
+                  scale={scale}
+                  canvasWidth={doc.canvasWidth}
+                  canvasHeight={doc.canvasHeight}
+                />
+              )}
+              {rangeEdit &&
+                (() => {
+                  const parts = doc.parts.filter((p) => getPartSlotId(p) === rangeEdit.slotId);
+                  const rep = parts.find((p) => p.visible) ?? parts[0];
+                  if (!rep) return null;
+                  const box = unionAlphaBounds(parts);
+                  const stored = normalizeCharacterRig(doc).reaches.find(
+                    (r) => r.slotId === rangeEdit.slotId,
+                  )?.rotReach;
+                  return (
+                    <RotationReachOverlay
+                      anchor={pivotForPart(rep)}
+                      radius={Math.max(box.width, box.height) * 0.6 + 24}
+                      range={rotDraft ?? stored ?? null}
+                      scale={scale}
+                      canvasWidth={doc.canvasWidth}
+                      canvasHeight={doc.canvasHeight}
+                      onStartRotate={startRotationTrace}
+                    />
+                  );
+                })()}
             </div>
           </div>
           <div className="pointer-events-none absolute bottom-2 right-3 rounded bg-panel/80 px-2 py-1 text-[10px] text-muted-foreground">
@@ -1082,9 +1769,21 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               selectedBoneId={selectedBoneId}
               selectedSlotId={selectedSlotId ?? (selectedPart ? getPartSlotId(selectedPart) : null)}
               selectedPart={selectedPart}
+              showBones={showBones}
               onSelectBone={selectBone}
               onRigChange={(rig) => updateDoc({ rig })}
             />
+            {restrictSlotId && (
+              <RestrictMovementPanel
+                doc={doc}
+                slotId={restrictSlotId}
+                editing={rangeEdit?.slotId === restrictSlotId}
+                onEnterEdit={enterReachEdit}
+                onExitEdit={exitReachEdit}
+                onAttachTo={(parentSlotId) => setSlotAttachTo(restrictSlotId, parentSlotId)}
+                onClear={() => clearReach(restrictSlotId)}
+              />
+            )}
             <RigAssistant doc={doc} onChange={(patch) => updateDoc(patch)} />
             {selectedSlotId && selectedSlotBounds ? (
               <GroupInspector
@@ -1094,6 +1793,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                 bounds={selectedSlotBounds}
                 onMove={(dx, dy) => applyGroupMove(selectedSlotId, dx, dy)}
                 onScale={(anchor, sx, sy) => applyGroupScale(selectedSlotId, anchor, sx, sy)}
+                onRotate={(anchor, degrees) => applyGroupRotate(selectedSlotId, anchor, degrees)}
                 onSelectPart={selectPart}
                 lipSyncSamples={LIPSYNC_SAMPLES}
                 mouthTestPlaying={mouthTestPlaying}
@@ -1179,10 +1879,14 @@ function UploadSlots({
   onImport,
   parts,
   manifest,
+  canvasWidth,
+  canvasHeight,
 }: {
   onImport: (file: File, options?: ImportOptions) => void;
   parts: CharacterPart[];
   manifest: PartManifest;
+  canvasWidth: number;
+  canvasHeight: number;
 }) {
   return (
     <div className="space-y-3">
@@ -1228,7 +1932,11 @@ function UploadSlots({
             </span>
             <span className="text-[10px] text-muted-foreground">(optional)</span>
           </div>
-          <EyePresetSelector onImport={onImport} />
+          <EyePresetSelector
+            onImport={onImport}
+            canvasWidth={canvasWidth}
+            canvasHeight={canvasHeight}
+          />
           <div className="text-[10px] text-muted-foreground mb-2">
             Or upload eye state variants:
           </div>
@@ -1409,6 +2117,18 @@ function LayerPartRow({
       <button
         onClick={(e) => {
           e.stopPropagation();
+          onChange({ locked: !part.locked });
+        }}
+        className={`rounded p-1 hover:text-foreground ${
+          part.locked ? "text-primary" : "text-muted-foreground"
+        }`}
+        title={part.locked ? "Unlock" : "Lock"}
+      >
+        {part.locked ? <Lock size={14} /> : <Unlock size={14} />}
+      </button>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
           onChange({ zIndex: part.zIndex + 1 });
         }}
         className="rounded p-1 text-muted-foreground hover:text-foreground"
@@ -1449,6 +2169,7 @@ function LayerList({
   onChange,
   onRemove,
   onToggleSlotVisible,
+  onToggleSlotLocked,
   onNudgeSlotZ,
   onRemoveSlot,
 }: {
@@ -1460,6 +2181,7 @@ function LayerList({
   onChange: (id: ID, patch: Partial<CharacterPart>) => void;
   onRemove: (id: ID) => void;
   onToggleSlotVisible: (slotId: ID) => void;
+  onToggleSlotLocked: (slotId: ID) => void;
   onNudgeSlotZ: (slotId: ID, delta: number) => void;
   onRemoveSlot: (slotId: ID) => void;
 }) {
@@ -1513,6 +2235,7 @@ function LayerList({
           // Multi-variant slots render a collapsible group.
           const isOpen = expanded.has(slotId);
           const anyVisible = slotParts.some((p) => p.visible);
+          const anyLocked = slotParts.some((p) => p.locked);
           return (
             <li key={slotId} className="space-y-1">
               <div
@@ -1548,6 +2271,18 @@ function LayerList({
                   title={anyVisible ? "Hide all" : "Show all"}
                 >
                   {anyVisible ? <Eye size={14} /> : <EyeOff size={14} />}
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleSlotLocked(slotId);
+                  }}
+                  className={`rounded p-1 hover:text-foreground ${
+                    anyLocked ? "text-primary" : "text-muted-foreground"
+                  }`}
+                  title={anyLocked ? "Unlock all" : "Lock all"}
+                >
+                  {anyLocked ? <Lock size={14} /> : <Unlock size={14} />}
                 </button>
                 <button
                   onClick={(e) => {
@@ -2008,6 +2743,14 @@ function RigAssistant({
           Copy AI prompt
         </button>
       </div>
+      <div className="mb-2 rounded border border-accent/30 bg-accent/10 px-2 py-1.5 text-[10px] leading-snug text-muted-foreground">
+        Paste either a raw <code className="font-mono text-foreground">CharacterRig</code> object or{" "}
+        <code className="font-mono text-foreground">{'{"rig": {...}}'}</code>. Required shape:{" "}
+        <code className="font-mono text-foreground">
+          {"version:1, activeAngle, bones[], slotBindings[], drawOrder[], reaches[]"}
+        </code>
+        . Bone ids must be acyclic, and each slot binding must reference an existing slot and bone.
+      </div>
       <textarea
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
@@ -2031,6 +2774,7 @@ function RigPanel({
   selectedBoneId,
   selectedSlotId,
   selectedPart,
+  showBones,
   onSelectBone,
   onRigChange,
 }: {
@@ -2038,6 +2782,7 @@ function RigPanel({
   selectedBoneId: ID | null;
   selectedSlotId: ID | null;
   selectedPart: CharacterPart | null;
+  showBones: boolean;
   onSelectBone: (boneId: ID) => void;
   onRigChange: (rig: CharacterRig) => void;
 }) {
@@ -2070,6 +2815,11 @@ function RigPanel({
             <span className="shrink-0 text-[10px] text-muted-foreground">{bone.role}</span>
           </button>
         ))}
+      </div>
+      <div className="mb-3 rounded border border-border bg-background px-2 py-1.5 text-[10px] leading-snug text-muted-foreground">
+        {showBones
+          ? "Bones shown — drag the joints to position the skeleton; artwork stays put. Hide bones (top bar) to drag the layers themselves."
+          : "Bones hidden — drag layers on the canvas to reposition artwork. Show bones to adjust the skeleton."}
       </div>
       {selectedBone && (
         <div className="mb-3 grid grid-cols-2 gap-2">
@@ -2136,6 +2886,276 @@ function RigPanel({
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * Friendly UI for a layer's attach-to parent and its movement "reach". Attach-to carries the layer
+ * with its parent; the reach (traced by sweeping the layer to its extremes) is how far it may drift
+ * from that parent, in the parent's frame, so it rides along. Reach is a guide for generated motion;
+ * manual dragging stays free.
+ */
+function RestrictMovementPanel({
+  doc,
+  slotId,
+  editing,
+  onEnterEdit,
+  onExitEdit,
+  onAttachTo,
+  onClear,
+}: {
+  doc: CharacterPreset;
+  slotId: ID;
+  editing: boolean;
+  onEnterEdit: () => void;
+  onExitEdit: () => void;
+  onAttachTo: (parentSlotId: ID | "") => void;
+  onClear: () => void;
+}) {
+  const rig = normalizeCharacterRig(doc);
+  const slots = listCharacterSlots(doc.parts);
+  const slot = slots.find((s) => s.id === slotId);
+  const slotParts = doc.parts.filter((p) => getPartSlotId(p) === slotId);
+  const parentPart = slotParts.map((p) => p.parentId).find(Boolean)
+    ? doc.parts.find((p) => p.id === slotParts.map((sp) => sp.parentId).find(Boolean))
+    : undefined;
+  const parentSlotId = parentPart ? getPartSlotId(parentPart) : "";
+  const parentName = slots.find((s) => s.id === parentSlotId)?.name;
+  const parentOptions = slots.filter((s) => s.id !== slotId);
+  const constraint = rig.reaches.find((c) => c.slotId === slotId);
+  const hasPosReach = !!constraint?.reach && constraint.reach.length >= 3;
+  const hasRotReach = !!constraint?.rotReach;
+  const hasReach = hasPosReach || hasRotReach;
+
+  return (
+    <section className="rounded border border-border bg-panel-2 p-3">
+      <div className="mb-2 flex items-center gap-2">
+        <Lock size={13} className="text-muted-foreground" />
+        <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+          Attach & reach
+        </span>
+      </div>
+
+      <Field label="Attach to layer">
+        <select
+          value={parentSlotId}
+          onChange={(e) => onAttachTo(e.target.value)}
+          className="w-full rounded border border-border bg-background px-2 py-1"
+        >
+          <option value="">Nothing (independent)</option>
+          {parentOptions.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <p className="mb-2 mt-1 text-[10px] leading-snug text-muted-foreground">
+        {parentName
+          ? `Carried by ${parentName} when it moves.`
+          : "Not attached — moves on its own."}
+      </p>
+
+      <p className="mb-2 text-[10px] leading-snug text-muted-foreground">
+        Reach: how far <span className="text-foreground">{slot?.name ?? "this layer"}</span> may
+        drift and twist from {parentName ?? "its parent"}.{" "}
+        {hasReach
+          ? `Set${hasPosReach ? " · drift" : ""}${hasRotReach ? ` · twist ${constraint?.rotReach?.min}°/${constraint?.rotReach?.max}°` : ""}.`
+          : "Nothing set — unlimited."}
+      </p>
+
+      {!editing ? (
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={onEnterEdit}
+            disabled={!parentSlotId}
+            className="flex-1 rounded border border-primary/60 bg-primary/10 px-2 py-1 font-medium text-foreground hover:bg-primary/20 disabled:opacity-40"
+            title={parentSlotId ? "" : "Attach to a layer first"}
+          >
+            {hasReach ? "Edit reach" : "Set reach"}
+          </button>
+          {hasReach && (
+            <button
+              type="button"
+              onClick={onClear}
+              className="rounded border border-border px-2 py-1 hover:bg-panel"
+              title="Remove the reach — unlimited drift"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <div className="rounded border border-amber-400/40 bg-amber-300/10 px-2 py-1.5 text-[10px] leading-snug text-muted-foreground">
+            <span className="text-foreground">Sweep the layer</span> to the farthest spots it should
+            reach — the amber outline is its drift. Drag the{" "}
+            <span className="text-sky-400">blue knob</span> to twist it to its rotation extremes. It
+            snaps back; you&apos;re setting limits, not posing.
+          </div>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={onClear}
+              className="flex-1 rounded border border-border px-2 py-1 hover:bg-panel"
+            >
+              Clear reach
+            </button>
+            <button
+              type="button"
+              onClick={onExitEdit}
+              className="flex-1 rounded border border-primary/60 bg-primary/10 px-2 py-1 font-medium text-foreground hover:bg-primary/20"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** Convex hull (monotonic chain) of a point cloud — the outline of a swept reach. */
+function convexHull(points: { x: number; y: number }[]): { x: number; y: number }[] {
+  const pts = points
+    .slice()
+    .sort((a, b) => a.x - b.x || a.y - b.y)
+    .filter((p, i, arr) => i === 0 || p.x !== arr[i - 1].x || p.y !== arr[i - 1].y);
+  if (pts.length <= 2) return pts;
+  const cross = (
+    o: { x: number; y: number },
+    a: { x: number; y: number },
+    b: { x: number; y: number },
+  ) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower: { x: number; y: number }[] = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0)
+      lower.pop();
+    lower.push(p);
+  }
+  const upper: { x: number; y: number }[] = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0)
+      upper.pop();
+    upper.push(p);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
+/**
+ * The traced reach outline (the area a layer may move within), drawn as an organic polygon in
+ * canvas coordinates. Shown only in reach-edit focus mode for the layer being edited.
+ */
+function ReachOverlay({
+  points,
+  scale,
+  canvasWidth,
+  canvasHeight,
+}: {
+  points: { x: number; y: number }[];
+  scale: number;
+  canvasWidth: number;
+  canvasHeight: number;
+}) {
+  if (points.length < 3) return null;
+  const stroke = Math.max(1.5, 2 / Math.max(0.0001, scale));
+  const path = points.map((p) => `${p.x},${p.y}`).join(" ");
+  return (
+    <svg
+      className="pointer-events-none absolute inset-0"
+      width={canvasWidth}
+      height={canvasHeight}
+      style={{ zIndex: 9400 }}
+    >
+      <polygon
+        points={path}
+        fill="rgba(245, 158, 11, 0.28)"
+        stroke="#f59e0b"
+        strokeWidth={stroke}
+        strokeDasharray={`${stroke * 3} ${stroke * 2}`}
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Rotation-reach gizmo: a pivot, a wedge showing the allowed twist range, and a draggable knob to
+ * trace it. Distinct (sky-blue) from the amber position reach. Shown in reach-edit focus mode.
+ */
+function RotationReachOverlay({
+  anchor,
+  radius,
+  range,
+  scale,
+  canvasWidth,
+  canvasHeight,
+  onStartRotate,
+}: {
+  anchor: { x: number; y: number };
+  radius: number;
+  range: { min: number; max: number } | null;
+  scale: number;
+  canvasWidth: number;
+  canvasHeight: number;
+  onStartRotate: (e: React.PointerEvent) => void;
+}) {
+  const restAngle = -90; // straight up
+  const stroke = Math.max(1.5, 2 / Math.max(0.0001, scale));
+  const knobR = Math.max(7, 9 / Math.max(0.0001, scale));
+  const toXY = (deg: number, r: number) => ({
+    x: anchor.x + r * Math.cos((deg * Math.PI) / 180),
+    y: anchor.y + r * Math.sin((deg * Math.PI) / 180),
+  });
+  const knob = toXY(restAngle, radius);
+  let wedge: string | null = null;
+  if (range && (range.min !== 0 || range.max !== 0)) {
+    const p0 = toXY(restAngle + range.min, radius);
+    const p1 = toXY(restAngle + range.max, radius);
+    const large = range.max - range.min > 180 ? 1 : 0;
+    wedge = `M ${anchor.x} ${anchor.y} L ${p0.x} ${p0.y} A ${radius} ${radius} 0 ${large} 1 ${p1.x} ${p1.y} Z`;
+  }
+  return (
+    <svg
+      className="pointer-events-none absolute inset-0"
+      width={canvasWidth}
+      height={canvasHeight}
+      style={{ zIndex: 9450 }}
+    >
+      {wedge && (
+        <path
+          d={wedge}
+          fill="rgba(14, 165, 233, 0.22)"
+          stroke="#0ea5e9"
+          strokeWidth={stroke}
+          strokeLinejoin="round"
+        />
+      )}
+      <line
+        x1={anchor.x}
+        y1={anchor.y}
+        x2={knob.x}
+        y2={knob.y}
+        stroke="#0ea5e9"
+        strokeWidth={stroke}
+        strokeDasharray={`${stroke * 3} ${stroke * 2}`}
+      />
+      <circle cx={anchor.x} cy={anchor.y} r={stroke * 1.6} fill="#0ea5e9" />
+      <circle
+        className="pointer-events-auto cursor-grab"
+        cx={knob.x}
+        cy={knob.y}
+        r={knobR}
+        fill="#0ea5e9"
+        stroke="#082f49"
+        strokeWidth={stroke * 0.7}
+        onPointerDown={onStartRotate}
+      />
+    </svg>
   );
 }
 
@@ -2227,13 +3247,19 @@ function GroupControlsOverlay({
   scale,
   onStartMove,
   onStartResize,
+  onStartRotate,
 }: {
   bounds: { x: number; y: number; width: number; height: number };
   scale: number;
   onStartMove: (e: React.PointerEvent) => void;
   onStartResize: (e: React.PointerEvent, corner: ResizeCorner) => void;
+  onStartRotate: (e: React.PointerEvent<HTMLButtonElement>) => void;
 }) {
   const handleSize = 14 / Math.max(0.0001, scale);
+  const rotateSize = 24 / Math.max(0.0001, scale);
+  const rotateOffset = 34 / Math.max(0.0001, scale);
+  const rotateTop =
+    bounds.y > rotateOffset + rotateSize ? -rotateOffset : bounds.height + rotateOffset;
   const corners: ResizeCorner[] = ["nw", "ne", "sw", "se"];
   const cornerPos: Record<ResizeCorner, { x: number; y: number }> = {
     nw: { x: 0, y: 0 },
@@ -2279,6 +3305,21 @@ function GroupControlsOverlay({
           }}
         />
       ))}
+      <button
+        type="button"
+        aria-label="Rotate group"
+        onPointerDown={onStartRotate}
+        className="pointer-events-auto absolute flex items-center justify-center rounded-full border border-background bg-primary text-primary-foreground shadow-[0_1px_5px_rgba(0,0,0,0.35)]"
+        style={{
+          left: bounds.width / 2,
+          top: rotateTop,
+          width: rotateSize,
+          height: rotateSize,
+          transform: "translate(-50%, -50%)",
+        }}
+      >
+        <RotateCw size={Math.max(10, rotateSize * 0.55)} strokeWidth={2.25} />
+      </button>
     </div>
   );
 }
@@ -2291,6 +3332,7 @@ function GroupInspector({
   bounds,
   onMove,
   onScale,
+  onRotate,
   onSelectPart,
   lipSyncSamples,
   mouthTestPlaying,
@@ -2304,6 +3346,7 @@ function GroupInspector({
   bounds: { x: number; y: number; width: number; height: number };
   onMove: (dx: number, dy: number) => void;
   onScale: (anchor: { x: number; y: number }, scaleX: number, scaleY: number) => void;
+  onRotate: (anchor: { x: number; y: number }, degrees: number) => void;
   onSelectPart: (id: ID) => void;
   lipSyncSamples: Array<{ name: string; url: string }>;
   mouthTestPlaying: boolean;
@@ -2313,6 +3356,11 @@ function GroupInspector({
 }) {
   const name = parts[0]?.slotName ?? roleLabel(parts[0]?.role ?? "custom");
   const isMouth = parts[0]?.role === "mouth";
+  const averageRotation =
+    parts.length > 0
+      ? Math.round(parts.reduce((sum, part) => sum + part.rotation, 0) / parts.length)
+      : 0;
+  const center = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
   const wordNames = SAMPLE_WORDS.map((w) => w.toLowerCase());
   const wordHasAudio = (word: string) =>
     lipSyncSamples.some((s) => s.name.toLowerCase() === word.toLowerCase());
@@ -2349,6 +3397,11 @@ function GroupInspector({
             onChange={(h) =>
               onScale({ x: bounds.x, y: bounds.y }, 1, Math.max(8, h) / Math.max(1, bounds.height))
             }
+          />
+          <NumberField
+            label="Rotate"
+            value={averageRotation}
+            onChange={(rotation) => onRotate(center, rotation - averageRotation)}
           />
         </div>
       </section>
@@ -2437,13 +3490,17 @@ function GroupInspector({
 function PartLayer({
   part,
   selected,
+  dimmed = false,
   preview,
   previewParentPart,
+  allParts,
 }: {
   part: CharacterPart;
   selected: boolean;
+  dimmed?: boolean;
   preview: PreviewState | null;
   previewParentPart?: CharacterPart;
+  allParts: CharacterPart[];
 }) {
   const url = useMediaUrl(part.mediaId);
   const previewingTalk = preview?.kind === "talk";
@@ -2468,13 +3525,15 @@ function PartLayer({
   }
   if (!part.visible && !selected) return null;
 
-  const previewTransform = previewDelta(part, preview, previewParentPart);
-  const opacity = part.visible ? previewTransform.opacity : 0.28;
+  const previewTransform = previewDelta(part, preview, previewParentPart, allParts);
+  const baseOpacity = part.visible ? previewTransform.opacity : 0.28;
+  // In movement-range focus mode, fade everything except the layer being edited.
+  const opacity = dimmed ? baseOpacity * 0.12 : baseOpacity;
   const pivot = pivotForPart(part);
 
   return (
     <>
-      {part.bounds && <BoundsOverlay bounds={part.bounds} zIndex={part.zIndex - 1} />}
+      {part.bounds && selected && <BoundsOverlay bounds={part.bounds} zIndex={part.zIndex - 1} />}
       <div
         className="absolute select-none"
         style={{
@@ -2511,6 +3570,8 @@ function PartControlsOverlay({
   onBoundsModeChange,
   preview,
   previewParentPart,
+  allParts,
+  onBeginChange,
   onChange,
 }: {
   part: CharacterPart;
@@ -2521,9 +3582,11 @@ function PartControlsOverlay({
   onBoundsModeChange: (mode: EditorBoundsMode) => void;
   preview: PreviewState | null;
   previewParentPart?: CharacterPart;
+  allParts: CharacterPart[];
+  onBeginChange: () => void;
   onChange: (patch: Partial<CharacterPart>) => void;
 }) {
-  const previewTransform = previewDelta(part, preview, previewParentPart);
+  const previewTransform = previewDelta(part, preview, previewParentPart, allParts);
   const pivot = pivotForPart(part);
   const selection = editorSelectionBounds(part, boundsMode);
   const control = editorControlBounds(part, scale, boundsMode);
@@ -2567,6 +3630,7 @@ function PartControlsOverlay({
     e.preventDefault();
     e.stopPropagation();
     if (e.button !== 0) return;
+    onBeginChange();
     const startX = e.clientX;
     const startY = e.clientY;
     const move = (ev: PointerEvent) => {
@@ -2591,6 +3655,7 @@ function PartControlsOverlay({
     e.preventDefault();
     e.stopPropagation();
     if (e.button !== 0) return;
+    onBeginChange();
     const canvas = e.currentTarget.closest("[data-editor-canvas]") as HTMLDivElement | null;
     const rect = canvas?.getBoundingClientRect();
     if (!rect) return;
@@ -2991,6 +4056,22 @@ function editorPartPivot(part: CharacterPart) {
   );
 }
 
+function rotateCanvasPointAroundPivot(
+  point: { x: number; y: number },
+  pivot: { x: number; y: number },
+  degrees: number,
+) {
+  const radians = (degrees * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  const relX = point.x - pivot.x;
+  const relY = point.y - pivot.y;
+  return {
+    x: pivot.x + relX * cos - relY * sin,
+    y: pivot.y + relX * sin + relY * cos,
+  };
+}
+
 function editorTransformPointAroundPivot(
   point: { x: number; y: number },
   pivot: { x: number; y: number },
@@ -3011,27 +4092,25 @@ function previewDelta(
   part: CharacterPart,
   preview: PreviewState | null,
   previewParentPart?: CharacterPart,
+  allParts: CharacterPart[] = [],
 ) {
   if (!preview) return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: 1, opacity: 1 };
   const targetsPart = part.id === preview.targetPartId || part.slotId === preview.targetSlotId;
   const elapsed = Date.now() - preview.startedAt;
   const t = Math.min(1, elapsed / preview.durationMs);
   const wave = Math.sin(t * Math.PI * 2);
-  if (
-    !targetsPart &&
-    preview.kind === "nod" &&
-    preview.targetRole === "head" &&
-    previewParentPart &&
-    (part.role === "eye" ||
-      part.role === "eyebrow" ||
-      part.role === "mouth" ||
-      part.role === "hair")
-  ) {
-    const motion = { dx: 0, dy: Math.round(Math.abs(wave) * 8), rotation: wave * 3, scale: 1 };
+  if (!targetsPart) {
+    const ancestor =
+      previewTargetAncestor(part, preview, allParts) ??
+      (isLegacyHeadPreviewChild(part, preview) ? previewParentPart : undefined);
+    const motion = ancestor ? previewMotionForPart(ancestor, preview, t, wave) : null;
+    if (!ancestor || !motion || !hasGeometricPreviewMotion(motion)) {
+      return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: 1, opacity: 1 };
+    }
     const childPivot = editorPartPivot(part);
     const transformedPivot = editorTransformPointAroundPivot(
       childPivot,
-      editorPartPivot(previewParentPart),
+      editorPartPivot(ancestor),
       motion,
     );
     return {
@@ -3043,7 +4122,10 @@ function previewDelta(
       opacity: 1,
     };
   }
-  if (!targetsPart) return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: 1, opacity: 1 };
+  return previewMotionForPart(part, preview, t, wave);
+}
+
+function previewMotionForPart(part: CharacterPart, preview: PreviewState, t: number, wave: number) {
   if (preview.kind === "blink" && part.role === "eye") {
     const closedMoment = t > 0.35 && t < 0.55;
     if (part.eyeState) {
@@ -3053,7 +4135,7 @@ function previewDelta(
     }
     return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: closedMoment ? 0.12 : 1, opacity: 1 };
   }
-  if (preview.kind === "wave" && part.role === "arm") {
+  if (preview.kind === "wave" && (part.role === "arm" || part.motionBehavior === "rotate")) {
     return { dx: 0, dy: 0, rotation: wave * 18, scale: 1, opacity: 1 };
   }
   if (preview.kind === "kick" && (part.role === "leg" || part.role === "foot")) {
@@ -3091,6 +4173,45 @@ function previewDelta(
     };
   }
   return { dx: 0, dy: 0, rotation: 0, scale: 1, opacity: 1 };
+}
+
+function isLegacyHeadPreviewChild(part: CharacterPart, preview: PreviewState) {
+  return (
+    preview.kind === "nod" &&
+    preview.targetRole === "head" &&
+    (part.role === "eye" ||
+      part.role === "eyebrow" ||
+      part.role === "mouth" ||
+      part.role === "hair")
+  );
+}
+
+function hasGeometricPreviewMotion(motion: ReturnType<typeof previewMotionForPart>) {
+  return (
+    motion.dx !== 0 ||
+    motion.dy !== 0 ||
+    motion.rotation !== 0 ||
+    motion.scale !== 1 ||
+    (motion.scaleY ?? motion.scale) !== 1
+  );
+}
+
+function previewTargetAncestor(
+  part: CharacterPart,
+  preview: PreviewState,
+  allParts: CharacterPart[],
+): CharacterPart | undefined {
+  const byId = new Map(allParts.map((candidate) => [candidate.id, candidate]));
+  let current = part.parentId ? byId.get(part.parentId) : undefined;
+  const seen = new Set<ID>();
+  while (current && !seen.has(current.id)) {
+    if (current.id === preview.targetPartId || current.slotId === preview.targetSlotId) {
+      return current;
+    }
+    seen.add(current.id);
+    current = current.parentId ? byId.get(current.parentId) : undefined;
+  }
+  return undefined;
 }
 
 function wordToVisemes(word: string): MouthViseme[] {
@@ -3212,6 +4333,20 @@ function unionFrameBounds(parts: CharacterPart[]) {
   return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
 }
 
+// Union of the parts' tight visible-pixel bounds (ignores transparent layer padding) in canvas
+// coords. Used to size the movement-range zone to actual art, not the full layer frame.
+function unionAlphaBounds(parts: CharacterPart[]) {
+  const rects = parts.map((p) => {
+    const a = localAlphaBounds(p);
+    return { x: p.x + a.x, y: p.y + a.y, right: p.x + a.x + a.width, bottom: p.y + a.y + a.height };
+  });
+  const minX = Math.min(...rects.map((r) => r.x));
+  const minY = Math.min(...rects.map((r) => r.y));
+  const maxX = Math.max(...rects.map((r) => r.right));
+  const maxY = Math.max(...rects.map((r) => r.bottom));
+  return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+}
+
 function moveSlotSetFromSnapshot(
   parts: CharacterPart[],
   snapshot: Array<{ id: ID; x: number; y: number; pivot: { x: number; y: number } }>,
@@ -3231,6 +4366,29 @@ function moveSlotSetFromSnapshot(
       pivot: { x: start.pivot.x + dx, y: start.pivot.y + dy },
     };
   });
+}
+
+function descendantPartIds(parts: CharacterPart[], parentIds: Set<ID>): Set<ID> {
+  const out = new Set<ID>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const part of parts) {
+      if (out.has(part.id)) continue;
+      if (part.parentId && (parentIds.has(part.parentId) || out.has(part.parentId))) {
+        out.add(part.id);
+        changed = true;
+      }
+    }
+  }
+  return out;
+}
+
+function partAndDescendantIdsForSlot(parts: CharacterPart[], slotId: ID): Set<ID> {
+  const rootIds = new Set(
+    parts.filter((part) => getPartSlotId(part) === slotId).map((part) => part.id),
+  );
+  return new Set([...rootIds, ...descendantPartIds(parts, rootIds)]);
 }
 
 function normalizePartPatch(part: CharacterPart, patch: Partial<CharacterPart>): CharacterPart {
@@ -3271,8 +4429,12 @@ const MOUTH_COLOR_PRESETS = [
 
 function EyePresetSelector({
   onImport,
+  canvasWidth,
+  canvasHeight,
 }: {
   onImport: (file: File, options?: ImportOptions) => void;
+  canvasWidth: number;
+  canvasHeight: number;
 }) {
   const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
   const [selectedColor, setSelectedColor] = useState("#1a1a1a");
@@ -3285,6 +4447,20 @@ function EyePresetSelector({
 
     const color = customColor;
     const eyeStates: EyeState[] = ["open", "half", "closed", "wink"];
+    const eyeWidth = Math.round(canvasWidth * 0.095);
+    const eyeHeight = Math.round(eyeWidth * 0.68);
+    const eyeY = Math.round(canvasHeight * 0.28 - eyeHeight / 2);
+    const placementForSide = (side: "left" | "right") => {
+      const centerX = Math.round(canvasWidth * (side === "left" ? 0.58 : 0.42));
+      const centerY = Math.round(eyeY + eyeHeight / 2);
+      return {
+        x: Math.round(centerX - eyeWidth / 2),
+        y: eyeY,
+        width: eyeWidth,
+        height: eyeHeight,
+        pivot: { x: centerX, y: centerY },
+      };
+    };
 
     for (const side of ["left", "right"] as const) {
       for (const eyeState of eyeStates) {
@@ -3296,6 +4472,7 @@ function EyePresetSelector({
           eyeState,
           label: `${side === "left" ? "Left" : "Right"} ${eyeState}`,
           slotId: `slot:${side}-eye`,
+          placement: placementForSide(side),
           zIndex: 50,
         });
       }

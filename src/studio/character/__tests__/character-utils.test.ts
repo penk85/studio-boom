@@ -7,8 +7,10 @@ import {
   normalizePartRole,
   getPartSlotId,
   defaultSlotIdForRole,
+  inferHumanParentPartId,
+  withInferredHumanParentIds,
 } from "../character-utils";
-import type { CharacterPart, PartManifest } from "../../types";
+import type { CharacterPart, CharacterPreset, PartManifest } from "../../types";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -83,6 +85,84 @@ describe("getPartSlotId", () => {
     // A part with slotId = "role:eye" and side = "left" is a generic sided slot
     const part = makePart({ role: "eye", slotId: "role:eye", side: "left" });
     expect(getPartSlotId(part)).toBe("slot:left-eye");
+  });
+});
+
+// ─── inferHumanParentPartId ───────────────────────────────────────────────────
+
+describe("inferHumanParentPartId", () => {
+  it("attaches human limb parts to their expected same-side parents", () => {
+    const body = makePart({ id: "body", role: "body", slotId: "role:body" });
+    const leftArm = makePart({
+      id: "left-arm",
+      role: "arm",
+      side: "left",
+      slotId: "slot:left-arm",
+    });
+    const rightArm = makePart({
+      id: "right-arm",
+      role: "arm",
+      side: "right",
+      slotId: "slot:right-arm",
+    });
+    const rightHand = makePart({
+      id: "right-hand",
+      role: "hand",
+      side: "right",
+      slotId: "slot:right-hand",
+    });
+    const leftLeg = makePart({
+      id: "left-leg",
+      role: "leg",
+      side: "left",
+      slotId: "slot:left-leg",
+    });
+    const leftFoot = makePart({
+      id: "left-foot",
+      role: "foot",
+      side: "left",
+      slotId: "slot:left-foot",
+    });
+    const parts = [body, leftArm, rightArm, rightHand, leftLeg, leftFoot];
+
+    expect(inferHumanParentPartId(parts, leftArm)).toBe("body");
+    expect(inferHumanParentPartId(parts, rightArm)).toBe("body");
+    expect(inferHumanParentPartId(parts, rightHand)).toBe("right-arm");
+    expect(inferHumanParentPartId(parts, leftLeg)).toBe("body");
+    expect(inferHumanParentPartId(parts, leftFoot)).toBe("left-leg");
+  });
+
+  it("fills missing human parent ids on a character without changing explicit parents", () => {
+    const body = makePart({ id: "body", role: "body", slotId: "role:body" });
+    const head = makePart({ id: "head", role: "head", slotId: "role:head" });
+    const eye = makePart({
+      id: "left-eye",
+      role: "eye",
+      side: "left",
+      slotId: "slot:left-eye",
+    });
+    const hand = makePart({
+      id: "hand",
+      role: "hand",
+      side: "left",
+      slotId: "slot:left-hand",
+      parentId: "custom-parent",
+    });
+    const character = {
+      id: "character",
+      name: "Character",
+      canvasWidth: 600,
+      canvasHeight: 900,
+      parts: [body, head, eye, hand],
+      createdAt: 1,
+      updatedAt: 1,
+    } as CharacterPreset;
+
+    const next = withInferredHumanParentIds(character);
+
+    expect(next.parts.find((part) => part.id === "head")?.parentId).toBe("body");
+    expect(next.parts.find((part) => part.id === "left-eye")?.parentId).toBe("head");
+    expect(next.parts.find((part) => part.id === "hand")?.parentId).toBe("custom-parent");
   });
 });
 

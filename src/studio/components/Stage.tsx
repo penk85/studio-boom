@@ -50,6 +50,7 @@ import {
   roundRotationDegrees,
   roundCompositionRect,
   resizeCompositionRect,
+  hitTestClipIdsAtPoint,
   projectClickOntoPolyline,
   resolvePickedClipId,
   resolveTargetClipId,
@@ -64,6 +65,11 @@ import {
   compositionPointToCss,
 } from "./stage-helpers";
 import { resolvePreviewHtml } from "../hyperframes/preview";
+import {
+  useSelectDrag,
+  type MoveSession,
+  type PointerEventLike,
+} from "../interaction/useSelectDrag";
 
 const MIN_STAGE_RESIZE_SIZE = 16;
 const STAGE_NUDGE_RESET_MS = 400;
@@ -189,6 +195,10 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const dragRef = useRef<StageDrag>(null);
   const queuedDragRef = useRef<StageDrag>(null);
   const dragFrameRef = useRef<number | null>(null);
+  // Which gesture owns the active drag: the Move-handle/resize/rotate window pipeline, or
+  // a controller-driven canvas body-drag. Lets the window pointermove handler step aside
+  // for body-drags so the two don't both apply the same move.
+  const dragDriverRef = useRef<"window" | "controller">("window");
   const nudgeResetTimerRef = useRef<number | null>(null);
   const nudgeCheckpointedRef = useRef(false);
   const stageEditableClipRef = useRef<EditorClip | null>(null);
@@ -310,8 +320,141 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       window.cancelAnimationFrame(dragFrameRef.current);
       dragFrameRef.current = null;
     }
+    dragDriverRef.current = "window";
     setDrag(null);
   }, []);
+
+  // ─── Move preview/commit (shared by the Move handle and canvas body-drag) ─────
+  const previewMoveDrag = useCallback(
+    (currentDrag: Extract<NonNullable<StageDrag>, { type: "move" }>, event: PointerEvent) => {
+      const delta = pointerDeltaToComposition(
+        event.clientX - currentDrag.startClientX,
+        event.clientY - currentDrag.startClientY,
+        currentDrag.geometry,
+      );
+      const preview = getMovePreview(currentDrag, delta, !event.altKey);
+      const nextX = preview.previewX;
+      const nextY = preview.previewY;
+      previewElementPosition(iframeRef.current, currentDrag.clipId, nextX, nextY);
+      queueDragPreview({
+        ...currentDrag,
+        previewX: nextX,
+        previewY: nextY,
+        snapGuides: preview.snapGuides,
+      });
+    },
+    [iframeRef, queueDragPreview],
+  );
+
+  const commitMoveDrag = useCallback(
+    (currentDrag: Extract<NonNullable<StageDrag>, { type: "move" }>, event: PointerEvent) => {
+      const delta = pointerDeltaToComposition(
+        event.clientX - currentDrag.startClientX,
+        event.clientY - currentDrag.startClientY,
+        currentDrag.geometry,
+      );
+      const preview = getMovePreview(currentDrag, delta, !event.altKey);
+      const nextX = preview.previewX;
+      const nextY = preview.previewY;
+      commitElementPosition(iframeRef.current, currentDrag.clipId, nextX, nextY);
+      // Prefer the drag's own keyframeId (set when starting from a path dot)
+      // so we route correctly even if selectKeyframe hasn't propagated yet.
+      const keyframeTarget = currentDrag.keyframeId
+        ? findKeyframeTargetById(currentDrag.clipId, currentDrag.keyframeId, "position", clips)
+        : getStageKeyframeTarget(currentDrag.clipId, "position", selectedKeyframe, clips);
+      const moved =
+        Math.abs(nextX - currentDrag.startX) > 0.5 || Math.abs(nextY - currentDrag.startY) > 0.5;
+      if (keyframeTarget) {
+        // For a tap-to-select on a dot (no movement), skip the no-op commit
+        // so we don't pollute undo history.
+        if (moved) {
+          updateClipKeyframe(keyframeTarget.selection, { x: nextX, y: nextY });
+        }
+      } else if (moved) {
+        updateClip(currentDrag.clipId, { x: nextX, y: nextY });
+      }
+      clearDrag();
+    },
+    [clearDrag, clips, iframeRef, selectedKeyframe, updateClip, updateClipKeyframe],
+  );
+
+  // ─── Figma-style canvas select/drag (project-wide model) ─────────────────────
+  // Locked clips are excluded from canvas hit-testing — clicks fall through to the clip
+  // beneath them. They stay selectable from the timeline layer list so they can be
+  // unlocked. Selection two-way-syncs with the timeline through `selectedClipId`.
+  const lockedClipIds = useMemo(
+    () => new Set(clips.filter((clip) => clip.locked).map((clip) => clip.id)),
+    [clips],
+  );
+
+  // Begin a canvas body-drag. Reuses the same drag state + window preview/commit effect
+  // as the Move handle (so snapping, keyframe routing, and undo all behave identically);
+  // the controller drives the move through the returned session.
+  const beginBodyMove = useCallback(
+    (clipId: string, down: PointerEventLike): MoveSession | null => {
+      if (!project || !stageShellRef.current) return null;
+      const clip = clips.find((candidate) => candidate.id === clipId);
+      if (!clip || clip.locked || clip.kind === "audio") return null;
+      const iframe = resolveIframe(playerRef.current);
+      const geometry = getStageGeometry(
+        stageShellRef.current,
+        project.hf.width,
+        project.hf.height,
+        iframe?.getBoundingClientRect() ?? null,
+      );
+      dragDriverRef.current = "controller";
+      beginDrag({
+        type: "move",
+        clipId,
+        pointerId: down.pointerId,
+        startClientX: down.clientX,
+        startClientY: down.clientY,
+        startX: clip.x,
+        startY: clip.y,
+        width: clip.width,
+        height: clip.height,
+        previewX: clip.x,
+        previewY: clip.y,
+        snapTargets: buildMoveSnapTargets(clips, project.hf.width, project.hf.height, clipId),
+        snapGuides: [],
+        geometry,
+      });
+      return {
+        move: (event) => {
+          const current = dragRef.current;
+          if (current?.type === "move") previewMoveDrag(current, event);
+        },
+        end: (event) => {
+          const current = dragRef.current;
+          if (current?.type === "move") commitMoveDrag(current, event);
+          else clearDrag();
+        },
+      };
+    },
+    [beginDrag, clearDrag, clips, commitMoveDrag, previewMoveDrag, project],
+  );
+
+  const onCanvasPointerDown = useSelectDrag({
+    hitTest: (down) =>
+      hitTestClipIdsAtPoint(down.target, down.clientX, down.clientY, clipIds, (id) =>
+        lockedClipIds.has(id),
+      ),
+    getSelectedId: () => selectedClipId,
+    selectId: (id) => selectClip(id),
+    beginMove: beginBodyMove,
+    capturePointer: (down, pointerId) => {
+      // Capture on the overlay element under the pointer (never the stage shell) so
+      // pointermoves keep arriving even over the player iframe, while the synthesized
+      // `click` still targets the overlay — not the shell, whose onClick would otherwise
+      // deselect the clip we just selected.
+      try {
+        const target = down.target instanceof Element ? down.target : null;
+        target?.setPointerCapture(pointerId);
+      } catch {
+        /* pointer capture is best-effort */
+      }
+    },
+  });
 
   // Resolve asset URLs and serve the complete preview HTML through srcdoc.
   // Blob URLs cannot be passed through `src`: the player appends shader query
@@ -592,6 +735,9 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     const handlePointerMove = (event: PointerEvent) => {
       const currentDrag = dragRef.current;
       if (!currentDrag || event.pointerId !== currentDrag.pointerId) return;
+      // Canvas body-drags are driven by the select/drag controller; the window pipeline
+      // here only owns the Move handle, resize, and rotate gestures.
+      if (dragDriverRef.current === "controller") return;
       if (currentDrag.type === "rotate") {
         const preview = getRotationPreview(
           currentDrag,
@@ -604,28 +750,19 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         return;
       }
 
+      if (currentDrag.type === "move") {
+        previewMoveDrag(currentDrag, event);
+        return;
+      }
+
       const delta = pointerDeltaToComposition(
         event.clientX - currentDrag.startClientX,
         event.clientY - currentDrag.startClientY,
         currentDrag.geometry,
       );
-
-      if (currentDrag.type === "move") {
-        const preview = getMovePreview(currentDrag, delta, !event.altKey);
-        const nextX = preview.previewX;
-        const nextY = preview.previewY;
-        previewElementPosition(iframeRef.current, currentDrag.clipId, nextX, nextY);
-        queueDragPreview({
-          ...currentDrag,
-          previewX: nextX,
-          previewY: nextY,
-          snapGuides: preview.snapGuides,
-        });
-        return;
-      }
-
       const localDelta = compositionDeltaToLocal(delta.x, delta.y, currentDrag.rotation);
-      const preview = getResizePreview(currentDrag, localDelta.x, localDelta.y, event.shiftKey);
+      // Resize preserves aspect ratio by default; hold Shift to resize freely.
+      const preview = getResizePreview(currentDrag, localDelta.x, localDelta.y, !event.shiftKey);
       previewElementRect(iframeRef.current, currentDrag.clipId, preview.previewClip);
       queueDragPreview({ ...currentDrag, ...preview });
     };
@@ -665,39 +802,17 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       );
 
       if (currentDrag.type === "move") {
-        const preview = getMovePreview(currentDrag, delta, !event.altKey);
-        const nextX = preview.previewX;
-        const nextY = preview.previewY;
-        commitElementPosition(iframeRef.current, currentDrag.clipId, nextX, nextY);
-        // Prefer the drag's own keyframeId (set when starting from a path dot)
-        // so we route correctly even if selectKeyframe hasn't propagated yet.
-        const keyframeTarget = currentDrag.keyframeId
-          ? findKeyframeTargetById(currentDrag.clipId, currentDrag.keyframeId, "position", clips)
-          : getStageKeyframeTarget(currentDrag.clipId, "position", selectedKeyframe, clips);
-        const moved =
-          Math.abs(nextX - currentDrag.startX) > 0.5 || Math.abs(nextY - currentDrag.startY) > 0.5;
-        if (keyframeTarget) {
-          // For a tap-to-select on a dot (no movement), skip the no-op commit
-          // so we don't pollute undo history.
-          if (moved) {
-            updateClipKeyframe(keyframeTarget.selection, {
-              x: nextX,
-              y: nextY,
-            });
-          }
-        } else if (moved) {
-          updateClip(currentDrag.clipId, { x: nextX, y: nextY });
-        }
-        clearDrag();
+        commitMoveDrag(currentDrag, event);
         return;
       }
 
       const localDelta = compositionDeltaToLocal(delta.x, delta.y, currentDrag.rotation);
+      // Resize preserves aspect ratio by default; hold Shift to resize freely.
       const { previewClip } = getResizePreview(
         currentDrag,
         localDelta.x,
         localDelta.y,
-        event.shiftKey,
+        !event.shiftKey,
       );
       const finalClip = roundCompositionRect(previewClip);
       const keyframeTarget = getStageKeyframeTarget(
@@ -771,7 +886,9 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     activeDragKey,
     clearDrag,
     clips,
+    commitMoveDrag,
     iframeRef,
+    previewMoveDrag,
     queueDragPreview,
     selectedKeyframe,
     updateClip,
@@ -967,7 +1084,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       if (layerShortcut) {
         if (!isStageNudgeEventTarget(event.target)) return;
         const currentClip = stageEditableClipRef.current;
-        if (!currentClip || dragRef.current) return;
+        if (!currentClip || currentClip.locked || dragRef.current) return;
 
         event.preventDefault();
         event.stopPropagation();
@@ -996,7 +1113,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       }
 
       const currentClip = stageEditableClipRef.current;
-      if (!currentClip || dragRef.current) return;
+      if (!currentClip || currentClip.locked || dragRef.current) return;
 
       event.preventDefault();
       event.stopPropagation();
@@ -1086,7 +1203,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         <StageClickOverlay
           clips={stageClickTargets}
           geometry={stageGeometry}
-          onSelectClip={selectClip}
+          onCanvasPointerDown={onCanvasPointerDown}
         />
       )}
       {motionPaths.length > 0 && stageEditableClip && (
@@ -1116,10 +1233,14 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
             transformOrigin: "center center",
           }}
         >
-          <SelectionCorner handle="nw" onPointerDown={startResize} />
-          <SelectionCorner handle="ne" onPointerDown={startResize} />
-          <SelectionCorner handle="sw" onPointerDown={startResize} />
-          <SelectionCorner handle="se" onPointerDown={startResize} />
+          {!selectedClip?.locked && (
+            <>
+              <SelectionCorner handle="nw" onPointerDown={startResize} />
+              <SelectionCorner handle="ne" onPointerDown={startResize} />
+              <SelectionCorner handle="sw" onPointerDown={startResize} />
+              <SelectionCorner handle="se" onPointerDown={startResize} />
+            </>
+          )}
         </div>
       )}
       {outlineRect && selectedMotionEndpoint && (
@@ -1133,23 +1254,27 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           {selectedMotionEndpoint.motion.label} {selectedMotionEndpoint.endpointLabel}
         </div>
       )}
-      {outlineRect && rotateHandleStyle && stageEditableClip && activeHandleClip && (
-        <button
-          type="button"
-          data-stage-rotate-handle=""
-          data-stage-keyboard-nudge=""
-          title={rotateHandleLabel}
-          aria-label={rotateHandleLabel}
-          className="absolute z-40 flex h-7 w-7 items-center justify-center rounded-full border border-primary/70 bg-panel/95 text-foreground shadow-[0_2px_10px_rgba(0,0,0,0.35)] backdrop-blur hover:bg-panel-2"
-          style={{
-            ...rotateHandleStyle,
-            cursor: drag?.type === "rotate" ? "grabbing" : "grab",
-          }}
-          onPointerDown={startRotate}
-        >
-          <RotateCw size={15} strokeWidth={2.2} />
-        </button>
-      )}
+      {outlineRect &&
+        rotateHandleStyle &&
+        stageEditableClip &&
+        activeHandleClip &&
+        !selectedClip?.locked && (
+          <button
+            type="button"
+            data-stage-rotate-handle=""
+            data-stage-keyboard-nudge=""
+            title={rotateHandleLabel}
+            aria-label={rotateHandleLabel}
+            className="absolute z-40 flex h-7 w-7 items-center justify-center rounded-full border border-primary/70 bg-panel/95 text-foreground shadow-[0_2px_10px_rgba(0,0,0,0.35)] backdrop-blur hover:bg-panel-2"
+            style={{
+              ...rotateHandleStyle,
+              cursor: drag?.type === "rotate" ? "grabbing" : "grab",
+            }}
+            onPointerDown={startRotate}
+          >
+            <RotateCw size={15} strokeWidth={2.2} />
+          </button>
+        )}
       {rotationPillStyle && (
         <div
           className="pointer-events-none absolute z-40 rounded-full border border-border bg-panel/95 px-2 py-0.5 text-[11px] font-medium text-foreground shadow-[0_2px_10px_rgba(0,0,0,0.28)]"
@@ -1158,57 +1283,61 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           {Math.round(previewRotation)}°
         </div>
       )}
-      {outlineRect && moveHandleStyle && stageEditableClip && activeHandleClip && (
-        <button
-          ref={moveHandleRef}
-          type="button"
-          data-stage-move-handle=""
-          data-stage-keyboard-nudge=""
-          title={moveHandleLabel}
-          aria-label={moveHandleLabel}
-          className="absolute z-40 flex h-7 w-7 items-center justify-center rounded-md border border-primary/70 bg-panel/95 text-foreground shadow-[0_2px_10px_rgba(0,0,0,0.35)] backdrop-blur hover:bg-panel-2"
-          style={{
-            ...moveHandleStyle,
-            cursor: drag ? "grabbing" : "grab",
-          }}
-          onPointerDown={(event) => {
-            if (!stageEditableClip || !activeHandleClip || !stageShellRef.current) return;
-            event.preventDefault();
-            event.stopPropagation();
-            event.currentTarget.setPointerCapture(event.pointerId);
-            const iframe = resolveIframe(playerRef.current);
-            const geometry = getStageGeometry(
-              stageShellRef.current,
-              project.hf.width,
-              project.hf.height,
-              iframe?.getBoundingClientRect() ?? null,
-            );
-            beginDrag({
-              type: "move",
-              clipId: stageEditableClip.id,
-              pointerId: event.pointerId,
-              startClientX: event.clientX,
-              startClientY: event.clientY,
-              startX: activeHandleClip.x,
-              startY: activeHandleClip.y,
-              width: activeHandleClip.width,
-              height: activeHandleClip.height,
-              previewX: activeHandleClip.x,
-              previewY: activeHandleClip.y,
-              snapTargets: buildMoveSnapTargets(
-                clips,
+      {outlineRect &&
+        moveHandleStyle &&
+        stageEditableClip &&
+        activeHandleClip &&
+        !selectedClip?.locked && (
+          <button
+            ref={moveHandleRef}
+            type="button"
+            data-stage-move-handle=""
+            data-stage-keyboard-nudge=""
+            title={moveHandleLabel}
+            aria-label={moveHandleLabel}
+            className="absolute z-40 flex h-7 w-7 items-center justify-center rounded-md border border-primary/70 bg-panel/95 text-foreground shadow-[0_2px_10px_rgba(0,0,0,0.35)] backdrop-blur hover:bg-panel-2"
+            style={{
+              ...moveHandleStyle,
+              cursor: drag ? "grabbing" : "grab",
+            }}
+            onPointerDown={(event) => {
+              if (!stageEditableClip || !activeHandleClip || !stageShellRef.current) return;
+              event.preventDefault();
+              event.stopPropagation();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              const iframe = resolveIframe(playerRef.current);
+              const geometry = getStageGeometry(
+                stageShellRef.current,
                 project.hf.width,
                 project.hf.height,
-                stageEditableClip.id,
-              ),
-              snapGuides: [],
-              geometry,
-            });
-          }}
-        >
-          <Move size={15} strokeWidth={2.2} />
-        </button>
-      )}
+                iframe?.getBoundingClientRect() ?? null,
+              );
+              beginDrag({
+                type: "move",
+                clipId: stageEditableClip.id,
+                pointerId: event.pointerId,
+                startClientX: event.clientX,
+                startClientY: event.clientY,
+                startX: activeHandleClip.x,
+                startY: activeHandleClip.y,
+                width: activeHandleClip.width,
+                height: activeHandleClip.height,
+                previewX: activeHandleClip.x,
+                previewY: activeHandleClip.y,
+                snapTargets: buildMoveSnapTargets(
+                  clips,
+                  project.hf.width,
+                  project.hf.height,
+                  stageEditableClip.id,
+                ),
+                snapGuides: [],
+                geometry,
+              });
+            }}
+          >
+            <Move size={15} strokeWidth={2.2} />
+          </button>
+        )}
       <div className="pointer-events-none absolute bottom-2 right-3 rounded bg-panel/80 px-2 py-1 text-xs text-muted-foreground">
         {project.hf.width}×{project.hf.height}
       </div>
@@ -1340,12 +1469,16 @@ function MotionPathOverlay({
 function StageClickOverlay({
   clips,
   geometry,
-  onSelectClip,
+  onCanvasPointerDown,
 }: {
   clips: StageClickTarget[];
   geometry: StageGeometry;
-  onSelectClip: (clipId: string | null) => void;
+  onCanvasPointerDown: (event: PointerEventLike) => void;
 }) {
+  // One transparent `data-clip-id` rect per visible clip. The Figma-style controller
+  // reads the full z-stack under the pointer via `elementsFromPoint` (see
+  // `hitTestClipIdsAtPoint`), so the rects are pure hit targets — selection, drill-through,
+  // body-drag, and deselect are all decided by the single container handler.
   return (
     <div
       aria-hidden="true"
@@ -1356,10 +1489,7 @@ function StageClickOverlay({
         width: geometry.rect.width,
         height: geometry.rect.height,
       }}
-      onPointerDown={(event) => {
-        if (event.button !== 0) return;
-        if (event.target === event.currentTarget) onSelectClip(null);
-      }}
+      onPointerDown={onCanvasPointerDown}
     >
       {clips.map((clip) => {
         const rect = compositionRectToCss(clip, {
@@ -1370,6 +1500,7 @@ function StageClickOverlay({
           <div
             key={clip.id}
             data-stage-click-target=""
+            data-clip-id={clip.id}
             title={clip.name || clip.kind}
             className="absolute bg-transparent"
             style={{
@@ -1380,12 +1511,6 @@ function StageClickOverlay({
               transform: `rotate(${clip.rotation}deg)`,
               transformOrigin: "center center",
               zIndex: clip.zIndex,
-            }}
-            onPointerDown={(event) => {
-              if (event.button !== 0) return;
-              event.preventDefault();
-              event.stopPropagation();
-              onSelectClip(clip.id);
             }}
           />
         );
