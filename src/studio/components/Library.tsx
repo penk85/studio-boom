@@ -697,6 +697,15 @@ function ComingSoon({ what, desc }: { what: string; desc: string }) {
   );
 }
 
+type MediaKindFilter = "all" | "image" | "video" | "audio";
+
+const MEDIA_KIND_FILTERS: { id: MediaKindFilter; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "image", label: "Images" },
+  { id: "video", label: "Video" },
+  { id: "audio", label: "Audio" },
+];
+
 function MediaTab() {
   const queriedItems = useLiveQuery(() => db.media.orderBy("createdAt").reverse().toArray(), []);
   const allItems = useMemo(() => queriedItems ?? [], [queriedItems]);
@@ -721,9 +730,22 @@ function MediaTab() {
     return ids;
   }, [characters]);
 
-  const items = allItems.filter(
+  const libraryItems = allItems.filter(
     (asset) => (asset.scope ?? "library") === "library" && !internalMediaIds.has(asset.id),
   );
+
+  const [kindFilter, setKindFilter] = useState<MediaKindFilter>("all");
+  const counts = useMemo(() => {
+    const c = { all: libraryItems.length, image: 0, video: 0, audio: 0 };
+    for (const asset of libraryItems) {
+      if (asset.kind === "image") c.image += 1;
+      else if (asset.kind === "video") c.video += 1;
+      else if (asset.kind === "audio") c.audio += 1;
+    }
+    return c;
+  }, [libraryItems]);
+  const items =
+    kindFilter === "all" ? libraryItems : libraryItems.filter((asset) => asset.kind === kindFilter);
 
   const onFiles = async (files: FileList | null) => {
     if (!files) return;
@@ -753,6 +775,27 @@ function MediaTab() {
         className="hidden"
         onChange={(e) => onFiles(e.target.files)}
       />
+      <div className="mb-3 flex items-center gap-1">
+        {MEDIA_KIND_FILTERS.map((f) => {
+          const active = kindFilter === f.id;
+          return (
+            <button
+              key={f.id}
+              type="button"
+              onClick={() => setKindFilter(f.id)}
+              className={`flex-1 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                active
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-panel-2 text-muted-foreground hover:text-foreground"
+              }`}
+              title={`${f.label} (${counts[f.id]})`}
+            >
+              {f.label}
+              <span className={active ? "ml-1 opacity-80" : "ml-1 opacity-60"}>{counts[f.id]}</span>
+            </button>
+          );
+        })}
+      </div>
       <div className="grid grid-cols-2 gap-2">
         {items.map((m) => (
           <MediaTile
@@ -777,7 +820,9 @@ function MediaTab() {
         ))}
         {items.length === 0 && (
           <div className="col-span-2 text-center text-xs text-muted-foreground">
-            No media yet. Upload to start building.
+            {libraryItems.length === 0
+              ? "No media yet. Upload to start building."
+              : `No ${kindFilter} files yet.`}
           </div>
         )}
       </div>

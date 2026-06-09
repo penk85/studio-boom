@@ -4,6 +4,7 @@ import type {
   CharacterPart,
   CharacterPreset,
   CharacterReach,
+  CharacterSlotRelation,
   MotionPreset,
   MouthPose,
   MouthViseme,
@@ -20,9 +21,10 @@ import {
   deltaFor,
   emptyDelta,
   generateMotionOccurrences,
+  motionAppliesToAngle,
   poseSwapFor,
 } from "../presets/apply";
-import { listCharacterSlots, roleEnabledByManifest } from "./character-utils";
+import { listCharacterSlots, partsAvailableForAngle, roleEnabledByManifest } from "./character-utils";
 import { faceTurnMotionForPart } from "./face-turn";
 import {
   autoBlinkPoseSwapAt,
@@ -49,6 +51,11 @@ const VISEMES: MouthViseme[] = ["rest", "A", "E", "O", "U", "MBP", "FV", "L", "W
 const MOTION_SAMPLE_FPS = 12;
 
 type CharacterSlotRef = ReturnType<typeof listCharacterSlots>[number];
+
+interface NestedSlotChild {
+  slot: CharacterSlotRef;
+  relation: CharacterSlotRelation;
+}
 
 interface BuildCharacterCompositionArgs {
   compositionId: string;
@@ -98,6 +105,7 @@ interface MotionTarget {
 interface SlotTimeline {
   slotId: string;
   role: PartRole;
+  hostSlotId?: string;
   defaultKey: string;
   render: SlotRenderStrategy;
 }
@@ -219,8 +227,10 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
     motionPresets: args.motionPresets,
     motionTargets: dom.motionTargets,
     canvasWidth: args.character.canvasWidth,
+    canvasHeight: args.character.canvasHeight,
     slotTimelines: dom.slotTimelines,
     reaches: characterRig.reaches,
+    activeAngle: characterRig.activeAngle,
     parentBoneIds: new Set(
       characterRig.bones.map((bone) => bone.parentId).filter((id): id is string => !!id),
     ),
@@ -373,52 +383,96 @@ function buildPuppetDom(
   const slotTargets: MotionTarget[] = [];
   const boneTargets: MotionTarget[] = [];
 
-  const slots = listCharacterSlots(character.parts).filter((slot) =>
+  const slots = listCharacterSlots(partsAvailableForAngle(character.parts, rig.activeAngle)).filter((slot) =>
     roleEnabledByManifest(slot.role, character.manifest),
   );
   const hasMouthSlot = slots.some(
     (slot) => slot.role === "mouth" && slot.parts.some((p) => p.visible),
   );
-
-  for (const slot of slots) {
-    const binding = resolveSlotBinding(rig, slot.id);
-    if (binding && !binding.visible) continue;
+  const appendCapturedSlotToBone = (boneId: string, render: () => void): MotionTarget[] => {
     const beforeHtml = out.html.length;
     const beforeTargets = out.motionTargets.length;
-    if (slot.role === "eye") buildEyeSlot(out, slot, scaleX, scaleY, binding, rig);
-    else if (slot.role === "mouth")
-      buildMouthSlot(out, character, slot, scaleX, scaleY, binding, rig);
-    else buildGenericSlot(out, slot, meta.poses, scaleX, scaleY, binding, rig);
+    render();
     const chunks = out.html.splice(beforeHtml);
     const newTargets = out.motionTargets.splice(beforeTargets);
-    const boneId = binding?.effectiveBoneId ?? "bone:root";
     slotHtmlByBone.set(boneId, [...(slotHtmlByBone.get(boneId) ?? []), ...chunks]);
-    // Tag each slot target with the bone it lives in so the timeline can route parent motion to
-    // the bone group (children follow) and leaf motion to the slot element (anchor pivot).
-    for (const target of newTargets) target.boneId = binding?.effectiveBoneId;
+    for (const target of newTargets) target.boneId ??= boneId;
     slotTargets.push(...newTargets);
+    return newTargets;
+  };
+
+  const slotById = new Map(slots.map((slot) => [slot.id, slot]));
+  const nestedSlotIds = new Set<string>();
+  const nestedChildrenByParentSlotId = new Map<string, NestedSlotChild[]>();
+  for (const relation of rig.slotRelations ?? []) {
+    if (relation.renderMode !== "nested") continue;
+    if (relation.characterViewIds?.length && !relation.characterViewIds.includes(rig.activeAngle)) continue;
+    const childSlot = slotById.get(relation.childSlotId);
+    const parentSlotId = parentSlotIdForRelation(relation, slots);
+    if (!childSlot || !parentSlotId || !slotById.has(parentSlotId)) continue;
+    nestedSlotIds.add(childSlot.id);
+    nestedChildrenByParentSlotId.set(parentSlotId, [
+      ...(nestedChildrenByParentSlotId.get(parentSlotId) ?? []),
+      { slot: childSlot, relation },
+    ]);
+  }
+
+  for (const slot of slots) {
+    if (nestedSlotIds.has(slot.id)) continue;
+    const binding = resolveSlotBinding(rig, slot.id);
+    if (binding && !binding.visible) continue;
+    const boneId = binding?.effectiveBoneId ?? "bone:root";
+    const newTargets = appendCapturedSlotToBone(boneId, () => {
+      buildSlotByRole(
+        out,
+        character,
+        slot,
+        meta.poses,
+        scaleX,
+        scaleY,
+        binding,
+        rig,
+        nestedChildrenByParentSlotId,
+      );
+    });
     if (binding && newTargets[0]) {
       boneTargets.push(boneTargetForSlotTarget(newTargets[0], binding));
     }
   }
 
+  const generatedMouthBoneId = defaultGeneratedMouthBoneId(rig);
   if (!hasMouthSlot && character.mouthRig && character.mouthStyle !== "images") {
-    buildGeneratedMouthSlot(
-      out,
-      character,
-      character.mouthRig.placement,
-      "role:mouth",
-      scaleX,
-      scaleY,
-    );
+    appendCapturedSlotToBone(generatedMouthBoneId, () => {
+      buildGeneratedMouthSlot(
+        out,
+        character,
+        character.mouthRig.placement,
+        "role:mouth",
+        scaleX,
+        scaleY,
+        undefined,
+        rig,
+        generatedMouthBoneId,
+      );
+    });
   } else if (!hasMouthSlot && !character.mouthRig && character.fallbackMouth) {
-    buildFallbackMouthRig(out, character, scaleX, scaleY);
+    appendCapturedSlotToBone(generatedMouthBoneId, () => {
+      buildFallbackMouthRig(out, character, scaleX, scaleY, generatedMouthBoneId);
+    });
   }
 
   renderBoneTree(out.html, rig, slotHtmlByBone, scaleX, scaleY);
   out.motionTargets.push(...uniqueMotionTargets([...slotTargets, ...boneTargets]));
   out.html.push("</div>");
   return out;
+}
+
+function defaultGeneratedMouthBoneId(rig: ReturnType<typeof normalizeCharacterRig>): string {
+  return (
+    rig.bones.find((bone) => bone.role === "head")?.id ??
+    rig.bones.find((bone) => bone.role === "body")?.id ??
+    "bone:root"
+  );
 }
 
 function renderBoneTree(
@@ -434,11 +488,10 @@ function renderBoneTree(
     byParent.set(parent, [...(byParent.get(parent) ?? []), bone]);
   }
   const renderBone = (bone: (typeof rig.bones)[number]) => {
-    const override = bone.angleOverrides?.[rig.activeAngle];
-    const localX = override?.x ?? bone.x;
-    const localY = override?.y ?? bone.y;
-    const rotation = override?.rotation ?? bone.rotation;
-    const depth = override?.depth ?? bone.depth ?? 0;
+    const localX = bone.x;
+    const localY = bone.y;
+    const rotation = bone.rotation;
+    const depth = bone.depth ?? 0;
     const id = boneElementId(bone.id);
     html.push(
       `<div id="${esc(id)}" data-character-bone="true" data-character-bone-id="${esc(bone.id)}"${
@@ -505,13 +558,123 @@ function lipSyncOwnsMouth(meta: CharacterClipMeta): boolean {
   return !!meta.visemes?.length;
 }
 
-function buildEyeSlot(
+function buildSlotByRole(
   out: PuppetDom,
+  character: CharacterPreset,
   slot: CharacterSlotRef,
+  poses: Record<string, string>,
   scaleX: number,
   scaleY: number,
   binding: ResolvedSlotBinding | undefined,
   rig: ReturnType<typeof normalizeCharacterRig>,
+  nestedChildrenByParentSlotId: Map<string, NestedSlotChild[]>,
+  hostPart?: CharacterPart,
+): void {
+  if (slot.role === "eye")
+    buildEyeSlot(
+      out,
+      character,
+      slot,
+      poses,
+      scaleX,
+      scaleY,
+      binding,
+      rig,
+      nestedChildrenByParentSlotId,
+      hostPart,
+    );
+  else if (slot.role === "mouth")
+    buildMouthSlot(
+      out,
+      character,
+      slot,
+      poses,
+      scaleX,
+      scaleY,
+      binding,
+      rig,
+      nestedChildrenByParentSlotId,
+      hostPart,
+    );
+  else buildGenericSlot(out, character, slot, poses, scaleX, scaleY, binding, rig, nestedChildrenByParentSlotId, hostPart);
+}
+
+function renderNestedChildrenForPart(
+  out: PuppetDom,
+  character: CharacterPreset,
+  parentSlotId: string,
+  parentPart: CharacterPart,
+  poses: Record<string, string>,
+  scaleX: number,
+  scaleY: number,
+  rig: ReturnType<typeof normalizeCharacterRig>,
+  nestedChildrenByParentSlotId: Map<string, NestedSlotChild[]>,
+): string {
+  const children = nestedChildrenByParentSlotId.get(parentSlotId) ?? [];
+  if (children.length === 0) return "";
+  return children
+    .filter(({ relation }) => relationActiveForParentPart(relation, parentPart))
+    .map(({ slot }) => {
+      const beforeHtml = out.html.length;
+      const binding = resolveSlotBinding(rig, slot.id);
+      if (binding && !binding.visible) return "";
+      buildSlotByRole(
+        out,
+        character,
+        slot,
+        poses,
+        scaleX,
+        scaleY,
+        binding,
+        rig,
+        nestedChildrenByParentSlotId,
+        parentPart,
+      );
+      return out.html.splice(beforeHtml).join("");
+    })
+    .join("");
+}
+
+function relationActiveForParentPart(relation: CharacterSlotRelation, parentPart: CharacterPart) {
+  const gate = relation.activeWhenParentVariant;
+  if (!gate?.keys?.length && !gate?.partIds?.length) return true;
+  if (gate.partIds?.includes(parentPart.id)) return true;
+  const key = variantKeyForPart(parentPart);
+  const keys = [key, parentPart.pose, parentPart.viseme, parentPart.eyeState].filter(
+    (value): value is string => !!value,
+  );
+  return keys.some((value) => gate.keys?.includes(value));
+}
+
+function parentSlotIdForRelation(
+  relation: CharacterSlotRelation,
+  slots: CharacterSlotRef[],
+): string | undefined {
+  if (relation.parentRef.type === "slot" || relation.parentRef.type === "semanticSlot") {
+    return relation.parentRef.id;
+  }
+  if (relation.parentRef.type === "role") {
+    return slots.find(
+      (slot) =>
+        slot.role === relation.parentRef.role &&
+        (!relation.parentRef.side ||
+          slot.parts.some((part) => part.side === relation.parentRef.side)),
+    )?.id;
+  }
+  return undefined;
+}
+
+function buildEyeSlot(
+  out: PuppetDom,
+  character: CharacterPreset,
+  slot: CharacterSlotRef,
+  poses: Record<string, string>,
+  scaleX: number,
+  scaleY: number,
+  binding: ResolvedSlotBinding | undefined,
+  rig: ReturnType<typeof normalizeCharacterRig>,
+  nestedChildrenByParentSlotId: Map<string, NestedSlotChild[]>,
+  hostPart?: CharacterPart,
 ): void {
   const variants = eyeVariantsForSlot(slot);
   const anglePart = binding?.effectivePartId
@@ -530,7 +693,7 @@ function buildEyeSlot(
     anglePart?.id ??
     openVariant?.state ??
     variants[0].state;
-  out.html.push(openSlotContainer(containerId, slot, basePart, scaleX, scaleY, binding, rig));
+  out.html.push(openSlotContainerForPart(containerId, slot, basePart, scaleX, scaleY, binding, rig, hostPart));
   for (const { state, part } of variants) {
     const id = partElementId(slot.id, state);
     const keys = [state, part.id];
@@ -540,6 +703,17 @@ function buildEyeSlot(
       variantIds[key] = id;
       variantParts[key] = part;
     }
+    const children = renderNestedChildrenForPart(
+      out,
+      character,
+      slot.id,
+      part,
+      poses,
+      scaleX,
+      scaleY,
+      rig,
+      nestedChildrenByParentSlotId,
+    );
     out.html.push(
       renderPartElement(
         id,
@@ -548,18 +722,20 @@ function buildEyeSlot(
         part.id === anglePart?.id || state === activeState,
         scaleX,
         scaleY,
+        children,
       ),
     );
   }
   out.html.push("</div>");
   out.motionTargets.push({
-    ...motionTargetFor(containerId, slot, basePart),
+    ...motionTargetFor(containerId, slot, basePart, binding?.effectiveBoneId),
     defaultVariantKey: activeState,
     variantParts,
   });
   out.slotTimelines.push({
     slotId: slot.id,
     role: slot.role,
+    hostSlotId: hostSlotIdFor(rig, slot.id),
     defaultKey: activeState,
     render: {
       kind: "variant",
@@ -572,10 +748,13 @@ function buildMouthSlot(
   out: PuppetDom,
   character: CharacterPreset,
   slot: CharacterSlotRef,
+  poses: Record<string, string>,
   scaleX: number,
   scaleY: number,
   binding: ResolvedSlotBinding | undefined,
   rig: ReturnType<typeof normalizeCharacterRig>,
+  nestedChildrenByParentSlotId: Map<string, NestedSlotChild[]>,
+  hostPart?: CharacterPart,
 ): void {
   if (character.mouthRig && character.mouthStyle === "rig") {
     buildGeneratedMouthSlot(
@@ -605,7 +784,7 @@ function buildMouthSlot(
   const variants: Record<string, string> = {};
   const variantParts: Record<string, CharacterPart> = {};
   const renderedIds = new Set<string>();
-  out.html.push(openSlotContainer(containerId, slot, restPart, scaleX, scaleY, binding, rig));
+  out.html.push(openSlotContainerForPart(containerId, slot, restPart, scaleX, scaleY, binding, rig, hostPart));
   for (const viseme of VISEMES) {
     const part = visibleParts.find(
       (candidate) => candidate.viseme === viseme || candidate.pose === viseme,
@@ -623,7 +802,18 @@ function buildMouthSlot(
       variantParts[part.viseme] = part;
     }
     renderedIds.add(id);
-    out.html.push(renderPartElement(id, part, restPart, viseme === "rest", scaleX, scaleY));
+    const children = renderNestedChildrenForPart(
+      out,
+      character,
+      slot.id,
+      part,
+      poses,
+      scaleX,
+      scaleY,
+      rig,
+      nestedChildrenByParentSlotId,
+    );
+    out.html.push(renderPartElement(id, part, restPart, viseme === "rest", scaleX, scaleY, children));
   }
   for (const part of visibleParts) {
     const key = variantKeyForPart(part);
@@ -640,17 +830,29 @@ function buildMouthSlot(
     }
     if (renderedIds.has(id)) continue;
     renderedIds.add(id);
-    out.html.push(renderPartElement(id, part, restPart, part === restPart, scaleX, scaleY));
+    const children = renderNestedChildrenForPart(
+      out,
+      character,
+      slot.id,
+      part,
+      poses,
+      scaleX,
+      scaleY,
+      rig,
+      nestedChildrenByParentSlotId,
+    );
+    out.html.push(renderPartElement(id, part, restPart, part === restPart, scaleX, scaleY, children));
   }
   out.html.push("</div>");
   out.motionTargets.push({
-    ...motionTargetFor(containerId, slot, restPart),
+    ...motionTargetFor(containerId, slot, restPart, binding?.effectiveBoneId),
     defaultVariantKey: "rest",
     variantParts,
   });
   out.slotTimelines.push({
     slotId: slot.id,
     role: slot.role,
+    hostSlotId: hostSlotIdFor(rig, slot.id),
     defaultKey: "rest",
     render: {
       kind: "variant",
@@ -670,6 +872,7 @@ function buildGeneratedMouthSlot(
   scaleY: number,
   binding?: ResolvedSlotBinding,
   rig?: ReturnType<typeof normalizeCharacterRig>,
+  boundBoneId?: string,
 ): void {
   const mouthRig = character.mouthRig;
   if (!mouthRig) return;
@@ -699,7 +902,9 @@ function buildGeneratedMouthSlot(
     `<div id="${esc(containerId)}" data-character-slot="true" data-character-slot-id="${esc(
       slotId,
     )}" data-character-role="mouth" data-character-generated-mouth="true"${
-      binding ? ` data-character-bound-bone-id="${esc(binding.effectiveBoneId)}"` : ""
+      binding || boundBoneId
+        ? ` data-character-bound-bone-id="${esc(binding?.effectiveBoneId ?? boundBoneId ?? "")}"`
+        : ""
     } data-character-depth="${esc(binding?.effectiveDepth ?? ("depth" in placement ? placement.depth : 0))}" data-character-draw-order-index="${esc(
       drawIndex,
     )}" style="${esc(style)}">`,
@@ -785,6 +990,7 @@ function buildFallbackMouthRig(
   character: CharacterPreset,
   scaleX: number,
   scaleY: number,
+  boundBoneId: string,
 ): void {
   const placement = character.fallbackMouth;
   if (!placement) return;
@@ -801,7 +1007,11 @@ function buildFallbackMouthRig(
   out.html.push(
     `<div id="${esc(containerId)}" data-character-slot="true" data-character-slot-id="${esc(
       slotId,
-    )}" data-character-role="mouth" data-character-generated-mouth="fallback" style="${esc(
+    )}" data-character-role="mouth" data-character-generated-mouth="fallback" data-character-bound-bone-id="${esc(
+      boundBoneId,
+    )}" data-character-depth="${esc("depth" in placement ? placement.depth : 0)}" data-character-draw-order-index="${esc(
+      placement.zIndex,
+    )}" style="${esc(
       styleString({
         left: placement.x * scaleX,
         top: placement.y * scaleY,
@@ -875,12 +1085,15 @@ function buildFallbackMouthRig(
 
 function buildGenericSlot(
   out: PuppetDom,
+  character: CharacterPreset,
   slot: CharacterSlotRef,
   poses: Record<string, string>,
   scaleX: number,
   scaleY: number,
   binding: ResolvedSlotBinding | undefined,
   rig: ReturnType<typeof normalizeCharacterRig>,
+  nestedChildrenByParentSlotId: Map<string, NestedSlotChild[]>,
+  hostPart?: CharacterPart,
 ): void {
   const visibleParts = slot.parts.filter((part) => part.visible);
   const activePose = binding?.effectivePartId ?? poses[slot.id];
@@ -898,7 +1111,7 @@ function buildGenericSlot(
   const variants: Record<string, string> = {};
   const variantParts: Record<string, CharacterPart> = {};
   const activeKey = variantKeyForPart(activePart);
-  out.html.push(openSlotContainer(containerId, slot, activePart, scaleX, scaleY, binding, rig));
+  out.html.push(openSlotContainerForPart(containerId, slot, activePart, scaleX, scaleY, binding, rig, hostPart));
   for (const part of visibleParts) {
     const key = variantKeyForPart(part);
     const id = partElementId(slot.id, key);
@@ -908,23 +1121,50 @@ function buildGenericSlot(
     variantParts[part.id] = part;
     if (part.pose) variants[part.pose] = id;
     if (part.pose) variantParts[part.pose] = part;
-    out.html.push(renderPartElement(id, part, activePart, key === activeKey, scaleX, scaleY));
+    const children = renderNestedChildrenForPart(
+      out,
+      character,
+      slot.id,
+      part,
+      poses,
+      scaleX,
+      scaleY,
+      rig,
+      nestedChildrenByParentSlotId,
+    );
+    out.html.push(renderPartElement(id, part, activePart, key === activeKey, scaleX, scaleY, children));
   }
   out.html.push("</div>");
   out.motionTargets.push({
-    ...motionTargetFor(containerId, slot, activePart),
+    ...motionTargetFor(containerId, slot, activePart, binding?.effectiveBoneId),
     defaultVariantKey: activeKey,
     variantParts,
   });
   out.slotTimelines.push({
     slotId: slot.id,
     role: slot.role,
+    hostSlotId: hostSlotIdFor(rig, slot.id),
     defaultKey: activeKey,
     render: {
       kind: "variant",
       variants,
     },
   });
+}
+
+function openSlotContainerForPart(
+  containerId: string,
+  slot: CharacterSlotRef,
+  basePart: CharacterPart,
+  scaleX: number,
+  scaleY: number,
+  binding: ResolvedSlotBinding | undefined,
+  rig: ReturnType<typeof normalizeCharacterRig>,
+  hostPart?: CharacterPart,
+): string {
+  return hostPart
+    ? openNestedSlotContainer(containerId, slot, basePart, hostPart, scaleX, scaleY, binding, rig)
+    : openSlotContainer(containerId, slot, basePart, scaleX, scaleY, binding, rig);
 }
 
 function openSlotContainer(
@@ -941,10 +1181,15 @@ function openSlotContainer(
   const top = binding ? binding.y : basePart.y;
   const rotation = binding ? binding.rotation : basePart.rotation;
   const depth = binding ? binding.effectiveDepth : basePart.depth;
+  const host = rig.hostConstraints.find((constraint) => constraint.slotId === slot.id);
   return `<div id="${esc(containerId)}" data-character-slot="true" data-character-slot-id="${esc(
     slot.id,
-  )}"${
-    binding ? ` data-character-bound-bone-id="${esc(binding.effectiveBoneId)}"` : ""
+  )}"${binding ? ` data-character-bound-bone-id="${esc(binding.effectiveBoneId)}"` : ""}${
+    host?.hostSlotId ? ` data-character-host-slot-id="${esc(host.hostSlotId)}"` : ""
+  }${host?.hostBoneId ? ` data-character-host-bone-id="${esc(host.hostBoneId)}"` : ""}${
+    host?.mode ? ` data-character-host-mode="${esc(host.mode)}"` : ""
+  }${
+    host?.reachPolicy ? ` data-character-reach-policy="${esc(host.reachPolicy)}"` : ""
   } data-character-depth="${esc(depth)}" data-character-draw-order-index="${esc(
     drawIndex,
   )}" data-character-role="${esc(slot.role)}" data-character-side="${esc(
@@ -962,6 +1207,53 @@ function openSlotContainer(
   )}">`;
 }
 
+function hostSlotIdFor(rig: ReturnType<typeof normalizeCharacterRig>, slotId: string) {
+  return hostConstraintFor(rig, slotId)?.hostSlotId;
+}
+
+function hostConstraintFor(rig: ReturnType<typeof normalizeCharacterRig>, slotId: string) {
+  return rig.hostConstraints.find((constraint) => constraint.slotId === slotId);
+}
+
+function openNestedSlotContainer(
+  containerId: string,
+  slot: CharacterSlotRef,
+  basePart: CharacterPart,
+  hostPart: CharacterPart,
+  scaleX: number,
+  scaleY: number,
+  binding: ResolvedSlotBinding | undefined,
+  rig: ReturnType<typeof normalizeCharacterRig>,
+): string {
+  const drawIndex = slotDrawIndex(rig, slot.id, basePart.zIndex);
+  const host = rig.hostConstraints.find((constraint) => constraint.slotId === slot.id);
+  return `<div id="${esc(containerId)}" data-character-slot="true" data-character-slot-id="${esc(
+    slot.id,
+  )}"${binding ? ` data-character-bound-bone-id="${esc(binding.effectiveBoneId)}"` : ""}${
+    host?.hostSlotId ? ` data-character-host-slot-id="${esc(host.hostSlotId)}"` : ""
+  }${host?.hostBoneId ? ` data-character-host-bone-id="${esc(host.hostBoneId)}"` : ""}${
+    host?.mode ? ` data-character-host-mode="${esc(host.mode)}"` : ""
+  }${
+    host?.reachPolicy ? ` data-character-reach-policy="${esc(host.reachPolicy)}"` : ""
+  } data-character-depth="${esc(binding?.effectiveDepth ?? basePart.depth)}" data-character-draw-order-index="${esc(
+    drawIndex,
+  )}" data-character-role="${esc(slot.role)}" data-character-side="${esc(
+    basePart.side ?? "",
+  )}" style="${esc(
+    styleString({
+      left: (basePart.x - hostPart.x) * scaleX,
+      top: (basePart.y - hostPart.y) * scaleY,
+      width: basePart.width * scaleX,
+      height: basePart.height * scaleY,
+      "z-index": Math.max(0, drawIndex - hostPart.zIndex),
+      "transform-origin": `${basePart.anchorX * 100}% ${basePart.anchorY * 100}%`,
+      transform: `rotate(${basePart.rotation - hostPart.rotation}deg) scale(${
+        binding?.scaleX ?? 1
+      }, ${binding?.scaleY ?? 1})`,
+    }),
+  )}">`;
+}
+
 function renderPartElement(
   id: string,
   part: CharacterPart,
@@ -969,6 +1261,7 @@ function renderPartElement(
   visible: boolean,
   scaleX: number,
   scaleY: number,
+  children = "",
 ): string {
   const attrs = `id="${esc(id)}" data-character-part="true" data-character-part-id="${esc(
     part.id,
@@ -992,6 +1285,10 @@ function renderPartElement(
     }),
   );
 
+  if (children) {
+    return `<div ${attrs} style="${style}">${renderPartVisual(part, children)}</div>`;
+  }
+
   if (part.morph?.primaryPath) {
     const viewBox = part.morph.viewBox ?? `0 0 ${part.width} ${part.height}`;
     const strokeAttrs = part.morph.stroke
@@ -1005,6 +1302,30 @@ function renderPartElement(
   }
 
   return `<img ${attrs} src="asset:${esc(part.mediaId)}" alt="" draggable="false" style="${style}">`;
+}
+
+function renderPartVisual(part: CharacterPart, children: string): string {
+  if (part.morph?.primaryPath) {
+    const viewBox = part.morph.viewBox ?? `0 0 ${part.width} ${part.height}`;
+    const strokeAttrs = part.morph.stroke
+      ? ` stroke="${esc(part.morph.stroke)}" stroke-width="${esc(String(part.morph.strokeWidth ?? 1))}" stroke-linecap="${esc(
+          part.morph.strokeLinecap ?? "round",
+        )}" stroke-linejoin="${esc(part.morph.strokeLinejoin ?? "round")}"`
+      : "";
+    return `<svg viewBox="${esc(
+      viewBox,
+    )}" aria-hidden="true" overflow="visible" style="${esc(
+      styleString({ position: "absolute", left: 0, top: 0, width: "100%", height: "100%" }),
+    )}"><path d="${esc(part.morph.primaryPath)}" fill="${esc(
+      part.morph.fill ?? "#733f43",
+    )}"${strokeAttrs}/></svg>${children}`;
+  }
+  const visual = `<img src="asset:${esc(
+    part.mediaId,
+  )}" alt="" draggable="false" style="${esc(
+    styleString({ position: "absolute", left: 0, top: 0, width: "100%", height: "100%" }),
+  )}">`;
+  return `${visual}${children}`;
 }
 
 function renderGeneratedMouthComponent(
@@ -1059,11 +1380,13 @@ function motionTargetFor(
   id: string,
   slot: CharacterSlotRef,
   basePart: CharacterPart,
+  boneId?: string,
 ): MotionTarget {
   return {
     kind: "slot",
     id,
     selector: `#${id}`,
+    boneId,
     slotId: slot.id,
     role: slot.role,
     basePart,
@@ -1162,8 +1485,10 @@ function appendCharacterTimelineScript(
     motionPresets: Map<string, MotionPreset>;
     motionTargets: MotionTarget[];
     canvasWidth: number;
+    canvasHeight: number;
     slotTimelines: SlotTimeline[];
     reaches: CharacterReach[];
+    activeAngle: ReturnType<typeof normalizeCharacterRig>["activeAngle"];
     parentBoneIds: Set<string>;
   },
 ): void {
@@ -1173,7 +1498,13 @@ function appendCharacterTimelineScript(
     autoBlink: args.meta.autoBlink,
   });
   const reachBySlot = new Map(args.reaches.map((reach) => [reach.slotId, reach]));
-  const times = collectTimelineTimes(args.duration, args.meta, args.motionPresets, blinkWindows);
+  const times = collectTimelineTimes(
+    args.duration,
+    args.meta,
+    args.motionPresets,
+    blinkWindows,
+    args.activeAngle,
+  );
   const frames = times.map((time) =>
     buildMotionFrame(
       time,
@@ -1184,9 +1515,11 @@ function appendCharacterTimelineScript(
       args.motionPresets,
       args.motionTargets,
       args.canvasWidth,
+      args.canvasHeight,
       args.slotTimelines,
       blinkWindows,
       reachBySlot,
+      args.activeAngle,
       args.parentBoneIds,
     ),
   );
@@ -1220,6 +1553,26 @@ function appendCharacterTimelineScript(
   // so without this tween the character's host clip disappears as soon as the last
   // internal motion/viseme ends.
   tl.to({}, { duration: S.duration }, 0);
+  const applyTargetVars = function(targets) {
+    (targets || []).forEach(function(target) { gsap.set(target.selector, target.vars); });
+  };
+  const applyVariantEvent = function(event) {
+    (event.variant.hide || []).forEach(function(id) { gsap.set("#" + id, { opacity: 0 }); });
+    if (event.variant.show) gsap.set("#" + event.variant.show, { opacity: 1 });
+  };
+  const applyGeneratedMouthEvent = function(event) {
+    Object.keys(event.generatedMouth.components || {}).forEach(function(selector) {
+      gsap.set(selector, event.generatedMouth.components[selector]);
+    });
+  };
+  const resetInitialState = function() {
+    applyTargetVars(S.initialTargets || []);
+    (S.slotEvents || []).forEach(function(event) {
+      if (Math.abs((event.time || 0)) > 0.0001) return;
+      if (event.variant) applyVariantEvent(event);
+      if (event.generatedMouth) applyGeneratedMouthEvent(event);
+    });
+  };
   const setVars = function(targets, time) {
     targets.forEach(function(target) { tl.set(target.selector, target.vars, time); });
   };
@@ -1240,6 +1593,17 @@ function appendCharacterTimelineScript(
       });
     }
   });
+  const originalSeek = tl.seek;
+  tl.seek = function(time, suppressEvents) {
+    const result = originalSeek.call(this, time, suppressEvents);
+    if (Number(time) <= 0.001) resetInitialState();
+    return result;
+  };
+  tl.eventCallback("onStart", function() {
+    if (tl.time() <= 0.001) resetInitialState();
+  });
+  tl.eventCallback("onReverseComplete", resetInitialState);
+  resetInitialState();
   window.__timelines = window.__timelines || {};
   window.__timelines[${JSON.stringify(args.compositionId)}] = tl;
 })();`;
@@ -1251,6 +1615,7 @@ function collectTimelineTimes(
   meta: CharacterClipMeta,
   presets: Map<string, MotionPreset>,
   blinkWindows: Array<{ start: number; end: number }>,
+  activeAngle: ReturnType<typeof normalizeCharacterRig>["activeAngle"],
 ): number[] {
   const times = new Set<number>([0, roundTime(duration)]);
   const step = 1 / MOTION_SAMPLE_FPS;
@@ -1264,11 +1629,13 @@ function collectTimelineTimes(
   for (const motion of meta.motions ?? []) {
     const preset = presets.get(motion.presetId);
     if (!preset) continue;
+    if (!motionAppliesToAngle(preset, activeAngle)) continue;
     const motionDuration = Math.max(0.0001, motion.duration ?? preset.duration);
     for (const occurrence of generateMotionOccurrences(motion, preset, duration)) {
       times.add(roundTime(Math.max(0, Math.min(duration, occurrence.start))));
       times.add(roundTime(Math.max(0, Math.min(duration, occurrence.end))));
       for (const track of preset.tracks) {
+        if (track.angleIds?.length && !track.angleIds.includes(activeAngle)) continue;
         for (const keyframe of track.keyframes) {
           times.add(
             roundTime(
@@ -1306,12 +1673,14 @@ function buildMotionFrame(
   presets: Map<string, MotionPreset>,
   motionTargets: MotionTarget[],
   canvasWidth: number,
+  canvasHeight: number,
   slots: SlotTimeline[],
   blinkWindows: Array<{ start: number; end: number }>,
   reachBySlot: Map<string, CharacterReach>,
+  activeAngle: ReturnType<typeof normalizeCharacterRig>["activeAngle"],
   parentBoneIds: Set<string>,
 ) {
-  const composed = composeMotionsAt({ duration, motions: meta.motions }, time, presets);
+  const composed = composeMotionsAt({ duration, motions: meta.motions }, time, presets, activeAngle);
   const slotStates = resolveSlotStatesAt({
     time,
     meta,
@@ -1351,9 +1720,16 @@ function buildMotionFrame(
         ? { ...rawDelta, dx: limited.dx, dy: limited.dy, rotation: limited.rotation }
         : rawDelta;
       const activePart = activePartForMotionTarget(target, composed, slotStates);
-      const turn = activePart
-        ? faceTurnMotionForPart(activePart, composed.faceTurnX, canvasWidth)
-        : null;
+      const turn =
+        activePart && shouldApplyFaceTurnToTarget(target, boneCarriesChildren)
+          ? faceTurnMotionForPart(
+              activePart,
+              composed.faceTurnX,
+              canvasWidth,
+              composed.faceTurnY,
+              canvasHeight,
+            )
+          : null;
       const { originX, originY } =
         target.kind === "bone"
           ? { originX: 0, originY: 0 }
@@ -1410,6 +1786,12 @@ function activePartForMotionTarget(
     return partWithTargetDepth(target.variantParts[target.defaultVariantKey], target);
   }
   return partWithTargetDepth(target.basePart, target);
+}
+
+function shouldApplyFaceTurnToTarget(target: MotionTarget, boneCarriesChildren: boolean): boolean {
+  if (target.role === "iris") return false;
+  if (target.kind === "slot" && boneCarriesChildren) return false;
+  return true;
 }
 
 function partWithTargetDepth(

@@ -16,9 +16,9 @@ import {
   SkipBack,
   Unlock,
 } from "lucide-react";
-import { db, uid } from "../db";
-import { useMediaUrl } from "../hooks/useMediaUrl";
+import { db, getMediaUrl, uid } from "../db";
 import { useStudio } from "../store";
+import { buildCharacterCompositionHtml, characterAssetIds } from "../character/composition";
 import {
   listCharacterSlots,
   pickActivePartForSlot,
@@ -26,8 +26,11 @@ import {
 } from "../character/character-utils";
 import { localAlphaBounds, pivotForPart } from "../character/alpha-bounds";
 import { faceTurnMotionForPart } from "../character/face-turn";
-import { RigPreview } from "../character/MouthCreator";
-import { RIG_STYLES, VISEME_POSES } from "../character/mouth-libraries";
+import {
+  normalizeCharacterRig,
+  resolveSlotBinding,
+  type ResolvedSlotBinding,
+} from "../character/rig";
 import {
   angleRigJsonFromPreset,
   characterJsonFromPreset,
@@ -77,7 +80,8 @@ const EASE_OPTIONS = [
 ];
 
 const ROLE_GROUPS: { title: string; roles: PartRole[] }[] = [
-  { title: "Face", roles: ["eye", "eyebrow", "mouth"] },
+  { title: "Eyes", roles: ["eye", "iris"] },
+  { title: "Face", roles: ["eyebrow", "nose", "mouth"] },
   { title: "Body", roles: ["head", "body", "arm", "hand", "leg", "foot"] },
   { title: "Other", roles: ["hair", "accessory", "static", "custom"] },
 ];
@@ -86,6 +90,8 @@ type CharacterSlot = ReturnType<typeof listCharacterSlots>[number];
 
 interface RecorderPartState {
   slotId: string;
+  target?: "slot" | "bone";
+  boneId?: string;
   poseSwap?: string;
   dx: number;
   dy: number;
@@ -111,6 +117,14 @@ interface StatusMessage {
   message: string;
 }
 
+interface RecorderEditPreviewTarget {
+  slotId: string;
+  part: CharacterPart;
+  override: RecorderPartState;
+  faceTurnX: number;
+  faceTurnY: number;
+}
+
 export function MotionPresetRecorder({
   character,
   onClose,
@@ -131,6 +145,7 @@ export function MotionPresetRecorder({
       ),
     [character.parts, character.manifest],
   );
+  const rig = useMemo(() => normalizeCharacterRig(character), [character]);
   const usesGeneratedMouth = !!character.mouthRig && character.mouthStyle === "rig";
   const generatedMouthPart = useMemo(
     () => (usesGeneratedMouth ? generatedMouthPreviewPart(character) : null),
@@ -148,7 +163,9 @@ export function MotionPresetRecorder({
     initialKeyposesForPreset(initialPreset, slots),
   );
   const [overrides, setOverrides] = useState<Map<string, RecorderPartState>>(new Map());
+  const [draftDirty, setDraftDirty] = useState(false);
   const [faceTurnX, setFaceTurnX] = useState(initialPreset?.keyposes?.[0]?.faceTurnX ?? 0);
+  const [faceTurnY, setFaceTurnY] = useState(initialPreset?.keyposes?.[0]?.faceTurnY ?? 0);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
   // Transient editor lock for this recording session — locked slots ignore canvas
   // clicks/drags (still selectable from the part list). Parts locked in the character
@@ -157,6 +174,7 @@ export function MotionPresetRecorder({
   const [fitScale, setFitScale] = useState(0.5);
   const [previewMode, setPreviewMode] = useState<"fit" | "export">("fit");
   const [previewPlaying, setPreviewPlaying] = useState(false);
+  const [playbackPreset, setPlaybackPreset] = useState<MotionPreset | null>(null);
   const [selectPopover, setSelectPopover] = useState<SelectPopover | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
@@ -221,18 +239,21 @@ export function MotionPresetRecorder({
     setTime((current) => Math.min(current, Math.max(0.1, duration)));
   }, [duration]);
 
+  const keyposesForSampling =
+    previewPlaying && playbackPreset?.keyposes ? playbackPreset.keyposes : keyposes;
+
   useEffect(() => {
-    const interp = sampleKeyposesAtTime(keyposes, time);
+    const interp = sampleKeyposesAtTime(keyposesForSampling, time);
     const next = new Map<string, RecorderPartState>();
     for (const ov of interp.parts.values()) {
-      const slot = ov.slotId
-        ? slots.find((s) => s.id === ov.slotId)
-        : slots.find((s) => s.role === ov.partRole);
+      const slot = slotForRecordedOverride(ov, slots, rig);
       if (!slot) continue;
       const poseSwap = usesGeneratedMouth && slot.role === "mouth" ? undefined : ov.poseSwap;
       const part = activePartForSlot(slot, poseSwap);
       next.set(slot.id, {
         ...defaultOverride(slot.id, part),
+        target: ov.target,
+        boneId: ov.boneId,
         poseSwap,
         dx: ov.dx ?? 0,
         dy: ov.dy ?? 0,
@@ -249,7 +270,9 @@ export function MotionPresetRecorder({
     }
     setOverrides((prev) => (recorderOverrideMapsEqual(prev, next) ? prev : next));
     setFaceTurnX((prev) => (Object.is(prev, interp.faceTurnX) ? prev : interp.faceTurnX));
-  }, [activePartForSlot, time, keyposes, usesGeneratedMouth, slots]);
+    setFaceTurnY((prev) => (Object.is(prev, interp.faceTurnY) ? prev : interp.faceTurnY));
+    setDraftDirty(false);
+  }, [activePartForSlot, time, keyposesForSampling, usesGeneratedMouth, slots, rig]);
 
   const displayScale = previewMode === "export" ? 1 : fitScale;
   const selectedSlot = slots.find((slot) => slot.id === selectedSlotId) ?? null;
@@ -261,7 +284,100 @@ export function MotionPresetRecorder({
     ? (selectedOverrideFromMap ?? defaultOverride(selectedSlotId, selectedPart ?? undefined))
     : null;
 
+  const currentRecordedParts = useCallback((): RecordedPartOverride[] => {
+    const parts: RecordedPartOverride[] = [];
+    for (const ov of overrides.values()) {
+      const slot = slots.find((s) => s.id === ov.slotId);
+      const poseSwap = slot?.role === "mouth" && usesGeneratedMouth ? undefined : ov.poseSwap;
+      const activePart = slot ? activePartForSlot(slot, poseSwap) : undefined;
+      const normalizedOverride = { ...ov, poseSwap };
+      if (!slot || !isDirtyOverride(normalizedOverride, activePart)) continue;
+      const part: RecordedPartOverride =
+        ov.target === "bone" && ov.boneId
+          ? { target: "bone", partRole: slot.role, boneId: ov.boneId }
+          : { target: "slot", partRole: slot.role, slotId: slot.id };
+      if (poseSwap) part.poseSwap = poseSwap;
+      if (ov.dx !== 0) part.dx = ov.dx;
+      if (ov.dy !== 0) part.dy = ov.dy;
+      if (ov.scale !== 1) part.scale = ov.scale;
+      if (ov.scaleX !== 1) part.scaleX = ov.scaleX;
+      if (ov.scaleY !== 1) part.scaleY = ov.scaleY;
+      if (ov.skewX !== 0) part.skewX = ov.skewX;
+      if (ov.skewY !== 0) part.skewY = ov.skewY;
+      if (ov.rotation !== 0) part.rotation = ov.rotation;
+      if (ov.originX !== (activePart?.anchorX ?? 0.5)) part.originX = ov.originX;
+      if (ov.originY !== (activePart?.anchorY ?? 0.5)) part.originY = ov.originY;
+      if (ov.opacity !== 1) part.opacity = ov.opacity;
+      parts.push(part);
+    }
+    return parts;
+  }, [activePartForSlot, overrides, slots, usesGeneratedMouth]);
+
+  const sortedKeyposes = useMemo(
+    () => cloneKeyposes(keyposes).sort((a, b) => a.t - b.t),
+    [keyposes],
+  );
+
+  const keyposesForPlayback = useCallback(() => {
+    const currentParts = currentRecordedParts();
+    const hasDraft = draftDirty || currentParts.length > 0 || faceTurnX !== 0 || faceTurnY !== 0;
+    if (!hasDraft) return sortedKeyposes;
+    const existing = keyposes.find((k) => Math.abs(k.t - time) <= 0.001);
+    const draft: RecordedKeypose = {
+      t: round(time, 2),
+      parts: currentParts,
+      faceTurnX: faceTurnX === 0 ? undefined : faceTurnX,
+      faceTurnY: faceTurnY === 0 ? undefined : faceTurnY,
+      ease: existing?.ease ?? "easeInOut",
+      anticipation: existing?.anticipation,
+    };
+    return [
+      ...sortedKeyposes.filter((keypose) => Math.abs(keypose.t - draft.t) > 0.001),
+      draft,
+    ].sort((a, b) => a.t - b.t);
+  }, [currentRecordedParts, draftDirty, faceTurnX, faceTurnY, keyposes, sortedKeyposes, time]);
+
+  const commitRecorderPreviewToHtml = useCallback(() => {
+    const playbackKeyposes = keyposesForPlayback();
+    const preset =
+      playbackKeyposes.length > 0
+        ? recorderPreviewPreset({
+            name,
+            category,
+            duration,
+            keyposes: playbackKeyposes,
+          })
+        : null;
+    setPlaybackPreset(preset);
+    setPreviewPlaying(true);
+  }, [category, duration, keyposesForPlayback, name]);
+
+  const stopCompiledPreview = useCallback(() => {
+    setPreviewPlaying(false);
+    setPlaybackPreset(null);
+  }, []);
+
+  const editPreviewTargets = useMemo<RecorderEditPreviewTarget[]>(() => {
+    if (previewPlaying) return [];
+    return slots
+      .map((slot) => {
+        const override = overrides.get(slot.id);
+        const part = activePartForSlot(slot, override?.poseSwap);
+        if (!part) return null;
+        return {
+          slotId: slot.id,
+          part,
+          override: override ?? defaultOverride(slot.id, part),
+          faceTurnX,
+          faceTurnY,
+        };
+      })
+      .filter((target): target is RecorderEditPreviewTarget => !!target);
+  }, [activePartForSlot, faceTurnX, faceTurnY, overrides, previewPlaying, slots]);
+
   const updateOverride = (slotId: string, patch: Partial<RecorderPartState>) => {
+    stopCompiledPreview();
+    setDraftDirty(true);
     setOverrides((prev) => {
       const next = new Map(prev);
       const slot = slots.find((item) => item.id === slotId);
@@ -272,12 +388,31 @@ export function MotionPresetRecorder({
         slot?.role === "mouth" && usesGeneratedMouth && "poseSwap" in patch
           ? { ...patch, poseSwap: undefined }
           : patch;
-      next.set(slotId, { ...base, ...normalizedPatch });
+      const merged = { ...base, ...normalizedPatch };
+      next.set(
+        slotId,
+        slot && curPart
+          ? clampRecorderOverrideToHost({
+              character,
+              rig,
+              slots,
+              overrides: next,
+              activePartForSlot,
+              slot,
+              part: curPart,
+              override: merged,
+              faceTurnX,
+              faceTurnY,
+            })
+          : merged,
+      );
       return next;
     });
   };
 
   const clearOverride = (slotId: string) => {
+    stopCompiledPreview();
+    setDraftDirty(true);
     setOverrides((prev) => {
       const next = new Map(prev);
       next.delete(slotId);
@@ -314,6 +449,8 @@ export function MotionPresetRecorder({
           overrides.get(slot.id),
           faceTurnX,
           character.canvasWidth,
+          faceTurnY,
+          character.canvasHeight,
         );
         return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
       })
@@ -379,33 +516,12 @@ export function MotionPresetRecorder({
   };
 
   const captureKeypose = () => {
-    const parts: RecordedPartOverride[] = [];
-    for (const ov of overrides.values()) {
-      const slot = slots.find((s) => s.id === ov.slotId);
-      const poseSwap = slot?.role === "mouth" && usesGeneratedMouth ? undefined : ov.poseSwap;
-      const activePart = slot ? activePartForSlot(slot, poseSwap) : undefined;
-      const normalizedOverride = { ...ov, poseSwap };
-      if (!slot || !isDirtyOverride(normalizedOverride, activePart)) continue;
-      const part: RecordedPartOverride = { partRole: slot.role, slotId: slot.id };
-      if (poseSwap) part.poseSwap = poseSwap;
-      if (ov.dx !== 0) part.dx = ov.dx;
-      if (ov.dy !== 0) part.dy = ov.dy;
-      if (ov.scale !== 1) part.scale = ov.scale;
-      if (ov.scaleX !== 1) part.scaleX = ov.scaleX;
-      if (ov.scaleY !== 1) part.scaleY = ov.scaleY;
-      if (ov.skewX !== 0) part.skewX = ov.skewX;
-      if (ov.skewY !== 0) part.skewY = ov.skewY;
-      if (ov.rotation !== 0) part.rotation = ov.rotation;
-      if (ov.originX !== (activePart?.anchorX ?? 0.5)) part.originX = ov.originX;
-      if (ov.originY !== (activePart?.anchorY ?? 0.5)) part.originY = ov.originY;
-      if (ov.opacity !== 1) part.opacity = ov.opacity;
-      parts.push(part);
-    }
     const existing = keyposes.find((k) => Math.abs(k.t - time) <= 0.001);
     const kp: RecordedKeypose = {
       t: round(time, 2),
-      parts,
+      parts: currentRecordedParts(),
       faceTurnX: faceTurnX === 0 ? undefined : faceTurnX,
+      faceTurnY: faceTurnY === 0 ? undefined : faceTurnY,
       ease: existing?.ease ?? "easeInOut",
       anticipation: existing?.anticipation,
     };
@@ -413,6 +529,7 @@ export function MotionPresetRecorder({
       const filtered = prev.filter((k) => Math.abs(k.t - kp.t) > 0.001);
       return [...filtered, kp].sort((a, b) => a.t - b.t);
     });
+    setDraftDirty(false);
   };
 
   const updateKeypose = (t: number, patch: Partial<RecordedKeypose>) => {
@@ -425,7 +542,8 @@ export function MotionPresetRecorder({
     setKeyposes((prev) => prev.filter((k) => Math.abs(k.t - t) > 0.001));
 
   const save = async () => {
-    if (keyposes.length === 0) {
+    const playbackKeyposes = keyposesForPlayback();
+    if (playbackKeyposes.length === 0) {
       alert("Capture at least one pose before saving.");
       return;
     }
@@ -438,7 +556,7 @@ export function MotionPresetRecorder({
       duration: Math.max(0.1, duration),
       loop: initialPreset?.loop ?? false,
       tracks: [],
-      keyposes: cloneKeyposes(keyposes).sort((a, b) => a.t - b.t),
+      keyposes: cloneKeyposes(playbackKeyposes).sort((a, b) => a.t - b.t),
       builtin: false,
       createdAt: savingCopy ? now : (initialPreset?.createdAt ?? now),
       updatedAt: now,
@@ -505,6 +623,7 @@ export function MotionPresetRecorder({
     setCategory(converted.preset.category);
     setDuration(converted.preset.duration);
     setKeyposes(cloneKeyposes(converted.preset.keyposes ?? []));
+    setDraftDirty(false);
     setTime(0);
     setPreviewPlaying(false);
     const warningText = converted.warnings.length
@@ -638,30 +757,21 @@ export function MotionPresetRecorder({
                   transform: `scale(${displayScale})`,
                 }}
               >
-                {slots.map((slot) => {
-                  const part = activePartForSlot(slot, overrides.get(slot.id)?.poseSwap);
-                  if (!part) return null;
-                  return (
-                    <PoseLayer
-                      key={slot.id}
-                      part={part}
-                      override={overrides.get(slot.id)}
-                      selected={slot.id === selectedSlotId}
-                      faceTurnX={faceTurnX}
-                      canvasWidth={character.canvasWidth}
-                      mouthRig={
-                        usesGeneratedMouth && slot.role === "mouth" ? character.mouthRig : undefined
-                      }
-                    />
-                  );
-                })}
+                <RecorderHyperFramesPreview
+                  character={character}
+                  preset={previewPlaying ? playbackPreset : null}
+                  time={time}
+                  editTargets={editPreviewTargets}
+                />
                 {selectedPart && selectedOverride && (
                   <SelectionHandles
                     part={selectedPart}
                     override={selectedOverride}
                     scale={displayScale}
                     faceTurnX={faceTurnX}
+                    faceTurnY={faceTurnY}
                     canvasWidth={character.canvasWidth}
+                    canvasHeight={character.canvasHeight}
                     planeRef={planeRef}
                     onChange={(patch) => updateOverride(selectedOverride.slotId, patch)}
                   />
@@ -724,7 +834,24 @@ export function MotionPresetRecorder({
                 max={1}
                 step={0.01}
                 rest={0}
-                onChange={setFaceTurnX}
+                onChange={(value) => {
+                  stopCompiledPreview();
+                  setDraftDirty(true);
+                  setFaceTurnX(value);
+                }}
+              />
+              <PropertyRow
+                label="Turn Y"
+                value={faceTurnY}
+                min={-1}
+                max={1}
+                step={0.01}
+                rest={0}
+                onChange={(value) => {
+                  stopCompiledPreview();
+                  setDraftDirty(true);
+                  setFaceTurnY(value);
+                }}
               />
             </div>
 
@@ -749,7 +876,10 @@ export function MotionPresetRecorder({
               <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
                 <button
                   type="button"
-                  onClick={() => setPreviewPlaying((playing) => !playing)}
+                  onClick={() => {
+                    if (previewPlaying) stopCompiledPreview();
+                    else commitRecorderPreviewToHtml();
+                  }}
                   className="flex items-center justify-center gap-1 rounded border border-border bg-panel-2 px-2 py-1 text-xs hover:bg-panel"
                 >
                   {previewPlaying ? <Pause size={12} /> : <Play size={12} />}
@@ -759,7 +889,7 @@ export function MotionPresetRecorder({
                   type="button"
                   onClick={() => {
                     setTime(0);
-                    setPreviewPlaying(true);
+                    commitRecorderPreviewToHtml();
                   }}
                   className="flex items-center justify-center rounded border border-border bg-panel-2 px-2 py-1 hover:bg-panel"
                   title="Restart preview"
@@ -1287,107 +1417,280 @@ function PropertyRow({
   );
 }
 
-function PoseLayer({
-  part,
-  override,
-  selected,
-  faceTurnX,
-  canvasWidth,
-  mouthRig,
+function RecorderHyperFramesPreview({
+  character,
+  preset,
+  time,
+  editTargets,
 }: {
-  part: CharacterPart;
-  override?: RecorderPartState;
-  selected: boolean;
-  faceTurnX: number;
-  canvasWidth: number;
-  mouthRig?: CharacterPreset["mouthRig"];
+  character: CharacterPreset;
+  preset: MotionPreset | null;
+  time: number;
+  editTargets: RecorderEditPreviewTarget[];
 }) {
-  // Pure visual layer. Selection and dragging are handled centrally on the pose plane
-  // (`handlePlanePointerDown`) so the full z-stack is considered for drill-through and
-  // overlap-priority drag.
-  const url = useMediaUrl(part.mediaId);
-  const ov = override ?? defaultOverride(part.slotId, part);
-  const turn = faceTurnMotionForPart(part, faceTurnX, canvasWidth);
-  const alphaRect = localAlphaBounds(part);
-  const rigStyle = mouthRig
-    ? (RIG_STYLES.find((style) => style.id === mouthRig.styleId) ?? RIG_STYLES[0])
-    : null;
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const compositionId = "recorder_character_preview";
+  const sourceHtml = useMemo(() => {
+    const motionPresets = preset ? new Map([[preset.id, preset]]) : new Map<string, MotionPreset>();
+    return buildCharacterCompositionHtml({
+      compositionId,
+      clipId: "recorder-character-preview-clip",
+      width: character.canvasWidth,
+      height: character.canvasHeight,
+      duration: Math.max(0.1, preset?.duration ?? 1),
+      character,
+      meta: {
+        characterId: character.id,
+        poses: {},
+        autoBlink: false,
+        motions: preset
+          ? [
+              {
+                id: "recorder-draft-motion",
+                presetId: preset.id,
+                offset: 0,
+                intensity: 1,
+                loop: false,
+                duration: preset.duration,
+              },
+            ]
+          : [],
+      },
+      motionPresets,
+    });
+  }, [character, compositionId, preset]);
+  const [html, setHtml] = useState<string | null>(null);
 
-  if (!part.visible) return null;
+  useEffect(() => {
+    let alive = true;
+    // Keep the current iframe mounted while the next composition resolves, and bail when
+    // the resolved HTML is identical — resetting to null here (or updating on identical
+    // content) reloads the iframe every render and trips the update-depth guard.
+    void resolveRecorderPreviewAssetRefs(sourceHtml, character).then((resolved) => {
+      if (alive) setHtml((prev) => (prev === resolved ? prev : resolved));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [character, sourceHtml]);
+
+  useEffect(() => {
+    if (!html) return;
+    if (preset) seekRecorderPreview(iframeRef.current, compositionId, time);
+    else
+      applyRecorderEditPose(
+        iframeRef.current,
+        editTargets,
+        character.canvasWidth,
+        character.canvasHeight,
+      );
+  }, [character.canvasHeight, character.canvasWidth, compositionId, editTargets, html, preset, time]);
+
   return (
-    <div
-      className="absolute select-none"
-      style={{
-        left: part.x + ov.dx + turn.dx,
-        top: part.y + ov.dy + turn.dy,
-        width: part.width,
-        height: part.height,
-        opacity: ov.opacity,
-        transform: `rotate(${part.rotation + ov.rotation + turn.rotation}deg) scale(${
-          ov.scale * ov.scaleX * turn.scaleX
-        }, ${ov.scale * ov.scaleY * turn.scaleY}) skew(${ov.skewX + turn.skewX}deg, ${
-          ov.skewY + turn.skewY
-        }deg)`,
-        transformOrigin: `${ov.originX * 100}% ${ov.originY * 100}%`,
-        zIndex: part.zIndex,
-        pointerEvents: "none",
-      }}
-      title={part.name}
-    >
-      {mouthRig && rigStyle ? (
-        <RigPreview
-          style={rigStyle}
-          pose={mouthRig.poses.rest ?? VISEME_POSES.rest}
-          colors={{
-            lipColor: mouthRig.lipColor,
-            teethColor: mouthRig.teethColor,
-            tongueColor: mouthRig.tongueColor,
-            interiorColor: mouthRig.interiorColor,
+    <>
+      {html ? (
+        <iframe
+          ref={iframeRef}
+          title="Recorder HyperFrames character preview"
+          sandbox="allow-scripts allow-same-origin"
+          referrerPolicy="no-referrer"
+          srcDoc={html}
+          className="pointer-events-none absolute inset-0 block h-full w-full border-0 bg-transparent"
+          onLoad={() => {
+            if (preset) seekRecorderPreview(iframeRef.current, compositionId, time);
+            else
+              applyRecorderEditPose(
+                iframeRef.current,
+                editTargets,
+                character.canvasWidth,
+                character.canvasHeight,
+              );
           }}
-          widthScale={mouthRig.widthScale}
-          upperCurve={mouthRig.upperCurve}
-          lowerCurve={mouthRig.lowerCurve}
         />
-      ) : part.morph?.primaryPath ? (
-        <svg
-          viewBox={part.morph.viewBox ?? `0 0 ${part.width} ${part.height}`}
-          aria-hidden
-          overflow="visible"
-          className="pointer-events-none h-full w-full"
-        >
-          <path
-            d={part.morph.primaryPath}
-            fill={part.morph.fill ?? "#733f43"}
-            stroke={part.morph.stroke}
-            strokeWidth={part.morph.strokeWidth}
-            strokeLinecap={
-              part.morph.strokeLinecap as "round" | "inherit" | "butt" | "square" | undefined
-            }
-            strokeLinejoin={
-              part.morph.strokeLinejoin as "round" | "inherit" | "miter" | "bevel" | undefined
-            }
-          />
-        </svg>
-      ) : url ? (
-        <img
-          src={url}
-          alt={part.name}
-          draggable={false}
-          className="pointer-events-none h-full w-full object-contain"
-        />
-      ) : null}
-      <div
-        className={`absolute ${selected ? "outline outline-1 outline-primary/80" : ""}`}
-        style={{
-          left: alphaRect.x,
-          top: alphaRect.y,
-          width: alphaRect.width,
-          height: alphaRect.height,
-          pointerEvents: "none",
-        }}
-      />
-    </div>
+      ) : (
+        <div className="pointer-events-none absolute inset-0 grid place-items-center text-[11px] text-muted-foreground">
+          Loading character preview...
+        </div>
+      )}
+    </>
   );
+}
+
+async function resolveRecorderPreviewAssetRefs(
+  html: string,
+  character: CharacterPreset,
+): Promise<string> {
+  let resolved = html;
+  const assetIds = Array.from(characterAssetIds(character));
+  const entries = await Promise.all(
+    assetIds.map(async (id) => [id, await getMediaUrl(id)] as const),
+  );
+  for (const [id, url] of entries) {
+    if (!url) continue;
+    resolved = resolved.replaceAll(`asset:${id}`, url);
+  }
+  return resolved;
+}
+
+function seekRecorderPreview(
+  iframe: HTMLIFrameElement | null,
+  compositionId: string,
+  time: number,
+  attempts = 0,
+): void {
+  let timeline:
+    | {
+        seek?: (time: number, suppressEvents?: boolean) => unknown;
+        pause?: () => unknown;
+      }
+    | undefined;
+  try {
+    const win = iframe?.contentWindow as
+      | (Window & {
+          __timelines?: Record<
+            string,
+            {
+              seek?: (time: number, suppressEvents?: boolean) => unknown;
+              pause?: () => unknown;
+            }
+          >;
+        })
+      | null
+      | undefined;
+    timeline = win?.__timelines?.[compositionId];
+  } catch {
+    timeline = undefined;
+  }
+  if (!timeline?.seek) {
+    if (iframe && attempts < 30) {
+      window.setTimeout(() => seekRecorderPreview(iframe, compositionId, time, attempts + 1), 40);
+    }
+    return;
+  }
+  timeline.pause?.();
+  timeline.seek(Math.max(0, time), false);
+}
+
+function applyRecorderEditPose(
+  iframe: HTMLIFrameElement | null,
+  targets: RecorderEditPreviewTarget[],
+  canvasWidth: number,
+  canvasHeight: number,
+): void {
+  const doc = iframe?.contentDocument;
+  if (!doc) return;
+
+  for (const el of Array.from(
+    doc.querySelectorAll<HTMLElement>('[data-character-slot="true"], [data-character-bone="true"]'),
+  )) {
+    el.dataset.recorderBaseTransform ??= el.style.transform || "";
+    el.dataset.recorderBaseOpacity ??= el.style.opacity || "";
+    el.style.translate = "";
+    el.style.rotate = "";
+    el.style.scale = "";
+    el.style.transform = el.dataset.recorderBaseTransform;
+    el.style.transformOrigin = "";
+    el.style.opacity = el.dataset.recorderBaseOpacity;
+  }
+
+  for (const partEl of Array.from(
+    doc.querySelectorAll<HTMLElement>('[data-character-part="true"]'),
+  )) {
+    partEl.dataset.recorderBaseOpacity ??= partEl.style.opacity || "";
+    partEl.style.opacity = partEl.dataset.recorderBaseOpacity;
+  }
+
+  for (const target of targets) {
+    const slotEl = doc.querySelector<HTMLElement>(
+      `[data-character-slot-id="${cssAttrValue(target.slotId)}"]`,
+    );
+    if (!slotEl) continue;
+    const transformEl = recorderTransformElementForSlot(doc, slotEl);
+    const ov = target.override;
+    const turn = faceTurnMotionForPart(
+      target.part,
+      target.faceTurnX,
+      canvasWidth,
+      target.faceTurnY,
+      canvasHeight,
+    );
+    const scaleX = ov.scale * ov.scaleX * turn.scaleX;
+    const scaleY = ov.scale * ov.scaleY * turn.scaleY;
+
+    transformEl.style.translate = `${round(ov.dx + turn.dx, 3)}px ${round(ov.dy + turn.dy, 3)}px`;
+    transformEl.style.rotate = `${round(ov.rotation + turn.rotation, 3)}deg`;
+    transformEl.style.scale = `${round(scaleX, 4)} ${round(scaleY, 4)}`;
+    transformEl.style.transform = `${transformEl.dataset.recorderBaseTransform ?? ""} skew(${round(
+      ov.skewX + turn.skewX,
+      3,
+    )}deg, ${round(ov.skewY + turn.skewY, 3)}deg)`;
+    transformEl.style.transformOrigin = `${ov.originX * 100}% ${ov.originY * 100}%`;
+    transformEl.style.opacity = String(ov.opacity);
+
+    applyRecorderVariantPreview(slotEl, ov.poseSwap);
+  }
+}
+
+function recorderTransformElementForSlot(doc: Document, slotEl: HTMLElement): HTMLElement {
+  const boneId = slotEl.getAttribute("data-character-bound-bone-id");
+  if (!boneId) return slotEl;
+  const boneEl = doc.querySelector<HTMLElement>(
+    `[data-character-bone-id="${cssAttrValue(boneId)}"]`,
+  );
+  if (!boneEl) return slotEl;
+  const hasChildBone = !!doc.querySelector(
+    `[data-character-parent-bone-id="${cssAttrValue(boneId)}"]`,
+  );
+  return hasChildBone ? boneEl : slotEl;
+}
+
+function applyRecorderVariantPreview(slotEl: HTMLElement, poseSwap: string | undefined): void {
+  const partEls = Array.from(slotEl.querySelectorAll<HTMLElement>('[data-character-part="true"]'));
+  if (!poseSwap) {
+    for (const partEl of partEls) {
+      partEl.style.opacity = partEl.dataset.recorderBaseOpacity ?? partEl.style.opacity;
+    }
+    return;
+  }
+  for (const partEl of partEls) {
+    const keys = [
+      partEl.getAttribute("data-character-part-id"),
+      partEl.getAttribute("data-character-variant"),
+      partEl.getAttribute("data-character-pose"),
+      partEl.getAttribute("data-character-viseme"),
+      partEl.getAttribute("data-character-eye-state"),
+    ];
+    partEl.style.opacity = keys.includes(poseSwap) ? "1" : "0";
+  }
+}
+
+function cssAttrValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function recorderPreviewPreset({
+  name,
+  category,
+  duration,
+  keyposes,
+}: {
+  name: string;
+  category: MotionCategory;
+  duration: number;
+  keyposes: RecordedKeypose[];
+}): MotionPreset {
+  return {
+    id: "__recorder_draft_motion",
+    name: name.trim() || "Draft movement",
+    category,
+    duration: Math.max(0.1, duration),
+    loop: false,
+    tracks: [],
+    keyposes: cloneKeyposes(keyposes).sort((a, b) => a.t - b.t),
+    builtin: false,
+    createdAt: 0,
+    updatedAt: 0,
+  };
 }
 
 function SelectionHandles({
@@ -1395,7 +1698,9 @@ function SelectionHandles({
   override,
   scale,
   faceTurnX,
+  faceTurnY,
   canvasWidth,
+  canvasHeight,
   planeRef,
   onChange,
 }: {
@@ -1403,12 +1708,14 @@ function SelectionHandles({
   override: RecorderPartState;
   scale: number;
   faceTurnX: number;
+  faceTurnY: number;
   canvasWidth: number;
+  canvasHeight: number;
   planeRef: React.RefObject<HTMLDivElement | null>;
   onChange: (patch: Partial<RecorderPartState>) => void;
 }) {
   const alphaRect = localAlphaBounds(part);
-  const turn = faceTurnMotionForPart(part, faceTurnX, canvasWidth);
+  const turn = faceTurnMotionForPart(part, faceTurnX, canvasWidth, faceTurnY, canvasHeight);
   const handleSize = 24 / Math.max(0.0001, scale);
   const gap = 18 / Math.max(0.0001, scale);
   const pivotLocal = { x: override.originX * part.width, y: override.originY * part.height };
@@ -1808,9 +2115,9 @@ function sampleSingleMotionKeyframe(
 function sampleKeyposesAtTime(
   keyposes: RecordedKeypose[],
   t: number,
-): { parts: Map<string, RecordedPartOverride>; faceTurnX: number } {
+): { parts: Map<string, RecordedPartOverride>; faceTurnX: number; faceTurnY: number } {
   const out = new Map<string, RecordedPartOverride>();
-  if (keyposes.length === 0) return { parts: out, faceTurnX: 0 };
+  if (keyposes.length === 0) return { parts: out, faceTurnX: 0, faceTurnY: 0 };
   const sorted = expandKeyposesWithAnticipation(keyposes);
   let a = sorted[0];
   let b = sorted[sorted.length - 1];
@@ -1864,7 +2171,104 @@ function sampleKeyposesAtTime(
       poseSwap: (u >= 0.5 ? pb?.poseSwap : pa?.poseSwap) ?? pa?.poseSwap ?? pb?.poseSwap,
     });
   }
-  return { parts: out, faceTurnX: lerp(a.faceTurnX, b.faceTurnX, 0) };
+  return {
+    parts: out,
+    faceTurnX: lerp(a.faceTurnX, b.faceTurnX, 0),
+    faceTurnY: lerp(a.faceTurnY, b.faceTurnY, 0),
+  };
+}
+
+function slotForRecordedOverride(
+  override: RecordedPartOverride,
+  slots: CharacterSlot[],
+  rig: ReturnType<typeof normalizeCharacterRig>,
+): CharacterSlot | undefined {
+  if (override.slotId) return slots.find((slot) => slot.id === override.slotId);
+  if (override.target === "bone" && override.boneId) {
+    const binding = rig.slotBindings
+      .map((candidate) => resolveSlotBinding(rig, candidate.slotId))
+      .find((candidate) => candidate?.effectiveBoneId === override.boneId);
+    if (binding) return slots.find((slot) => slot.id === binding.slotId);
+  }
+  return slots.find((slot) => slot.role === override.partRole);
+}
+
+function clampRecorderOverrideToHost({
+  character,
+  rig,
+  slots,
+  overrides,
+  activePartForSlot,
+  slot,
+  part,
+  override,
+  faceTurnX,
+  faceTurnY,
+}: {
+  character: CharacterPreset;
+  rig: ReturnType<typeof normalizeCharacterRig>;
+  slots: CharacterSlot[];
+  overrides: Map<string, RecorderPartState>;
+  activePartForSlot: (slot: CharacterSlot, poseSwap?: string) => CharacterPart | undefined;
+  slot: CharacterSlot;
+  part: CharacterPart;
+  override: RecorderPartState;
+  faceTurnX: number;
+  faceTurnY: number;
+}): RecorderPartState {
+  const constraint = rig.hostConstraints.find((entry) => entry.slotId === slot.id);
+  if (
+    !constraint?.hostSlotId ||
+    constraint.hostSlotId === slot.id ||
+    constraint.mode === "reach" ||
+    constraint.reachPolicy === "allow"
+  ) {
+    return override;
+  }
+
+  const hostSlot = slots.find((candidate) => candidate.id === constraint.hostSlotId);
+  const hostOverride = hostSlot ? overrides.get(hostSlot.id) : undefined;
+  const hostPart = hostSlot ? activePartForSlot(hostSlot, hostOverride?.poseSwap) : undefined;
+  if (!hostSlot || !hostPart) return override;
+
+  const hostBounds = transformedBounds(
+    hostPart,
+    hostOverride ?? defaultOverride(hostSlot.id, hostPart),
+    faceTurnX,
+    character.canvasWidth,
+    faceTurnY,
+    character.canvasHeight,
+  );
+  const subjectBounds = transformedBounds(
+    part,
+    override,
+    faceTurnX,
+    character.canvasWidth,
+    faceTurnY,
+    character.canvasHeight,
+  );
+  let dx = override.dx;
+  let dy = override.dy;
+
+  if (subjectBounds.right - subjectBounds.left > hostBounds.right - hostBounds.left) {
+    const subjectCenter = (subjectBounds.left + subjectBounds.right) / 2;
+    const hostCenter = (hostBounds.left + hostBounds.right) / 2;
+    dx += hostCenter - subjectCenter;
+  } else {
+    if (subjectBounds.left < hostBounds.left) dx += hostBounds.left - subjectBounds.left;
+    if (subjectBounds.right > hostBounds.right) dx -= subjectBounds.right - hostBounds.right;
+  }
+
+  if (subjectBounds.bottom - subjectBounds.top > hostBounds.bottom - hostBounds.top) {
+    const subjectCenter = (subjectBounds.top + subjectBounds.bottom) / 2;
+    const hostCenter = (hostBounds.top + hostBounds.bottom) / 2;
+    dy += hostCenter - subjectCenter;
+  } else {
+    if (subjectBounds.top < hostBounds.top) dy += hostBounds.top - subjectBounds.top;
+    if (subjectBounds.bottom > hostBounds.bottom) dy -= subjectBounds.bottom - hostBounds.bottom;
+  }
+
+  return { ...override, dx: Math.round(dx), dy: Math.round(dy) };
 }
 
 function defaultOverride(slotId: string, part?: CharacterPart): RecorderPartState {
@@ -1899,6 +2303,8 @@ function recorderOverrideMapsEqual(
 function recorderOverridesEqual(a: RecorderPartState, b: RecorderPartState): boolean {
   return (
     a.slotId === b.slotId &&
+    a.target === b.target &&
+    a.boneId === b.boneId &&
     a.poseSwap === b.poseSwap &&
     Object.is(a.dx, b.dx) &&
     Object.is(a.dy, b.dy) &&
@@ -2011,9 +2417,11 @@ function transformedBounds(
   override: RecorderPartState | undefined,
   faceTurnX: number,
   canvasWidth: number,
+  faceTurnY = 0,
+  canvasHeight = canvasWidth,
 ) {
   const ov = override ?? defaultOverride(part.slotId, part);
-  const turn = faceTurnMotionForPart(part, faceTurnX, canvasWidth);
+  const turn = faceTurnMotionForPart(part, faceTurnX, canvasWidth, faceTurnY, canvasHeight);
   const alphaRect = localAlphaBounds(part);
   const pivot = pivotForPart(part);
   const pivotLocalX = pivot.x - part.x;
@@ -2028,7 +2436,9 @@ function transformedBounds(
 }
 
 function recordedTargetKey(part: RecordedPartOverride) {
-  return part.slotId ?? part.partRole;
+  if (part.target === "bone" && part.boneId) return `bone:${part.boneId}`;
+  if (part.slotId) return `slot:${part.slotId}`;
+  return `role:${part.partRole}`;
 }
 
 function roleLabel(role: PartRole) {

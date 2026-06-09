@@ -61,7 +61,9 @@ export type PartRole =
   | "head"
   | "body"
   | "eye"
+  | "iris"
   | "eyebrow"
+  | "nose"
   | "mouth"
   | "arm"
   | "hand"
@@ -131,6 +133,14 @@ export interface CharacterPart {
   eyeState?: EyeState;
   /** Optional side inferred from filename, e.g. left_eye.svg. */
   side?: "left" | "right" | "center" | "front" | "back";
+  /**
+   * Optional angle availability for this image variant. Undefined means the
+   * image can be shared by every available character angle. Use multiple ids
+   * for assets that intentionally work across angles, such as hands or props.
+   */
+  angleIds?: CharacterAngle[];
+  /** @deprecated Use angleIds for single-angle and shared-angle variants. */
+  angleId?: CharacterAngle;
   mediaId: ID;
   // Transform on the character canvas:
   x: number;
@@ -167,7 +177,9 @@ export interface PartManifest {
   hasLegs: boolean;
   hasFeet: boolean;
   hasEyes: boolean;
+  hasIrises: boolean;
   hasBrows: boolean;
+  hasNose: boolean;
   hasMouth: boolean;
   hasHair: boolean;
   hasAccessories: boolean;
@@ -181,7 +193,9 @@ export const DEFAULT_PART_MANIFEST: PartManifest = {
   hasLegs: true,
   hasFeet: true,
   hasEyes: true,
+  hasIrises: true,
   hasBrows: true,
+  hasNose: true,
   hasMouth: true,
   hasHair: true,
   hasAccessories: true,
@@ -214,6 +228,8 @@ export interface CharacterAngleTransformOverride {
 
 export interface CharacterBone {
   id: ID;
+  /** Shared vocabulary id used to map equivalent bones across angle-specific rigs. */
+  semanticBoneId?: ID;
   name: string;
   role: PartRole | "root";
   side?: CharacterPart["side"];
@@ -230,6 +246,8 @@ export interface CharacterBone {
 
 export interface CharacterSlotBinding {
   slotId: ID;
+  /** Shared vocabulary id used to map equivalent slots across angle-specific rigs. */
+  semanticSlotId?: ID;
   boneId: ID;
   /** Local attachment position relative to the bound bone, in character canvas pixels. */
   x: number;
@@ -238,6 +256,8 @@ export interface CharacterSlotBinding {
   scaleX: number;
   scaleY: number;
   depth: number;
+  /** Angle-local visibility for this slot binding. Undefined = visible. */
+  visible?: boolean;
   /** Active variant part for this binding, mostly used by discrete angle states. */
   partId?: ID;
   angleOverrides?: Partial<
@@ -249,6 +269,18 @@ export interface CharacterSlotBinding {
       }
     >
   >;
+}
+
+export interface CharacterAngleRig {
+  angleId: CharacterAngle;
+  bones: CharacterBone[];
+  slotBindings: CharacterSlotBinding[];
+  drawOrder: ID[];
+  /** Slot hierarchy, variant-gated visibility, render nesting, and inheritance relationships. */
+  slotRelations: CharacterSlotRelation[];
+  /** Host containment for manual drag/bounds metadata only. */
+  hostConstraints: CharacterHostConstraint[];
+  reaches: CharacterReach[];
 }
 
 /**
@@ -269,12 +301,56 @@ export interface CharacterReach {
   rotReach?: { min: number; max: number };
 }
 
+export interface CharacterHostConstraint {
+  id: ID;
+  slotId: ID;
+  hostSlotId?: ID;
+  hostBoneId?: ID;
+  mode: "insideHostMask" | "insideHostBounds" | "reach";
+  reachPolicy?: "scaleToFit" | "cap" | "allow";
+}
+
+export interface CharacterSlotRelation {
+  id: ID;
+  childSlotId: ID;
+  parentRef:
+    | { type: "slot"; id: ID }
+    | { type: "semanticSlot"; id: ID }
+    | { type: "role"; role: PartRole; side?: CharacterPart["side"] }
+    | { type: "bone"; id: ID };
+  relationType:
+    | "attachment"
+    | "containedFeature"
+    | "decorativeChild"
+    | "heldProp"
+    | "clothingCoverage";
+  activeWhenParentVariant?: {
+    keys?: string[];
+    partIds?: ID[];
+  };
+  transformMode: "inheritParent" | "independent";
+  visibilityMode: "withParentSlot" | "withParentVariant" | "independent";
+  renderMode: "nested" | "sibling";
+  clipMode?: "none" | "clipToParentShape" | "clipToMaskSlot";
+  clipSlotId?: ID;
+  characterViewIds?: CharacterAngle[];
+}
+
 export interface CharacterRig {
   version: 1;
   activeAngle: CharacterAngle;
+  /**
+   * Independent concrete rigs by angle. Top-level bones/bindings remain as the
+   * active-angle view for older callers and legacy saves.
+   */
+  angles?: Partial<Record<CharacterAngle, CharacterAngleRig>>;
   bones: CharacterBone[];
   slotBindings: CharacterSlotBinding[];
   drawOrder: ID[];
+  /** Slot hierarchy, variant-gated visibility, render nesting, and inheritance relationships. */
+  slotRelations: CharacterSlotRelation[];
+  /** Host containment for manual drag/bounds metadata only. */
+  hostConstraints: CharacterHostConstraint[];
   reaches: CharacterReach[];
   /** Reserved shape for future mesh/control-point binding support. */
   mesh?: {
@@ -351,6 +427,8 @@ export interface CharacterPreset {
   /** Logical canvas size for the character (e.g. 600 x 900). */
   canvasWidth: number;
   canvasHeight: number;
+  /** Optional set of angle categories this character can present. */
+  angles?: CharacterAngle[];
   parts: CharacterPart[];
   manifest: PartManifest;
   /** @deprecated kept for migration — use `parallax` instead. */
@@ -391,6 +469,8 @@ export interface MotionKeyframe {
 
 /** Per-part transform track inside a reusable motion preset. */
 export interface MotionTrack {
+  /** Optional angle availability. Undefined means this track is angle-agnostic. */
+  angleIds?: CharacterAngle[];
   /** Rig V1 target. Defaults to "slot" for older part/slot tracks. */
   target?: "slot" | "bone" | "camera";
   /** Exact bone target when `target` is "bone". */
@@ -451,6 +531,8 @@ export interface RecordedKeypose {
   parts: RecordedPartOverride[];
   /** Semantic horizontal face-turn control. Resolved to GSAP transforms at playback/export. */
   faceTurnX?: number; // -1..1
+  /** Semantic vertical face-turn control. Resolved to GSAP transforms at playback/export. */
+  faceTurnY?: number; // -1..1
   /** Optional camera state at this keypose. */
   camera?: { dx?: number; dy?: number; zoom?: number };
   /** Procedural anticipation pre-pose inserted before this keypose. */
@@ -469,6 +551,8 @@ export interface MotionPreset {
   id: ID;
   name: string;
   category: MotionCategory;
+  /** Optional angle availability. Undefined means the motion is angle-agnostic. */
+  angleIds?: CharacterAngle[];
   /** Base duration in seconds. */
   duration: number;
   loop: boolean;

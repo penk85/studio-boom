@@ -1,15 +1,23 @@
 import type {
   CharacterAngle,
+  CharacterAngleRig,
   CharacterBone,
+  CharacterHostConstraint,
   CharacterPart,
   CharacterPreset,
   CharacterReach,
   CharacterRig,
   CharacterSlotBinding,
+  CharacterSlotRelation,
   ID,
   PartRole,
 } from "../types";
-import { getPartSlotId, listCharacterSlots, roleLabel } from "./character-utils";
+import {
+  getPartSlotId,
+  listCharacterSlots,
+  partsAvailableForAngle,
+  roleLabel,
+} from "./character-utils";
 import { pivotForPart } from "./alpha-bounds";
 
 export const CHARACTER_ANGLES: CharacterAngle[] = ["front", "3qL", "3qR", "sideL", "sideR"];
@@ -39,53 +47,53 @@ export function normalizeCharacterRig(character: CharacterPreset): CharacterRig 
   const source = character.rig;
   if (!source) return inferred;
 
-  const bonesById = new Map(inferred.bones.map((bone) => [bone.id, bone]));
-  for (const bone of source.bones ?? []) {
-    bonesById.set(bone.id, {
-      ...bone,
-      x: finiteNumber(bone.x, 0),
-      y: finiteNumber(bone.y, 0),
-      rotation: finiteNumber(bone.rotation, 0),
-    });
-  }
-  if (!bonesById.has(ROOT_BONE_ID)) bonesById.set(ROOT_BONE_ID, inferred.bones[0]);
-
-  const bindingsBySlot = new Map(inferred.slotBindings.map((binding) => [binding.slotId, binding]));
-  for (const binding of source.slotBindings ?? []) {
-    bindingsBySlot.set(binding.slotId, {
-      ...binding,
-      boneId: bonesById.has(binding.boneId) ? binding.boneId : ROOT_BONE_ID,
-      x: finiteNumber(binding.x, 0),
-      y: finiteNumber(binding.y, 0),
-      rotation: finiteNumber(binding.rotation, 0),
-      scaleX: positiveNumber(binding.scaleX, 1),
-      scaleY: positiveNumber(binding.scaleY, 1),
-      depth: finiteNumber(binding.depth, 0),
-      partId: binding.partId,
-    });
-  }
-
-  const drawOrder = normalizeDrawOrder(
-    source.drawOrder?.length ? source.drawOrder : inferred.drawOrder,
-    Array.from(bindingsBySlot.keys()),
-  );
-  const reaches = normalizeReaches(source.reaches ?? [], new Set(bindingsBySlot.keys()));
-
+  const angles = normalizeRigAngles(character, source, inferred);
+  const activeAngle = isCharacterAngle(source.activeAngle)
+    ? source.activeAngle
+    : inferred.activeAngle;
+  const active =
+    activeAngleRig(angles, activeAngle) ??
+    firstAngleRig(angles) ??
+    activeAngleRig(inferred.angles, inferred.activeAngle);
   const rig: CharacterRig = {
     version: 1,
-    activeAngle: CHARACTER_ANGLES.includes(source.activeAngle) ? source.activeAngle : "front",
-    bones: Array.from(bonesById.values()),
-    slotBindings: Array.from(bindingsBySlot.values()),
-    drawOrder,
-    reaches,
+    activeAngle: active?.angleId ?? inferred.activeAngle,
+    angles,
+    bones: active?.bones ?? inferred.bones,
+    slotBindings: active?.slotBindings ?? inferred.slotBindings,
+    drawOrder: active?.drawOrder ?? inferred.drawOrder,
+    slotRelations: active?.slotRelations ?? inferred.slotRelations,
+    hostConstraints: active?.hostConstraints ?? inferred.hostConstraints,
+    reaches: active?.reaches ?? inferred.reaches,
     mesh: source.mesh?.version === 1 ? source.mesh : undefined,
   };
   const validation = validateCharacterRig(rig);
   return validation.ok ? rig : inferred;
 }
 
-export function buildDefaultRig(character: CharacterPreset): CharacterRig {
-  const slots = listCharacterSlots(character.parts);
+export function buildDefaultRig(
+  character: CharacterPreset,
+  activeAngle: CharacterAngle = availableCharacterAngles(character)[0] ?? "front",
+): CharacterRig {
+  const angles = Object.fromEntries(
+    availableCharacterAngles(character).map((angle) => [angle, buildDefaultAngleRig(character, angle)]),
+  ) as Partial<Record<CharacterAngle, CharacterAngleRig>>;
+  const active = activeAngleRig(angles, activeAngle) ?? activeAngleRig(angles, "front") ?? firstAngleRig(angles);
+  return {
+    version: 1,
+    activeAngle: active?.angleId ?? "front",
+    angles,
+    bones: active?.bones ?? [],
+    slotBindings: active?.slotBindings ?? [],
+    drawOrder: active?.drawOrder ?? [],
+    slotRelations: active?.slotRelations ?? [],
+    hostConstraints: active?.hostConstraints ?? [],
+    reaches: active?.reaches ?? [],
+  };
+}
+
+function buildDefaultAngleRig(character: CharacterPreset, angle: CharacterAngle): CharacterAngleRig {
+  const slots = listCharacterSlots(partsAvailableForAngle(character.parts, angle));
   const reps = new Map(slots.map((slot) => [slot.id, representativePart(slot)] as const));
   const slotIdByRoleSide = new Map<string, string>();
   const slotIdByPartId = new Map<string, string>();
@@ -97,6 +105,7 @@ export function buildDefaultRig(character: CharacterPreset): CharacterRig {
 
   const root: CharacterBone = {
     id: ROOT_BONE_ID,
+    semanticBoneId: ROOT_BONE_ID,
     name: "Root",
     role: "root",
     x: 0,
@@ -119,6 +128,7 @@ export function buildDefaultRig(character: CharacterPreset): CharacterRig {
     const length = Math.round(Math.hypot(part.width, part.height) * 0.5);
     boneBySlot.set(slot.id, {
       id: `bone:${slot.id}`,
+      semanticBoneId: `bone:${slot.id}`,
       name: slot.name ?? roleLabel(slot.role),
       role: slot.role,
       side: part.side,
@@ -139,6 +149,7 @@ export function buildDefaultRig(character: CharacterPreset): CharacterRig {
     const pivot = pivotForPart(part);
     bindings.push({
       slotId: slot.id,
+      semanticSlotId: slot.id,
       boneId: bone.id,
       x: Math.round(part.x - pivot.x),
       y: Math.round(part.y - pivot.y),
@@ -156,15 +167,209 @@ export function buildDefaultRig(character: CharacterPreset): CharacterRig {
         Math.min(...a.parts.map((p) => p.zIndex)) - Math.min(...b.parts.map((p) => p.zIndex)),
     )
     .map((slot) => slot.id);
+  const slotRelations = inferSlotRelations(slots, slotIdByRoleSide, slotIdByPartId);
+  const hostConstraints = inferHostConstraints(slots, slotIdByRoleSide);
 
   return {
-    version: 1,
-    activeAngle: "front",
+    angleId: angle,
     bones: [root, ...Array.from(boneBySlot.values())],
     slotBindings: bindings,
     drawOrder,
+    slotRelations,
+    hostConstraints,
     reaches: [],
   };
+}
+
+export function availableCharacterAngles(character: CharacterPreset): CharacterAngle[] {
+  const seen = new Set<CharacterAngle>();
+  const add = (value: unknown) => {
+    if (isCharacterAngle(value)) seen.add(value);
+  };
+  for (const angle of character.angles ?? []) add(angle);
+  for (const angle of Object.keys(character.rig?.angles ?? {})) add(angle);
+  add(character.rig?.activeAngle);
+  for (const part of character.parts) {
+    add(part.angleId);
+    for (const angle of part.angleIds ?? []) add(angle);
+  }
+  if (seen.size === 0) seen.add("front");
+  return CHARACTER_ANGLES.filter((angle) => seen.has(angle));
+}
+
+function normalizeRigAngles(
+  character: CharacterPreset,
+  source: CharacterRig,
+  inferred: CharacterRig,
+): Partial<Record<CharacterAngle, CharacterAngleRig>> {
+  const out: Partial<Record<CharacterAngle, CharacterAngleRig>> = {};
+  const angles = availableCharacterAngles({ ...character, rig: source });
+  for (const angle of angles) {
+    const inferredAngle = activeAngleRig(inferred.angles, angle) ?? rigViewToAngleRig(inferred, angle);
+    const sourceAngle = source.angles?.[angle] ?? legacyRigViewToAngleRig(source, angle);
+    out[angle] = normalizeAngleRig(inferredAngle, sourceAngle);
+  }
+  return out;
+}
+
+function normalizeAngleRig(
+  inferred: CharacterAngleRig,
+  source: Partial<CharacterAngleRig> | undefined,
+): CharacterAngleRig {
+  if (!source) return inferred;
+  const bonesById = new Map(inferred.bones.map((bone) => [bone.id, bone]));
+  for (const bone of source.bones ?? []) {
+    bonesById.set(bone.id, {
+      ...bone,
+      x: finiteNumber(bone.x, 0),
+      y: finiteNumber(bone.y, 0),
+      rotation: finiteNumber(bone.rotation, 0),
+    });
+  }
+  if (!bonesById.has(ROOT_BONE_ID)) bonesById.set(ROOT_BONE_ID, inferred.bones[0]);
+
+  const bindingsBySlot = new Map(inferred.slotBindings.map((binding) => [binding.slotId, binding]));
+  for (const binding of source.slotBindings ?? []) {
+    bindingsBySlot.set(binding.slotId, {
+      ...binding,
+      boneId: bonesById.has(binding.boneId) ? binding.boneId : ROOT_BONE_ID,
+      x: finiteNumber(binding.x, 0),
+      y: finiteNumber(binding.y, 0),
+      rotation: finiteNumber(binding.rotation, 0),
+      scaleX: positiveNumber(binding.scaleX, 1),
+      scaleY: positiveNumber(binding.scaleY, 1),
+      depth: finiteNumber(binding.depth, 0),
+      visible: binding.visible,
+      partId: binding.partId,
+    });
+  }
+
+  const bindingSlots = new Set(bindingsBySlot.keys());
+  const boneIds = new Set(bonesById.keys());
+  return {
+    angleId: isCharacterAngle(source.angleId) ? source.angleId : inferred.angleId,
+    bones: Array.from(bonesById.values()).filter((bone): bone is CharacterBone => !!bone),
+    slotBindings: Array.from(bindingsBySlot.values()),
+    drawOrder: normalizeDrawOrder(
+      source.drawOrder?.length ? source.drawOrder : inferred.drawOrder,
+      Array.from(bindingSlots),
+    ),
+    slotRelations: normalizeSlotRelations(
+      source.slotRelations ?? inferred.slotRelations,
+      bindingSlots,
+      boneIds,
+    ),
+    hostConstraints: normalizeHostConstraints(
+      source.hostConstraints ?? inferred.hostConstraints,
+      bindingSlots,
+      boneIds,
+    ),
+    reaches: normalizeReaches(source.reaches ?? inferred.reaches, bindingSlots),
+  };
+}
+
+function activeAngleRig(
+  angles: Partial<Record<CharacterAngle, CharacterAngleRig>> | undefined,
+  angle: CharacterAngle,
+): CharacterAngleRig | undefined {
+  return angles?.[angle];
+}
+
+function angleRigView(rig: CharacterRig, angle: CharacterAngle = rig.activeAngle): CharacterAngleRig {
+  if (angle === rig.activeAngle) return legacyRigViewToAngleRig(rig, angle);
+  return activeAngleRig(rig.angles, angle) ?? legacyRigViewToAngleRig(rig, angle);
+}
+
+function firstAngleRig(
+  angles: Partial<Record<CharacterAngle, CharacterAngleRig>> | undefined,
+): CharacterAngleRig | undefined {
+  return Object.values(angles ?? {})[0];
+}
+
+function rigViewToAngleRig(rig: CharacterRig, angle: CharacterAngle): CharacterAngleRig {
+  return {
+    angleId: angle,
+    bones: rig.bones ?? [],
+    slotBindings: rig.slotBindings ?? [],
+    drawOrder: rig.drawOrder ?? [],
+    slotRelations: rig.slotRelations ?? [],
+    hostConstraints: rig.hostConstraints ?? [],
+    reaches: rig.reaches ?? [],
+  };
+}
+
+function legacyRigViewToAngleRig(
+  rig: Partial<CharacterRig>,
+  angle: CharacterAngle,
+): CharacterAngleRig {
+  return {
+    angleId: angle,
+    bones: (rig.bones ?? []).map((bone) => {
+      const override = bone.angleOverrides?.[angle];
+      return override
+        ? {
+            ...bone,
+            x: override.x ?? bone.x,
+            y: override.y ?? bone.y,
+            rotation: override.rotation ?? bone.rotation,
+            depth: override.depth ?? bone.depth,
+          }
+        : bone;
+    }),
+    slotBindings: (rig.slotBindings ?? []).map((binding) => {
+      const override = binding.angleOverrides?.[angle];
+      return override
+        ? {
+            ...binding,
+            boneId: override.boneId ?? binding.boneId,
+            x: override.x ?? binding.x,
+            y: override.y ?? binding.y,
+            rotation: override.rotation ?? binding.rotation,
+            scaleX: override.scaleX ?? binding.scaleX,
+            scaleY: override.scaleY ?? binding.scaleY,
+            depth: override.depth ?? binding.depth,
+            visible: override.visible ?? binding.visible,
+            partId: override.partId ?? binding.partId,
+          }
+        : binding;
+    }),
+    drawOrder: rig.drawOrder ?? [],
+    slotRelations: rig.slotRelations ?? [],
+    hostConstraints: rig.hostConstraints ?? [],
+    reaches: rig.reaches ?? [],
+  };
+}
+
+function withUpdatedAngleRig(
+  rig: CharacterRig,
+  angle: CharacterAngle,
+  update: (angleRig: CharacterAngleRig) => CharacterAngleRig,
+): CharacterRig {
+  const angles: Partial<Record<CharacterAngle, CharacterAngleRig>> = {
+    ...(rig.angles ?? {}),
+  };
+  const sourceAngle = angleRigView(rig, angle);
+  const nextAngle = update(sourceAngle);
+  angles[angle] = nextAngle;
+  const active = angle === rig.activeAngle ? nextAngle : activeAngleRig(angles, rig.activeAngle);
+  return {
+    ...rig,
+    angles,
+    ...(active
+      ? {
+          bones: active.bones,
+          slotBindings: active.slotBindings,
+          drawOrder: active.drawOrder,
+          slotRelations: active.slotRelations,
+          hostConstraints: active.hostConstraints,
+          reaches: active.reaches,
+        }
+      : {}),
+  };
+}
+
+function isCharacterAngle(value: unknown): value is CharacterAngle {
+  return typeof value === "string" && (CHARACTER_ANGLES as string[]).includes(value);
 }
 
 export function validateCharacterRig(rig: CharacterRig): { ok: boolean; errors: string[] } {
@@ -195,6 +400,24 @@ export function validateCharacterRig(rig: CharacterRig): { ok: boolean; errors: 
       errors.push(`Reach "${reach.id}" references missing slot "${reach.slotId}".`);
     }
   }
+  validateSlotRelations(rig.slotRelations ?? [], bindingSlots, boneIds, "Rig", errors);
+  for (const constraint of rig.hostConstraints ?? []) {
+    if (!bindingSlots.has(constraint.slotId)) {
+      errors.push(
+        `Host constraint "${constraint.id}" references missing slot "${constraint.slotId}".`,
+      );
+    }
+    if (constraint.hostSlotId && !bindingSlots.has(constraint.hostSlotId)) {
+      errors.push(
+        `Host constraint "${constraint.id}" references missing host slot "${constraint.hostSlotId}".`,
+      );
+    }
+    if (constraint.hostBoneId && !boneIds.has(constraint.hostBoneId)) {
+      errors.push(
+        `Host constraint "${constraint.id}" references missing host bone "${constraint.hostBoneId}".`,
+      );
+    }
+  }
   for (const bone of rig.bones) {
     const seen = new Set<string>();
     let current: CharacterBone | undefined = bone;
@@ -207,26 +430,146 @@ export function validateCharacterRig(rig: CharacterRig): { ok: boolean; errors: 
       current = rig.bones.find((candidate) => candidate.id === current?.parentId);
     }
   }
+  for (const [angle, angleRig] of Object.entries(rig.angles ?? {})) {
+    if (!isCharacterAngle(angle)) {
+      errors.push(`Unknown angle "${angle}".`);
+      continue;
+    }
+    if (!angleRig) continue;
+    validateAngleRigGraph(angleRig, `Angle "${angle}"`, errors);
+  }
   return { ok: errors.length === 0, errors };
+}
+
+function validateAngleRigGraph(
+  angleRig: CharacterAngleRig,
+  label: string,
+  errors: string[],
+): void {
+  const boneIds = new Set<string>();
+  for (const bone of angleRig.bones) {
+    if (!bone.id) errors.push(`${label}: bone is missing id.`);
+    if (boneIds.has(bone.id)) errors.push(`${label}: duplicate bone id "${bone.id}".`);
+    boneIds.add(bone.id);
+  }
+  for (const bone of angleRig.bones) {
+    if (bone.parentId && !boneIds.has(bone.parentId)) {
+      errors.push(`${label}: bone "${bone.id}" references missing parent "${bone.parentId}".`);
+    }
+  }
+  const bindingSlots = new Set<string>();
+  for (const binding of angleRig.slotBindings) {
+    if (!boneIds.has(binding.boneId)) {
+      errors.push(`${label}: slot "${binding.slotId}" references missing bone "${binding.boneId}".`);
+    }
+    if (bindingSlots.has(binding.slotId)) {
+      errors.push(`${label}: duplicate binding for slot "${binding.slotId}".`);
+    }
+    bindingSlots.add(binding.slotId);
+  }
+  for (const reach of angleRig.reaches) {
+    if (!bindingSlots.has(reach.slotId)) {
+      errors.push(`${label}: reach "${reach.id}" references missing slot "${reach.slotId}".`);
+    }
+  }
+  validateSlotRelations(angleRig.slotRelations ?? [], bindingSlots, boneIds, label, errors);
+  for (const constraint of angleRig.hostConstraints ?? []) {
+    if (!bindingSlots.has(constraint.slotId)) {
+      errors.push(`${label}: host constraint "${constraint.id}" references missing slot "${constraint.slotId}".`);
+    }
+    if (constraint.hostSlotId && !bindingSlots.has(constraint.hostSlotId)) {
+      errors.push(
+        `${label}: host constraint "${constraint.id}" references missing host slot "${constraint.hostSlotId}".`,
+      );
+    }
+    if (constraint.hostBoneId && !boneIds.has(constraint.hostBoneId)) {
+      errors.push(
+        `${label}: host constraint "${constraint.id}" references missing host bone "${constraint.hostBoneId}".`,
+      );
+    }
+  }
+  for (const bone of angleRig.bones) {
+    const seen = new Set<string>();
+    let current: CharacterBone | undefined = bone;
+    while (current?.parentId) {
+      if (seen.has(current.id)) {
+        errors.push(`${label}: bone "${bone.id}" is part of a parent cycle.`);
+        break;
+      }
+      seen.add(current.id);
+      current = angleRig.bones.find((candidate) => candidate.id === current?.parentId);
+    }
+  }
+}
+
+function validateSlotRelations(
+  relations: CharacterSlotRelation[],
+  slotIds: Set<string>,
+  boneIds: Set<string>,
+  label: string,
+  errors: string[],
+): void {
+  const parentByChild = new Map<string, string>();
+  for (const relation of relations ?? []) {
+    if (!relation.id) errors.push(`${label}: slot relation is missing id.`);
+    if (!slotIds.has(relation.childSlotId)) {
+      errors.push(
+        `${label}: slot relation "${relation.id}" references missing child slot "${relation.childSlotId}".`,
+      );
+    }
+    if (relation.parentRef.type === "slot" || relation.parentRef.type === "semanticSlot") {
+      if (!slotIds.has(relation.parentRef.id)) {
+        errors.push(
+          `${label}: slot relation "${relation.id}" references missing parent slot "${relation.parentRef.id}".`,
+        );
+      } else if (relation.parentRef.id === relation.childSlotId) {
+        errors.push(`${label}: slot relation "${relation.id}" cannot parent a slot to itself.`);
+      } else {
+        parentByChild.set(relation.childSlotId, relation.parentRef.id);
+      }
+    }
+    if (relation.parentRef.type === "bone" && !boneIds.has(relation.parentRef.id)) {
+      errors.push(
+        `${label}: slot relation "${relation.id}" references missing parent bone "${relation.parentRef.id}".`,
+      );
+    }
+    if (relation.clipMode === "clipToMaskSlot" && relation.clipSlotId && !slotIds.has(relation.clipSlotId)) {
+      errors.push(
+        `${label}: slot relation "${relation.id}" references missing clip slot "${relation.clipSlotId}".`,
+      );
+    }
+  }
+  for (const childSlotId of parentByChild.keys()) {
+    const seen = new Set<string>();
+    let current: string | undefined = childSlotId;
+    while (current) {
+      if (seen.has(current)) {
+        errors.push(`${label}: slot relation cycle includes "${childSlotId}".`);
+        break;
+      }
+      seen.add(current);
+      current = parentByChild.get(current);
+    }
+  }
 }
 
 export function computeBoneWorldTransforms(
   rig: CharacterRig,
   angle: CharacterAngle = rig.activeAngle,
 ): Map<string, BoneWorldTransform> {
-  const bonesById = new Map(rig.bones.map((bone) => [bone.id, bone]));
+  const angleRig = angleRigView(rig, angle);
+  const bonesById = new Map(angleRig.bones.map((bone) => [bone.id, bone]));
   const out = new Map<string, BoneWorldTransform>();
   const resolving = new Set<string>();
   const resolve = (bone: CharacterBone): BoneWorldTransform => {
     const cached = out.get(bone.id);
     if (cached) return cached;
     resolving.add(bone.id);
-    const override = bone.angleOverrides?.[angle];
     const local = {
-      x: override?.x ?? bone.x,
-      y: override?.y ?? bone.y,
-      rotation: override?.rotation ?? bone.rotation,
-      depth: override?.depth ?? bone.depth ?? 0,
+      x: bone.x,
+      y: bone.y,
+      rotation: bone.rotation,
+      depth: bone.depth ?? 0,
     };
     const parent = bone.parentId ? bonesById.get(bone.parentId) : undefined;
     if (!parent) {
@@ -255,7 +598,7 @@ export function computeBoneWorldTransforms(
     resolving.delete(bone.id);
     return world;
   };
-  for (const bone of rig.bones) resolve(bone);
+  for (const bone of angleRig.bones) resolve(bone);
   return out;
 }
 
@@ -264,23 +607,15 @@ export function resolveSlotBinding(
   slotId: string,
   angle: CharacterAngle = rig.activeAngle,
 ): ResolvedSlotBinding | undefined {
-  const binding = rig.slotBindings.find((candidate) => candidate.slotId === slotId);
+  const angleRig = angleRigView(rig, angle);
+  const binding = angleRig.slotBindings.find((candidate) => candidate.slotId === slotId);
   if (!binding) return undefined;
-  const override = binding.angleOverrides?.[angle];
   return {
     ...binding,
-    boneId: override?.boneId ?? binding.boneId,
-    effectiveBoneId: override?.boneId ?? binding.boneId,
-    x: override?.x ?? binding.x,
-    y: override?.y ?? binding.y,
-    rotation: override?.rotation ?? binding.rotation,
-    scaleX: override?.scaleX ?? binding.scaleX,
-    scaleY: override?.scaleY ?? binding.scaleY,
-    partId: override?.partId ?? binding.partId,
-    effectivePartId: override?.partId ?? binding.partId,
-    effectiveDepth: override?.depth ?? binding.depth,
-    depth: override?.depth ?? binding.depth,
-    visible: override?.visible ?? true,
+    effectiveBoneId: binding.boneId,
+    effectivePartId: binding.partId,
+    effectiveDepth: binding.depth,
+    visible: binding.visible ?? true,
   };
 }
 
@@ -293,8 +628,13 @@ export function activeDepthForSlot(
   return resolveSlotBinding(rig, slotId, angle)?.effectiveDepth ?? fallbackDepth;
 }
 
-export function slotDrawIndex(rig: CharacterRig, slotId: string, fallback = 0): number {
-  const index = rig.drawOrder.indexOf(slotId);
+export function slotDrawIndex(
+  rig: CharacterRig,
+  slotId: string,
+  fallback = 0,
+  angle: CharacterAngle = rig.activeAngle,
+): number {
+  const index = angleRigView(rig, angle).drawOrder.indexOf(slotId);
   return index >= 0 ? index : fallback;
 }
 
@@ -305,27 +645,13 @@ export function moveSlotBinding(
   dy: number,
   angle: CharacterAngle = rig.activeAngle,
 ): CharacterRig {
-  return {
-    ...rig,
-    slotBindings: rig.slotBindings.map((binding) => {
+  return withUpdatedAngleRig(rig, angle, (angleRig) => ({
+    ...angleRig,
+    slotBindings: angleRig.slotBindings.map((binding) => {
       if (binding.slotId !== slotId) return binding;
-      if (angle !== "front") {
-        const override = binding.angleOverrides?.[angle] ?? {};
-        return {
-          ...binding,
-          angleOverrides: {
-            ...binding.angleOverrides,
-            [angle]: {
-              ...override,
-              x: (override.x ?? binding.x) + dx,
-              y: (override.y ?? binding.y) + dy,
-            },
-          },
-        };
-      }
       return { ...binding, x: binding.x + dx, y: binding.y + dy };
     }),
-  };
+  }));
 }
 
 export function moveBone(
@@ -335,27 +661,13 @@ export function moveBone(
   dy: number,
   angle: CharacterAngle = rig.activeAngle,
 ): CharacterRig {
-  return {
-    ...rig,
-    bones: rig.bones.map((bone) => {
+  return withUpdatedAngleRig(rig, angle, (angleRig) => ({
+    ...angleRig,
+    bones: angleRig.bones.map((bone) => {
       if (bone.id !== boneId) return bone;
-      if (angle !== "front") {
-        const override = bone.angleOverrides?.[angle] ?? {};
-        return {
-          ...bone,
-          angleOverrides: {
-            ...bone.angleOverrides,
-            [angle]: {
-              ...override,
-              x: (override.x ?? bone.x) + dx,
-              y: (override.y ?? bone.y) + dy,
-            },
-          },
-        };
-      }
       return { ...bone, x: bone.x + dx, y: bone.y + dy };
     }),
-  };
+  }));
 }
 
 export function moveBoneForSlot(
@@ -375,23 +687,13 @@ export function bindSlotPartToAngle(
   partId: string,
   angle: CharacterAngle = rig.activeAngle,
 ): CharacterRig {
-  return {
-    ...rig,
-    slotBindings: rig.slotBindings.map((binding) => {
+  return withUpdatedAngleRig(rig, angle, (angleRig) => ({
+    ...angleRig,
+    slotBindings: angleRig.slotBindings.map((binding) => {
       if (binding.slotId !== slotId) return binding;
-      if (angle !== "front") {
-        const override = binding.angleOverrides?.[angle] ?? {};
-        return {
-          ...binding,
-          angleOverrides: {
-            ...binding.angleOverrides,
-            [angle]: { ...override, partId, visible: true },
-          },
-        };
-      }
-      return { ...binding, partId };
+      return { ...binding, partId, visible: true };
     }),
-  };
+  }));
 }
 
 export function setSlotDepth(
@@ -400,23 +702,13 @@ export function setSlotDepth(
   depth: number,
   angle: CharacterAngle = rig.activeAngle,
 ): CharacterRig {
-  return {
-    ...rig,
-    slotBindings: rig.slotBindings.map((binding) => {
+  return withUpdatedAngleRig(rig, angle, (angleRig) => ({
+    ...angleRig,
+    slotBindings: angleRig.slotBindings.map((binding) => {
       if (binding.slotId !== slotId) return binding;
-      if (angle !== "front") {
-        const override = binding.angleOverrides?.[angle] ?? {};
-        return {
-          ...binding,
-          angleOverrides: {
-            ...binding.angleOverrides,
-            [angle]: { ...override, depth },
-          },
-        };
-      }
       return { ...binding, depth };
     }),
-  };
+  }));
 }
 
 export function setBoneDepth(
@@ -425,23 +717,25 @@ export function setBoneDepth(
   depth: number,
   angle: CharacterAngle = rig.activeAngle,
 ): CharacterRig {
-  return {
-    ...rig,
-    bones: rig.bones.map((bone) => {
+  return withUpdatedAngleRig(rig, angle, (angleRig) => ({
+    ...angleRig,
+    bones: angleRig.bones.map((bone) => {
       if (bone.id !== boneId) return bone;
-      if (angle !== "front") {
-        const override = bone.angleOverrides?.[angle] ?? {};
-        return {
-          ...bone,
-          angleOverrides: {
-            ...bone.angleOverrides,
-            [angle]: { ...override, depth },
-          },
-        };
-      }
       return { ...bone, depth };
     }),
-  };
+  }));
+}
+
+export function setBoneTransform(
+  rig: CharacterRig,
+  boneId: string,
+  patch: Partial<Pick<CharacterBone, "x" | "y" | "rotation" | "depth">>,
+  angle: CharacterAngle = rig.activeAngle,
+): CharacterRig {
+  return withUpdatedAngleRig(rig, angle, (angleRig) => ({
+    ...angleRig,
+    bones: angleRig.bones.map((bone) => (bone.id === boneId ? { ...bone, ...patch } : bone)),
+  }));
 }
 
 /** Create or update a slot's reach record. */
@@ -449,12 +743,15 @@ function upsertSlotReach(
   rig: CharacterRig,
   slotId: ID,
   patch: Partial<Pick<CharacterReach, "reach" | "rotReach">>,
+  angle: CharacterAngle = rig.activeAngle,
 ): CharacterRig {
-  const existing = rig.reaches.find((entry) => entry.slotId === slotId);
-  const base: CharacterReach = existing ?? { id: `reach:${slotId}`, slotId };
-  const next: CharacterReach = { ...base, ...patch };
-  const others = rig.reaches.filter((entry) => entry.slotId !== slotId);
-  return { ...rig, reaches: [...others, next] };
+  return withUpdatedAngleRig(rig, angle, (angleRig) => {
+    const existing = angleRig.reaches.find((entry) => entry.slotId === slotId);
+    const base: CharacterReach = existing ?? { id: `reach:${slotId}`, slotId };
+    const next: CharacterReach = { ...base, ...patch };
+    const others = angleRig.reaches.filter((entry) => entry.slotId !== slotId);
+    return { ...angleRig, reaches: [...others, next] };
+  });
 }
 
 /**
@@ -465,10 +762,11 @@ export function setSlotReach(
   rig: CharacterRig,
   slotId: ID,
   reach: { x: number; y: number }[] | undefined,
+  angle: CharacterAngle = rig.activeAngle,
 ): CharacterRig {
   return upsertSlotReach(rig, slotId, {
     reach: reach && reach.length >= 3 ? reach : undefined,
-  });
+  }, angle);
 }
 
 /** Set or clear a slot's rotation reach — how far it may twist from rest, in degrees. */
@@ -476,12 +774,44 @@ export function setSlotRotReach(
   rig: CharacterRig,
   slotId: ID,
   rotReach: { min: number; max: number } | undefined,
+  angle: CharacterAngle = rig.activeAngle,
 ): CharacterRig {
   const next =
     rotReach && (rotReach.min !== 0 || rotReach.max !== 0)
       ? { min: Math.round(Math.min(0, rotReach.min)), max: Math.round(Math.max(0, rotReach.max)) }
       : undefined;
-  return upsertSlotReach(rig, slotId, { rotReach: next });
+  return upsertSlotReach(rig, slotId, { rotReach: next }, angle);
+}
+
+/** Create, update, or clear a slot's host containment constraint. */
+export function setSlotHostConstraint(
+  rig: CharacterRig,
+  slotId: ID,
+  hostSlotId: ID | undefined,
+  mode: CharacterHostConstraint["mode"] = "insideHostMask",
+  reachPolicy: NonNullable<CharacterHostConstraint["reachPolicy"]> = "scaleToFit",
+  angle: CharacterAngle = rig.activeAngle,
+): CharacterRig {
+  return withUpdatedAngleRig(rig, angle, (angleRig) => {
+    const others = (angleRig.hostConstraints ?? []).filter((entry) => entry.slotId !== slotId);
+    if (!hostSlotId) return { ...angleRig, hostConstraints: others };
+    const existing = (angleRig.hostConstraints ?? []).find((entry) => entry.slotId === slotId);
+    const hostBoneId = angleRig.slotBindings.find((binding) => binding.slotId === hostSlotId)?.boneId;
+    return {
+      ...angleRig,
+      hostConstraints: [
+        ...others,
+        {
+          id: existing?.id || `host:${slotId}`,
+          slotId,
+          hostSlotId,
+          hostBoneId,
+          mode,
+          reachPolicy,
+        },
+      ],
+    };
+  });
 }
 
 type Point = { x: number; y: number };
@@ -558,11 +888,12 @@ export function slotIdsForBoneSubtree(
   boneId: string,
   angle: CharacterAngle = rig.activeAngle,
 ): Set<string> {
+  const angleRig = angleRigView(rig, angle);
   const boneIds = new Set<string>([boneId]);
   let changed = true;
   while (changed) {
     changed = false;
-    for (const bone of rig.bones) {
+    for (const bone of angleRig.bones) {
       if (boneIds.has(bone.id)) continue;
       if (bone.parentId && boneIds.has(bone.parentId)) {
         boneIds.add(bone.id);
@@ -571,7 +902,7 @@ export function slotIdsForBoneSubtree(
     }
   }
   return new Set(
-    rig.slotBindings
+    angleRig.slotBindings
       .map((binding) => resolveSlotBinding(rig, binding.slotId, angle))
       .filter((binding): binding is ResolvedSlotBinding => !!binding)
       .filter((binding) => boneIds.has(binding.effectiveBoneId))
@@ -628,9 +959,13 @@ Rules:
 - Do not output Spine JSON or renderer code.
 - Bones must form an acyclic FK hierarchy.
 - slotBindings attach slots to bones using local offsets.
+- slotRelations describe slot hierarchy, inheritance, variant-gated visibility, and render nesting.
+- hostConstraints keep slots inside host art while editing movement/bounds only.
 - depth is parallax/2.5D only; drawOrder controls visual stacking.
 - reaches[] limit how far a slot may drift/twist from its parent (movement guides).
 - Angles are discrete in V1: front, 3qL, 3qR, sideL, sideR.
+- Each rig.angles[angleId] entry is its own concrete skeleton, slot binding set, draw order, and reach set.
+- Use part angleIds to mark which image variants belong to each angle. Omit angleIds only for art that is intentionally shared across angles.
 - The final character must remain HyperFrames-compatible.
 
 Character:
@@ -655,6 +990,8 @@ ${JSON.stringify(
       alphaBounds: part.alphaBounds,
       zIndex: part.zIndex,
       depth: part.depth,
+      angleId: part.angleId,
+      angleIds: part.angleIds,
     })),
     currentRig: rig,
   },
@@ -690,8 +1027,15 @@ function parentSlotIdFor(
       return slotIdByRoleSide.get(roleSideKey("body"));
     case "eye":
     case "eyebrow":
+    case "nose":
     case "mouth":
       return slotIdByRoleSide.get(roleSideKey("head"));
+    case "iris":
+      return (
+        slotIdByRoleSide.get(roleSideKey("eye", sameSide)) ??
+        slotIdByRoleSide.get(roleSideKey("eye")) ??
+        slotIdByRoleSide.get(roleSideKey("head"))
+      );
     case "hair":
       return slotIdByRoleSide.get(roleSideKey("head")) ?? slotIdByRoleSide.get(roleSideKey("body"));
     case "arm":
@@ -715,6 +1059,81 @@ function parentSlotIdFor(
   }
 }
 
+function inferHostConstraints(slots: SlotLike[], slotIdByRoleSide: Map<string, string>) {
+  const headSlotId = slotIdByRoleSide.get(roleSideKey("head"));
+  if (!headSlotId) return [];
+  const constrainedRoles = new Set<PartRole>(["eye", "iris", "eyebrow", "nose", "mouth"]);
+  return slots
+    .filter((slot) => constrainedRoles.has(slot.role) && slot.id !== headSlotId)
+    .map(
+      (slot): CharacterHostConstraint => {
+        const sameSide = slot.parts.find((part) => part.side === "left" || part.side === "right")
+          ?.side;
+        const hostSlotId =
+          slot.role === "iris"
+            ? (slotIdByRoleSide.get(roleSideKey("eye", sameSide)) ??
+              slotIdByRoleSide.get(roleSideKey("eye")) ??
+              headSlotId)
+            : headSlotId;
+        return {
+          id: `host:${slot.id}`,
+          slotId: slot.id,
+          hostSlotId,
+          hostBoneId: `bone:${hostSlotId}`,
+          mode: "insideHostMask",
+          reachPolicy: "scaleToFit",
+        };
+      },
+    );
+}
+
+function inferSlotRelations(
+  slots: SlotLike[],
+  slotIdByRoleSide: Map<string, string>,
+  slotIdByPartId: Map<string, string>,
+): CharacterSlotRelation[] {
+  return slots.flatMap((slot): CharacterSlotRelation[] => {
+    const part = representativePart(slot);
+    if (!part) return [];
+    const parentSlotId = parentSlotIdFor(slot, part, slotIdByRoleSide, slotIdByPartId);
+    if (!parentSlotId || parentSlotId === slot.id) return [];
+    const isIris = slot.role === "iris";
+    return [
+      {
+        id: `relation:${slot.id}`,
+        childSlotId: slot.id,
+        parentRef: { type: "slot", id: parentSlotId },
+        relationType: relationTypeForSlot(slot.role),
+        activeWhenParentVariant: isIris ? { keys: ["open"] } : undefined,
+        transformMode: "inheritParent",
+        visibilityMode: isIris ? "withParentVariant" : "withParentSlot",
+        renderMode: isIris ? "nested" : "sibling",
+        clipMode: "none",
+      },
+    ];
+  });
+}
+
+function relationTypeForSlot(role: PartRole): CharacterSlotRelation["relationType"] {
+  switch (role) {
+    case "eye":
+    case "iris":
+    case "eyebrow":
+    case "nose":
+    case "mouth":
+      return "containedFeature";
+    case "hand":
+    case "foot":
+    case "hair":
+    case "accessory":
+      return "attachment";
+    case "custom":
+      return "heldProp";
+    default:
+      return "attachment";
+  }
+}
+
 function normalizeDrawOrder(drawOrder: string[], slotIds: string[]): string[] {
   const seen = new Set<string>();
   const out = drawOrder.filter((slotId) => {
@@ -734,6 +1153,102 @@ function normalizeReaches(reaches: CharacterReach[], slotIds: Set<string>): Char
   for (const entry of reaches) {
     if (!entry?.slotId || !slotIds.has(entry.slotId)) continue;
     out.set(entry.slotId, { ...entry, id: entry.id || `reach:${entry.slotId}` });
+  }
+  return Array.from(out.values());
+}
+
+function normalizeSlotRelations(
+  relations: CharacterSlotRelation[],
+  slotIds: Set<string>,
+  boneIds: Set<string>,
+): CharacterSlotRelation[] {
+  const out = new Map<string, CharacterSlotRelation>();
+  for (const entry of relations ?? []) {
+    if (!entry?.childSlotId || !slotIds.has(entry.childSlotId)) continue;
+    if (entry.parentRef?.type === "slot" || entry.parentRef?.type === "semanticSlot") {
+      if (!slotIds.has(entry.parentRef.id) || entry.parentRef.id === entry.childSlotId) continue;
+    } else if (entry.parentRef?.type === "bone") {
+      if (!boneIds.has(entry.parentRef.id)) continue;
+    } else if (entry.parentRef?.type !== "role") {
+      continue;
+    }
+    out.set(entry.childSlotId, {
+      id: entry.id || `relation:${entry.childSlotId}`,
+      childSlotId: entry.childSlotId,
+      parentRef: entry.parentRef,
+      relationType: normalizeRelationType(entry.relationType),
+      activeWhenParentVariant: normalizeVariantGate(entry.activeWhenParentVariant),
+      transformMode: entry.transformMode === "independent" ? "independent" : "inheritParent",
+      visibilityMode: ["withParentSlot", "withParentVariant", "independent"].includes(
+        entry.visibilityMode,
+      )
+        ? entry.visibilityMode
+        : "withParentSlot",
+      renderMode: entry.renderMode === "nested" ? "nested" : "sibling",
+      clipMode: ["none", "clipToParentShape", "clipToMaskSlot"].includes(entry.clipMode ?? "none")
+        ? (entry.clipMode ?? "none")
+        : "none",
+      clipSlotId:
+        entry.clipSlotId && slotIds.has(entry.clipSlotId) ? entry.clipSlotId : undefined,
+      characterViewIds: entry.characterViewIds?.filter(isCharacterAngle),
+    });
+  }
+  return Array.from(out.values());
+}
+
+function normalizeRelationType(
+  value: CharacterSlotRelation["relationType"] | undefined,
+): CharacterSlotRelation["relationType"] {
+  return [
+    "attachment",
+    "containedFeature",
+    "decorativeChild",
+    "heldProp",
+    "clothingCoverage",
+  ].includes(value ?? "")
+    ? (value as CharacterSlotRelation["relationType"])
+    : "attachment";
+}
+
+function normalizeVariantGate(
+  gate: CharacterSlotRelation["activeWhenParentVariant"] | undefined,
+): CharacterSlotRelation["activeWhenParentVariant"] | undefined {
+  const keys = gate?.keys?.filter((value): value is string => typeof value === "string");
+  const partIds = gate?.partIds?.filter((value): value is string => typeof value === "string");
+  if (!keys?.length && !partIds?.length) return undefined;
+  return { keys, partIds };
+}
+
+/** Keep one host constraint per known slot, dropping broken references. */
+function normalizeHostConstraints(
+  constraints: CharacterHostConstraint[],
+  slotIds: Set<string>,
+  boneIds: Set<string>,
+): CharacterHostConstraint[] {
+  const out = new Map<string, CharacterHostConstraint>();
+  for (const entry of constraints ?? []) {
+    if (!entry?.slotId || !slotIds.has(entry.slotId)) continue;
+    const hostSlotId =
+      entry.hostSlotId && slotIds.has(entry.hostSlotId) && entry.hostSlotId !== entry.slotId
+        ? entry.hostSlotId
+        : undefined;
+    const hostBoneId =
+      entry.hostBoneId && boneIds.has(entry.hostBoneId) ? entry.hostBoneId : undefined;
+    if (!hostSlotId && !hostBoneId) continue;
+    const mode = ["insideHostMask", "insideHostBounds", "reach"].includes(entry.mode)
+      ? entry.mode
+      : "insideHostMask";
+    const reachPolicy = ["scaleToFit", "cap", "allow"].includes(entry.reachPolicy ?? "")
+      ? entry.reachPolicy
+      : "scaleToFit";
+    out.set(entry.slotId, {
+      id: entry.id || `host:${entry.slotId}`,
+      slotId: entry.slotId,
+      hostSlotId,
+      hostBoneId,
+      mode,
+      reachPolicy,
+    });
   }
   return Array.from(out.values());
 }

@@ -40,6 +40,8 @@ export interface ComposedMotions {
   headDirectionBlend?: { from: HeadDirection; to: HeadDirection; u: number };
   /** Semantic horizontal face turn, resolved to plain per-part transforms by render/export. */
   faceTurnX: number;
+  /** Semantic vertical face turn, resolved to plain per-part transforms by render/export. */
+  faceTurnY: number;
   /** Layers (slotIds / roles) an active movement allows past the character's reach (no clamp). */
   unclampedLayers: Set<string>;
 }
@@ -230,6 +232,7 @@ export function composeMotionsAt(
   },
   tInClip: number,
   presets: Map<string, MotionPreset>,
+  activeAngle?: HeadDirection,
 ): ComposedMotions {
   const out: ComposedMotions = {
     perPart: new Map(),
@@ -237,6 +240,7 @@ export function composeMotionsAt(
     poseSwap: new Map(),
     camera: { dx: 0, dy: 0, zoom: 1 },
     faceTurnX: 0,
+    faceTurnY: 0,
     unclampedLayers: new Set(),
   };
   const motions: AppliedMotion[] = clip.motions ?? [];
@@ -245,10 +249,12 @@ export function composeMotionsAt(
     tInClip,
     presets,
     clip.duration,
+    activeAngle,
   );
   for (const a of motions) {
     const preset = presets.get(a.presetId);
     if (!preset) continue;
+    if (!motionAppliesToAngle(preset, activeAngle)) continue;
     if (
       EXCLUSIVE_MOTION_CATEGORIES.has(preset.category) &&
       activeExclusiveMotionIds.get(preset.category) !== a.id
@@ -280,6 +286,7 @@ export function composeMotionsAt(
     }
 
     for (const track of preset.tracks) {
+      if (!trackAppliesToAngle(track, activeAngle)) continue;
       const sample = applyIntensity(sampleTrack(track.keyframes, u), intensity);
       if (track.partRole === "__camera") {
         out.camera.dx += sample.dx;
@@ -306,11 +313,13 @@ function activeExclusiveMotionsAt(
   tInClip: number,
   presets: Map<string, MotionPreset>,
   clipDuration: number,
+  activeAngle?: HeadDirection,
 ): Map<string, string> {
   const active = new Map<string, { id: string; occurrenceStart: number; index: number }>();
   motions.forEach((motion, index) => {
     const preset = presets.get(motion.presetId);
     if (!preset || !EXCLUSIVE_MOTION_CATEGORIES.has(preset.category)) return;
+    if (!motionAppliesToAngle(preset, activeAngle)) return;
     const occurrence = generateMotionOccurrences(motion, preset, clipDuration).find(
       (entry) => tInClip >= entry.start && tInClip <= entry.end,
     );
@@ -325,6 +334,20 @@ function activeExclusiveMotionsAt(
     }
   });
   return new Map(Array.from(active.entries()).map(([category, entry]) => [category, entry.id]));
+}
+
+export function motionAppliesToAngle(
+  preset: MotionPreset,
+  activeAngle: HeadDirection | undefined,
+): boolean {
+  return !activeAngle || !preset.angleIds?.length || preset.angleIds.includes(activeAngle);
+}
+
+function trackAppliesToAngle(
+  track: { angleIds?: HeadDirection[] },
+  activeAngle: HeadDirection | undefined,
+): boolean {
+  return !activeAngle || !track.angleIds?.length || track.angleIds.includes(activeAngle);
 }
 
 /** Linearly interpolate between recorded keyposes and merge into ComposedMotions. */
@@ -365,6 +388,7 @@ function applyKeyposes(
   out.camera.dy += cdy * intensity;
   out.camera.zoom *= 1 + (cz - 1) * intensity;
   out.faceTurnX += lerp(a.faceTurnX, b.faceTurnX, 0) * intensity;
+  out.faceTurnY += lerp(a.faceTurnY, b.faceTurnY, 0) * intensity;
 
   const targets = new Set<string>();
   for (const p of a.parts) targets.add(overrideTargetKey(p));
@@ -444,6 +468,7 @@ export function expandKeyposesWithAnticipation(keyposes: RecordedKeypose[]): Rec
           invertOverrideForAnticipation(part, Math.max(0, Math.min(1, spec.amount))),
         ),
         faceTurnX: keypose.faceTurnX === undefined ? undefined : -keypose.faceTurnX * spec.amount,
+        faceTurnY: keypose.faceTurnY === undefined ? undefined : -keypose.faceTurnY * spec.amount,
         camera: keypose.camera
           ? {
               dx: keypose.camera.dx === undefined ? undefined : -keypose.camera.dx * spec.amount,

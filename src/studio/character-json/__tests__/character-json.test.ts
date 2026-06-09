@@ -32,6 +32,28 @@ function makeCharacter(): CharacterPreset {
         height: 360,
         zIndex: 10,
       }),
+      makePart("head", "head-media", {
+        id: "head",
+        slotId: "slot:head",
+        slotName: "Head",
+        x: 370,
+        y: 250,
+        width: 160,
+        height: 160,
+        zIndex: 20,
+      }),
+      makePart("eye", "eye-media", {
+        id: "left-eye",
+        slotId: "slot:left-eye",
+        slotName: "Left eye",
+        side: "left",
+        eyeState: "open",
+        x: 410,
+        y: 306,
+        width: 40,
+        height: 24,
+        zIndex: 25,
+      }),
       makePart("hand", "hand-open-media", {
         id: "right-hand-open",
         slotId: "slot:rightHand",
@@ -118,8 +140,81 @@ describe("character JSON architecture", () => {
       role: "custom",
       semanticType: "prop",
     });
+    expect(
+      angleRig.hostConstraints?.find((constraint) => constraint.slotId === "slot:left-eye"),
+    ).toMatchObject({
+      hostSlotId: "slot:head",
+      mode: "insideHostMask",
+    });
+    expect(
+      angleRig.slotRelations?.find((relation) => relation.childSlotId === "slot:left-eye"),
+    ).toMatchObject({
+      parentRef: { type: "slot", id: "slot:head" },
+      relationType: "containedFeature",
+      renderMode: "sibling",
+    });
     expect(validateCharacterJson(characterJson).ok).toBe(true);
     expect(validateAngleRigJson(angleRig).ok).toBe(true);
+  });
+
+  it("exports available angles and filters angle rig variants by part angle tags", () => {
+    const character: CharacterPreset = {
+      ...createBlankCharacter("Turner"),
+      id: "turner",
+      angles: ["front", "sideL"],
+      canvasWidth: 900,
+      canvasHeight: 1200,
+      parts: [
+        makePart("body", "body-front-media", {
+          id: "body-front",
+          slotId: "slot:torso",
+          slotName: "Torso",
+          angleIds: ["front"],
+          x: 340,
+          y: 420,
+          width: 220,
+          height: 360,
+          zIndex: 10,
+        }),
+        makePart("body", "body-side-media", {
+          id: "body-side",
+          slotId: "slot:torso",
+          slotName: "Torso",
+          angleIds: ["sideL"],
+          x: 360,
+          y: 420,
+          width: 180,
+          height: 360,
+          zIndex: 10,
+        }),
+        makePart("hand", "shared-hand-media", {
+          id: "shared-hand",
+          slotId: "slot:rightHand",
+          slotName: "Right hand",
+          side: "right",
+          pose: "openPalm",
+          x: 580,
+          y: 540,
+          width: 80,
+          height: 90,
+          zIndex: 30,
+        }),
+      ],
+    };
+
+    const characterJson = characterJsonFromPreset(character);
+    const sideRig = angleRigJsonFromPreset(character, "sideL");
+
+    expect(characterJson.angles).toEqual(["front", "sideL"]);
+    expect(
+      characterJson.semanticSlots.find((slot) => slot.id === "slot:rightHand")?.angleIds,
+    ).toEqual(["front", "sideL"]);
+    expect(
+      sideRig.slots.find((slot) => slot.id === "slot:torso")?.variants.map((variant) => variant.id),
+    ).toEqual(["body-side"]);
+    expect(
+      sideRig.slots.find((slot) => slot.id === "slot:rightHand")?.variants.map((variant) => variant.id),
+    ).toEqual(["openPalm"]);
   });
 
   it("validates angle rig references before generated HTML is touched", () => {
@@ -185,6 +280,21 @@ describe("character JSON architecture", () => {
     expect(validation.ok).toBe(false);
     expect(validation.errors.map((issue) => issue.message).join("\n")).toContain(
       'angle "sideL" has no mapped slot',
+    );
+  });
+
+  it("fails clearly when a motion is scoped to another angle", () => {
+    const angleRig = angleRigJsonFromPreset(makeCharacter(), "sideL");
+    const motion = {
+      ...motionJsonFromPreset(makeMotion()),
+      angleIds: ["front" as const],
+    };
+
+    const validation = validateMotionJsonForAngle(motion, angleRig);
+
+    expect(validation.ok).toBe(false);
+    expect(validation.errors.map((issue) => issue.message).join("\n")).toContain(
+      'not available for angle "sideL"',
     );
   });
 
@@ -271,6 +381,43 @@ describe("character JSON architecture", () => {
         ?.flatMap((keypose) => keypose.parts)
         .some((part) => part.slotId === "slot:rightHand" && part.poseSwap === "closedFist"),
     ).toBe(true);
+  });
+
+  it("normalizes unknown AI motion categories to custom", () => {
+    const angleRig = angleRigJsonFromPreset(makeCharacter(), "front");
+    const result = motionJsonToPreset(
+      {
+        kind: "studioBoom.motion.v1",
+        schemaVersion: 1,
+        suggestedFilename: "forward-walk.motion.json",
+        id: "motion:forward-walk",
+        name: "Forward Walk",
+        category: "locomotion" as MotionPreset["category"],
+        duration: 1,
+        loop: true,
+        targetSpace: "parentRelative",
+        tracks: [
+          {
+            id: "track:body",
+            target: { kind: "semanticBone", id: "bone:slot:rightHand" },
+            channel: "transform",
+            keyframes: [
+              { t: 0, dy: 0 },
+              { t: 0.5, dy: -8 },
+              { t: 1, dy: 0 },
+            ],
+          },
+        ],
+      },
+      angleRig,
+      { id: "preset:forward-walk" },
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(result.preset?.category).toBe("custom");
+    expect(result.warnings.join("\n")).toContain(
+      'Unknown motion category "locomotion" will be imported as "custom"',
+    );
   });
 
   it("rejects AI motion JSON with invalid slot variants before preset creation", () => {

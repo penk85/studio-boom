@@ -59,6 +59,7 @@ import {
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
 import {
   CHARACTER_ANGLES,
+  availableCharacterAngles,
   buildDefaultRig,
   normalizeCharacterRig,
   setBoneDepth,
@@ -452,11 +453,18 @@ function CharacterMotionTab({
 function CharacterRigPresetPanel({ character }: { character: CharacterPreset }) {
   const registerCharacterPreset = useStudio((s) => s.registerCharacterPreset);
   const rig = normalizeCharacterRig(character);
+  const angles = availableCharacterAngles(character);
   const rootBone = rig.bones.find((bone) => bone.role === "root") ?? rig.bones[0];
   const firstBinding = rig.slotBindings[0];
   const saveCharacterPatch = (patch: Partial<CharacterPreset>) => {
     const next: CharacterPreset = { ...character, ...patch, updatedAt: Date.now() };
     void db.characters.put(next).then(() => registerCharacterPreset(next));
+  };
+  const selectAngle = (activeAngle: CharacterAngle) => {
+    const nextAngles = CHARACTER_ANGLES.filter(
+      (angle) => angle === activeAngle || angles.includes(angle),
+    );
+    saveCharacterPatch({ angles: nextAngles, rig: { ...rig, activeAngle } });
   };
 
   return (
@@ -465,16 +473,13 @@ function CharacterRigPresetPanel({ character }: { character: CharacterPreset }) 
         <Field label="Angle">
           <select
             value={rig.activeAngle}
-            onChange={(event) =>
-              saveCharacterPatch({
-                rig: { ...rig, activeAngle: event.target.value as CharacterAngle },
-              })
-            }
+            onChange={(event) => selectAngle(event.target.value as CharacterAngle)}
             className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
           >
             {CHARACTER_ANGLES.map((angle) => (
               <option key={angle} value={angle}>
                 {angle}
+                {angles.includes(angle) ? "" : " (add)"}
               </option>
             ))}
           </select>
@@ -743,6 +748,8 @@ function MotionInspector({
   // first/last point and pushed users to the "Delete motion" button by accident.
   const canRemoveCheckpoint =
     selectedMotion && selectedCheckpoint && selectedMotion.checkpoints.length > 2;
+  const firstMotionCheckpoint = selectedMotion?.checkpoints[0];
+  const lastMotionCheckpoint = selectedMotion?.checkpoints[selectedMotion.checkpoints.length - 1];
   const addPointToMotion = (motion: EditorClip["motionSteps"][number]) => {
     const time = pointTimeForMotion(motion, localPlayheadTime);
     const selection = onAddCheckpoint(motion.id, time);
@@ -910,8 +917,48 @@ function MotionInspector({
               />
             </Field>
             <Field label="Span">
-              <div className="rounded border border-border bg-input px-2 py-1 text-foreground">
-                {selectedMotion.startTime.toFixed(1)}-{selectedMotion.endTime.toFixed(1)}s
+              <div className="grid grid-cols-2 gap-1">
+                <NumberInput
+                  value={selectedMotion.startTime}
+                  min={0}
+                  step={0.05}
+                  onChange={(value) => {
+                    if (!firstMotionCheckpoint || !lastMotionCheckpoint) return;
+                    const nextTime = Math.max(0, Math.min(lastMotionCheckpoint.time - 0.05, value));
+                    const selection = onMoveCheckpoint(
+                      clip.id,
+                      selectedMotion.id,
+                      firstMotionCheckpoint.id,
+                      nextTime,
+                    );
+                    if (selection) {
+                      onSelectKeyframe(selection);
+                      onSeek(nextTime);
+                    }
+                  }}
+                />
+                <NumberInput
+                  value={selectedMotion.endTime}
+                  min={0}
+                  step={0.05}
+                  onChange={(value) => {
+                    if (!firstMotionCheckpoint || !lastMotionCheckpoint) return;
+                    const nextTime = Math.max(
+                      firstMotionCheckpoint.time + 0.05,
+                      Math.min(clip.duration, value),
+                    );
+                    const selection = onMoveCheckpoint(
+                      clip.id,
+                      selectedMotion.id,
+                      lastMotionCheckpoint.id,
+                      nextTime,
+                    );
+                    if (selection) {
+                      onSelectKeyframe(selection);
+                      onSeek(nextTime);
+                    }
+                  }}
+                />
               </div>
             </Field>
             <Field label="Feel">

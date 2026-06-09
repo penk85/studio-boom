@@ -5,11 +5,11 @@ import type {
   MotionJsonTrack,
   MotionTargetJson,
 } from "../character-json/schema";
+import { normalizeMotionCategoryForImport } from "../character-json/schema";
 import { motionJsonFromPreset, motionJsonFilename, slugifyName } from "../character-json/normalize";
 import { resolveMotionTarget, validateMotionJsonForAngle } from "../character-json/validate";
 import type {
   ID,
-  MotionCategory,
   MotionKeyframe,
   MotionPreset,
   PartRole,
@@ -48,10 +48,12 @@ export function motionJsonToPreset(
   const duration = Math.max(0.1, motion.duration);
   const now = options.updatedAt ?? Date.now();
   const keyposes = keyposesFromMotionJson(motion, angleRig, duration);
+  const category = normalizeMotionCategoryForImport(motion.category).category;
   const preset: MotionPreset = {
     id: options.id,
     name: motion.name.trim() || "AI motion",
-    category: motion.category as MotionCategory,
+    category,
+    angleIds: motion.angleIds,
     duration,
     loop: motion.loop,
     tracks: [],

@@ -9,6 +9,7 @@ import {
   moveBoneForSlot,
   moveSlotBinding,
   normalizeCharacterRig,
+  setSlotHostConstraint,
   setSlotReach,
   setSlotRotReach,
   validateCharacterRig,
@@ -47,6 +48,16 @@ function makeRigCharacter(): CharacterPreset {
         width: 36,
         height: 24,
         zIndex: 8,
+      }),
+      makePart("iris", "iris-media", {
+        id: "left-iris",
+        slotId: "slot:left-iris",
+        side: "left",
+        x: 173,
+        y: 112,
+        width: 10,
+        height: 10,
+        zIndex: 9,
       }),
       makePart("leg", "leg-media", {
         id: "left-leg",
@@ -135,6 +146,47 @@ describe("CharacterRig V1", () => {
     );
   });
 
+  it("normalizes angle rigs as independent concrete skeletons", () => {
+    const character = { ...makeRigCharacter(), angles: ["front", "sideL"] as CharacterPreset["angles"] };
+    const base = buildDefaultRig(character);
+    const front = base.angles?.front;
+    expect(front).toBeTruthy();
+    if (!front) return;
+    const side = {
+      ...front,
+      angleId: "sideL" as const,
+      bones: front.bones.map((bone) =>
+        bone.id === "bone:slot:left-foot"
+          ? {
+              ...bone,
+              id: "sideL:bone:left-foot",
+              semanticBoneId: "bone:slot:left-foot",
+              x: bone.x + 32,
+            }
+          : bone,
+      ),
+      slotBindings: front.slotBindings.map((binding) =>
+        binding.slotId === "slot:left-foot"
+          ? { ...binding, boneId: "sideL:bone:left-foot" }
+          : binding,
+      ),
+    };
+
+    const normalized = normalizeCharacterRig({
+      ...character,
+      rig: { ...base, activeAngle: "sideL", angles: { front, sideL: side } },
+    });
+
+    expect(normalized.bones.some((bone) => bone.id === "sideL:bone:left-foot")).toBe(true);
+    expect(normalized.angles?.front?.bones.some((bone) => bone.id === "sideL:bone:left-foot")).toBe(
+      false,
+    );
+    expect(
+      normalized.angles?.sideL?.bones.find((bone) => bone.id === "sideL:bone:left-foot")
+        ?.semanticBoneId,
+    ).toBe("bone:slot:left-foot");
+  });
+
   it("starts with no reaches and stores/clears a traced reach per slot", () => {
     const base = buildDefaultRig(makeRigCharacter());
     expect(base.reaches).toEqual([]);
@@ -154,6 +206,59 @@ describe("CharacterRig V1", () => {
     // Fewer than three points clears it.
     const cleared = setSlotReach(withReach, "slot:left-eye", [{ x: 0, y: 0 }]);
     expect(cleared.reaches.find((r) => r.slotId === "slot:left-eye")?.reach).toBeUndefined();
+  });
+
+  it("infers and normalizes host constraints for face slots", () => {
+    const base = buildDefaultRig(makeRigCharacter());
+    const eyeRelation = base.slotRelations.find(
+      (relation) => relation.childSlotId === "slot:left-eye",
+    );
+    const irisRelation = base.slotRelations.find(
+      (relation) => relation.childSlotId === "slot:left-iris",
+    );
+    const eyeHost = base.hostConstraints.find(
+      (constraint) => constraint.slotId === "slot:left-eye",
+    );
+
+    expect(eyeRelation).toMatchObject({
+      parentRef: { type: "slot", id: "role:head" },
+      relationType: "containedFeature",
+      visibilityMode: "withParentSlot",
+      renderMode: "sibling",
+    });
+    expect(irisRelation).toMatchObject({
+      parentRef: { type: "slot", id: "slot:left-eye" },
+      relationType: "containedFeature",
+      activeWhenParentVariant: { keys: ["open"] },
+      visibilityMode: "withParentVariant",
+      renderMode: "nested",
+    });
+    expect(eyeHost).toMatchObject({
+      hostSlotId: "role:head",
+      hostBoneId: "bone:role:head",
+      mode: "insideHostMask",
+      reachPolicy: "scaleToFit",
+    });
+    expect(base.hostConstraints.find((constraint) => constraint.slotId === "slot:left-iris"))
+      .toMatchObject({
+        hostSlotId: "slot:left-eye",
+        hostBoneId: "bone:slot:left-eye",
+        mode: "insideHostMask",
+        reachPolicy: "scaleToFit",
+      });
+
+    const cleared = setSlotHostConstraint(base, "slot:left-eye", undefined);
+    expect(
+      cleared.hostConstraints.some((constraint) => constraint.slotId === "slot:left-eye"),
+    ).toBe(false);
+
+    const normalized = normalizeCharacterRig({ ...makeRigCharacter(), rig: base });
+    expect(
+      normalized.hostConstraints.find((constraint) => constraint.slotId === "slot:left-eye"),
+    ).toMatchObject({ hostSlotId: "role:head" });
+    expect(
+      normalized.slotRelations.find((relation) => relation.childSlotId === "slot:left-iris"),
+    ).toMatchObject({ parentRef: { type: "slot", id: "slot:left-eye" } });
   });
 
   it("stores a rotation reach with min ≤ 0 ≤ max and clears an empty one", () => {

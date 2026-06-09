@@ -204,6 +204,15 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const stageEditableClipRef = useRef<EditorClip | null>(null);
   const clipIdsRef = useRef<Set<string>>(new Set());
   const moveHandleRef = useRef<HTMLButtonElement>(null);
+  // Last geometry computed while NOT dragging. Reused (frozen) for the duration of a
+  // drag so the selection chrome and motion paths don't flicker — see `stageGeometry`.
+  const lastStageGeometryRef = useRef<StageGeometry | null>(null);
+  // Set by a base-property stage commit (move/resize/rotate/nudge) once the change has
+  // already been applied to the live player iframe. The resolve effect consumes it to skip
+  // re-bundling and swapping `srcdoc`, which would reload the iframe (black flash) only to
+  // re-render what the live DOM already shows. Keyframe commits do NOT set this — they
+  // change the GSAP timeline and need a real reload to take effect on play/seek.
+  const suppressReloadRef = useRef(false);
   const [resolvedHtml, setResolvedHtml] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [drag, setDrag] = useState<StageDrag>(null);
@@ -241,15 +250,23 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     return selectedKeyframedClip ?? stageEditableClip;
   }, [drag, selectedKeyframedClip, stageEditableClip]);
   const stageGeometry = (() => {
+    // Freeze geometry during a drag: the iframe never moves or resizes mid-gesture,
+    // and re-reading its bounding rect on every drag frame intermittently returns a
+    // 0-size rect (while the browser repaints the iframe), which collapses geometry to
+    // the letterboxed fallback for a frame and makes the selection chrome / motion
+    // paths flicker. Reusing the pre-drag geometry also drops a forced reflow per frame.
+    if (drag && lastStageGeometryRef.current) return lastStageGeometryRef.current;
     if (!project || !stageShellRef.current) return null;
     const iframe = resolveIframe(playerRef.current);
     const iframeRect = iframe?.getBoundingClientRect();
-    return getStageGeometry(
+    const geometry = getStageGeometry(
       stageShellRef.current,
       project.hf.width,
       project.hf.height,
       iframeRect && iframeRect.width > 0 && iframeRect.height > 0 ? iframeRect : null,
     );
+    lastStageGeometryRef.current = geometry;
+    return geometry;
   })();
   const motionPaths =
     stageEditableClip && stageGeometry
@@ -356,7 +373,12 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       const preview = getMovePreview(currentDrag, delta, !event.altKey);
       const nextX = preview.previewX;
       const nextY = preview.previewY;
-      commitElementPosition(iframeRef.current, currentDrag.clipId, nextX, nextY);
+      const appliedLive = commitElementPosition(
+        iframeRef.current,
+        currentDrag.clipId,
+        nextX,
+        nextY,
+      );
       // Prefer the drag's own keyframeId (set when starting from a path dot)
       // so we route correctly even if selectKeyframe hasn't propagated yet.
       const keyframeTarget = currentDrag.keyframeId
@@ -371,6 +393,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           updateClipKeyframe(keyframeTarget.selection, { x: nextX, y: nextY });
         }
       } else if (moved) {
+        if (appliedLive) suppressReloadRef.current = true;
         updateClip(currentDrag.clipId, { x: nextX, y: nextY });
       }
       clearDrag();
@@ -459,16 +482,30 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   // Resolve asset URLs and serve the complete preview HTML through srcdoc.
   // Blob URLs cannot be passed through `src`: the player appends shader query
   // params to `src`, which changes object URLs and breaks loading.
+  //
+  // Keyed on `project.hf` (the rendered film), NOT the whole `project`. Setting a
+  // new `srcdoc` fully reloads the iframe document (black flash + GSAP re-boot), so
+  // we must only do it when the rendered output actually changed. `saveProject`
+  // bumps `project` with `{ ...p, updatedAt }` but shares the same `hf` reference, and
+  // selection/keyframe-selection live outside `project` entirely — none of those touch
+  // `hf`, so none of them reload. The latest `project` is read at resolve time.
+  const projectHf = project?.hf;
   useEffect(() => {
-    if (!project) {
+    const current = useStudio.getState().project;
+    if (!current) {
       setResolvedHtml(null);
       setPreviewError(null);
       return;
     }
     if (repairTimelineLanes()) return;
+    // A base-property stage edit already updated the live iframe; don't reload it.
+    if (suppressReloadRef.current) {
+      suppressReloadRef.current = false;
+      return;
+    }
     let alive = true;
     setPreviewError(null);
-    void resolvePreviewHtml(project)
+    void resolvePreviewHtml(current)
       .then((html) => {
         if (!alive) return;
         setResolvedHtml(html);
@@ -481,7 +518,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     return () => {
       alive = false;
     };
-  }, [project, repairTimelineLanes]);
+  }, [projectHf, repairTimelineLanes]);
 
   useEffect(() => {
     if (!resolvedHtml) return;
@@ -580,6 +617,11 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       );
       return;
     }
+    // Suspend click-rect polling while dragging: it re-reads iframe rects and re-renders
+    // the hit-test overlay every 200ms, competing with the gesture for layout/paint while
+    // hit-testing is already paused under pointer capture. It resumes (and re-measures)
+    // once the drag commits and the iframe settles.
+    if (drag) return;
 
     let stopped = false;
     const measure = () => {
@@ -593,7 +635,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       window.cancelAnimationFrame(frame);
       window.clearInterval(interval);
     };
-  }, [measureRenderedClickRects, resolvedHtml]);
+  }, [drag, measureRenderedClickRects, resolvedHtml]);
 
   useEffect(() => {
     if (!resolvedHtml || isPlaying) return;
@@ -778,7 +820,11 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           event.shiftKey,
         );
         const finalRotation = roundRotationDegrees(preview.previewRotation);
-        commitElementRotation(iframeRef.current, currentDrag.clipId, finalRotation);
+        const appliedLive = commitElementRotation(
+          iframeRef.current,
+          currentDrag.clipId,
+          finalRotation,
+        );
         const keyframeTarget = getStageKeyframeTarget(
           currentDrag.clipId,
           "rotation",
@@ -788,6 +834,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         if (keyframeTarget) {
           updateClipKeyframe(keyframeTarget.selection, { rotation: finalRotation });
         } else {
+          if (appliedLive) suppressReloadRef.current = true;
           updateClip(currentDrag.clipId, { rotation: finalRotation });
         }
         setRenderedElementRect(null);
@@ -827,7 +874,8 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           scale: scaleForKeyframedResize(keyframeTarget.clip, finalClip),
         });
       } else {
-        commitElementRect(iframeRef.current, currentDrag.clipId, finalClip);
+        const appliedLive = commitElementRect(iframeRef.current, currentDrag.clipId, finalClip);
+        if (appliedLive) suppressReloadRef.current = true;
         updateClip(currentDrag.clipId, {
           x: finalClip.x,
           y: finalClip.y,
@@ -1134,7 +1182,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         : null;
       const nextX = Math.round((keyframedState?.x ?? currentClip.x) + delta.x);
       const nextY = Math.round((keyframedState?.y ?? currentClip.y) + delta.y);
-      commitElementPosition(iframeRef.current, currentClip.id, nextX, nextY);
+      const appliedLive = commitElementPosition(iframeRef.current, currentClip.id, nextX, nextY);
       if (keyframeTarget) {
         updateClipKeyframe(keyframeTarget.selection, { x: nextX, y: nextY }, { history: false });
         const nextProject = useStudio.getState().project;
@@ -1143,6 +1191,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           : null;
         stageEditableClipRef.current = nextClip ?? currentClip;
       } else {
+        if (appliedLive) suppressReloadRef.current = true;
         updateClip(currentClip.id, { x: nextX, y: nextY }, { history: false });
         stageEditableClipRef.current = { ...currentClip, x: nextX, y: nextY };
       }

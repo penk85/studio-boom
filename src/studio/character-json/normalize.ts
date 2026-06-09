@@ -1,6 +1,18 @@
-import type { CharacterPart, CharacterPreset, MotionPreset, MotionTrack, PartRole } from "../types";
-import { listCharacterSlots, roleLabel } from "../character/character-utils";
-import { normalizeCharacterRig } from "../character/rig";
+import type {
+  CharacterBone,
+  CharacterPart,
+  CharacterPreset,
+  MotionPreset,
+  MotionTrack,
+  PartRole,
+} from "../types";
+import {
+  listCharacterSlots,
+  partAvailableForAngle,
+  partsAvailableForAngle,
+  roleLabel,
+} from "../character/character-utils";
+import { availableCharacterAngles, normalizeCharacterRig } from "../character/rig";
 import {
   ANGLE_RIG_JSON_KIND,
   CHARACTER_JSON_KIND,
@@ -47,7 +59,8 @@ export function aiInFilename(name: string, suffix: string): string {
 export function characterJsonFromPreset(character: CharacterPreset): CharacterJson {
   const rig = normalizeCharacterRig(character);
   const slots = listCharacterSlots(character.parts);
-  const angles = Array.from(new Set(["front", rig.activeAngle] as const));
+  const angles = availableCharacterAngles(character);
+  const semanticBones = uniqueSemanticBones(rig);
   return {
     kind: CHARACTER_JSON_KIND,
     schemaVersion: CHARACTER_JSON_SCHEMA_VERSION,
@@ -56,8 +69,8 @@ export function characterJsonFromPreset(character: CharacterPreset): CharacterJs
     name: character.name,
     defaultAngle: rig.activeAngle,
     angles,
-    semanticBones: rig.bones.map((bone) => ({
-      id: bone.id,
+    semanticBones: semanticBones.map((bone) => ({
+      id: bone.semanticBoneId ?? bone.id,
       name: bone.name,
       role: bone.role,
       aliases: semanticAliases(bone.name, bone.role),
@@ -73,6 +86,9 @@ export function characterJsonFromPreset(character: CharacterPreset): CharacterJs
         name: slot.name ?? roleLabel(slot.role),
         role: slot.role,
         semanticType: semanticTypeForSlot(slot.role, slot.name ?? representative?.name ?? ""),
+        angleIds: angles.filter((angle) =>
+          slot.parts.some((part) => partAvailableForAngle(part, angle)),
+        ),
         aliases: semanticAliases(
           slot.name ?? representative?.name ?? roleLabel(slot.role),
           slot.role,
@@ -93,7 +109,7 @@ export function angleRigJsonFromPreset(
     ...character,
     rig: { ...normalizeCharacterRig(character), activeAngle: angleId },
   });
-  const slots = listCharacterSlots(character.parts);
+  const slots = listCharacterSlots(partsAvailableForAngle(character.parts, rig.activeAngle));
   const variantsBySlot = new Map(slots.map((slot) => [slot.id, variantsForParts(slot.parts)]));
   const slotById = new Map(slots.map((slot) => [slot.id, slot]));
   return {
@@ -105,7 +121,7 @@ export function angleRigJsonFromPreset(
     canvas: { width: character.canvasWidth, height: character.canvasHeight },
     bones: rig.bones.map((bone) => ({
       id: bone.id,
-      semanticBoneId: bone.id,
+      semanticBoneId: bone.semanticBoneId ?? bone.id,
       name: bone.name,
       role: bone.role,
       parentId: bone.parentId ?? null,
@@ -118,7 +134,8 @@ export function angleRigJsonFromPreset(
     })),
     slots: slots.map((slot) => ({
       id: slot.id,
-      semanticSlotId: slot.id,
+      semanticSlotId:
+        rig.slotBindings.find((binding) => binding.slotId === slot.id)?.semanticSlotId ?? slot.id,
       name: slot.name ?? roleLabel(slot.role),
       role: slot.role,
       variants: variantsBySlot.get(slot.id) ?? [],
@@ -139,6 +156,8 @@ export function angleRigJsonFromPreset(
         variantsBySlot.get(binding.slotId)?.[0]?.id,
       visible: true,
     })),
+    slotRelations: rig.slotRelations.map((relation) => ({ ...relation })),
+    hostConstraints: rig.hostConstraints.map((constraint) => ({ ...constraint })),
     reaches: rig.reaches.map((reach) => ({ ...reach })),
     drawOrder: rig.drawOrder,
   };
@@ -152,6 +171,7 @@ export function motionJsonFromPreset(preset: MotionPreset): MotionJson {
     id: `motion:${preset.id}`,
     name: preset.name,
     category: preset.category,
+    angleIds: preset.angleIds,
     duration: preset.duration,
     loop: preset.loop,
     targetSpace: "parentRelative",
@@ -176,6 +196,7 @@ function motionJsonTrackFromPresetTrack(track: MotionTrack, index: number): Moti
   if (track.target === "camera" || track.partRole === "__camera") {
     return {
       id,
+      angleIds: track.angleIds,
       target: { kind: "camera", id: "__camera" },
       channel: "transform",
       keyframes: track.keyframes,
@@ -184,6 +205,7 @@ function motionJsonTrackFromPresetTrack(track: MotionTrack, index: number): Moti
   if (track.target === "bone" && track.boneId) {
     return {
       id,
+      angleIds: track.angleIds,
       target: { kind: "semanticBone", id: track.boneId },
       channel,
       keyframes: track.keyframes.map((keyframe) => ({ ...keyframe, variant: track.poseSwap })),
@@ -191,6 +213,7 @@ function motionJsonTrackFromPresetTrack(track: MotionTrack, index: number): Moti
   }
   return {
     id,
+    angleIds: track.angleIds,
     target: { kind: "semanticSlot", id: track.slotId ?? `role:${track.partRole}` },
     channel,
     keyframes: track.keyframes.map((keyframe) => ({ ...keyframe, variant: track.poseSwap })),
@@ -201,11 +224,22 @@ function representativePart(parts: CharacterPart[]): CharacterPart | undefined {
   return parts.find((part) => part.visible) ?? parts[0];
 }
 
+function uniqueSemanticBones(rig: ReturnType<typeof normalizeCharacterRig>): CharacterBone[] {
+  const out = new Map<string, CharacterBone>();
+  const angleBones = Object.values(rig.angles ?? {}).flatMap((angleRig) => angleRig?.bones ?? []);
+  for (const bone of angleBones.length ? angleBones : rig.bones) {
+    const id = bone.semanticBoneId ?? bone.id;
+    if (!out.has(id)) out.set(id, bone);
+  }
+  return Array.from(out.values());
+}
+
 function variantsForParts(parts: CharacterPart[]): AngleSlotVariantJson[] {
   return parts.map((part) => ({
     id: part.pose ?? part.viseme ?? part.eyeState ?? part.id,
     mediaId: part.mediaId,
     name: part.name,
+    angleIds: part.angleIds ?? (part.angleId ? [part.angleId] : undefined),
     pose: part.pose,
     viseme: part.viseme,
     eyeState: part.eyeState,
@@ -222,7 +256,8 @@ function defaultVariantForParts(parts: CharacterPart[]): string | undefined {
 function semanticTypeForSlot(role: PartRole, label: string): SemanticType {
   const text = label.toLowerCase();
   if (role === "mouth") return "mouthShape";
-  if (role === "eye" || role === "eyebrow") return "faceFeature";
+  if (role === "eye" || role === "iris" || role === "eyebrow" || role === "nose")
+    return "faceFeature";
   if (role === "accessory") return "accessory";
   if (["head", "body", "arm", "hand", "leg", "foot", "hair"].includes(role)) return "bodyPart";
   if (text.includes("shirt") || text.includes("jacket") || text.includes("dress"))

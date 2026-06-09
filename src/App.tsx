@@ -5,6 +5,7 @@ import { PresetsModal } from "./PresetsModal";
 import { useStudio } from "@/studio/store";
 import { ProjectDashboard } from "@/studio/components/ProjectDashboard";
 import { garbageCollectUnusedInternalMedia } from "@/studio/db";
+import { useTheme } from "@/studio/theme";
 
 type AppView = "dashboard" | "studio";
 
@@ -14,11 +15,16 @@ export default function App() {
   const modal = useStudio((s) => s.currentModal);
   const closeModal = useStudio((s) => s.closeModal);
   const saveProject = useStudio((s) => s.saveProject);
+  // Reading the store here applies the persisted [data-theme] app-wide,
+  // including on the dashboard before the studio (and its TopBar) mounts.
+  const setTheme = useTheme((s) => s.setTheme);
+  const theme = useTheme((s) => s.theme);
 
   useEffect(() => {
     setMounted(true);
+    setTheme(theme);
     void garbageCollectUnusedInternalMedia();
-  }, []);
+  }, [setTheme, theme]);
 
   const openProject = async (projectId: string) => {
     await useStudio.getState().loadProject(projectId);

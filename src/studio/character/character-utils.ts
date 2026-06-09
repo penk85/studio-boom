@@ -3,6 +3,7 @@ import { db, deleteMediaIfUnused, mediaIdsForCharacter, uid } from "../db";
 import {
   DEFAULT_PARALLAX_CONFIG,
   DEFAULT_PART_MANIFEST,
+  type CharacterAngle,
   type ID,
   type CharacterPart,
   type CharacterPreset,
@@ -15,6 +16,7 @@ import { legacyVisemeToStandard } from "../lipsync/viseme-schema";
 import { alphaCenterForPart } from "./alpha-bounds";
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+const CHARACTER_ANGLE_VALUES: CharacterAngle[] = ["front", "3qL", "3qR", "sideL", "sideR"];
 
 export function defaultFallbackMouthAnchor(
   canvasWidth: number,
@@ -42,6 +44,7 @@ export function createBlankCharacter(name = "New Character"): CharacterPreset {
     name,
     canvasWidth: 600,
     canvasHeight: 900,
+    angles: ["front"],
     parts: [],
     manifest: { ...DEFAULT_PART_MANIFEST },
     parallax: { ...DEFAULT_PARALLAX_CONFIG },
@@ -64,7 +67,15 @@ export async function saveCharacter(c: CharacterPreset) {
   return updated;
 }
 
-const SIDED_SLOT_ROLES = new Set<PartRole>(["eye", "eyebrow", "arm", "hand", "leg", "foot"]);
+const SIDED_SLOT_ROLES = new Set<PartRole>([
+  "eye",
+  "iris",
+  "eyebrow",
+  "arm",
+  "hand",
+  "leg",
+  "foot",
+]);
 
 export function defaultSlotIdForRole(
   role: PartRole,
@@ -112,9 +123,17 @@ export function inferHumanParentPartId(
       return pickAny("body");
     case "eye":
     case "eyebrow":
+    case "nose":
     case "mouth":
     case "hair":
       return pickAny("head") ?? pickAny("body");
+    case "iris":
+      return (
+        (sameSide ? pick("eye", sameSide) : undefined) ??
+        pickAny("eye") ??
+        pickAny("head") ??
+        pickAny("body")
+      );
     case "arm":
     case "leg":
       return pickAny("body");
@@ -147,6 +166,7 @@ export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
   );
   return {
     ...c,
+    angles: normalizeAngleIds(c.angles) ?? c.angles,
     manifest: normalizePartManifest(c.manifest),
     fallbackMouth: c.fallbackMouth ?? defaultFallbackMouthAnchor(c.canvasWidth, c.canvasHeight),
     parts: c.parts.map((part) => {
@@ -172,6 +192,8 @@ export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
         slotId,
         slotName,
         viseme,
+        angleId: normalizeAngleId(part.angleId),
+        angleIds: normalizeAngleIds(part.angleIds),
         anchorX: clamp01((pivot.x - part.x) / Math.max(1, part.width)),
         anchorY: clamp01((pivot.y - part.y) / Math.max(1, part.height)),
         pivot,
@@ -189,6 +211,34 @@ export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
       };
     }),
   };
+}
+
+export function partAvailableForAngle(part: CharacterPart, angle: CharacterAngle): boolean {
+  const explicit = normalizeAngleIds(part.angleIds);
+  if (explicit?.length) return explicit.includes(angle);
+  const single = normalizeAngleId(part.angleId);
+  return single ? single === angle : true;
+}
+
+export function partsAvailableForAngle(
+  parts: CharacterPart[],
+  angle: CharacterAngle,
+): CharacterPart[] {
+  return parts.filter((part) => partAvailableForAngle(part, angle));
+}
+
+function normalizeAngleId(value: unknown): CharacterAngle | undefined {
+  return typeof value === "string" && (CHARACTER_ANGLE_VALUES as string[]).includes(value)
+    ? (value as CharacterAngle)
+    : undefined;
+}
+
+function normalizeAngleIds(value: unknown): CharacterAngle[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out = Array.from(
+    new Set(value.map(normalizeAngleId).filter((angle): angle is CharacterAngle => !!angle)),
+  );
+  return out.length ? out : undefined;
 }
 
 export function normalizePartManifest(manifest: Partial<PartManifest> | undefined): PartManifest {
@@ -215,8 +265,12 @@ export function roleEnabledByManifest(role: PartRole, manifest: Partial<PartMani
       return normalized.hasFeet;
     case "eye":
       return normalized.hasEyes;
+    case "iris":
+      return normalized.hasEyes && normalized.hasIrises;
     case "eyebrow":
       return normalized.hasBrows;
+    case "nose":
+      return normalized.hasNose;
     case "mouth":
       return normalized.hasMouth;
     case "hair":
@@ -234,7 +288,9 @@ export function normalizePartRole(role: string | undefined): PartRole {
     case "head":
     case "body":
     case "eye":
+    case "iris":
     case "eyebrow":
+    case "nose":
     case "mouth":
     case "arm":
     case "hand":
@@ -248,6 +304,12 @@ export function normalizePartRole(role: string | undefined): PartRole {
     case "eyeL":
     case "eyeR":
       return "eye";
+    case "irisL":
+    case "irisR":
+    case "pupil":
+    case "pupilL":
+    case "pupilR":
+      return "iris";
     case "brow":
     case "browL":
     case "browR":
@@ -309,6 +371,8 @@ export function makePart(
     viseme: opts.viseme,
     eyeState: opts.eyeState,
     side: opts.side,
+    angleId: opts.angleId,
+    angleIds: opts.angleIds,
     mediaId,
     x: base.x,
     y: base.y,
@@ -337,8 +401,12 @@ export function roleLabel(role: PartRole): string {
       return "Body";
     case "eye":
       return "Eye";
+    case "iris":
+      return "Iris";
     case "eyebrow":
       return "Eyebrow";
+    case "nose":
+      return "Nose";
     case "mouth":
       return "Mouth";
     case "arm":

@@ -154,8 +154,13 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const [expandedClipIds, setExpandedClipIds] = useState<Set<string>>(new Set());
   const [selectedMotionId, setSelectedMotionId] = useState<string | null>(null);
   const queriedPresets = useLiveQuery(() => db.motionPresets.toArray(), []);
+  const storePresetMap = useStudio((s) => s.motionPresets);
   const presets = useMemo(() => queriedPresets ?? [], [queriedPresets]);
-  const presetMap = useMemo(() => new Map(presets.map((p) => [p.id, p] as const)), [presets]);
+  const presetMap = useMemo(() => {
+    const merged = new Map(presets.map((p) => [p.id, p] as const));
+    for (const [id, preset] of storePresetMap) merged.set(id, preset);
+    return merged;
+  }, [presets, storePresetMap]);
   const mediaAssets = useStudio((s) => s.mediaAssets);
   const mediaHealth = useHfMediaHealth(project?.hf);
   const projectDuration = project?.hf.duration ?? 0;
@@ -817,12 +822,15 @@ function ClipBlock({
     compositionSourceErrors.length > 0
       ? `Malformed composition source:\n${compositionSourceErrors.join("\n")}`
       : undefined;
+  const motionTitle = characterMotionTitle(clipMotions, presetMap);
+  const motionBadge = characterMotionBadge(clipMotions, presetMap);
   const clipVolume = clip.volume ?? 1;
   const clipTitle = [
     clip.name,
     clip.kind === "audio" ? `Volume ${Math.round(clipVolume * 100)}%` : undefined,
     missingMediaTitle,
     malformedCompositionTitle,
+    motionTitle,
   ]
     .filter(Boolean)
     .join("\n");
@@ -969,7 +977,7 @@ function ClipBlock({
           ) : (
             <Volume2 size={12} className="shrink-0" />
           ))}
-        <span className="truncate">{clip.name}</span>
+        <span className="min-w-0 flex-1 truncate">{clip.name}</span>
         {clip.kind === "audio" && clipVolume < 1 && (
           <span className="shrink-0 text-[10px] text-foreground/80">
             {Math.round(clipVolume * 100)}%
@@ -993,23 +1001,18 @@ function ClipBlock({
                 aria-label="Malformed composition source"
               />
             )}
-            {clipMotions.length > 0 && (
-              <span className="flex shrink-0 items-center gap-0.5">
-                {clipMotions.slice(0, 4).map((motion) => {
-                  const preset = presetMap.get(motion.presetId);
-                  return (
-                    <span
-                      key={motion.id}
-                      className={`h-1.5 w-3 rounded-full border ${
-                        preset ? CATEGORY_COLORS[preset.category] : CATEGORY_COLORS.custom
-                      }`}
-                      title={preset?.name ?? "Motion"}
-                    />
-                  );
-                })}
-                {clipMotions.length > 4 && (
-                  <span className="text-[9px] text-foreground/80">+{clipMotions.length - 4}</span>
-                )}
+            {motionBadge && (
+              <span
+                className="flex max-w-28 shrink items-center gap-1 rounded bg-black/25 px-1.5 py-0.5 text-[9px] leading-none text-foreground/95 shadow-sm"
+                title={motionBadge.title}
+              >
+                <span
+                  aria-hidden="true"
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                    CATEGORY_DOT_COLORS[motionBadge.category]
+                  }`}
+                />
+                <span className="truncate">{motionBadge.label}</span>
               </span>
             )}
           </span>
@@ -1031,6 +1034,40 @@ function ClipBlock({
       </div>
     </div>
   );
+}
+
+function characterMotionBadge(
+  motions: AppliedMotion[],
+  presetMap: Map<string, MotionPreset>,
+): { label: string; title: string; category: MotionCategory } | null {
+  if (motions.length === 0) return null;
+  const firstPreset = presetMap.get(motions[0]?.presetId ?? "");
+  return {
+    label: characterMotionBadgeLabel(motions, presetMap),
+    title: characterMotionTitle(motions, presetMap) ?? "Movement",
+    category: firstPreset?.category ?? "custom",
+  };
+}
+
+function characterMotionBadgeLabel(
+  motions: AppliedMotion[],
+  presetMap: Map<string, MotionPreset>,
+): string {
+  if (motions.length === 0) return "";
+  const firstName = presetMap.get(motions[0]?.presetId ?? "")?.name;
+  if (motions.length === 1) return firstName ?? "1 movement";
+  return firstName ? `${firstName} +${motions.length - 1}` : `${motions.length} movements`;
+}
+
+function characterMotionTitle(
+  motions: AppliedMotion[],
+  presetMap: Map<string, MotionPreset>,
+): string | undefined {
+  if (motions.length === 0) return undefined;
+  const names = motions.map(
+    (motion, index) => presetMap.get(motion.presetId)?.name ?? `Movement ${index + 1}`,
+  );
+  return `Movements: ${names.join(", ")}`;
 }
 
 interface ExpandedClipRow {

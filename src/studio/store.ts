@@ -67,6 +67,12 @@ import {
   defaultCharacterCompositionId,
   type ResolvedSpeech,
 } from "./character/composition";
+import {
+  applyCharacterCommand,
+  lintCharacterDocument,
+  type CharacterCommand,
+  type CharacterDocumentLintResult,
+} from "./character-document";
 
 // ─── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -872,6 +878,11 @@ interface StudioState {
     html: string,
     options?: ProjectMutationOptions,
   ) => void;
+  applyCharacterDocumentCommand: (
+    characterId: string,
+    command: CharacterCommand,
+    options?: ProjectMutationOptions,
+  ) => void;
   repairTimelineLanes: () => boolean;
 
   addMediaToTimeline: (asset: MediaAsset, trackIndex?: number, insertAtTime?: number) => void;
@@ -906,6 +917,10 @@ const scheduleSave = (get: () => StudioState, set: (partial: Partial<StudioState
     void get().saveProject(generation);
   }, 500);
 };
+
+function characterDocumentLintMessage(result: CharacterDocumentLintResult): string {
+  return result.errors.map((issue) => `- ${issue.path}: ${issue.message}`).join("\n");
+}
 
 function applyClipLayerMove(
   id: string,
@@ -2071,6 +2086,64 @@ export const useStudio = create<StudioState>((set, get) => ({
         updatedAt: Date.now(),
       },
     });
+    scheduleSave(get, set);
+  },
+
+  applyCharacterDocumentCommand(characterId, command, options) {
+    const state = get();
+    const p = state.project;
+    if (!p) return;
+
+    const characterClips = deriveEditorClips(p)
+      .filter(isCharacterCompositionClip)
+      .filter((clip) => clip.character.characterId === characterId);
+    if (characterClips.length === 0) return;
+
+    let nextProject = p;
+    let compositionHtml = { ...p.hf.compositionHtml };
+    let changed = false;
+
+    for (const clip of characterClips) {
+      let html = compositionHtml[clip.compositionId];
+      if (!html) {
+        nextProject = rebuildCharacterCompositionInProject(
+          nextProject,
+          clip.id,
+          state.characters,
+          state.mediaAssets,
+          state.motionPresets,
+        );
+        compositionHtml = { ...nextProject.hf.compositionHtml };
+        html = compositionHtml[clip.compositionId];
+      }
+      if (!html) continue;
+
+      const updated = applyCharacterCommand(html, command);
+      const lint = lintCharacterDocument(updated);
+      if (!lint.ok) {
+        throw new Error(
+          `Character document command produced invalid HTML:\n${characterDocumentLintMessage(
+            lint,
+          )}`,
+        );
+      }
+      if (updated !== html) {
+        compositionHtml[clip.compositionId] = updated;
+        changed = true;
+      }
+    }
+
+    if (!changed && nextProject === p) return;
+    if (options?.history !== false) get().checkpointHistory();
+    const project: Project = {
+      ...nextProject,
+      hf: {
+        ...nextProject.hf,
+        compositionHtml,
+      },
+      updatedAt: Date.now(),
+    };
+    set({ project, tracks: project.editorMeta.tracks });
     scheduleSave(get, set);
   },
 

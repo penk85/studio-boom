@@ -338,6 +338,46 @@ describe("composeMotionsAt", () => {
     expect(headDelta.dy).toBeCloseTo(25, 0);
   });
 
+  it("skips preset and track motion outside their declared angles", () => {
+    const sidePreset = makePreset({
+      angleIds: ["sideL"],
+      tracks: [{ partRole: "head", keyframes: [makeKeyframe(0, { dx: 30 })] }],
+    });
+    const mixedPreset = makePreset({
+      id: "p2",
+      tracks: [
+        {
+          angleIds: ["front"],
+          partRole: "head",
+          keyframes: [makeKeyframe(0, { dy: 10 })],
+        },
+        {
+          angleIds: ["sideL"],
+          partRole: "head",
+          keyframes: [makeKeyframe(0, { dy: 40 })],
+        },
+      ],
+    });
+    const clip = makeClip({
+      motions: [
+        makeAppliedMotion({ presetId: "p1" }),
+        makeAppliedMotion({ id: "m2", presetId: "p2" }),
+      ],
+    });
+    const presets = new Map([
+      ["p1", sidePreset],
+      ["p2", mixedPreset],
+    ]);
+
+    const front = composeMotionsAt(clip, 0, presets, "front");
+    const side = composeMotionsAt(clip, 0, presets, "sideL");
+
+    expect(deltaFor(front, "head").dx).toBe(0);
+    expect(deltaFor(front, "head").dy).toBe(10);
+    expect(deltaFor(side, "head").dx).toBe(30);
+    expect(deltaFor(side, "head").dy).toBe(40);
+  });
+
   it("applies intensity scaling", () => {
     const preset = makePreset({
       tracks: [

@@ -4,6 +4,8 @@ import {
   CHARACTER_JSON_KIND,
   CHARACTER_JSON_SCHEMA_VERSION,
   MOTION_JSON_KIND,
+  normalizeMotionCategory,
+  normalizeMotionCategoryForImport,
   type AngleRigJson,
   type CharacterJson,
   type JsonValidationIssue,
@@ -27,6 +29,7 @@ const NUMERIC_KEYFRAME_FIELDS = [
   "originY",
   "opacity",
 ] as const;
+const CHARACTER_ANGLE_VALUES = new Set(["front", "3qL", "3qR", "sideL", "sideR"]);
 
 export function identifyJsonArtifact(value: unknown): StudioBoomJsonKind | null {
   if (!isRecord(value)) return null;
@@ -52,6 +55,13 @@ export function validateCharacterJson(value: unknown): JsonValidationResult {
   requiredString(value, "name", "$.name", issues);
   requiredString(value, "defaultAngle", "$.defaultAngle", issues);
   validateUniqueStringArray(value.angles, "$.angles", issues);
+  if (
+    typeof value.defaultAngle === "string" &&
+    Array.isArray(value.angles) &&
+    !value.angles.includes(value.defaultAngle)
+  ) {
+    issues.error("$.defaultAngle", "defaultAngle must be listed in angles.");
+  }
 
   if (!Array.isArray(value.semanticBones)) {
     issues.error("$.semanticBones", "Expected semanticBones array.");
@@ -71,6 +81,7 @@ export function validateCharacterJson(value: unknown): JsonValidationResult {
       requiredString(slot, "name", `${path}.name`, issues);
       requiredString(slot, "role", `${path}.role`, issues);
       requiredString(slot, "semanticType", `${path}.semanticType`, issues);
+      validateOptionalAngleIds(slot.angleIds, `${path}.angleIds`, issues);
     });
   }
 
@@ -131,6 +142,7 @@ export function validateAngleRigJson(value: unknown): JsonValidationResult {
           if (variantId) variants.add(variantId);
           requiredString(variant, "mediaId", `${variantPath}.mediaId`, issues);
           requiredString(variant, "name", `${variantPath}.name`, issues);
+          validateOptionalAngleIds(variant.angleIds, `${variantPath}.angleIds`, issues);
         });
       }
       if (id) variantsBySlot.set(id, variants);
@@ -203,6 +215,42 @@ export function validateAngleRigJson(value: unknown): JsonValidationResult {
     }
   }
 
+  for (const [index, relation] of optionalArray(value.slotRelations).entries()) {
+    const path = `$.slotRelations[${index}]`;
+    if (!isRecord(relation)) {
+      issues.error(path, "Expected slot relation object.");
+      continue;
+    }
+    const childSlotId = requiredString(relation, "childSlotId", `${path}.childSlotId`, issues);
+    if (childSlotId && !slotIds.has(childSlotId)) {
+      issues.error(`${path}.childSlotId`, `Missing child slot "${childSlotId}".`);
+    }
+    if (!isRecord(relation.parentRef)) {
+      issues.error(`${path}.parentRef`, "Expected parentRef object.");
+      continue;
+    }
+    const parentType = requiredString(relation.parentRef, "type", `${path}.parentRef.type`, issues);
+    if (parentType === "slot" || parentType === "semanticSlot") {
+      const parentId = requiredString(relation.parentRef, "id", `${path}.parentRef.id`, issues);
+      if (parentId && !slotIds.has(parentId)) {
+        issues.error(`${path}.parentRef.id`, `Missing parent slot "${parentId}".`);
+      }
+    } else if (parentType === "bone") {
+      const parentId = requiredString(relation.parentRef, "id", `${path}.parentRef.id`, issues);
+      if (parentId && !boneIds.has(parentId)) {
+        issues.error(`${path}.parentRef.id`, `Missing parent bone "${parentId}".`);
+      }
+    } else if (parentType !== "role") {
+      issues.error(`${path}.parentRef.type`, `Unknown parentRef type "${parentType}".`);
+    }
+    if (
+      typeof relation.clipSlotId === "string" &&
+      !slotIds.has(relation.clipSlotId)
+    ) {
+      issues.error(`${path}.clipSlotId`, `Missing clip slot "${relation.clipSlotId}".`);
+    }
+  }
+
   for (const [index, reach] of optionalArray(value.reaches).entries()) {
     const path = `$.reaches[${index}]`;
     if (!isRecord(reach)) {
@@ -225,7 +273,12 @@ export function validateMotionJson(value: unknown): JsonValidationResult {
   validateBase(value, MOTION_JSON_KIND, issues);
   requiredString(value, "id", "$.id", issues);
   requiredString(value, "name", "$.name", issues);
-  requiredString(value, "category", "$.category", issues);
+  const category = requiredString(value, "category", "$.category", issues);
+  if (category && !normalizeMotionCategory(category)) {
+    const normalized = normalizeMotionCategoryForImport(category);
+    if (normalized.warning) issues.warn("$.category", normalized.warning);
+  }
+  validateOptionalAngleIds(value.angleIds, "$.angleIds", issues);
   finitePositive(value.duration, "$.duration", issues);
   if (value.targetSpace !== "parentRelative")
     issues.error("$.targetSpace", 'Expected "parentRelative" targetSpace.');
@@ -236,6 +289,7 @@ export function validateMotionJson(value: unknown): JsonValidationResult {
   }
   validateUniqueObjects(value.tracks, "$.tracks", issues, (track, path) => {
     requiredString(track, "id", `${path}.id`, issues);
+    validateOptionalAngleIds(track.angleIds, `${path}.angleIds`, issues);
     validateMotionTarget(track.target, `${path}.target`, issues);
     requiredString(track, "channel", `${path}.channel`, issues);
     if (!Array.isArray(track.keyframes)) {
@@ -264,8 +318,13 @@ export function validateMotionJsonForAngle(
   const base = validateMotionJson(motion);
   const issues = makeIssues(base.errors, base.warnings);
   if (!base.ok || !isRecord(motion) || !Array.isArray(motion.tracks)) return issues.result();
+  if (!angleIdsInclude(motion.angleIds, angleRig.angleId)) {
+    issues.error("$.angleIds", `Motion is not available for angle "${angleRig.angleId}".`);
+    return issues.result();
+  }
   for (const [index, track] of motion.tracks.entries()) {
     if (!isRecord(track)) continue;
+    if (!angleIdsInclude(track.angleIds, angleRig.angleId)) continue;
     const target = track.target as MotionTargetJson;
     const resolved = resolveMotionTarget(target, angleRig);
     if (!resolved.ok) {
@@ -378,6 +437,26 @@ function validateMotionTarget(value: unknown, path: string, issues: ReturnType<t
   if (kind !== "camera") requiredString(value, "id", `${path}.id`, issues);
   if (kind === "angleBone" || kind === "angleSlot")
     requiredString(value, "angleId", `${path}.angleId`, issues);
+}
+
+function validateOptionalAngleIds(
+  value: unknown,
+  path: string,
+  issues: ReturnType<typeof makeIssues>,
+) {
+  if (value === undefined) return;
+  validateUniqueStringArray(value, path, issues);
+  if (!Array.isArray(value)) return;
+  for (const [index, angle] of value.entries()) {
+    if (typeof angle === "string" && !CHARACTER_ANGLE_VALUES.has(angle)) {
+      issues.error(`${path}[${index}]`, `Unknown angle "${angle}".`);
+    }
+  }
+}
+
+function angleIdsInclude(value: unknown, angle: CharacterAngle): boolean {
+  if (!Array.isArray(value) || value.length === 0) return true;
+  return value.includes(angle);
 }
 
 function validateMotionKeyframe(

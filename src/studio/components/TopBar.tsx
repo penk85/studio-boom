@@ -3,6 +3,7 @@ import { AlertCircle, CheckCircle2, FolderOpen, Loader2, Redo2, Save, Undo2 } fr
 import { useState } from "react";
 import { useStudio } from "../store";
 import { renderProjectToMp4 } from "../export/render-client";
+import { ThemeToggle } from "./ThemeToggle";
 
 interface TopBarProps {
   onBackToProjects?: () => void;
@@ -95,6 +96,7 @@ export function TopBar({ onBackToProjects }: TopBarProps) {
         {saveStatus === "saving" ? "Saving" : "Save"}
       </button>
       <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+        <ThemeToggle />
         <SaveStatusIndicator status={saveStatus} error={saveError} lastSavedAt={lastSavedAt} />
         {renderError && (
           <span className="max-w-[360px] truncate text-destructive" title={renderError}>

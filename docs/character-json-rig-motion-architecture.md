@@ -1,43 +1,146 @@
-# Character JSON, Rig, and Motion Architecture
+# HyperFrames-First Character Document Architecture
 
 ## Summary
 
-Studio Boom characters should be authored as structured JSON intent, resolved through
-a shared rig/motion adapter, and emitted as native HyperFrames composition HTML.
-
-The split is:
+Studio Boom characters are specialized HyperFrames sub-compositions. The canonical
+character document is the native HyperFrames HTML stored in:
 
 ```text
-Character JSON
-  shared identity, semantic vocabulary, custom slots, angle list
-
-Angle Rig JSON
-  concrete bones, slots, bindings, masks/reach, depth, draw order for one angle
-
-Motion JSON
-  reusable parent-relative bone motion and slot variants/local offsets over time
-
-HyperFrames HTML
-  generated preview/export source of truth in project.hf.compositionHtml
+project.hf.compositionHtml[characterCompositionId]
 ```
 
-React may provide editors, handles, inspectors, JSON panels, and validation UI. It
-must not become a second character renderer. The generated HyperFrames character
-composition remains the movie.
+That document owns the puppet DOM, bone groups, slot elements, angle metadata,
+motion metadata, reach/host constraints, asset references, styles, and finite paused
+GSAP timeline. React is the editor shell around that document. It reads the
+document for inspectors and overlays, then writes back through typed character
+commands.
+
+JSON remains important, but it is not the living model. Character JSON, angle rig
+JSON, motion JSON, and AI suggestion JSON are portable exchange formats:
+
+```text
+HyperFrames character document
+  source of truth for preview/export/editing
+
+Character commands
+  typed authoring operations that update the document
+
+JSON artifacts
+  import/export, AI context, AI suggestions, debug snapshots
+```
+
+The invariant is the same as the rest of Studio Boom:
+
+```text
+React edits the movie.
+HyperFrames HTML is the movie.
+```
+
+## Core Model
+
+### Character Document
+
+The character document is native HyperFrames composition HTML. It must contain:
+
+```text
+explicit puppet DOM
+  data-character-bone
+  data-character-slot
+  data-character-bound-bone-id
+  data-character-host-slot-id / data-character-host-bone-id where relevant
+
+stable editor-readable metadata
+  character id/name
+  active angle
+  angles
+  semantic bone/slot ids
+  reach and host constraints
+  depth and draw order
+
+timeline data
+  finite paused GSAP timeline
+  registered window.__timelines[compositionId]
+  slot events and motion events expressed against real DOM targets
+
+asset refs
+  asset:<id> references for library media
+```
+
+### Character Commands
+
+Character commands are typed document edits. They are not "patches" in the sense of
+fixing broken HTML; they are the official authoring API for a character document.
+
+Examples:
+
+```ts
+setBoneTransform(html, { boneId, x, y, rotation, depth })
+setSlotBinding(html, { slotId, boneId, x, y, rotation, scaleX, scaleY })
+setSlotVariant(html, { slotId, variantId })
+addSlotVariant(html, { slotId, variant })
+setReachLimit(html, { slotId, reach, rotReach })
+setHostConstraint(html, { slotId, hostSlotId, mode })
+setActiveAngle(html, { angleId })
+applyMotionDraft(html, { motion })
+commitMotion(html, { motion })
+```
+
+The command layer is the guardrail. Character Builder, Motion Editor, AI import,
+and future rig assistants should all use the same commands.
+
+### Parser and Inspector Model
+
+React panels should parse the HyperFrames character document into a view model for
+display only:
+
+```text
+parseCharacterDocument(html)
+  -> bones
+  -> slots
+  -> angles
+  -> motions
+  -> reach/host/depth/draw-order data
+  -> validation findings
+```
+
+The parsed model is never the export source and should not become a second
+canonical character state. It is a lens over the document.
+
+### Portable JSON Artifacts
+
+JSON files are still first-class user-facing artifacts, but their job is exchange:
+
+```text
+export JSON
+  derive from the current HyperFrames character document
+
+import JSON
+  validate, normalize, preview, convert to character commands
+
+AI JSON
+  context out and suggestions in; never direct document writes
+```
 
 ## Goals
 
-- Make character and motion data readable, copyable, and AI-friendly.
+- Make the HyperFrames character sub-composition the source of truth for character
+  authoring, preview, and export.
+- Give Character Builder and Motion Editor the same real document surface, not two
+  renderers.
+- Make character and motion data readable, copyable, and AI-friendly through JSON
+  import/export artifacts.
 - Keep every JSON artifact easy to identify by filename and top-level `kind`.
 - Support first-class custom slots such as umbrellas, tails, wings, props, clothing,
   and alternate face features.
 - Treat each angle as its own concrete rig while preserving shared character identity.
-- Make the Motion Editor and Stage use the same rig semantics and motion sampler.
-- Preserve HyperFrames compatibility: JSON is authoring intent; HTML is preview/export.
+- Preserve HyperFrames compatibility: HTML is the editable document and
+  preview/export source.
 
 ## Non-Goals
 
 - No second preview/export renderer.
+- No long-lived parallel character state that must later be compiled to
+  HyperFrames HTML.
 - No full mesh deformation in this cleanup pass.
 - No animated angle interpolation in this cleanup pass.
 - No direct provider/API-specific AI automation in the character runtime.
@@ -48,9 +151,10 @@ All JSON files should include a top-level `kind`, `schemaVersion`, and
 `suggestedFilename`. The filename suffix should make the direction and purpose clear
 even outside Studio Boom.
 
-### Canonical Authoring JSON
+### Portable Authoring JSON
 
-These are the durable, editable Studio Boom data shapes.
+These are durable import/export shapes, but not the runtime source of truth while a
+character is being edited in Studio Boom.
 
 ```text
 <character-slug>.character.json
@@ -105,10 +209,9 @@ forward-walk.motion-suggestion.ai-in.json
 Inbound AI JSON is never applied blindly. It is parsed, normalized, validated,
 previewed, and then explicitly accepted by the user.
 
-### Generated Output
+### Character Document
 
-Generated HyperFrames output should be clearly labeled as generated and should not be
-treated as editable character JSON.
+The editable character document is HyperFrames composition HTML:
 
 ```text
 <composition-id>.character-composition.html
@@ -119,6 +222,9 @@ In the app this lives in:
 ```text
 project.hf.compositionHtml[compositionId]
 ```
+
+This is not "generated output" in the old compiler sense. It is the working
+character document. JSON exports are derived from it.
 
 ## Suggested Export Package Layout
 
@@ -142,18 +248,21 @@ characters/<character-id>/
       hand-clap.motion-request.ai-out.json
     in/
       hand-clap.motion-suggestion.ai-in.json
-  generated/
+  document/
     comp_character_marisol.character-composition.html
 ```
 
 The app may store these objects in Dexie rather than literal files, but clipboard,
 debug export, import/export, and AI panels should use the same names and `kind`
-values.
+values. The `document/` HTML is the editable character document; the JSON files are
+portable views of it.
 
 ## Character JSON
 
-`*.character.json` stores the shared identity and semantic vocabulary for one
+`*.character.json` exports the shared identity and semantic vocabulary for one
 character. It does not require every angle to have the same concrete bones or slots.
+When imported, it should become character document commands that update identity,
+semantic aliases, custom slot definitions, and angle availability.
 
 ```json
 {
@@ -219,8 +328,10 @@ prompts, but they do not limit what the user can add.
 
 ## Angle Rig JSON
 
-`*.angle-rig.json` stores one concrete angle. Each angle may have unique bones,
-slots, media variants, masks, reach, depth, and draw order.
+`*.angle-rig.json` exports one concrete angle. Each angle may have unique bones,
+slots, media variants, masks, reach, depth, and draw order. When imported, it
+should become character document commands that update the active angle, bone
+structure, slot bindings, variants, reach, host constraints, depth, and draw order.
 
 `front` is not the master rig. It is just one angle.
 
@@ -321,8 +432,11 @@ depth is the depth used for parallax while that angle is active.
 
 ## Motion JSON
 
-`*.motion.json` stores reusable animation intent. It should target semantic bones
+`*.motion.json` exports reusable animation intent. It should target semantic bones
 and semantic slots whenever possible so the same motion can resolve across angles.
+When imported, it should become a draft motion command against a temporary copy of
+the HyperFrames character document. Saving commits it as a named motion and/or
+applies it to the selected character clip.
 
 ```json
 {
@@ -472,50 +586,79 @@ Paste flow:
 2. Check `kind` and `schemaVersion`.
 3. Normalize aliases and legacy field names if safe.
 4. Validate IDs, finite numbers, keyframe times, target resolution, and variants.
-5. Preview on the same rig/motion sampler used by the Stage.
-6. Show warnings and unresolved targets.
-7. Apply only after explicit user confirmation.
+5. Convert the suggestion into character commands.
+6. Preview those commands on a draft copy of the real HyperFrames character
+   document.
+7. Show warnings and unresolved targets.
+8. Apply only after explicit user confirmation.
 
-AI JSON must never directly mutate `project.hf.compositionHtml`.
+AI JSON must never directly mutate `project.hf.compositionHtml`. AI suggestions
+must pass through validation and character commands first.
 
-## Parser and Adapter Boundary
+## Document Command Boundary
 
-Implementation should keep schema parsing separate from rendering:
+Implementation should center on the HyperFrames character document:
 
 ```text
-parseCharacterJson()
-parseAngleRigJson()
-parseMotionJson()
-  -> normalized Studio Boom character/motion objects
-  -> shared motion sampler
-  -> character composition builder
-  -> project.hf.compositionHtml[compositionId]
+parseCharacterDocument(html)
+  -> inspector view model
+
+applyCharacterCommand(html, command)
+  -> updated HyperFrames character document
+
+lintCharacterDocument(html)
+  -> errors and warnings
 ```
 
 Suggested module boundaries:
 
 ```text
-src/studio/character-json/schema.ts
-src/studio/character-json/normalize.ts
-src/studio/character-json/validate.ts
-src/studio/character-json/ai-context.ts
-src/studio/presets/motion-json.ts
+src/studio/character-document/schema.ts
+src/studio/character-document/parse.ts
+src/studio/character-document/commands.ts
+src/studio/character-document/lint.ts
+src/studio/character-json/schema.ts       JSON exchange schemas only
+src/studio/character-json/normalize.ts    JSON -> command normalization
+src/studio/character-json/validate.ts     JSON validation before commands
+src/studio/character-json/ai-context.ts   AI context and prompt packages
+src/studio/presets/motion-json.ts         motion JSON import/export adapter
 ```
 
-These modules should not import React components.
+These modules should not import React components. React components may call them,
+display their parsed view models, and render editor-only overlays.
+
+### Character Commands
+
+Commands should be explicit authoring operations:
+
+```ts
+type CharacterCommand =
+  | { type: "setBoneTransform"; boneId: string; x: number; y: number; rotation: number }
+  | { type: "setSlotBinding"; slotId: string; boneId: string; x: number; y: number }
+  | { type: "addSlotVariant"; slotId: string; variant: SlotVariant }
+  | { type: "setReachLimit"; slotId: string; reach: ReachLimit }
+  | { type: "setHostConstraint"; slotId: string; constraint: HostConstraint }
+  | { type: "setActiveAngle"; angleId: CharacterAngle }
+  | { type: "applyMotionDraft"; motion: MotionJson }
+  | { type: "commitMotion"; motion: MotionJson };
+```
+
+Commands are allowed to edit DOM attrs, style blocks, and editor-readable metadata
+inside the character composition, but they must preserve valid HyperFrames HTML and
+a finite paused timeline.
 
 ## Motion Editor Runtime Contract
 
 The Motion Editor must not maintain a flat private puppet renderer.
 
-It should author against the same logical runtime used by generated character
-compositions:
+It should author against a draft copy of the real HyperFrames character document:
 
 ```text
-active Character JSON + active Angle Rig JSON + Motion JSON
-  -> resolver
-  -> shared sampler
-  -> same nested skeleton semantics as Stage
+current character composition HTML
+  -> copy draft HTML
+  -> applyMotionDraft command
+  -> preview draft HTML in HyperFrames player
+  -> commitMotion command when saved
 ```
 
 The Motion Editor may use React overlays for:
@@ -527,12 +670,40 @@ The Motion Editor may use React overlays for:
 - reach/mask visualization,
 - JSON validation messages.
 
-It must not draw a second copy of the puppet whose motion differs from the generated
-HyperFrames character composition.
+It must not draw a second copy of the puppet. The character body parts in the
+Motion Editor should come from the same HyperFrames DOM shape used by Stage and
+export.
+
+## Character Document Lint
+
+Add a character-specific linter on top of native HyperFrames validation:
+
+```ts
+lintCharacterDocument(html)
+```
+
+It should catch:
+
+- invalid native HyperFrames composition HTML,
+- missing or duplicate `data-character-bone-id`,
+- missing or duplicate `data-character-slot-id`,
+- slot without a valid bound bone,
+- bone parent cycles,
+- host constraints referencing missing slots or bones,
+- reach constraints referencing missing slots,
+- motion targets that do not resolve,
+- unknown motion categories normalized to `custom`,
+- missing asset refs,
+- empty or non-finite timelines,
+- child motion that restates inherited parent translation in built-in presets.
+
+This linter should run after character commands, before accepting imported AI JSON,
+and before export/debug package generation.
 
 ## Bounds and Reach
 
-Angle rigs define host constraints and reach. Motions respect them by default.
+Character documents define host constraints and reach. Motions respect them by
+default.
 
 Default behavior:
 
@@ -593,6 +764,12 @@ The incorrect shape double-counts once the head is nested under the body.
 
 ## Testing Requirements
 
+- Character document parsing reads bones, slots, variants, angles, depth, draw
+  order, reach, host constraints, and motion metadata from HyperFrames HTML.
+- Character commands update the HyperFrames character document and preserve native
+  composition validity.
+- Character document lint catches duplicate IDs, missing bindings, invalid bone
+  graphs, unresolved host/reach constraints, missing assets, and invalid timelines.
 - Character JSON validates required `kind`, `schemaVersion`, IDs, semantic slots,
   custom slot hints, and angle list.
 - Angle Rig JSON validates bone graph, slot bindings, host constraints, depth, and
@@ -604,15 +781,22 @@ The incorrect shape double-counts once the head is nested under the body.
 - Built-in Jump moves the head exactly once through parent inheritance.
 - Wave rotates an arm bone and carries the hand slot automatically.
 - A slot variant track swaps open hand to closed fist without changing bone motion.
-- The Motion Editor preview and generated character composition sample the same
-  motion state at the same time.
-- Pasted AI JSON cannot write directly to HyperFrames HTML.
+- The Motion Editor previews a draft copy of the real HyperFrames character
+  document.
+- Pasted AI JSON cannot write directly to HyperFrames HTML; it must become
+  validated character commands first.
 
 ## Implementation Order
 
-1. Add JSON schema, normalizers, validators, and sample fixtures.
-2. Convert built-in presets to parent-relative bone/slot tracks.
-3. Refactor Motion Editor sampling away from its private flat sampler.
-4. Add AI copy/paste panels using the identifiable JSON artifacts above.
-5. Add per-track or per-target `allowOutOfBounds` UI in Motion Editor.
-6. Keep mesh/deformation extensions behind the same character/angle/slot contract.
+1. Add `character-document` parser, command, and linter module boundaries.
+2. Teach existing character composition HTML to carry all editor-readable document
+   metadata needed by the parser.
+3. Move Character Builder edits onto character commands against
+   `project.hf.compositionHtml[compositionId]`.
+4. Move Motion Editor preview to a draft copy of the real character document in a
+   HyperFrames player.
+5. Route AI JSON imports through validation and character commands.
+6. Convert built-in presets to parent-relative bone/slot tracks.
+7. Add per-track or per-target `allowOutOfBounds` UI in Motion Editor.
+8. Keep mesh/deformation extensions behind the same character document command
+   contract.

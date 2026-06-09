@@ -1,5 +1,6 @@
 // The studio shell — three-pane layout with a timeline at the bottom.
-import { useEffect } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { useTimelinePlayer } from "@hyperframes/studio";
 import { useStudio } from "./store";
 import { Library } from "./components/Library";
@@ -12,6 +13,23 @@ interface StudioProps {
   onBackToProjects?: () => void;
 }
 
+function usePersistentBoolean(key: string, fallback: boolean) {
+  const [value, setValue] = useState<boolean>(() => {
+    if (typeof localStorage === "undefined") return fallback;
+    const stored = localStorage.getItem(key);
+    return stored === null ? fallback : stored === "1";
+  });
+  const set = (next: boolean) => {
+    setValue(next);
+    try {
+      localStorage.setItem(key, next ? "1" : "0");
+    } catch {
+      // ignore storage failures
+    }
+  };
+  return [value, set] as const;
+}
+
 export function Studio({ onBackToProjects }: StudioProps) {
   const project = useStudio((s) => s.project);
   const undo = useStudio((s) => s.undo);
@@ -20,6 +38,8 @@ export function Studio({ onBackToProjects }: StudioProps) {
   // PlayerControls and usePlayerStore. Stage bridges this ref to the
   // <hyperframes-player> iframe; Timeline passes togglePlay/seek to PlayerControls.
   const { iframeRef, togglePlay, seek, onIframeLoad } = useTimelinePlayer();
+  const [libraryOpen, setLibraryOpen] = usePersistentBoolean("studio-library-open", true);
+  const [inspectorOpen, setInspectorOpen] = usePersistentBoolean("studio-inspector-open", true);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -56,9 +76,17 @@ export function Studio({ onBackToProjects }: StudioProps) {
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <TopBar onBackToProjects={onBackToProjects} />
       <div className="flex min-h-0 flex-1">
-        <aside className="w-60 shrink-0 border-r border-border">
-          <Library />
-        </aside>
+        {libraryOpen && (
+          <aside className="w-60 shrink-0 bg-panel">
+            <Library />
+          </aside>
+        )}
+        <SidebarRail
+          side="left"
+          open={libraryOpen}
+          label="Library"
+          onToggle={() => setLibraryOpen(!libraryOpen)}
+        />
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <div className="relative min-h-0 flex-1">
             <Stage iframeRef={iframeRef} onIframeLoad={onIframeLoad} />
@@ -67,10 +95,58 @@ export function Studio({ onBackToProjects }: StudioProps) {
             <Timeline togglePlay={togglePlay} seek={seek} />
           </div>
         </main>
-        <aside className="w-72 shrink-0 border-l border-border">
-          <Inspector seek={seek} />
-        </aside>
+        <SidebarRail
+          side="right"
+          open={inspectorOpen}
+          label="Inspector"
+          onToggle={() => setInspectorOpen(!inspectorOpen)}
+        />
+        {inspectorOpen && (
+          <aside className="w-72 shrink-0 bg-panel">
+            <Inspector seek={seek} />
+          </aside>
+        )}
       </div>
+    </div>
+  );
+}
+
+function SidebarRail({
+  side,
+  open,
+  label,
+  onToggle,
+}: {
+  side: "left" | "right";
+  open: boolean;
+  label: string;
+  onToggle: () => void;
+}): ReactNode {
+  const Icon = open
+    ? side === "left"
+      ? PanelLeftClose
+      : PanelRightClose
+    : side === "left"
+      ? PanelLeftOpen
+      : PanelRightOpen;
+  const borderClass = side === "left" ? "border-r border-border" : "border-l border-border";
+  return (
+    <div className={`flex w-7 shrink-0 flex-col items-center bg-panel ${borderClass}`}>
+      <button
+        type="button"
+        onClick={onToggle}
+        title={`${open ? "Collapse" : "Expand"} ${label}`}
+        aria-label={`${open ? "Collapse" : "Expand"} ${label}`}
+        aria-expanded={open}
+        className="mt-2 grid h-6 w-6 place-items-center rounded text-muted-foreground transition-colors hover:bg-panel-2 hover:text-foreground"
+      >
+        <Icon size={15} />
+      </button>
+      {!open && (
+        <div className="mt-3 select-none text-[10px] font-medium uppercase tracking-wider text-muted-foreground [writing-mode:vertical-rl]">
+          {label}
+        </div>
+      )}
     </div>
   );
 }

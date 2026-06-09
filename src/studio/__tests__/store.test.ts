@@ -1021,6 +1021,99 @@ describe("createBlankProject", () => {
     );
   });
 
+  it("applies character document commands to canonical sub-composition HTML", () => {
+    const project = createBlankProject("Character document command");
+    const body = makeMediaAsset("body-a", "Body");
+    const head = makeMediaAsset("head-a", "Head");
+    const hand = makeMediaAsset("hand-a", "Hand");
+    const character = {
+      ...createBlankCharacter("Actor"),
+      id: "character-document-source-1",
+      parts: [
+        makePart("body", body.id, {
+          id: "part-body",
+          slotId: "role:body",
+          x: 90,
+          y: 150,
+          width: 160,
+          height: 240,
+          zIndex: 1,
+        }),
+        makePart("head", head.id, {
+          id: "part-head",
+          slotId: "role:head",
+          x: 112,
+          y: 70,
+          width: 120,
+          height: 100,
+          zIndex: 2,
+        }),
+        makePart("hand", hand.id, {
+          id: "part-hand",
+          slotId: "slot:right-hand",
+          side: "right",
+          x: 250,
+          y: 250,
+          width: 60,
+          height: 70,
+          zIndex: 3,
+        }),
+      ],
+    };
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+      characters: new Map([[character.id, character]]),
+      mediaAssets: new Map([
+        [body.id, body],
+        [head.id, head],
+        [hand.id, hand],
+      ]),
+    });
+
+    useStudio.getState().addClip({
+      id: "character-document-clip",
+      kind: "composition",
+      compositionKind: "character",
+      character: {
+        characterId: character.id,
+        poses: {},
+        autoBlink: false,
+      },
+      name: "Actor",
+      trackIndex: 0,
+      start: 0,
+      duration: 4,
+      x: 10,
+      y: 20,
+      width: 300,
+      height: 450,
+      rotation: 0,
+      opacity: 1,
+      zIndex: 0,
+    });
+
+    useStudio.getState().applyCharacterDocumentCommand(character.id, {
+      type: "setSlotBinding",
+      slotId: "slot:right-hand",
+      boneId: "bone:role:head",
+      x: 7,
+      y: 9,
+      rotation: -8,
+      scaleX: 1,
+      scaleY: 1,
+      depth: 2,
+    });
+
+    const html =
+      useStudio.getState().project!.hf.compositionHtml["char_character-document-clip"] ?? "";
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const handSlot = doc.querySelector('[data-character-slot-id="slot:right-hand"]');
+    expect(handSlot?.getAttribute("data-character-bound-bone-id")).toBe("bone:role:head");
+    expect(handSlot?.parentElement?.getAttribute("data-character-bone-id")).toBe("bone:role:head");
+    expect(handSlot?.getAttribute("data-character-depth")).toBe("2");
+  });
+
   it("prunes stale generated speech audio when character lip sync changes or clears", () => {
     const project = createBlankProject("Character voice cleanup");
     const body = makeMediaAsset("body-a", "body-a");

@@ -48,4 +48,15 @@ describe("Timeline selection integration", () => {
     expect(source).toContain("pointTimeForMotion(motion, localPlayheadTime)");
     expect(source).toContain("selectionForMotionEndpoint");
   });
+
+  it("labels applied character movements directly on the parent clip", () => {
+    const source = readFileSync(timelinePath, "utf8");
+
+    expect(source).toContain("const storePresetMap = useStudio((s) => s.motionPresets);");
+    expect(source).toContain("characterMotionBadgeLabel");
+    expect(source).toContain("characterMotionTitle");
+    expect(source).toContain("motionBadge.label");
+    expect(source).toContain("1 movement");
+    expect(source).toContain("movements");
+  });
 });

@@ -40,6 +40,10 @@ movie. `editorMeta` is editor-only intent and UI state.
 - Character composition builder: `character/composition.ts` generates native
   HyperFrames sub-composition HTML for Studio Boom puppet rigs. Root character
   clips are regular composition clips with `compositionKind: "character"`.
+- Character document direction: character authoring should move toward the
+  HyperFrames-first document model in `docs/character-json-rig-motion-architecture.md`.
+  The character sub-composition HTML is the editable document; JSON artifacts are
+  import/export and AI exchange formats.
 - Speech/lip-sync boundary: character speech audio is reusable library media.
   Speech placement lives in character clip metadata, viseme timing lives on the
   audio `MediaAsset`, and `character/composition.ts` serializes placed speech as

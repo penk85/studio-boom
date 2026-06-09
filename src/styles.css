@@ -74,43 +74,57 @@
   --color-grid-line: var(--grid-line);
 }
 
+/*
+ * Three switchable themes, selected by [data-theme] on <html>:
+ *   (default / "light") — bright, Vyond-like
+ *   "soft"              — light gray, low glare
+ *   "dark"              — lifted dark (breathable, not near-black)
+ *
+ * :root holds shared tokens + the light defaults so there is no FOUC before
+ * the theme hook runs. Override blocks only restate what differs.
+ */
 :root {
-  /* Hyperframes Studio — dark, cinematic, Toon-Boom inspired */
   --radius: 0.625rem;
-  --background: oklch(0.16 0.02 270);
-  --foreground: oklch(0.96 0.01 250);
-  --card: oklch(0.21 0.025 270);
-  --card-foreground: oklch(0.96 0.01 250);
-  --popover: oklch(0.21 0.025 270);
-  --popover-foreground: oklch(0.96 0.01 250);
-  --primary: oklch(0.7 0.18 295);
-  --primary-foreground: oklch(0.14 0.02 270);
-  --secondary: oklch(0.27 0.03 270);
-  --secondary-foreground: oklch(0.96 0.01 250);
-  --muted: oklch(0.24 0.025 270);
-  --muted-foreground: oklch(0.7 0.02 260);
-  --accent: oklch(0.78 0.16 200);
-  --accent-foreground: oklch(0.14 0.02 270);
-  --destructive: oklch(0.65 0.22 25);
-  --destructive-foreground: oklch(0.98 0.01 250);
-  --border: oklch(0.3 0.025 270);
-  --input: oklch(0.27 0.025 270);
-  --ring: oklch(0.7 0.18 295);
+
+  /* Light theme (Vyond-like) — also the pre-JS default */
+  --background: oklch(0.99 0.003 270);
+  --foreground: oklch(0.25 0.02 270);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.25 0.02 270);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.25 0.02 270);
+  /* Vyond-like warm orange highlight (distinguishes Light from Soft's violet) */
+  --primary: oklch(0.66 0.2 45);
+  --primary-foreground: oklch(0.99 0.01 70);
+  --secondary: oklch(0.96 0.012 60);
+  --secondary-foreground: oklch(0.32 0.03 55);
+  --muted: oklch(0.96 0.008 270);
+  --muted-foreground: oklch(0.52 0.02 270);
+  --accent: oklch(0.7 0.13 200);
+  --accent-foreground: oklch(0.2 0.02 270);
+  --destructive: oklch(0.58 0.22 25);
+  --destructive-foreground: oklch(0.99 0.005 270);
+  --border: oklch(0.91 0.006 270);
+  --input: oklch(0.93 0.006 270);
+  --ring: oklch(0.66 0.2 45);
 
   /* Studio-specific tokens */
-  --panel: oklch(0.19 0.022 270);
-  --panel-2: oklch(0.23 0.025 270);
-  --stage-bg: oklch(0.1 0.015 270);
-  --track: oklch(0.24 0.025 270);
-  --track-alt: oklch(0.21 0.025 270);
-  --clip: oklch(0.55 0.18 295);
-  --clip-character: oklch(0.65 0.16 160);
-  --clip-audio: oklch(0.7 0.15 60);
-  --clip-bg: oklch(0.55 0.1 240);
-  --playhead: oklch(0.78 0.16 25);
-  --grid-line: oklch(0.28 0.02 270);
-  --gradient-primary: linear-gradient(135deg, oklch(0.7 0.18 295), oklch(0.78 0.16 200));
-  --shadow-panel: 0 1px 0 oklch(1 0 0 / 5%) inset, 0 8px 24px -12px oklch(0 0 0 / 60%);
+  --panel: oklch(0.975 0.005 270);
+  --panel-2: oklch(0.995 0.003 270);
+  --stage-bg: oklch(0.93 0.006 270);
+  --track: oklch(0.95 0.006 270);
+  --track-alt: oklch(0.97 0.005 270);
+  --clip: oklch(0.6 0.18 295);
+  --clip-character: oklch(0.62 0.15 160);
+  --clip-audio: oklch(0.7 0.14 60);
+  --clip-bg: oklch(0.6 0.1 240);
+  --playhead: oklch(0.6 0.22 25);
+  --grid-line: oklch(0.9 0.006 270);
+  /* Consumed by @hyperframes PlayerControls (seek fill/thumb). Resolves to the
+     active theme's accent so the transport matches every palette. */
+  --hf-accent: var(--accent);
+  --gradient-primary: linear-gradient(135deg, oklch(0.72 0.19 58), oklch(0.62 0.21 32));
+  --shadow-panel: 0 1px 2px oklch(0 0 0 / 6%), 0 8px 24px -16px oklch(0 0 0 / 18%);
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
@@ -126,39 +140,80 @@
   --sidebar-ring: oklch(0.704 0.04 256.788);
 }
 
-.dark {
-  --background: oklch(0.129 0.042 264.695);
-  --foreground: oklch(0.984 0.003 247.858);
-  --card: oklch(0.208 0.042 265.755);
-  --card-foreground: oklch(0.984 0.003 247.858);
-  --popover: oklch(0.208 0.042 265.755);
-  --popover-foreground: oklch(0.984 0.003 247.858);
-  --primary: oklch(0.929 0.013 255.508);
-  --primary-foreground: oklch(0.208 0.042 265.755);
-  --secondary: oklch(0.279 0.041 260.031);
-  --secondary-foreground: oklch(0.984 0.003 247.858);
-  --muted: oklch(0.279 0.041 260.031);
-  --muted-foreground: oklch(0.704 0.04 256.788);
-  --accent: oklch(0.279 0.041 260.031);
-  --accent-foreground: oklch(0.984 0.003 247.858);
-  --destructive: oklch(0.704 0.191 22.216);
-  --destructive-foreground: oklch(0.984 0.003 247.858);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.551 0.027 264.364);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.208 0.042 265.755);
-  --sidebar-foreground: oklch(0.984 0.003 247.858);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.984 0.003 247.858);
-  --sidebar-accent: oklch(0.279 0.041 260.031);
-  --sidebar-accent-foreground: oklch(0.984 0.003 247.858);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.551 0.027 264.364);
+/* Soft light-gray — calm, low-glare. Deliberately a clear step darker/grayer
+   than the bright Light theme so the two read as distinct. */
+[data-theme="soft"] {
+  --background: oklch(0.915 0.008 264);
+  --foreground: oklch(0.31 0.022 264);
+  --card: oklch(0.96 0.006 264);
+  --card-foreground: oklch(0.31 0.022 264);
+  --popover: oklch(0.96 0.006 264);
+  --popover-foreground: oklch(0.31 0.022 264);
+  --primary: oklch(0.6 0.18 295);
+  --primary-foreground: oklch(0.99 0.005 270);
+  --secondary: oklch(0.87 0.01 264);
+  --secondary-foreground: oklch(0.32 0.022 264);
+  --muted: oklch(0.89 0.009 264);
+  --muted-foreground: oklch(0.47 0.022 264);
+  --accent: oklch(0.66 0.12 200);
+  --accent-foreground: oklch(0.2 0.02 270);
+  --border: oklch(0.83 0.01 264);
+  --input: oklch(0.87 0.009 264);
+  --ring: oklch(0.6 0.18 295);
+
+  --panel: oklch(0.94 0.008 264);
+  --panel-2: oklch(0.975 0.005 264);
+  --stage-bg: oklch(0.85 0.011 264);
+  --track: oklch(0.9 0.009 264);
+  --track-alt: oklch(0.925 0.008 264);
+  --grid-line: oklch(0.82 0.01 264);
+  --gradient-primary: linear-gradient(135deg, oklch(0.6 0.18 295), oklch(0.66 0.13 200));
+  --shadow-panel: 0 1px 2px oklch(0 0 0 / 6%), 0 10px 26px -18px oklch(0 0 0 / 20%);
+}
+
+/* Lifted dark — breathable, not near-black */
+[data-theme="dark"] {
+  --background: oklch(0.24 0.02 270);
+  --foreground: oklch(0.96 0.008 250);
+  --card: oklch(0.29 0.022 270);
+  --card-foreground: oklch(0.96 0.008 250);
+  --popover: oklch(0.29 0.022 270);
+  --popover-foreground: oklch(0.96 0.008 250);
+  --primary: oklch(0.72 0.17 295);
+  --primary-foreground: oklch(0.18 0.02 270);
+  --secondary: oklch(0.33 0.025 270);
+  --secondary-foreground: oklch(0.96 0.008 250);
+  --muted: oklch(0.31 0.022 270);
+  --muted-foreground: oklch(0.74 0.02 260);
+  --accent: oklch(0.78 0.14 200);
+  --accent-foreground: oklch(0.18 0.02 270);
+  --destructive: oklch(0.65 0.22 25);
+  --destructive-foreground: oklch(0.98 0.01 250);
+  --border: oklch(0.36 0.022 270);
+  --input: oklch(0.33 0.022 270);
+  --ring: oklch(0.72 0.17 295);
+
+  --panel: oklch(0.27 0.022 270);
+  --panel-2: oklch(0.31 0.024 270);
+  --stage-bg: oklch(0.18 0.018 270);
+  --track: oklch(0.31 0.022 270);
+  --track-alt: oklch(0.28 0.022 270);
+  --clip: oklch(0.58 0.18 295);
+  --clip-character: oklch(0.65 0.16 160);
+  --clip-audio: oklch(0.7 0.15 60);
+  --clip-bg: oklch(0.55 0.1 240);
+  --playhead: oklch(0.78 0.16 25);
+  --grid-line: oklch(0.34 0.02 270);
+  --gradient-primary: linear-gradient(135deg, oklch(0.72 0.17 295), oklch(0.78 0.14 200));
+  --shadow-panel: 0 1px 0 oklch(1 0 0 / 5%) inset, 0 8px 24px -12px oklch(0 0 0 / 50%);
+  --sidebar: oklch(0.27 0.022 270);
+  --sidebar-foreground: oklch(0.96 0.008 250);
+  --sidebar-primary: oklch(0.72 0.17 295);
+  --sidebar-primary-foreground: oklch(0.18 0.02 270);
+  --sidebar-accent: oklch(0.33 0.025 270);
+  --sidebar-accent-foreground: oklch(0.96 0.008 250);
+  --sidebar-border: oklch(0.36 0.022 270);
+  --sidebar-ring: oklch(0.72 0.17 295);
 }
 
 @layer base {
@@ -170,4 +225,35 @@
     background-color: var(--color-background);
     color: var(--color-foreground);
   }
+}
+
+/*
+ * @hyperframes PlayerControls re-skin.
+ *
+ * The packaged component hardcodes dark-theme colors via inline styles
+ * (e.g. the Play button is white-on-white: background rgba(255,255,255,0.06)
+ * with a #FAFAFA icon), which disappears on the light themes. Its Tailwind
+ * utility classes are not generated here either (we only scan src/). So we
+ * override the inline styles directly with !important, themed via tokens.
+ */
+
+/* Play / Pause — make it the primary action color in every theme. */
+button[aria-label="Play"],
+button[aria-label="Pause"] {
+  background: var(--primary) !important;
+}
+button[aria-label="Play"] svg,
+button[aria-label="Pause"] svg {
+  fill: var(--primary-foreground) !important;
+}
+/* Keep the disabled (timeline not ready) state reading as disabled — the
+   package's disabled:opacity utility isn't generated in our build. */
+button[aria-label="Play"]:disabled,
+button[aria-label="Pause"]:disabled {
+  opacity: 0.4 !important;
+}
+
+/* Seek bar track — the package uses a faint white tint that vanishes on light. */
+[role="slider"][aria-label="Seek"] > div {
+  background: color-mix(in oklab, var(--foreground) 20%, transparent) !important;
 }

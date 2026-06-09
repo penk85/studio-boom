@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { validateCompositionSourceHtml } from "../../hyperframes/composition-source";
-import type { CharacterClipMeta, MotionPreset } from "../../types";
+import type { CharacterClipMeta, CharacterPreset, MotionPreset } from "../../types";
 import { createBlankCharacter, makePart } from "../character-utils";
 import { buildCharacterCompositionHtml } from "../composition";
 import { blinkWindowsForClip } from "../eye-state";
@@ -140,8 +140,302 @@ describe("buildCharacterCompositionHtml", () => {
     // composition clip's visibility window to min(data-duration, timeline.duration()),
     // so the character timeline must span the full composition duration.
     expect(html).toContain("tl.to({}, { duration: S.duration }, 0);");
+    expect(html).toContain("const resetInitialState = function()");
+    expect(html).toContain("const originalSeek = tl.seek;");
+    expect(html).toContain("tl.seek = function(time, suppressEvents)");
+    expect(html).toContain('tl.eventCallback("onStart"');
     expect(html).not.toMatch(/repeat\s*:\s*-1/);
     expect(html).not.toMatch(/\basync\b/);
+  });
+
+  it("nests iris slots inside the open eye variant", () => {
+    const character = {
+      ...createBlankCharacter("Eye actor"),
+      id: "eye-char",
+      parts: [
+        makePart("body", "body-media", {
+          id: "body",
+          slotId: "role:body",
+          x: 80,
+          y: 130,
+          width: 180,
+          height: 280,
+          zIndex: 1,
+        }),
+        makePart("head", "head-media", {
+          id: "head",
+          slotId: "role:head",
+          x: 110,
+          y: 70,
+          width: 120,
+          height: 120,
+          zIndex: 4,
+        }),
+        makePart("eye", "eye-open-media", {
+          id: "eye-open",
+          slotId: "slot:left-eye",
+          side: "left",
+          eyeState: "open",
+          x: 140,
+          y: 112,
+          width: 32,
+          height: 20,
+          zIndex: 6,
+        }),
+        makePart("eye", "eye-closed-media", {
+          id: "eye-closed",
+          slotId: "slot:left-eye",
+          side: "left",
+          eyeState: "closed",
+          x: 140,
+          y: 116,
+          width: 32,
+          height: 8,
+          zIndex: 6,
+        }),
+        makePart("iris", "iris-media", {
+          id: "left-iris",
+          slotId: "slot:left-iris",
+          side: "left",
+          x: 152,
+          y: 116,
+          width: 8,
+          height: 8,
+          zIndex: 7,
+        }),
+      ],
+    };
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_iris_nested",
+      clipId: "clip-iris-nested",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character: { ...character, rig: buildDefaultRig(character) },
+      meta: {
+        characterId: "eye-char",
+        poses: {},
+        autoBlink: false,
+      },
+      motionPresets: new Map(),
+    });
+
+    const openIndex = html.indexOf('data-character-part-id="eye-open"');
+    const irisIndex = html.indexOf('data-character-slot-id="slot:left-iris"');
+    const closedIndex = html.indexOf('data-character-part-id="eye-closed"');
+    expect(openIndex).toBeGreaterThan(-1);
+    expect(irisIndex).toBeGreaterThan(openIndex);
+    expect(closedIndex).toBeGreaterThan(irisIndex);
+  });
+
+  it("keeps nested iris slot motion on the iris target in compiled playback", () => {
+    const characterBase = {
+      ...createBlankCharacter("Eye actor"),
+      id: "eye-char",
+      parts: [
+        makePart("body", "body-media", {
+          id: "body",
+          slotId: "role:body",
+          x: 80,
+          y: 130,
+          width: 180,
+          height: 280,
+          zIndex: 1,
+        }),
+        makePart("head", "head-media", {
+          id: "head",
+          slotId: "role:head",
+          x: 110,
+          y: 70,
+          width: 120,
+          height: 120,
+          zIndex: 4,
+        }),
+        makePart("eye", "eye-open-media", {
+          id: "eye-open",
+          slotId: "slot:left-eye",
+          side: "left",
+          eyeState: "open",
+          x: 140,
+          y: 112,
+          width: 32,
+          height: 20,
+          zIndex: 6,
+        }),
+        makePart("eye", "eye-closed-media", {
+          id: "eye-closed",
+          slotId: "slot:left-eye",
+          side: "left",
+          eyeState: "closed",
+          x: 140,
+          y: 116,
+          width: 32,
+          height: 8,
+          zIndex: 6,
+        }),
+        makePart("iris", "iris-media", {
+          id: "left-iris",
+          slotId: "slot:left-iris",
+          side: "left",
+          x: 152,
+          y: 116,
+          width: 8,
+          height: 8,
+          zIndex: 7,
+        }),
+      ],
+    };
+    const preset: MotionPreset = {
+      id: "iris-look",
+      name: "Iris look",
+      category: "expression",
+      duration: 1,
+      loop: false,
+      tracks: [],
+      keyposes: [
+        {
+          t: 0,
+          parts: [{ partRole: "iris", slotId: "slot:left-iris", dx: 10, dy: 4 }],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_iris_motion",
+      clipId: "clip-iris-motion",
+      width: characterBase.canvasWidth,
+      height: characterBase.canvasHeight,
+      duration: 1,
+      character: { ...characterBase, rig: buildDefaultRig(characterBase) },
+      meta: {
+        characterId: "eye-char",
+        poses: {},
+        autoBlink: false,
+        motions: [{ id: "applied-iris", presetId: preset.id, offset: 0, intensity: 1 }],
+      },
+      motionPresets: new Map([[preset.id, preset]]),
+    });
+    const scene = extractScene(html);
+    const irisTarget = scene.initialTargets.find((target) =>
+      target.selector.includes("char-slot-slot-left-iris"),
+    );
+
+    expect(irisTarget?.vars.x).toBe(10);
+    expect(irisTarget?.vars.y).toBe(4);
+  });
+
+  it("renders any nested child slot through slotRelations and parent variant gates", () => {
+    const characterBase = {
+      ...createBlankCharacter("Mouth child actor"),
+      id: "mouth-child-char",
+      parts: [
+        makePart("body", "body-media", {
+          id: "body",
+          slotId: "role:body",
+          x: 80,
+          y: 130,
+          width: 180,
+          height: 280,
+          zIndex: 1,
+        }),
+        makePart("mouth", "mouth-rest-media", {
+          id: "mouth-rest",
+          slotId: "role:mouth",
+          viseme: "rest",
+          x: 120,
+          y: 180,
+          width: 70,
+          height: 32,
+          zIndex: 6,
+        }),
+        makePart("mouth", "mouth-a-media", {
+          id: "mouth-a",
+          slotId: "role:mouth",
+          viseme: "A",
+          x: 120,
+          y: 180,
+          width: 70,
+          height: 50,
+          zIndex: 6,
+        }),
+        makePart("custom", "tongue-media", {
+          id: "tongue",
+          slotId: "slot:tongue",
+          slotName: "Tongue",
+          x: 140,
+          y: 202,
+          width: 28,
+          height: 16,
+          zIndex: 7,
+        }),
+      ],
+    };
+    const defaultRig = buildDefaultRig(characterBase);
+    const rig = {
+      ...defaultRig,
+      slotRelations: [
+        ...defaultRig.slotRelations.filter((relation) => relation.childSlotId !== "slot:tongue"),
+        {
+          id: "relation:tongue-mouth-a",
+          childSlotId: "slot:tongue",
+          parentRef: { type: "slot" as const, id: "role:mouth" },
+          relationType: "containedFeature" as const,
+          activeWhenParentVariant: { keys: ["A"] },
+          transformMode: "inheritParent" as const,
+          visibilityMode: "withParentVariant" as const,
+          renderMode: "nested" as const,
+          clipMode: "none" as const,
+        },
+      ],
+      angles: Object.fromEntries(
+        Object.entries(defaultRig.angles ?? {}).map(([angle, angleRig]) => [
+          angle,
+          angleRig
+            ? {
+                ...angleRig,
+                slotRelations: [
+                  ...angleRig.slotRelations.filter(
+                    (relation) => relation.childSlotId !== "slot:tongue",
+                  ),
+                  {
+                    id: "relation:tongue-mouth-a",
+                    childSlotId: "slot:tongue",
+                    parentRef: { type: "slot" as const, id: "role:mouth" },
+                    relationType: "containedFeature" as const,
+                    activeWhenParentVariant: { keys: ["A"] },
+                    transformMode: "inheritParent" as const,
+                    visibilityMode: "withParentVariant" as const,
+                    renderMode: "nested" as const,
+                    clipMode: "none" as const,
+                  },
+                ],
+              }
+            : angleRig,
+        ]),
+      ),
+    };
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_mouth_child",
+      clipId: "clip-mouth-child",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character: { ...characterBase, rig },
+      meta: {
+        characterId: "mouth-child-char",
+        poses: {},
+        autoBlink: false,
+      },
+      motionPresets: new Map(),
+    });
+
+    const restIndex = html.indexOf('data-character-part-id="mouth-rest"');
+    const aIndex = html.indexOf('data-character-part-id="mouth-a"');
+    const tongueIndex = html.indexOf('data-character-slot-id="slot:tongue"');
+    expect(restIndex).toBeGreaterThan(-1);
+    expect(aIndex).toBeGreaterThan(restIndex);
+    expect(tongueIndex).toBeGreaterThan(aIndex);
   });
 
   it("emits nested rig, host, depth, angle, and draw-order metadata", () => {
@@ -216,6 +510,9 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).toContain('data-character-parent-bone-id="bone:role:body"');
     expect(html).toContain('data-character-slot-id="slot:left-eye"');
     expect(html).toContain('data-character-bound-bone-id="bone:slot:left-eye"');
+    expect(html).toContain('data-character-host-slot-id="role:head"');
+    expect(html).toContain('data-character-host-bone-id="bone:role:head"');
+    expect(html).toContain('data-character-host-mode="insideHostMask"');
     expect(html).toContain('data-character-depth="7"');
     expect(html).toContain('data-character-draw-order-index="');
   });
@@ -277,6 +574,68 @@ describe("buildCharacterCompositionHtml", () => {
 
     expect(scene.slotEvents.some((event) => event.variant?.show?.includes("3qL"))).toBe(true);
     expect(html).toContain('src="asset:body-3ql-media"');
+  });
+
+  it("renders active-angle images while preserving shared slot art", () => {
+    const characterBase = {
+      ...createBlankCharacter("Angle art actor"),
+      id: "angle-art-char",
+      angles: ["front", "sideL"] as CharacterPreset["angles"],
+      parts: [
+        makePart("body", "body-front-media", {
+          id: "body-front",
+          slotId: "role:body",
+          angleIds: ["front"],
+          x: 80,
+          y: 120,
+          width: 180,
+          height: 280,
+          zIndex: 1,
+        }),
+        makePart("body", "body-side-media", {
+          id: "body-side",
+          slotId: "role:body",
+          angleIds: ["sideL"],
+          x: 88,
+          y: 120,
+          width: 150,
+          height: 280,
+          zIndex: 1,
+        }),
+        makePart("hand", "shared-hand-media", {
+          id: "shared-hand",
+          slotId: "slot:left-hand",
+          side: "left",
+          x: 56,
+          y: 270,
+          width: 64,
+          height: 80,
+          zIndex: 4,
+        }),
+      ],
+    };
+    const rig = buildDefaultRig(characterBase, "sideL");
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_angle_art",
+      clipId: "clip-angle-art",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character: {
+        ...characterBase,
+        rig,
+      },
+      meta: {
+        characterId: "angle-art-char",
+        poses: {},
+        autoBlink: false,
+      },
+      motionPresets: new Map(),
+    });
+
+    expect(html).toContain('src="asset:body-side-media"');
+    expect(html).not.toContain('src="asset:body-front-media"');
+    expect(html).toContain('src="asset:shared-hand-media"');
   });
 
   it("targets bone groups for bone-aware motion while descendants inherit through DOM nesting", () => {

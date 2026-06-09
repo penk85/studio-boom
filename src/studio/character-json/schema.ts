@@ -1,5 +1,6 @@
 import type {
   CharacterAngle,
+  CharacterPart,
   CharacterPartBounds,
   EyeState,
   ID,
@@ -17,6 +18,47 @@ export const RIG_SUGGESTION_AI_IN_KIND = "studioBoom.ai.rigSuggestion.v1";
 export const MOTION_SUGGESTION_AI_IN_KIND = "studioBoom.ai.motionSuggestion.v1";
 
 export const CHARACTER_JSON_SCHEMA_VERSION = 1;
+
+export const MOTION_CATEGORY_VALUES: MotionCategory[] = [
+  "expression",
+  "gesture",
+  "full-body",
+  "camera",
+  "headTurn",
+  "custom",
+];
+
+const MOTION_CATEGORY_ALIASES: Record<string, MotionCategory> = {
+  "body gesture": "gesture",
+  bodygesture: "gesture",
+  "camera move": "camera",
+  cameramove: "camera",
+  "full body": "full-body",
+  fullbody: "full-body",
+  full_body: "full-body",
+};
+
+export function normalizeMotionCategory(value: unknown): MotionCategory | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  if ((MOTION_CATEGORY_VALUES as string[]).includes(normalized)) {
+    return normalized as MotionCategory;
+  }
+  return MOTION_CATEGORY_ALIASES[normalized.toLowerCase()] ?? null;
+}
+
+export function normalizeMotionCategoryForImport(value: unknown): {
+  category: MotionCategory;
+  warning?: string;
+} {
+  const normalized = normalizeMotionCategory(value);
+  if (normalized) return { category: normalized };
+  const label = typeof value === "string" && value.trim() ? value.trim() : "unknown";
+  return {
+    category: "custom",
+    warning: `Unknown motion category "${label}" will be imported as "custom". Choose one of: ${MOTION_CATEGORY_VALUES.join(", ")}.`,
+  };
+}
 
 export type StudioBoomJsonKind =
   | typeof CHARACTER_JSON_KIND
@@ -56,6 +98,7 @@ export interface SemanticSlotJson {
   name: string;
   role: PartRole;
   semanticType: SemanticType;
+  angleIds?: CharacterAngle[];
   aliases?: string[];
   aiHint?: string;
   defaultAttachment?: ID;
@@ -91,6 +134,7 @@ export interface AngleSlotVariantJson {
   id: ID;
   mediaId: ID;
   name: string;
+  angleIds?: CharacterAngle[];
   pose?: string;
   viseme?: MouthViseme;
   eyeState?: EyeState;
@@ -126,6 +170,32 @@ export interface AngleHostConstraintJson {
   reachPolicy?: "scaleToFit" | "cap" | "allow";
 }
 
+export interface AngleSlotRelationJson {
+  id: ID;
+  childSlotId: ID;
+  parentRef:
+    | { type: "slot"; id: ID }
+    | { type: "semanticSlot"; id: ID }
+    | { type: "role"; role: PartRole; side?: CharacterPart["side"] }
+    | { type: "bone"; id: ID };
+  relationType:
+    | "attachment"
+    | "containedFeature"
+    | "decorativeChild"
+    | "heldProp"
+    | "clothingCoverage";
+  activeWhenParentVariant?: {
+    keys?: string[];
+    partIds?: ID[];
+  };
+  transformMode: "inheritParent" | "independent";
+  visibilityMode: "withParentSlot" | "withParentVariant" | "independent";
+  renderMode: "nested" | "sibling";
+  clipMode?: "none" | "clipToParentShape" | "clipToMaskSlot";
+  clipSlotId?: ID;
+  characterViewIds?: CharacterAngle[];
+}
+
 export interface AngleReachJson {
   id: ID;
   slotId: ID;
@@ -141,6 +211,7 @@ export interface AngleRigJson extends StudioBoomJsonArtifactBase {
   bones: AngleBoneJson[];
   slots: AngleSlotJson[];
   bindings: AngleSlotBindingJson[];
+  slotRelations?: AngleSlotRelationJson[];
   hostConstraints?: AngleHostConstraintJson[];
   reaches?: AngleReachJson[];
   drawOrder: ID[];
@@ -175,6 +246,7 @@ export interface MotionJsonKeyframe {
 
 export interface MotionJsonTrack {
   id: ID;
+  angleIds?: CharacterAngle[];
   target: MotionTargetJson;
   channel: MotionTrackChannel;
   keyframes: MotionJsonKeyframe[];
@@ -185,6 +257,7 @@ export interface MotionJson extends StudioBoomJsonArtifactBase {
   id: ID;
   name: string;
   category: MotionCategory;
+  angleIds?: CharacterAngle[];
   duration: number;
   loop: boolean;
   targetSpace: "parentRelative";

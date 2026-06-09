@@ -174,7 +174,9 @@ describe("normalizePartRole", () => {
       "head",
       "body",
       "eye",
+      "iris",
       "eyebrow",
+      "nose",
       "mouth",
       "arm",
       "hand",
@@ -227,7 +229,9 @@ describe("roleEnabledByManifest", () => {
     hasLegs: true,
     hasFeet: true,
     hasEyes: true,
+    hasIrises: true,
     hasBrows: true,
+    hasNose: true,
     hasMouth: true,
     hasHair: true,
     hasAccessories: true,
@@ -242,7 +246,9 @@ describe("roleEnabledByManifest", () => {
       "leg",
       "foot",
       "eye",
+      "iris",
       "eyebrow",
+      "nose",
       "mouth",
       "hair",
       "accessory",
@@ -255,6 +261,8 @@ describe("roleEnabledByManifest", () => {
   it("returns false for disabled roles", () => {
     const noLegs = { ...fullManifest, hasLegs: false };
     expect(roleEnabledByManifest("leg", noLegs)).toBe(false);
+    expect(roleEnabledByManifest("iris", { ...fullManifest, hasEyes: false })).toBe(false);
+    expect(roleEnabledByManifest("iris", { ...fullManifest, hasIrises: false })).toBe(false);
   });
 
   it("static and custom are always enabled regardless of manifest", () => {
