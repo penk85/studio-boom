@@ -5,7 +5,10 @@ import type {
   MotionJsonTrack,
   MotionTargetJson,
 } from "../character-json/schema";
-import { normalizeMotionCategoryForImport } from "../character-json/schema";
+import {
+  MOTION_TRANSFORM_FIELD_NAMES,
+  normalizeMotionCategoryForImport,
+} from "../character-json/schema";
 import { motionJsonFromPreset, motionJsonFilename, slugifyName } from "../character-json/normalize";
 import { resolveMotionTarget, validateMotionJsonForAngle } from "../character-json/validate";
 import type {
@@ -107,10 +110,14 @@ function keyposesFromMotionJson(
     .map((tNorm) => {
       const parts: RecordedPartOverride[] = [];
       let camera: RecordedKeypose["camera"];
+      // Carry the AI's per-keyframe easing into the keypose so apply.ts shapes the curve into it
+      // (a RecordedKeypose holds one ease for all parts; take the first defined source ease here).
+      let keyposeEase: string | undefined;
       for (const track of motion.tracks) {
         const resolved = resolveMotionTarget(track.target, angleRig);
         if (!resolved.ok) continue;
         const sample = sampleMotionJsonTrack(track, tNorm);
+        if (keyposeEase === undefined && typeof sample.ease === "string") keyposeEase = sample.ease;
         if (resolved.target.kind === "camera") {
           camera = {
             dx: sample.dx,
@@ -136,7 +143,7 @@ function keyposesFromMotionJson(
         t: round(tNorm * duration, 4),
         parts,
         camera,
-        ease: "easeInOut",
+        ease: keyposeEase ?? "easeInOut",
       };
     })
     .filter((keypose) => keypose.parts.length > 0 || keypose.camera);
@@ -170,19 +177,7 @@ function assignSampleToOverride(
   channel: MotionJsonTrack["channel"],
 ) {
   const writable = out as RecordedPartOverride & Partial<MotionKeyframe>;
-  for (const key of [
-    "dx",
-    "dy",
-    "scale",
-    "scaleX",
-    "scaleY",
-    "skewX",
-    "skewY",
-    "rotation",
-    "originX",
-    "originY",
-    "opacity",
-  ] as const) {
+  for (const key of MOTION_TRANSFORM_FIELD_NAMES) {
     const value = sample[key];
     if (typeof value === "number" && Number.isFinite(value)) writable[key] = round(value, 4);
   }
@@ -228,19 +223,7 @@ function sampleInterpolatedTrack(
   const span = Math.max(0.0001, b.t - a.t);
   const u = Math.max(0, Math.min(1, (tNorm - a.t) / span));
   const out: Partial<MotionJsonKeyframe> = { t: tNorm };
-  for (const key of [
-    "dx",
-    "dy",
-    "scale",
-    "scaleX",
-    "scaleY",
-    "skewX",
-    "skewY",
-    "rotation",
-    "originX",
-    "originY",
-    "opacity",
-  ] as const) {
+  for (const key of MOTION_TRANSFORM_FIELD_NAMES) {
     const av = a[key];
     const bv = b[key];
     if (av === undefined && bv === undefined) continue;
@@ -248,6 +231,9 @@ function sampleInterpolatedTrack(
     else if (bv === undefined) out[key] = av;
     else out[key] = av + (bv - av) * u;
   }
+  // The keyframe at/after tNorm governs the easing into this sample (apply.ts uses keypose ease).
+  const ease = b.ease ?? a.ease;
+  if (typeof ease === "string") out.ease = ease;
   return out;
 }
 

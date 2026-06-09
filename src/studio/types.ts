@@ -98,6 +98,88 @@ export interface CharacterSlotVariant {
   kind?: CharacterVariantKind;
 }
 
+export interface CharacterVariantArtworkLayer {
+  id: ID;
+  partId?: ID;
+  mediaId?: ID;
+  name?: string;
+  role?: PartRole;
+  zIndex?: number;
+  mask?: boolean;
+  cover?: boolean;
+}
+
+export interface CharacterVariantArtwork {
+  partIds?: ID[];
+  layers?: CharacterVariantArtworkLayer[];
+}
+
+export interface CharacterVariantBone {
+  id: ID;
+  name?: string;
+  targetPartId?: ID;
+  pivot: { x: number; y: number };
+  defaultRotation?: number;
+  rotationLimits?: [number, number];
+}
+
+export interface CharacterVariantControl {
+  id: ID;
+  label: string;
+  type: "rotation" | "translation" | "scale" | "visibility" | "variant" | "custom";
+  targetBoneId?: ID;
+  targetPartId?: ID;
+  range?: [number, number];
+  defaultValue?: number | string | boolean;
+}
+
+export interface CharacterVariantClipping {
+  maskPartIds?: ID[];
+  coverPartIds?: ID[];
+  rules?: string[];
+}
+
+export interface CharacterVariantSocket {
+  id: ID;
+  name?: string;
+  x: number;
+  y: number;
+}
+
+export interface CharacterVariantRigPackage {
+  bones?: CharacterVariantBone[];
+  controls?: CharacterVariantControl[];
+  clipping?: CharacterVariantClipping;
+  sockets?: {
+    mount?: CharacterVariantSocket;
+    outputs?: CharacterVariantSocket[];
+  };
+  zOrder?: ID[];
+}
+
+export interface CharacterVariantAiMetadata {
+  plainDescription: string;
+  tags?: string[];
+  bodyPart?: PartRole | string;
+  side?: CharacterPart["side"];
+  energy?: string;
+  handPosition?: Record<string, string>;
+  goodFor?: string[];
+  lessIdealFor?: string[];
+}
+
+export interface CharacterSlotVariantPackage {
+  id: ID;
+  slotId: ID;
+  key?: string;
+  displayName: string;
+  slotCompatibility?: ID[];
+  angleIds?: CharacterAngle[];
+  artwork?: CharacterVariantArtwork;
+  rig?: CharacterVariantRigPackage;
+  aiMetadata?: CharacterVariantAiMetadata;
+}
+
 export type BoundsType = "rect" | "ellipse";
 
 export interface CharacterPartBounds {
@@ -147,6 +229,8 @@ export interface CharacterPart {
   pose?: string;
   /** Generic slot variant represented by this part image. */
   variant?: CharacterSlotVariant;
+  /** Optional rich variant package this artwork layer belongs to. */
+  variantPackageId?: ID;
   /** For mouth parts, the viseme this image represents. */
   viseme?: MouthViseme;
   /** For eye parts, the eye state. */
@@ -457,6 +541,8 @@ export interface CharacterPreset {
   parallax: ParallaxConfig;
   /** True FK skeleton, slot attachments, draw order, host constraints, and angle metadata. */
   rig?: CharacterRig;
+  /** Rich per-slot variant packages for variants that need their own art stack and rig controls. */
+  variantPackages?: CharacterSlotVariantPackage[];
   /** Optional head variants for head-turn animations. */
   headVariants?: HeadVariant[];
   /** Where generated fallback lip-sync mouth shapes should appear. */
@@ -480,7 +566,10 @@ export interface MotionKeyframe {
   scaleY?: number; // vertical stretch multiplier (1 = unchanged)
   skewX?: number; // additive degrees
   skewY?: number; // additive degrees
-  rotation?: number; // additive degrees
+  rotation?: number; // additive degrees (2D, Z axis)
+  rotationX?: number; // additive degrees, 3D X axis (vertical flip)
+  rotationY?: number; // additive degrees, 3D Y axis (horizontal / card flip)
+  transformPerspective?: number; // px, 3D perspective depth for rotationX/rotationY
   originX?: number; // transform origin x, 0..1 within part
   originY?: number; // transform origin y, 0..1 within part
   opacity?: number; // 0..1, replaces base
@@ -532,6 +621,9 @@ export interface RecordedPartOverride {
   skewX?: number; // additive degrees
   skewY?: number; // additive degrees
   rotation?: number;
+  rotationX?: number; // additive degrees, 3D X axis (vertical flip)
+  rotationY?: number; // additive degrees, 3D Y axis (horizontal / card flip)
+  transformPerspective?: number; // px, 3D perspective depth for rotationX/rotationY
   originX?: number; // transform origin x, 0..1 within part
   originY?: number; // transform origin y, 0..1 within part
   opacity?: number;

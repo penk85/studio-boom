@@ -2,6 +2,7 @@ import type {
   CharacterBone,
   CharacterPart,
   CharacterPreset,
+  CharacterSlotVariantPackage,
   MotionPreset,
   MotionTrack,
   PartRole,
@@ -112,7 +113,15 @@ export function angleRigJsonFromPreset(
     rig: { ...normalizeCharacterRig(character), activeAngle: angleId },
   });
   const slots = listCharacterSlots(partsAvailableForAngle(character.parts, rig.activeAngle));
-  const variantsBySlot = new Map(slots.map((slot) => [slot.id, variantsForParts(slot.parts)]));
+  const variantsBySlot = new Map(
+    slots.map((slot) => [
+      slot.id,
+      variantsForParts(
+        slot.parts,
+        character.variantPackages?.filter((variant) => variant.slotId === slot.id) ?? [],
+      ),
+    ]),
+  );
   const slotById = new Map(slots.map((slot) => [slot.id, slot]));
   return {
     kind: ANGLE_RIG_JSON_KIND,
@@ -236,17 +245,50 @@ function uniqueSemanticBones(rig: ReturnType<typeof normalizeCharacterRig>): Cha
   return Array.from(out.values());
 }
 
-function variantsForParts(parts: CharacterPart[]): AngleSlotVariantJson[] {
-  return parts.map((part) => ({
-    id: variantKeyForPart(part),
-    mediaId: part.mediaId,
-    name: part.name,
-    angleIds: part.angleIds ?? (part.angleId ? [part.angleId] : undefined),
-    variant: part.variant,
-    pose: part.pose,
-    viseme: part.viseme,
-    eyeState: part.eyeState,
-  }));
+function variantsForParts(
+  parts: CharacterPart[],
+  packages: CharacterSlotVariantPackage[] = [],
+): AngleSlotVariantJson[] {
+  const byVariant = new Map<string, CharacterPart[]>();
+  for (const part of parts) {
+    const key = variantKeyForPart(part);
+    byVariant.set(key, [...(byVariant.get(key) ?? []), part]);
+  }
+  return Array.from(byVariant, ([id, groupedParts]) => {
+    const representative = groupedParts[0];
+    const explicitPackage = packages.find(
+      (variant) => variant.id === id || variant.key === id || groupedParts.some((part) => part.variantPackageId === variant.id),
+    );
+    return {
+      id,
+      mediaId: representative.mediaId,
+      name: representative.name,
+      displayName: explicitPackage?.displayName ?? representative.variant?.name ?? representative.name,
+      slotCompatibility: explicitPackage?.slotCompatibility,
+      angleIds:
+        explicitPackage?.angleIds ??
+        uniqueAngles(groupedParts.flatMap((part) => part.angleIds ?? (part.angleId ? [part.angleId] : []))),
+      variant: representative.variant,
+      artwork:
+        explicitPackage?.artwork ??
+        {
+          partIds: groupedParts.map((part) => part.id),
+          layers: groupedParts.map((part) => ({
+            id: part.id,
+            partId: part.id,
+            mediaId: part.mediaId,
+            name: part.name,
+            role: part.role,
+            zIndex: part.zIndex,
+          })),
+        },
+      rig: explicitPackage?.rig,
+      aiMetadata: explicitPackage?.aiMetadata,
+      pose: representative.pose,
+      viseme: representative.viseme,
+      eyeState: representative.eyeState,
+    };
+  });
 }
 
 function defaultVariantForParts(parts: CharacterPart[]): string | undefined {
@@ -254,6 +296,11 @@ function defaultVariantForParts(parts: CharacterPart[]): string | undefined {
     parts.find((candidate) => partMatchesVariant(candidate, "rest")) ??
     representativePart(parts);
   return part ? variantKeyForPart(part) : undefined;
+}
+
+function uniqueAngles(angles: CharacterPreset["angles"]): CharacterPreset["angles"] | undefined {
+  const unique = Array.from(new Set(angles ?? []));
+  return unique.length ? unique : undefined;
 }
 
 function semanticTypeForSlot(role: PartRole, label: string): SemanticType {

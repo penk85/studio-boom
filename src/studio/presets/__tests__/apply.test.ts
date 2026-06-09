@@ -154,6 +154,16 @@ describe("sampleTrack", () => {
     const d = sampleTrack(kfs, 1.0);
     expect(d.dy).toBeCloseTo(50);
   });
+
+  it("interpolates 3D fields (rotationY) and carries transformPerspective", () => {
+    const kfs = [
+      makeKeyframe(0, { rotationY: 0, transformPerspective: 800, ease: "linear" }),
+      makeKeyframe(1, { rotationY: 360, transformPerspective: 800, ease: "linear" }),
+    ];
+    expect(sampleTrack(kfs, 0.5).rotationY).toBeCloseTo(180);
+    expect(sampleTrack(kfs, 1).rotationY).toBeCloseTo(360);
+    expect(sampleTrack(kfs, 0.5).transformPerspective).toBe(800);
+  });
 });
 
 // ─── applyIntensity ───────────────────────────────────────────────────────────
@@ -169,6 +179,9 @@ describe("applyIntensity", () => {
       skewX: 0,
       skewY: 0,
       rotation: 0,
+      rotationX: 0,
+      rotationY: 0,
+      transformPerspective: null,
       originX: null,
       originY: null,
       opacity: null,
@@ -221,6 +234,9 @@ describe("combine", () => {
       skewX: 0,
       skewY: 0,
       rotation: 0,
+      rotationX: 0,
+      rotationY: 0,
+      transformPerspective: null,
       originX: null,
       originY: null,
       opacity: null,

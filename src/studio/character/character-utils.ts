@@ -240,9 +240,16 @@ export function normalizePartVariant(
 }
 
 export function variantKeyForPart(
-  part: Pick<CharacterPart, "variant" | "pose" | "viseme" | "eyeState" | "id">,
+  part: Pick<CharacterPart, "variant" | "variantPackageId" | "pose" | "viseme" | "eyeState" | "id">,
 ): string {
-  return part.variant?.key?.trim() || part.viseme || part.eyeState || part.pose || part.id;
+  return (
+    part.variant?.key?.trim() ||
+    part.variantPackageId ||
+    part.viseme ||
+    part.eyeState ||
+    part.pose ||
+    part.id
+  );
 }
 
 export function variantLabelForPart(
@@ -252,11 +259,12 @@ export function variantLabelForPart(
 }
 
 export function variantAliasesForPart(
-  part: Pick<CharacterPart, "id" | "variant" | "pose" | "viseme" | "eyeState">,
+  part: Pick<CharacterPart, "id" | "variant" | "variantPackageId" | "pose" | "viseme" | "eyeState">,
 ): string[] {
   return uniqueStrings([
     variantKeyForPart(part),
     part.id,
+    part.variantPackageId,
     part.variant?.key,
     part.pose,
     part.viseme,
@@ -446,6 +454,7 @@ export function makePart(
     role,
     name: opts.name ?? roleLabel(role),
     pose: opts.pose,
+    variantPackageId: opts.variantPackageId,
     variant: normalizePartVariant({
       role,
       pose: opts.pose,

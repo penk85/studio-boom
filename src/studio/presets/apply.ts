@@ -19,7 +19,10 @@ export interface ComposedDelta {
   scaleY: number; // vertical stretch multiplier (1 = no change)
   skewX: number; // additive degrees
   skewY: number; // additive degrees
-  rotation: number; // additive degrees
+  rotation: number; // additive degrees (2D, Z axis)
+  rotationX: number; // additive degrees, 3D X axis (vertical flip)
+  rotationY: number; // additive degrees, 3D Y axis (horizontal / card flip)
+  transformPerspective: number | null; // px, 3D perspective depth; null = none
   originX: number | null; // null = inherit part anchor
   originY: number | null; // null = inherit part anchor
   opacity: number | null; // null = inherit
@@ -96,6 +99,9 @@ export function emptyDelta(): ComposedDelta {
     skewX: 0,
     skewY: 0,
     rotation: 0,
+    rotationX: 0,
+    rotationY: 0,
+    transformPerspective: null,
     originX: null,
     originY: null,
     opacity: null,
@@ -119,6 +125,12 @@ function interpKf(a: MotionKeyframe, b: MotionKeyframe, u: number): ComposedDelt
     skewX: lerp(a.skewX, b.skewX, 0),
     skewY: lerp(a.skewY, b.skewY, 0),
     rotation: lerp(a.rotation, b.rotation, 0),
+    rotationX: lerp(a.rotationX, b.rotationX, 0),
+    rotationY: lerp(a.rotationY, b.rotationY, 0),
+    transformPerspective:
+      a.transformPerspective === undefined && b.transformPerspective === undefined
+        ? null
+        : lerp(a.transformPerspective, b.transformPerspective, 0),
     originX:
       a.originX === undefined && b.originX === undefined ? null : lerp(a.originX, b.originX, 0.5),
     originY:
@@ -144,6 +156,9 @@ export function sampleTrack(
       skewX: k.skewX ?? 0,
       skewY: k.skewY ?? 0,
       rotation: k.rotation ?? 0,
+      rotationX: k.rotationX ?? 0,
+      rotationY: k.rotationY ?? 0,
+      transformPerspective: k.transformPerspective ?? null,
       originX: k.originX ?? null,
       originY: k.originY ?? null,
       opacity: k.opacity ?? null,
@@ -171,6 +186,9 @@ export function applyIntensity(d: ComposedDelta, intensity: number): ComposedDel
     skewX: d.skewX * intensity,
     skewY: d.skewY * intensity,
     rotation: d.rotation * intensity,
+    rotationX: d.rotationX * intensity,
+    rotationY: d.rotationY * intensity,
+    transformPerspective: d.transformPerspective,
     originX: d.originX,
     originY: d.originY,
     opacity: d.opacity,
@@ -187,6 +205,9 @@ export function combine(a: ComposedDelta, b: ComposedDelta): ComposedDelta {
     skewX: a.skewX + b.skewX,
     skewY: a.skewY + b.skewY,
     rotation: a.rotation + b.rotation,
+    rotationX: a.rotationX + b.rotationX,
+    rotationY: a.rotationY + b.rotationY,
+    transformPerspective: b.transformPerspective ?? a.transformPerspective,
     originX: b.originX ?? a.originX,
     originY: b.originY ?? a.originY,
     opacity: b.opacity ?? a.opacity,
@@ -407,6 +428,12 @@ function applyKeyposes(
       skewX: lerp(pa?.skewX, pb?.skewX, 0),
       skewY: lerp(pa?.skewY, pb?.skewY, 0),
       rotation: lerp(pa?.rotation, pb?.rotation, 0),
+      rotationX: lerp(pa?.rotationX, pb?.rotationX, 0),
+      rotationY: lerp(pa?.rotationY, pb?.rotationY, 0),
+      transformPerspective:
+        pa?.transformPerspective === undefined && pb?.transformPerspective === undefined
+          ? null
+          : lerp(pa?.transformPerspective, pb?.transformPerspective, 0),
       originX:
         pa?.originX === undefined && pb?.originX === undefined
           ? null
@@ -449,6 +476,9 @@ function invertOverrideForAnticipation(
     skewX: part.skewX === undefined ? undefined : -part.skewX * amount,
     skewY: part.skewY === undefined ? undefined : -part.skewY * amount,
     rotation: part.rotation === undefined ? undefined : -part.rotation * amount,
+    rotationX: part.rotationX === undefined ? undefined : -part.rotationX * amount,
+    rotationY: part.rotationY === undefined ? undefined : -part.rotationY * amount,
+    // transformPerspective is a depth setting, not a motion delta — carried through by the spread.
     originX: part.originX,
     originY: part.originY,
     opacity: part.opacity,

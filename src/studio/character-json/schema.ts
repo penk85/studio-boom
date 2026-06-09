@@ -2,6 +2,9 @@ import type {
   CharacterAngle,
   CharacterPart,
   CharacterPartBounds,
+  CharacterVariantAiMetadata,
+  CharacterVariantArtwork,
+  CharacterVariantRigPackage,
   CharacterSlotVariant,
   EyeState,
   ID,
@@ -19,6 +22,74 @@ export const RIG_SUGGESTION_AI_IN_KIND = "studioBoom.ai.rigSuggestion.v1";
 export const MOTION_SUGGESTION_AI_IN_KIND = "studioBoom.ai.motionSuggestion.v1";
 
 export const CHARACTER_JSON_SCHEMA_VERSION = 1;
+
+/**
+ * The native transform control surface the AI authors motion from. This is the single source of
+ * truth for (a) what the prompt advertises, (b) which keyframe fields validation accepts as finite
+ * numbers, and (c) which fields the adapter interpolates. Editing this list updates all three so
+ * OUT and IN can never drift. It is the control *vocabulary* — not a catalog of named movements.
+ */
+export const MOTION_TRANSFORM_FIELD_NAMES = [
+  "dx",
+  "dy",
+  "scale",
+  "scaleX",
+  "scaleY",
+  "skewX",
+  "skewY",
+  "rotation",
+  "rotationX",
+  "rotationY",
+  "transformPerspective",
+  "originX",
+  "originY",
+  "opacity",
+] as const;
+
+export type MotionTransformFieldName = (typeof MOTION_TRANSFORM_FIELD_NAMES)[number];
+
+/** Human-facing unit + meaning for each transform field, used to build the AI control surface. */
+export const MOTION_TRANSFORM_FIELD_DOCS: Record<
+  MotionTransformFieldName,
+  { unit: string; doc: string }
+> = {
+  dx: { unit: "px", doc: "Translate horizontally (parent-relative)." },
+  dy: { unit: "px", doc: "Translate vertically (parent-relative)." },
+  scale: { unit: "multiplier", doc: "Uniform scale (1 = unchanged)." },
+  scaleX: { unit: "multiplier", doc: "Horizontal scale/squash (1 = unchanged)." },
+  scaleY: { unit: "multiplier", doc: "Vertical scale/stretch (1 = unchanged)." },
+  skewX: { unit: "deg", doc: "Horizontal skew." },
+  skewY: { unit: "deg", doc: "Vertical skew." },
+  rotation: { unit: "deg", doc: "2D rotation about the Z axis." },
+  rotationX: { unit: "deg", doc: "3D rotation about the X axis (vertical flip)." },
+  rotationY: { unit: "deg", doc: "3D rotation about the Y axis (horizontal/card flip)." },
+  transformPerspective: {
+    unit: "px",
+    doc: "3D perspective depth; set this for believable rotationX/rotationY flips.",
+  },
+  originX: { unit: "0..1", doc: "Transform-origin X within the part (e.g. 0.5 = center)." },
+  originY: { unit: "0..1", doc: "Transform-origin Y within the part (e.g. 0 = top edge)." },
+  opacity: { unit: "0..1", doc: "Opacity; replaces the base value." },
+};
+
+/**
+ * Easing names the renderer honors (the `EASE` map in presets/apply.ts implements exactly these).
+ * Advertised to the AI and used by validation; keep the two in sync via this constant.
+ */
+export const MOTION_EASE_NAMES = [
+  "linear",
+  "easeIn",
+  "easeOut",
+  "easeInOut",
+  "soft",
+  "snappy",
+  "overshoot",
+  "bounce",
+  "elastic",
+  "hold",
+] as const;
+
+export type MotionEaseName = (typeof MOTION_EASE_NAMES)[number];
 
 export const MOTION_CATEGORY_VALUES: MotionCategory[] = [
   "expression",
@@ -135,8 +206,13 @@ export interface AngleSlotVariantJson {
   id: ID;
   mediaId: ID;
   name: string;
+  displayName?: string;
+  slotCompatibility?: ID[];
   angleIds?: CharacterAngle[];
   variant?: CharacterSlotVariant;
+  artwork?: CharacterVariantArtwork;
+  rig?: CharacterVariantRigPackage;
+  aiMetadata?: CharacterVariantAiMetadata;
   pose?: string;
   viseme?: MouthViseme;
   eyeState?: EyeState;
@@ -238,6 +314,12 @@ export interface MotionJsonKeyframe {
   skewX?: number;
   skewY?: number;
   rotation?: number;
+  /** 3D rotation about the X axis (vertical flip), degrees. */
+  rotationX?: number;
+  /** 3D rotation about the Y axis (horizontal / card flip), degrees. */
+  rotationY?: number;
+  /** 3D perspective depth in px; set for believable rotationX/rotationY flips. */
+  transformPerspective?: number;
   originX?: number;
   originY?: number;
   opacity?: number;
@@ -252,6 +334,24 @@ export interface MotionJsonTrack {
   target: MotionTargetJson;
   channel: MotionTrackChannel;
   keyframes: MotionJsonKeyframe[];
+}
+
+/**
+ * DEFERRED / RESERVED SEAM — not rendered yet. Temporary decorations that belong to a motion
+ * (hearts, tears, sparkles, etc.). When implemented these will be **restricted, sanitized vector
+ * overlays**: a constrained, whitelisted vector vocabulary sanitized before it enters the DOM, with
+ * motion driven by our GSAP schedule — NOT arbitrary inline SVG/markup, and no SMIL/CSS animation
+ * inside the overlay (so playback stays seek-deterministic). Validation currently warns and ignores.
+ */
+export interface MotionOverlayJson {
+  id: ID;
+  /** Restricted overlay kind (validated against a whitelist in the future render phase). */
+  kind: string;
+  /** Rig target the overlay is anchored to. */
+  anchor: MotionTargetJson;
+  /** Normalized [0..1] spawn/clear window within the motion. */
+  start?: number;
+  duration?: number;
 }
 
 export interface MotionJson extends StudioBoomJsonArtifactBase {
@@ -271,6 +371,8 @@ export interface MotionJson extends StudioBoomJsonArtifactBase {
       reason?: string;
     }>;
   };
+  /** Reserved seam for restricted/sanitized vector overlays. Not rendered yet (see MotionOverlayJson). */
+  overlays?: MotionOverlayJson[];
   description?: string;
 }
 
@@ -306,12 +408,28 @@ export interface CharacterRigContextAiOutJson extends StudioBoomJsonArtifactBase
   };
 }
 
+/** The native control surface advertised to the AI — what it can author motion from. */
+export interface MotionControlSurfaceJson {
+  /** Per-keyframe transform fields on a transform track (name, unit, meaning). */
+  transformFields: Array<{ name: MotionTransformFieldName; unit: string; doc: string }>;
+  /** Easing names the renderer honors for per-keyframe `ease`. */
+  easings: MotionEaseName[];
+  /** Channels a track can use. */
+  channels: MotionTrackChannel[];
+  /** Target kinds a track can address. */
+  targetKinds: string[];
+  /** Plain-language reminder of how to compose movements from these controls. */
+  note: string;
+}
+
 export interface MotionRequestAiOutJson extends StudioBoomJsonArtifactBase {
   kind: typeof MOTION_REQUEST_AI_OUT_KIND;
   request: string;
   character: CharacterJson;
   activeAngle: AngleRigJson;
   instructions: string[];
+  /** Native controls the AI authors movement from (single source of truth, see MOTION_TRANSFORM_FIELD_NAMES). */
+  controls: MotionControlSurfaceJson;
   exampleMotion: MotionJson;
 }
 

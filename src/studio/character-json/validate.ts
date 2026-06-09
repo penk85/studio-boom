@@ -3,7 +3,9 @@ import {
   ANGLE_RIG_JSON_KIND,
   CHARACTER_JSON_KIND,
   CHARACTER_JSON_SCHEMA_VERSION,
+  MOTION_EASE_NAMES,
   MOTION_JSON_KIND,
+  MOTION_TRANSFORM_FIELD_NAMES,
   normalizeMotionCategory,
   normalizeMotionCategoryForImport,
   type AngleRigJson,
@@ -16,19 +18,10 @@ import {
   type StudioBoomJsonKind,
 } from "./schema";
 
-const NUMERIC_KEYFRAME_FIELDS = [
-  "dx",
-  "dy",
-  "scale",
-  "scaleX",
-  "scaleY",
-  "skewX",
-  "skewY",
-  "rotation",
-  "originX",
-  "originY",
-  "opacity",
-] as const;
+// Single source of truth — the same transform vocabulary the prompt advertises and the adapter
+// interpolates. Adding a field in schema.ts updates validation, prompt, and adapter together.
+const NUMERIC_KEYFRAME_FIELDS = MOTION_TRANSFORM_FIELD_NAMES;
+const SUPPORTED_EASE_NAMES = new Set<string>(MOTION_EASE_NAMES);
 const CHARACTER_ANGLE_VALUES = new Set(["front", "3qL", "3qR", "sideL", "sideR"]);
 const CHARACTER_VARIANT_KIND_VALUES = new Set<CharacterVariantKind>([
   "pose",
@@ -151,8 +144,19 @@ export function validateAngleRigJson(value: unknown): JsonValidationResult {
           if (variantId) variants.add(variantId);
           requiredString(variant, "mediaId", `${variantPath}.mediaId`, issues);
           requiredString(variant, "name", `${variantPath}.name`, issues);
+          if (variant.displayName !== undefined && typeof variant.displayName !== "string")
+            issues.error(`${variantPath}.displayName`, "Expected string.");
+          if (variant.slotCompatibility !== undefined)
+            validateUniqueStringArray(
+              variant.slotCompatibility,
+              `${variantPath}.slotCompatibility`,
+              issues,
+            );
           validateOptionalAngleIds(variant.angleIds, `${variantPath}.angleIds`, issues);
           validateOptionalVariant(variant.variant, `${variantPath}.variant`, issues);
+          validateOptionalArtwork(variant.artwork, `${variantPath}.artwork`, issues);
+          validateOptionalVariantRigPackage(variant.rig, `${variantPath}.rig`, issues);
+          validateOptionalAiMetadata(variant.aiMetadata, `${variantPath}.aiMetadata`, issues);
         });
       }
       if (id) variantsBySlot.set(id, variants);
@@ -274,6 +278,144 @@ export function validateAngleRigJson(value: unknown): JsonValidationResult {
   return issues.result();
 }
 
+function validateOptionalArtwork(
+  value: unknown,
+  path: string,
+  issues: ReturnType<typeof makeIssues>,
+) {
+  if (value === undefined) return;
+  if (!isRecord(value)) {
+    issues.error(path, "Expected artwork object.");
+    return;
+  }
+  if (value.partIds !== undefined) validateUniqueStringArray(value.partIds, `${path}.partIds`, issues);
+  if (value.layers !== undefined && !Array.isArray(value.layers)) {
+    issues.error(`${path}.layers`, "Expected layers array.");
+  }
+  for (const [index, layer] of optionalArray(value.layers).entries()) {
+    const layerPath = `${path}.layers[${index}]`;
+    if (!isRecord(layer)) {
+      issues.error(layerPath, "Expected layer object.");
+      continue;
+    }
+    requiredString(layer, "id", `${layerPath}.id`, issues);
+    if (layer.partId !== undefined && typeof layer.partId !== "string")
+      issues.error(`${layerPath}.partId`, "Expected string.");
+    if (layer.mediaId !== undefined && typeof layer.mediaId !== "string")
+      issues.error(`${layerPath}.mediaId`, "Expected string.");
+    if (layer.zIndex !== undefined) finiteNumber(layer.zIndex, `${layerPath}.zIndex`, issues);
+  }
+}
+
+function validateOptionalVariantRigPackage(
+  value: unknown,
+  path: string,
+  issues: ReturnType<typeof makeIssues>,
+) {
+  if (value === undefined) return;
+  if (!isRecord(value)) {
+    issues.error(path, "Expected rig object.");
+    return;
+  }
+  const boneIds = new Set<string>();
+  for (const [index, bone] of optionalArray(value.bones).entries()) {
+    const bonePath = `${path}.bones[${index}]`;
+    if (!isRecord(bone)) {
+      issues.error(bonePath, "Expected bone object.");
+      continue;
+    }
+    const id = requiredString(bone, "id", `${bonePath}.id`, issues);
+    if (id) boneIds.add(id);
+    validateSocketLike(bone.pivot, `${bonePath}.pivot`, issues);
+    if (bone.defaultRotation !== undefined)
+      finiteNumber(bone.defaultRotation, `${bonePath}.defaultRotation`, issues);
+    validateOptionalNumberPair(bone.rotationLimits, `${bonePath}.rotationLimits`, issues);
+  }
+  for (const [index, control] of optionalArray(value.controls).entries()) {
+    const controlPath = `${path}.controls[${index}]`;
+    if (!isRecord(control)) {
+      issues.error(controlPath, "Expected control object.");
+      continue;
+    }
+    requiredString(control, "id", `${controlPath}.id`, issues);
+    requiredString(control, "label", `${controlPath}.label`, issues);
+    requiredString(control, "type", `${controlPath}.type`, issues);
+    if (
+      typeof control.targetBoneId === "string" &&
+      boneIds.size > 0 &&
+      !boneIds.has(control.targetBoneId)
+    ) {
+      issues.error(`${controlPath}.targetBoneId`, `Missing variant bone "${control.targetBoneId}".`);
+    }
+    validateOptionalNumberPair(control.range, `${controlPath}.range`, issues);
+  }
+  if (value.clipping !== undefined && !isRecord(value.clipping)) {
+    issues.error(`${path}.clipping`, "Expected clipping object.");
+  } else if (isRecord(value.clipping)) {
+    if (value.clipping.maskPartIds !== undefined)
+      validateUniqueStringArray(value.clipping.maskPartIds, `${path}.clipping.maskPartIds`, issues);
+    if (value.clipping.coverPartIds !== undefined)
+      validateUniqueStringArray(value.clipping.coverPartIds, `${path}.clipping.coverPartIds`, issues);
+    if (value.clipping.rules !== undefined)
+      validateUniqueStringArray(value.clipping.rules, `${path}.clipping.rules`, issues);
+  }
+  if (value.sockets !== undefined && !isRecord(value.sockets)) {
+    issues.error(`${path}.sockets`, "Expected sockets object.");
+  } else if (isRecord(value.sockets)) {
+    if (value.sockets.mount !== undefined)
+      validateSocketLike(value.sockets.mount, `${path}.sockets.mount`, issues);
+    for (const [index, socket] of optionalArray(value.sockets.outputs).entries()) {
+      validateSocketLike(socket, `${path}.sockets.outputs[${index}]`, issues);
+    }
+  }
+  if (value.zOrder !== undefined) validateUniqueStringArray(value.zOrder, `${path}.zOrder`, issues);
+}
+
+function validateOptionalAiMetadata(
+  value: unknown,
+  path: string,
+  issues: ReturnType<typeof makeIssues>,
+) {
+  if (value === undefined) return;
+  if (!isRecord(value)) {
+    issues.error(path, "Expected AI metadata object.");
+    return;
+  }
+  requiredString(value, "plainDescription", `${path}.plainDescription`, issues);
+  if (value.tags !== undefined) validateUniqueStringArray(value.tags, `${path}.tags`, issues);
+  if (value.goodFor !== undefined)
+    validateUniqueStringArray(value.goodFor, `${path}.goodFor`, issues);
+  if (value.lessIdealFor !== undefined)
+    validateUniqueStringArray(value.lessIdealFor, `${path}.lessIdealFor`, issues);
+}
+
+function validateSocketLike(
+  value: unknown,
+  path: string,
+  issues: ReturnType<typeof makeIssues>,
+) {
+  if (!isRecord(value)) {
+    issues.error(path, "Expected point object.");
+    return;
+  }
+  finiteNumber(value.x, `${path}.x`, issues);
+  finiteNumber(value.y, `${path}.y`, issues);
+}
+
+function validateOptionalNumberPair(
+  value: unknown,
+  path: string,
+  issues: ReturnType<typeof makeIssues>,
+) {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length !== 2) {
+    issues.error(path, "Expected two-number tuple.");
+    return;
+  }
+  finiteNumber(value[0], `${path}[0]`, issues);
+  finiteNumber(value[1], `${path}[1]`, issues);
+}
+
 function validateOptionalVariant(
   value: unknown,
   path: string,
@@ -340,6 +482,17 @@ export function validateMotionJson(value: unknown): JsonValidationResult {
       continue;
     }
     validateMotionTarget(item.target, `${path}.target`, issues);
+  }
+  if (value.overlays !== undefined) {
+    if (!Array.isArray(value.overlays)) {
+      issues.error("$.overlays", "Expected overlays array.");
+    } else if (value.overlays.length > 0) {
+      // Reserved seam — restricted/sanitized vector overlays are a future render phase.
+      issues.warn(
+        "$.overlays",
+        "Overlays are accepted but not rendered yet (restricted/sanitized vector overlays are a future phase).",
+      );
+    }
   }
   return issues.result();
 }
@@ -512,6 +665,16 @@ function validateMotionKeyframe(
     issues.error(`${path}.variant`, "Variant tracks require a variant string.");
   if (value.visible !== undefined && typeof value.visible !== "boolean")
     issues.error(`${path}.visible`, "Expected boolean visible value.");
+  if (value.ease !== undefined) {
+    if (typeof value.ease !== "string") {
+      issues.error(`${path}.ease`, "Expected string ease name.");
+    } else if (!SUPPORTED_EASE_NAMES.has(value.ease)) {
+      issues.warn(
+        `${path}.ease`,
+        `Unknown ease "${value.ease}" will fall back to easeInOut. Supported: ${MOTION_EASE_NAMES.join(", ")}.`,
+      );
+    }
+  }
 }
 
 function validateUniqueStringArray(

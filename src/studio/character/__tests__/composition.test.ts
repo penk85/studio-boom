@@ -111,10 +111,14 @@ function extractScene(html: string) {
     slotEvents: Array<{
       slotId: string;
       key: string;
-      variant?: { show?: string };
+      variant?: { show?: string[] };
       generatedMouth?: { components: Record<string, unknown> };
     }>;
   };
+}
+
+function eventShowsVariant(event: { variant?: { show?: string[] } }, value: string) {
+  return (event.variant?.show ?? []).some((id) => id.includes(value));
 }
 
 describe("buildCharacterCompositionHtml", () => {
@@ -573,7 +577,7 @@ describe("buildCharacterCompositionHtml", () => {
     });
     const scene = extractScene(html);
 
-    expect(scene.slotEvents.some((event) => event.variant?.show?.includes("3qL"))).toBe(true);
+    expect(scene.slotEvents.some((event) => eventShowsVariant(event, "3qL"))).toBe(true);
     expect(html).toContain('src="asset:body-3ql-media"');
   });
 
@@ -725,6 +729,78 @@ describe("buildCharacterCompositionHtml", () => {
     expect(
       animatedSelectors.some((selector) => selector.includes("char-slot-slot-left-foot")),
     ).toBe(false);
+  });
+
+  it("emits 3D transform vars (rotationY + transformPerspective) for a 3D bone motion", () => {
+    const character = {
+      ...createBlankCharacter("Flipper"),
+      id: "flipper-char",
+      parts: [
+        makePart("body", "body-media", {
+          id: "body",
+          slotId: "role:body",
+          x: 100,
+          y: 120,
+          width: 180,
+          height: 260,
+          zIndex: 1,
+        }),
+        makePart("leg", "leg-media", {
+          id: "left-leg",
+          slotId: "slot:left-leg",
+          side: "left",
+          x: 120,
+          y: 350,
+          width: 44,
+          height: 140,
+          zIndex: 0,
+        }),
+      ],
+    };
+    const preset: MotionPreset = {
+      id: "cardflip",
+      name: "Card Flip",
+      category: "gesture",
+      duration: 1,
+      loop: false,
+      tracks: [
+        {
+          target: "bone",
+          boneId: "bone:slot:left-leg",
+          partRole: "leg",
+          keyframes: [
+            { t: 0, rotationY: 0, transformPerspective: 800, ease: "linear" },
+            { t: 1, rotationY: 360, transformPerspective: 800, ease: "linear" },
+          ],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_cardflip",
+      clipId: "clip-cardflip",
+      width: 300,
+      height: 450,
+      duration: 2,
+      character,
+      meta: {
+        characterId: "flipper-char",
+        poses: {},
+        autoBlink: false,
+        motions: [{ id: "applied-flip", presetId: "cardflip", offset: 0, intensity: 1 }],
+      },
+      motionPresets: new Map([["cardflip", preset]]),
+    });
+    const scene = extractScene(html);
+    const allTargets = [
+      ...scene.initialTargets,
+      ...scene.motionSegments.flatMap((segment) => segment.targets),
+    ];
+    // 3D vars must reach the GSAP timeline, and the flip animates all the way to 360°.
+    expect(allTargets.some((target) => typeof target.vars.rotationY === "number")).toBe(true);
+    expect(allTargets.some((target) => target.vars.transformPerspective === 800)).toBe(true);
+    expect(allTargets.some((target) => target.vars.rotationY === 360)).toBe(true);
   });
 
   it("keeps generated DOM ids unique when slot ids sanitize to the same text", () => {
@@ -1068,7 +1144,7 @@ describe("buildCharacterCompositionHtml", () => {
     );
 
     expect(html).toContain('data-character-part-id="mouth-raspberry"');
-    expect(scene.slotEvents.some((event) => event.variant?.show?.includes("raspberry"))).toBe(true);
+    expect(scene.slotEvents.some((event) => eventShowsVariant(event, "raspberry"))).toBe(true);
     expect(mouthTarget?.vars.transformOrigin).toBe("61.111% 59.524%");
   });
 
@@ -1136,7 +1212,69 @@ describe("buildCharacterCompositionHtml", () => {
 
     expect(html).toContain('data-character-variant="fist"');
     expect(html).toContain('data-character-variant-kind="handShape"');
-    expect(scene.slotEvents.some((event) => event.variant?.show?.includes("fist"))).toBe(true);
+    expect(scene.slotEvents.some((event) => eventShowsVariant(event, "fist"))).toBe(true);
+  });
+
+  it("shows every artwork layer that belongs to the active generic variant", () => {
+    const base = makeCharacter();
+    const character: CharacterPreset = {
+      ...base,
+      parts: [
+        ...base.parts,
+        makePart("arm", "upper-arm-open-media", {
+          id: "upper-arm-open",
+          slotId: "slot:right-arm",
+          slotName: "Right arm",
+          side: "right",
+          variant: { key: "explaining", name: "Explaining arm", kind: "pose" },
+          x: 220,
+          y: 270,
+          width: 48,
+          height: 96,
+          zIndex: 7,
+        }),
+        makePart("arm", "forearm-open-media", {
+          id: "forearm-open",
+          slotId: "slot:right-arm",
+          slotName: "Right arm",
+          side: "right",
+          variant: { key: "explaining", name: "Explaining arm", kind: "pose" },
+          x: 256,
+          y: 330,
+          width: 72,
+          height: 42,
+          zIndex: 8,
+        }),
+      ],
+    };
+    const preset: MotionPreset = {
+      id: "explaining-arm",
+      name: "Explaining arm",
+      category: "gesture",
+      duration: 1,
+      loop: false,
+      tracks: [],
+      keyposes: [
+        {
+          t: 0,
+          parts: [{ partRole: "arm", slotId: "slot:right-arm", poseSwap: "explaining" }],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = build(
+      {
+        autoBlink: false,
+        motions: [{ id: "applied-arm", presetId: preset.id, offset: 0, intensity: 1 }],
+      },
+      new Map([[preset.id, preset]]),
+      character,
+    );
+    const scene = extractScene(html);
+    const event = scene.slotEvents.find((candidate) => candidate.key === "explaining");
+
+    expect(event?.variant?.show?.filter((id) => id.includes("explaining"))).toHaveLength(2);
   });
 
   it("lets expression mouth swaps continue when speech audio has no viseme timing", () => {
@@ -1168,7 +1306,7 @@ describe("buildCharacterCompositionHtml", () => {
 
     expect(html).toContain('data-character-speech="true"');
     expect(html).toContain('src="asset:imported-voice-audio"');
-    expect(scene.slotEvents.some((event) => event.variant?.show?.includes("raspberry"))).toBe(true);
+    expect(scene.slotEvents.some((event) => eventShowsVariant(event, "raspberry"))).toBe(true);
   });
 
   it("keeps lip sync in charge of mouth variant swaps when voice visemes exist", () => {
@@ -1199,7 +1337,7 @@ describe("buildCharacterCompositionHtml", () => {
     );
     const scene = extractScene(html);
 
-    expect(scene.slotEvents.some((event) => event.variant?.show?.includes("raspberry"))).toBe(
+    expect(scene.slotEvents.some((event) => eventShowsVariant(event, "raspberry"))).toBe(
       false,
     );
   });
@@ -1246,7 +1384,7 @@ describe("buildCharacterCompositionHtml", () => {
     });
     const scene = extractScene(html);
 
-    expect(scene.slotEvents.some((event) => event.variant?.show?.includes("closed"))).toBe(true);
+    expect(scene.slotEvents.some((event) => eventShowsVariant(event, "closed"))).toBe(true);
     expect(scene.slotEvents.every((event) => event.key !== "open")).toBe(true);
   });
 });

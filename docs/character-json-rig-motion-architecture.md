@@ -469,6 +469,15 @@ applies it to the selected character clip.
         { "t": 0.55, "variant": "openPalm" },
         { "t": 0.8, "variant": "relaxed" }
       ]
+    },
+    {
+      "id": "track:head-cardflip",
+      "target": { "kind": "semanticBone", "id": "bone:head" },
+      "channel": "transform",
+      "keyframes": [
+        { "t": 0, "rotationY": 0, "transformPerspective": 800, "ease": "easeInOut" },
+        { "t": 1, "rotationY": 360, "transformPerspective": 800, "ease": "overshoot" }
+      ]
     }
   ],
   "constraints": {
@@ -482,6 +491,50 @@ applies it to the selected character clip.
   }
 }
 ```
+
+### Transform Keyframe Fields (native control surface)
+
+Motion is authored by the AI from low-level primitives — there are **no named
+effects**. Studio Boom exposes the control vocabulary; the AI composes the movement
+(a card flip, a pendulum, a spin) directly as keyframes, and the editor renders it.
+The transform `channel` accepts these per-keyframe fields (all optional, `t`
+normalized `0..1`, `targetSpace: parentRelative`):
+
+| field | meaning | unit |
+| --- | --- | --- |
+| `dx`, `dy` | translate | px |
+| `scale` / `scaleX` / `scaleY` | uniform / axis scale | multiplier (1 = none) |
+| `skewX`, `skewY` | skew | deg |
+| `rotation` | 2D rotation (Z axis) | deg |
+| `rotationX` | 3D rotation about X (vertical flip) | deg |
+| `rotationY` | 3D rotation about Y (horizontal / card flip) | deg |
+| `transformPerspective` | 3D perspective depth (set for believable flips) | px |
+| `originX`, `originY` | transform origin within the part | 0..1 |
+| `opacity` | replaces base opacity | 0..1 |
+| `ease` | easing into this keyframe | name |
+
+`ease` is honored per keyframe; supported names: `linear`, `easeIn`, `easeOut`,
+`easeInOut`, `soft`, `snappy`, `overshoot`, `bounce`, `elastic`, `hold`.
+
+Recipes the AI expresses with these primitives (illustrative, not built-in):
+
+- **card flip** — `rotationY` `0 → 360` with `transformPerspective` (~800).
+- **pendulum** — oscillating `rotation` with an off-center origin (e.g. `originY: 0`).
+- **spin** — `rotation` `0 → 360`.
+
+This list is the single source of truth in
+`src/studio/character-json/schema.ts` (`MOTION_TRANSFORM_FIELD_NAMES`,
+`MOTION_EASE_NAMES`); the motion-request OUT JSON advertises it as `controls` and
+validation accepts exactly these, so OUT and IN cannot drift.
+
+### Overlays (reserved seam — not rendered yet)
+
+`motion.overlays[]` is reserved for temporary decorations that belong to a motion
+(hearts, tears, sparkles, dust, motion lines, magic swirls, impact bursts). When
+implemented these will be **restricted, sanitized vector overlays** — a constrained,
+whitelisted vector vocabulary sanitized before it enters the DOM, animated by the
+GSAP schedule (no SMIL / CSS animation inside, so playback stays seek-deterministic).
+Validation currently accepts `overlays` with a warning and ignores them.
 
 ### Track Types
 
@@ -570,8 +623,10 @@ The copied outbound JSON should include:
 - variant names,
 - bounds/reach rules,
 - depth/draw-order distinction,
+- the native control surface (`controls`: transform fields with units, honored
+  easings, channels, and target kinds),
 - schema instructions,
-- one small valid example.
+- one small valid example (including a 3D / eased track).
 
 ### Paste In
 

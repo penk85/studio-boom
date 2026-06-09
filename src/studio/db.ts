@@ -192,6 +192,11 @@ export function mediaIdsForCharacter(character: CharacterPreset | null | undefin
   if (!character) return ids;
   for (const part of character.parts) ids.add(part.mediaId);
   for (const variant of character.headVariants ?? []) ids.add(variant.mediaId);
+  for (const variant of character.variantPackages ?? []) {
+    for (const layer of variant.artwork?.layers ?? []) {
+      if (layer.mediaId) ids.add(layer.mediaId);
+    }
+  }
   return ids;
 }
 

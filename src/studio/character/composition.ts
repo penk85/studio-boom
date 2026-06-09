@@ -120,7 +120,7 @@ interface SlotTimeline {
 
 interface VariantSlotRender {
   kind: "variant";
-  variants: Record<string, string>;
+  variants: Record<string, string[]>;
 }
 
 interface GeneratedMouthSlotRender {
@@ -154,6 +154,9 @@ interface GsapVars {
   skewX?: number;
   skewY?: number;
   rotation?: number;
+  rotationX?: number;
+  rotationY?: number;
+  transformPerspective?: number;
   opacity?: number;
   transformOrigin?: string;
 }
@@ -176,6 +179,11 @@ export function characterAssetIds(
   if (character) {
     for (const part of character.parts) ids.add(part.mediaId);
     for (const variant of character.headVariants ?? []) ids.add(variant.mediaId);
+    for (const variant of character.variantPackages ?? []) {
+      for (const layer of variant.artwork?.layers ?? []) {
+        if (layer.mediaId) ids.add(layer.mediaId);
+      }
+    }
   }
   for (const speech of characterSpeeches(meta)) ids.add(speech.audioId);
   return ids;
@@ -689,7 +697,7 @@ function buildEyeSlot(
   if (!basePart) return;
 
   const containerId = slotContainerId(slot.id);
-  const variantIds: Record<string, string> = {};
+  const variantIds: Record<string, string[]> = {};
   const variantParts: Record<string, CharacterPart> = {};
   const activeState =
     (anglePart ? variantKeyForPart(anglePart) : undefined) ??
@@ -697,9 +705,9 @@ function buildEyeSlot(
     variants[0].state;
   out.html.push(openSlotContainerForPart(containerId, slot, basePart, scaleX, scaleY, binding, rig, hostPart));
   for (const { state, part } of variants) {
-    const id = partElementId(slot.id, state);
+    const id = partElementId(slot.id, state, part.id);
     for (const key of unique([state, ...variantAliasesForPart(part)])) {
-      variantIds[key] = id;
+      addVariantElement(variantIds, key, id);
       variantParts[key] = part;
     }
     const children = renderNestedChildrenForPart(
@@ -780,16 +788,16 @@ function buildMouthSlot(
   if (!restPart) return;
 
   const containerId = slotContainerId(slot.id);
-  const variants: Record<string, string> = {};
+  const variants: Record<string, string[]> = {};
   const variantParts: Record<string, CharacterPart> = {};
   const renderedIds = new Set<string>();
   out.html.push(openSlotContainerForPart(containerId, slot, restPart, scaleX, scaleY, binding, rig, hostPart));
   for (const viseme of VISEMES) {
     const part = visibleParts.find((candidate) => partMatchesVariant(candidate, viseme));
     if (!part) continue;
-    const id = partElementId(slot.id, viseme);
+    const id = partElementId(slot.id, viseme, part.id);
     for (const key of unique([viseme, ...variantAliasesForPart(part)])) {
-      variants[key] = id;
+      addVariantElement(variants, key, id);
       variantParts[key] = part;
     }
     renderedIds.add(id);
@@ -808,9 +816,9 @@ function buildMouthSlot(
   }
   for (const part of visibleParts) {
     const key = variantKeyForPart(part);
-    const id = partElementId(slot.id, key);
+    const id = partElementId(slot.id, key, part.id);
     for (const alias of variantAliasesForPart(part)) {
-      variants[alias] = id;
+      addVariantElement(variants, alias, id);
       variantParts[alias] = part;
     }
     if (renderedIds.has(id)) continue;
@@ -1095,15 +1103,15 @@ function buildGenericSlot(
   if (!activePart) return;
 
   const containerId = slotContainerId(slot.id);
-  const variants: Record<string, string> = {};
+  const variants: Record<string, string[]> = {};
   const variantParts: Record<string, CharacterPart> = {};
   const activeKey = variantKeyForPart(activePart);
   out.html.push(openSlotContainerForPart(containerId, slot, activePart, scaleX, scaleY, binding, rig, hostPart));
   for (const part of visibleParts) {
     const key = variantKeyForPart(part);
-    const id = partElementId(slot.id, key);
+    const id = partElementId(slot.id, key, part.id);
     for (const alias of variantAliasesForPart(part)) {
-      variants[alias] = id;
+      addVariantElement(variants, alias, id);
       variantParts[alias] = part;
     }
     const children = renderNestedChildrenForPart(
@@ -1512,6 +1520,7 @@ function appendCharacterTimelineScript(
       args.parentBoneIds,
     ),
   );
+  backfillThreeDVars(frames);
   const slotEvents = buildSlotEvents(frames, args.slotTimelines);
   const motionSegments = frames.slice(1).flatMap((frame, index) => {
     const previousFrame = frames[index];
@@ -1547,7 +1556,8 @@ function appendCharacterTimelineScript(
   };
   const applyVariantEvent = function(event) {
     (event.variant.hide || []).forEach(function(id) { gsap.set("#" + id, { opacity: 0 }); });
-    if (event.variant.show) gsap.set("#" + event.variant.show, { opacity: 1 });
+    const show = Array.isArray(event.variant.show) ? event.variant.show : event.variant.show ? [event.variant.show] : [];
+    show.forEach(function(id) { gsap.set("#" + id, { opacity: 1 }); });
   };
   const applyGeneratedMouthEvent = function(event) {
     Object.keys(event.generatedMouth.components || {}).forEach(function(selector) {
@@ -1574,7 +1584,8 @@ function appendCharacterTimelineScript(
   (S.slotEvents || []).forEach(function(event) {
     if (event.variant) {
       (event.variant.hide || []).forEach(function(id) { tl.set("#" + id, { opacity: 0 }, event.time); });
-      if (event.variant.show) tl.set("#" + event.variant.show, { opacity: 1 }, event.time);
+      const show = Array.isArray(event.variant.show) ? event.variant.show : event.variant.show ? [event.variant.show] : [];
+      show.forEach(function(id) { tl.set("#" + id, { opacity: 1 }, event.time); });
     }
     if (event.generatedMouth) {
       Object.keys(event.generatedMouth.components || {}).forEach(function(selector) {
@@ -1733,10 +1744,56 @@ function buildMotionFrame(
         rotation: round(target.baseRotation + delta.rotation + (turn?.rotation ?? 0), 3),
         transformOrigin: `${round(originX * 100, 3)}% ${round(originY * 100, 3)}%`,
       };
+      // 3D fields are emitted only when actually used, so existing 2D motions stay byte-identical.
+      // The backfill pass in appendCharacterTimelineScript then keeps these present for the whole
+      // motion on any target that uses 3D, so GSAP animates them cleanly back to zero.
+      if (delta.rotationX) vars.rotationX = round(delta.rotationX, 3);
+      if (delta.rotationY) vars.rotationY = round(delta.rotationY, 3);
+      if (delta.transformPerspective !== null)
+        vars.transformPerspective = round(delta.transformPerspective, 3);
       if (delta.opacity !== null) vars.opacity = round(delta.opacity, 4);
       return { selector: target.selector, vars };
     }),
   };
+}
+
+const DEFAULT_THREE_D_PERSPECTIVE = 800;
+
+/**
+ * Once a target uses any 3D transform anywhere in the motion, every frame for that target must
+ * carry rotationX/rotationY/transformPerspective — otherwise a later `tl.to` that omits a field
+ * leaves GSAP holding the previous value (e.g. a flip never returns to 0). buildMotionFrame emits
+ * 3D vars only when non-zero (so plain 2D motions stay byte-identical); this pass backfills the
+ * defaults across all frames for any target that touches 3D, keeping animations clean.
+ */
+function backfillThreeDVars(
+  frames: Array<{ targets: Array<{ selector: string; vars: GsapVars }> }>,
+) {
+  const perspectiveBySelector = new Map<string, number>();
+  for (const frame of frames) {
+    for (const target of frame.targets) {
+      const usesThreeD =
+        target.vars.rotationX !== undefined ||
+        target.vars.rotationY !== undefined ||
+        target.vars.transformPerspective !== undefined;
+      if (!usesThreeD) continue;
+      const persp =
+        target.vars.transformPerspective ??
+        perspectiveBySelector.get(target.selector) ??
+        DEFAULT_THREE_D_PERSPECTIVE;
+      perspectiveBySelector.set(target.selector, persp);
+    }
+  }
+  if (perspectiveBySelector.size === 0) return;
+  for (const frame of frames) {
+    for (const target of frame.targets) {
+      const persp = perspectiveBySelector.get(target.selector);
+      if (persp === undefined) continue;
+      if (target.vars.rotationX === undefined) target.vars.rotationX = 0;
+      if (target.vars.rotationY === undefined) target.vars.rotationY = 0;
+      if (target.vars.transformPerspective === undefined) target.vars.transformPerspective = persp;
+    }
+  }
 }
 
 function changedMotionTargets(
@@ -1887,7 +1944,7 @@ function buildSlotEvents(
     time: number;
     slotId: string;
     key: string;
-    variant?: { hide: string[]; show?: string };
+    variant?: { hide: string[]; show?: string[] };
     generatedMouth?: { duration: number; components: Record<string, GsapVars> };
   }> = [];
   const previous = new Map<string, string>();
@@ -1907,7 +1964,8 @@ function buildSlotEvents(
 }
 
 function slotRenderSignature(render: SlotRenderStrategy, key: string): string {
-  if (render.kind === "variant") return render.variants[key] ?? render.variants.rest ?? key;
+  if (render.kind === "variant")
+    return variantIdsForKey(render, key).join("|") || key;
   return key;
 }
 
@@ -1921,7 +1979,7 @@ function slotEventFor(
       time: number;
       slotId: string;
       key: string;
-      variant?: { hide: string[]; show?: string };
+      variant?: { hide: string[]; show?: string[] };
       generatedMouth?: { duration: number; components: Record<string, GsapVars> };
     }
   | undefined {
@@ -1931,8 +1989,8 @@ function slotEventFor(
       slotId: slot.slotId,
       key,
       variant: {
-        hide: unique(Object.values(slot.render.variants)),
-        show: slot.render.variants[key] ?? slot.render.variants[slot.defaultKey],
+        hide: unique(Object.values(slot.render.variants).flat()),
+        show: variantIdsForKey(slot.render, key),
       },
     };
   }
@@ -1953,6 +2011,10 @@ function slotEventFor(
       },
     },
   };
+}
+
+function variantIdsForKey(render: VariantSlotRender, key: string): string[] {
+  return render.variants[key] ?? render.variants.rest ?? render.variants[Object.keys(render.variants)[0]] ?? [];
 }
 
 function generatedMouthVarsForPose(
@@ -2007,8 +2069,9 @@ function slotContainerId(slotId: string): string {
   return `char-slot-${safeId(slotId)}`;
 }
 
-function partElementId(slotId: string, variant: string): string {
-  return `char-part-${safeId(slotId)}-${safeId(variant)}`;
+function partElementId(slotId: string, variant: string, partId?: string): string {
+  const suffix = partId && partId !== variant ? `-${safeId(partId)}` : "";
+  return `char-part-${safeId(slotId)}-${safeId(variant)}${suffix}`;
 }
 
 function safeId(value: string): string {
@@ -2056,6 +2119,11 @@ function esc(value: unknown): string {
     .replace(/"/g, "&quot;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+function addVariantElement(variants: Record<string, string[]>, key: string, id: string): void {
+  const existing = variants[key] ?? [];
+  if (!existing.includes(id)) variants[key] = [...existing, id];
 }
 
 function unique(values: string[]): string[] {
