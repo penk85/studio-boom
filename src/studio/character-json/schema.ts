@@ -2,6 +2,7 @@ import type {
   CharacterAngle,
   CharacterPart,
   CharacterPartBounds,
+  CharacterSlotVariant,
   EyeState,
   ID,
   MotionCategory,
@@ -135,6 +136,7 @@ export interface AngleSlotVariantJson {
   mediaId: ID;
   name: string;
   angleIds?: CharacterAngle[];
+  variant?: CharacterSlotVariant;
   pose?: string;
   viseme?: MouthViseme;
   eyeState?: EyeState;

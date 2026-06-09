@@ -217,6 +217,50 @@ describe("character JSON architecture", () => {
     ).toEqual(["openPalm"]);
   });
 
+  it("exports generic slot variant metadata for non-mouth and non-eye parts", () => {
+    const character: CharacterPreset = {
+      ...createBlankCharacter("Hands"),
+      id: "hands",
+      canvasWidth: 900,
+      canvasHeight: 1200,
+      parts: [
+        makePart("hand", "hand-open-media", {
+          id: "right-hand-open",
+          slotId: "slot:rightHand",
+          slotName: "Right hand",
+          side: "right",
+          variant: { key: "open", name: "Open hand", kind: "handShape" },
+          x: 580,
+          y: 540,
+          width: 80,
+          height: 90,
+          zIndex: 30,
+        }),
+        makePart("hand", "hand-fist-media", {
+          id: "right-hand-fist",
+          slotId: "slot:rightHand",
+          slotName: "Right hand",
+          side: "right",
+          variant: { key: "fist", name: "Fist", kind: "handShape" },
+          x: 580,
+          y: 540,
+          width: 80,
+          height: 90,
+          zIndex: 30,
+        }),
+      ],
+    };
+
+    const angleRig = angleRigJsonFromPreset(character, "front");
+    const handVariants = angleRig.slots.find((slot) => slot.id === "slot:rightHand")?.variants;
+
+    expect(handVariants).toMatchObject([
+      { id: "open", variant: { key: "open", name: "Open hand", kind: "handShape" } },
+      { id: "fist", variant: { key: "fist", name: "Fist", kind: "handShape" } },
+    ]);
+    expect(validateAngleRigJson(angleRig).ok).toBe(true);
+  });
+
   it("validates angle rig references before generated HTML is touched", () => {
     const angleRig = angleRigJsonFromPreset(makeCharacter(), "front");
     const broken = {

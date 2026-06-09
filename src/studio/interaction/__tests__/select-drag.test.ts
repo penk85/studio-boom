@@ -70,6 +70,28 @@ describe("resolveDrillSelection", () => {
     expect(id).toBeNull();
     expect(nextPick).toBeNull();
   });
+
+  it("stays on the topmost candidate across repeat clicks when drilling is disabled", () => {
+    // allowDrill=false (e.g. plain click, drill reserved for Alt): every click resolves to
+    // the top element instead of cycling underneath.
+    let pick: DrillPick | null = null;
+    const stack = ["a", "b", "c"];
+    const first = resolveDrillSelection(stack, pick, point, undefined, false);
+    pick = first.nextPick;
+    expect(first.id).toBe("a");
+
+    const second = resolveDrillSelection(stack, pick, point, undefined, false);
+    expect(second.id).toBe("a");
+  });
+
+  it("resumes drilling from the remembered index once re-enabled (Alt held)", () => {
+    // A plain click leaves index 0 remembered; a subsequent Alt-click drills to the next.
+    const stack = ["a", "b", "c"];
+    const plain = resolveDrillSelection(stack, null, point, undefined, false);
+    expect(plain.id).toBe("a");
+    const alt = resolveDrillSelection(stack, plain.nextPick, point, undefined, true);
+    expect(alt.id).toBe("b");
+  });
 });
 
 describe("exceedsDragThreshold", () => {

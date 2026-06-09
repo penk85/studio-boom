@@ -4,6 +4,8 @@ import {
   DEFAULT_PARALLAX_CONFIG,
   DEFAULT_PART_MANIFEST,
   type CharacterAngle,
+  type CharacterSlotVariant,
+  type CharacterVariantKind,
   type ID,
   type CharacterPart,
   type CharacterPreset,
@@ -17,6 +19,16 @@ import { alphaCenterForPart } from "./alpha-bounds";
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
 const CHARACTER_ANGLE_VALUES: CharacterAngle[] = ["front", "3qL", "3qR", "sideL", "sideR"];
+
+export const CHARACTER_VARIANT_KIND_VALUES: CharacterVariantKind[] = [
+  "pose",
+  "eyeState",
+  "viseme",
+  "handShape",
+  "mouthShape",
+  "expression",
+  "custom",
+];
 
 export function defaultFallbackMouthAnchor(
   canvasWidth: number,
@@ -192,6 +204,7 @@ export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
         slotId,
         slotName,
         viseme,
+        variant: normalizePartVariant({ ...part, role, viseme }),
         angleId: normalizeAngleId(part.angleId),
         angleIds: normalizeAngleIds(part.angleIds),
         anchorX: clamp01((pivot.x - part.x) / Math.max(1, part.width)),
@@ -211,6 +224,71 @@ export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
       };
     }),
   };
+}
+
+export function normalizePartVariant(
+  part: Pick<CharacterPart, "variant" | "role" | "pose" | "viseme" | "eyeState">,
+): CharacterSlotVariant | undefined {
+  const key = part.variant?.key?.trim() || part.viseme || part.eyeState || part.pose;
+  if (!key) return undefined;
+  const name = part.variant?.name?.trim();
+  return {
+    key,
+    ...(name ? { name } : {}),
+    kind: part.variant?.kind ?? defaultVariantKindForPart(part),
+  };
+}
+
+export function variantKeyForPart(
+  part: Pick<CharacterPart, "variant" | "pose" | "viseme" | "eyeState" | "id">,
+): string {
+  return part.variant?.key?.trim() || part.viseme || part.eyeState || part.pose || part.id;
+}
+
+export function variantLabelForPart(
+  part: Pick<CharacterPart, "variant" | "pose" | "viseme" | "eyeState" | "name">,
+): string {
+  return part.variant?.name?.trim() || part.variant?.key?.trim() || part.viseme || part.eyeState || part.pose || part.name;
+}
+
+export function variantAliasesForPart(
+  part: Pick<CharacterPart, "id" | "variant" | "pose" | "viseme" | "eyeState">,
+): string[] {
+  return uniqueStrings([
+    variantKeyForPart(part),
+    part.id,
+    part.variant?.key,
+    part.pose,
+    part.viseme,
+    part.eyeState,
+  ]);
+}
+
+export function partMatchesVariant(
+  part: Pick<CharacterPart, "id" | "variant" | "pose" | "viseme" | "eyeState">,
+  variantKey: string | undefined,
+): boolean {
+  return !!variantKey && variantAliasesForPart(part).includes(variantKey);
+}
+
+function defaultVariantKindForPart(
+  part: Pick<CharacterPart, "role" | "pose" | "viseme" | "eyeState">,
+): CharacterVariantKind {
+  if (part.viseme) return "viseme";
+  if (part.eyeState) return "eyeState";
+  if (part.role === "hand") return "handShape";
+  if (part.role === "mouth") return "mouthShape";
+  if (part.pose) return "pose";
+  return "custom";
+}
+
+function uniqueStrings(values: Array<string | undefined>): string[] {
+  const out: string[] = [];
+  for (const value of values) {
+    const normalized = value?.trim();
+    if (normalized && !out.includes(normalized)) out.push(normalized);
+  }
+  return out;
 }
 
 export function partAvailableForAngle(part: CharacterPart, angle: CharacterAngle): boolean {
@@ -368,6 +446,13 @@ export function makePart(
     role,
     name: opts.name ?? roleLabel(role),
     pose: opts.pose,
+    variant: normalizePartVariant({
+      role,
+      pose: opts.pose,
+      variant: opts.variant,
+      viseme: opts.viseme,
+      eyeState: opts.eyeState,
+    }),
     viseme: opts.viseme,
     eyeState: opts.eyeState,
     side: opts.side,
@@ -503,7 +588,7 @@ export function listCharacterSlots(parts: CharacterPart[]): CharacterSlotRef[] {
 export function pickActivePart(
   parts: CharacterPart[],
   role: PartRole,
-  selectors: { pose?: string; viseme?: string; eyeState?: string },
+  selectors: { pose?: string; viseme?: string; eyeState?: string } = {},
   slotId?: ID,
 ): CharacterPart | undefined {
   const candidates = parts.filter(
@@ -512,20 +597,20 @@ export function pickActivePart(
   if (candidates.length === 0) return undefined;
   if (role === "mouth" && (selectors.viseme || selectors.pose)) {
     const target = selectors.viseme ?? selectors.pose;
-    const m = candidates.find((p) => p.viseme === target || p.pose === target);
+    const m = candidates.find((p) => partMatchesVariant(p, target));
     if (m) return m;
-    const rest = candidates.find((p) => p.viseme === "rest");
+    const rest = candidates.find((p) => partMatchesVariant(p, "rest"));
     if (rest) return rest;
   }
   if (role === "eye" && (selectors.eyeState || selectors.pose)) {
     const target = selectors.eyeState ?? selectors.pose;
-    const m = candidates.find((p) => p.eyeState === target || p.pose === target);
+    const m = candidates.find((p) => partMatchesVariant(p, target));
     if (m) return m;
-    const open = candidates.find((p) => p.eyeState === "open");
+    const open = candidates.find((p) => partMatchesVariant(p, "open"));
     if (open) return open;
   }
   if (selectors.pose) {
-    const m = candidates.find((p) => p.pose === selectors.pose);
+    const m = candidates.find((p) => partMatchesVariant(p, selectors.pose));
     if (m) return m;
   }
   return candidates[0];

@@ -80,6 +80,24 @@ export type EyeState = "open" | "half" | "closed" | "wink";
 
 export type PartMotionBehavior = "none" | "blink" | "rotate" | "raise" | "lipSync" | "bounce";
 
+export type CharacterVariantKind =
+  | "pose"
+  | "eyeState"
+  | "viseme"
+  | "handShape"
+  | "mouthShape"
+  | "expression"
+  | "custom";
+
+export interface CharacterSlotVariant {
+  /** Stable key used by motion variant tracks, e.g. "open", "fist", "A". */
+  key: string;
+  /** Optional UI label when the key is terse or technical. */
+  name?: string;
+  /** What kind of variant this is. Semantic kinds can drive specialized systems. */
+  kind?: CharacterVariantKind;
+}
+
 export type BoundsType = "rect" | "ellipse";
 
 export interface CharacterPartBounds {
@@ -127,6 +145,8 @@ export interface CharacterPart {
   name: string;
   /** The pose/variant tag for swappable parts (body idle/walk/cheer, etc.). */
   pose?: string;
+  /** Generic slot variant represented by this part image. */
+  variant?: CharacterSlotVariant;
   /** For mouth parts, the viseme this image represents. */
   viseme?: MouthViseme;
   /** For eye parts, the eye state. */

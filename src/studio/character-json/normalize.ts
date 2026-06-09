@@ -9,8 +9,10 @@ import type {
 import {
   listCharacterSlots,
   partAvailableForAngle,
+  partMatchesVariant,
   partsAvailableForAngle,
   roleLabel,
+  variantKeyForPart,
 } from "../character/character-utils";
 import { availableCharacterAngles, normalizeCharacterRig } from "../character/rig";
 import {
@@ -236,10 +238,11 @@ function uniqueSemanticBones(rig: ReturnType<typeof normalizeCharacterRig>): Cha
 
 function variantsForParts(parts: CharacterPart[]): AngleSlotVariantJson[] {
   return parts.map((part) => ({
-    id: part.pose ?? part.viseme ?? part.eyeState ?? part.id,
+    id: variantKeyForPart(part),
     mediaId: part.mediaId,
     name: part.name,
     angleIds: part.angleIds ?? (part.angleId ? [part.angleId] : undefined),
+    variant: part.variant,
     pose: part.pose,
     viseme: part.viseme,
     eyeState: part.eyeState,
@@ -248,9 +251,9 @@ function variantsForParts(parts: CharacterPart[]): AngleSlotVariantJson[] {
 
 function defaultVariantForParts(parts: CharacterPart[]): string | undefined {
   const part =
-    parts.find((candidate) => candidate.pose === "rest" || candidate.viseme === "rest") ??
+    parts.find((candidate) => partMatchesVariant(candidate, "rest")) ??
     representativePart(parts);
-  return part ? (part.pose ?? part.viseme ?? part.eyeState ?? part.id) : undefined;
+  return part ? variantKeyForPart(part) : undefined;
 }
 
 function semanticTypeForSlot(role: PartRole, label: string): SemanticType {

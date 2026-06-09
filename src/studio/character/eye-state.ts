@@ -18,7 +18,7 @@ export function normalizeEyeState(value: string | undefined): EyeState | undefin
 }
 
 export function eyeStateForPart(part: CharacterPart): string | undefined {
-  return part.eyeState ?? part.pose ?? "open";
+  return part.eyeState ?? part.variant?.key ?? part.pose ?? "open";
 }
 
 export function eyeVariantsForSlot(slot: CharacterSlotRef): EyeVariant[] {

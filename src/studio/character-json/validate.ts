@@ -1,4 +1,4 @@
-import type { CharacterAngle } from "../types";
+import type { CharacterAngle, CharacterVariantKind } from "../types";
 import {
   ANGLE_RIG_JSON_KIND,
   CHARACTER_JSON_KIND,
@@ -30,6 +30,15 @@ const NUMERIC_KEYFRAME_FIELDS = [
   "opacity",
 ] as const;
 const CHARACTER_ANGLE_VALUES = new Set(["front", "3qL", "3qR", "sideL", "sideR"]);
+const CHARACTER_VARIANT_KIND_VALUES = new Set<CharacterVariantKind>([
+  "pose",
+  "eyeState",
+  "viseme",
+  "handShape",
+  "mouthShape",
+  "expression",
+  "custom",
+]);
 
 export function identifyJsonArtifact(value: unknown): StudioBoomJsonKind | null {
   if (!isRecord(value)) return null;
@@ -143,6 +152,7 @@ export function validateAngleRigJson(value: unknown): JsonValidationResult {
           requiredString(variant, "mediaId", `${variantPath}.mediaId`, issues);
           requiredString(variant, "name", `${variantPath}.name`, issues);
           validateOptionalAngleIds(variant.angleIds, `${variantPath}.angleIds`, issues);
+          validateOptionalVariant(variant.variant, `${variantPath}.variant`, issues);
         });
       }
       if (id) variantsBySlot.set(id, variants);
@@ -262,6 +272,29 @@ export function validateAngleRigJson(value: unknown): JsonValidationResult {
   }
 
   return issues.result();
+}
+
+function validateOptionalVariant(
+  value: unknown,
+  path: string,
+  issues: ReturnType<typeof makeIssues>,
+) {
+  if (value === undefined) return;
+  if (!isRecord(value)) {
+    issues.error(path, "Expected variant object.");
+    return;
+  }
+  requiredString(value, "key", `${path}.key`, issues);
+  if (value.name !== undefined && typeof value.name !== "string") {
+    issues.error(`${path}.name`, "Expected string.");
+  }
+  if (
+    value.kind !== undefined &&
+    (typeof value.kind !== "string" ||
+      !CHARACTER_VARIANT_KIND_VALUES.has(value.kind as CharacterVariantKind))
+  ) {
+    issues.error(`${path}.kind`, "Expected known variant kind.");
+  }
 }
 
 export function validateMotionJson(value: unknown): JsonValidationResult {

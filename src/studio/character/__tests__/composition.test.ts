@@ -81,6 +81,7 @@ function makeCharacter() {
 function build(
   meta: Partial<CharacterClipMeta> = {},
   motionPresets = new Map<string, MotionPreset>(),
+  character = makeCharacter(),
 ) {
   return buildCharacterCompositionHtml({
     compositionId: "char_clip-1",
@@ -88,7 +89,7 @@ function build(
     width: 300,
     height: 450,
     duration: 4,
-    character: makeCharacter(),
+    character,
     meta: {
       characterId: "char-1",
       poses: {},
@@ -1069,6 +1070,73 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).toContain('data-character-part-id="mouth-raspberry"');
     expect(scene.slotEvents.some((event) => event.variant?.show?.includes("raspberry"))).toBe(true);
     expect(mouthTarget?.vars.transformOrigin).toBe("61.111% 59.524%");
+  });
+
+  it("lets generic slot variants drive hand swaps without pose fields", () => {
+    const base = makeCharacter();
+    const character: CharacterPreset = {
+      ...base,
+      parts: [
+        ...base.parts,
+        makePart("hand", "hand-open-media", {
+          id: "hand-open",
+          slotId: "slot:right-hand",
+          slotName: "Right hand",
+          side: "right",
+          variant: { key: "open", name: "Open hand", kind: "handShape" },
+          x: 236,
+          y: 320,
+          width: 52,
+          height: 58,
+          zIndex: 8,
+        }),
+        makePart("hand", "hand-fist-media", {
+          id: "hand-fist",
+          slotId: "slot:right-hand",
+          slotName: "Right hand",
+          side: "right",
+          variant: { key: "fist", name: "Fist", kind: "handShape" },
+          x: 236,
+          y: 320,
+          width: 52,
+          height: 58,
+          zIndex: 8,
+        }),
+      ],
+    };
+    const preset: MotionPreset = {
+      id: "generic-hand",
+      name: "Make fist",
+      category: "gesture",
+      duration: 1,
+      loop: false,
+      tracks: [],
+      keyposes: [
+        {
+          t: 0,
+          parts: [{ partRole: "hand", slotId: "slot:right-hand", poseSwap: "fist" }],
+        },
+        {
+          t: 1,
+          parts: [{ partRole: "hand", slotId: "slot:right-hand", poseSwap: "fist" }],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = build(
+      {
+        autoBlink: false,
+        motions: [{ id: "applied-hand", presetId: preset.id, offset: 0, intensity: 1 }],
+      },
+      new Map([[preset.id, preset]]),
+      character,
+    );
+    const scene = extractScene(html);
+
+    expect(html).toContain('data-character-variant="fist"');
+    expect(html).toContain('data-character-variant-kind="handShape"');
+    expect(scene.slotEvents.some((event) => event.variant?.show?.includes("fist"))).toBe(true);
   });
 
   it("lets expression mouth swaps continue when speech audio has no viseme timing", () => {

@@ -24,7 +24,15 @@ import {
   motionAppliesToAngle,
   poseSwapFor,
 } from "../presets/apply";
-import { listCharacterSlots, partsAvailableForAngle, roleEnabledByManifest } from "./character-utils";
+import {
+  listCharacterSlots,
+  partMatchesVariant,
+  partsAvailableForAngle,
+  roleEnabledByManifest,
+  variantAliasesForPart,
+  variantKeyForPart,
+  variantLabelForPart,
+} from "./character-utils";
 import { faceTurnMotionForPart } from "./face-turn";
 import {
   autoBlinkPoseSwapAt,
@@ -639,11 +647,7 @@ function relationActiveForParentPart(relation: CharacterSlotRelation, parentPart
   const gate = relation.activeWhenParentVariant;
   if (!gate?.keys?.length && !gate?.partIds?.length) return true;
   if (gate.partIds?.includes(parentPart.id)) return true;
-  const key = variantKeyForPart(parentPart);
-  const keys = [key, parentPart.pose, parentPart.viseme, parentPart.eyeState].filter(
-    (value): value is string => !!value,
-  );
-  return keys.some((value) => gate.keys?.includes(value));
+  return variantAliasesForPart(parentPart).some((value) => gate.keys?.includes(value));
 }
 
 function parentSlotIdForRelation(
@@ -688,18 +692,13 @@ function buildEyeSlot(
   const variantIds: Record<string, string> = {};
   const variantParts: Record<string, CharacterPart> = {};
   const activeState =
-    anglePart?.eyeState ??
-    anglePart?.pose ??
-    anglePart?.id ??
+    (anglePart ? variantKeyForPart(anglePart) : undefined) ??
     openVariant?.state ??
     variants[0].state;
   out.html.push(openSlotContainerForPart(containerId, slot, basePart, scaleX, scaleY, binding, rig, hostPart));
   for (const { state, part } of variants) {
     const id = partElementId(slot.id, state);
-    const keys = [state, part.id];
-    if (part.pose) keys.push(part.pose);
-    if (part.eyeState) keys.push(part.eyeState);
-    for (const key of keys) {
+    for (const key of unique([state, ...variantAliasesForPart(part)])) {
       variantIds[key] = id;
       variantParts[key] = part;
     }
@@ -776,7 +775,7 @@ function buildMouthSlot(
     : undefined;
   const restPart =
     anglePart ??
-    visibleParts.find((part) => part.viseme === "rest" || part.pose === "rest") ??
+    visibleParts.find((part) => partMatchesVariant(part, "rest")) ??
     visibleParts[0];
   if (!restPart) return;
 
@@ -786,20 +785,12 @@ function buildMouthSlot(
   const renderedIds = new Set<string>();
   out.html.push(openSlotContainerForPart(containerId, slot, restPart, scaleX, scaleY, binding, rig, hostPart));
   for (const viseme of VISEMES) {
-    const part = visibleParts.find(
-      (candidate) => candidate.viseme === viseme || candidate.pose === viseme,
-    );
+    const part = visibleParts.find((candidate) => partMatchesVariant(candidate, viseme));
     if (!part) continue;
     const id = partElementId(slot.id, viseme);
-    variants[viseme] = id;
-    variants[part.id] = id;
-    variantParts[viseme] = part;
-    variantParts[part.id] = part;
-    if (part.pose) variants[part.pose] = id;
-    if (part.pose) variantParts[part.pose] = part;
-    if (part.viseme) {
-      variants[part.viseme] = id;
-      variantParts[part.viseme] = part;
+    for (const key of unique([viseme, ...variantAliasesForPart(part)])) {
+      variants[key] = id;
+      variantParts[key] = part;
     }
     renderedIds.add(id);
     const children = renderNestedChildrenForPart(
@@ -818,15 +809,9 @@ function buildMouthSlot(
   for (const part of visibleParts) {
     const key = variantKeyForPart(part);
     const id = partElementId(slot.id, key);
-    variants[key] = id;
-    variants[part.id] = id;
-    variantParts[key] = part;
-    variantParts[part.id] = part;
-    if (part.pose) variants[part.pose] = id;
-    if (part.pose) variantParts[part.pose] = part;
-    if (part.viseme) {
-      variants[part.viseme] = id;
-      variantParts[part.viseme] = part;
+    for (const alias of variantAliasesForPart(part)) {
+      variants[alias] = id;
+      variantParts[alias] = part;
     }
     if (renderedIds.has(id)) continue;
     renderedIds.add(id);
@@ -1099,10 +1084,12 @@ function buildGenericSlot(
   const activePose = binding?.effectivePartId ?? poses[slot.id];
   const activePart =
     (activePose
-      ? visibleParts.find((part) => part.id === activePose || part.pose === activePose)
+      ? visibleParts.find((part) => partMatchesVariant(part, activePose))
       : undefined) ??
     (rig.activeAngle
-      ? visibleParts.find((part) => part.pose === rig.activeAngle || part.name === rig.activeAngle)
+      ? visibleParts.find(
+          (part) => partMatchesVariant(part, rig.activeAngle) || part.name === rig.activeAngle,
+        )
       : undefined) ??
     visibleParts[0];
   if (!activePart) return;
@@ -1115,12 +1102,10 @@ function buildGenericSlot(
   for (const part of visibleParts) {
     const key = variantKeyForPart(part);
     const id = partElementId(slot.id, key);
-    variants[key] = id;
-    variants[part.id] = id;
-    variantParts[key] = part;
-    variantParts[part.id] = part;
-    if (part.pose) variants[part.pose] = id;
-    if (part.pose) variantParts[part.pose] = part;
+    for (const alias of variantAliasesForPart(part)) {
+      variants[alias] = id;
+      variantParts[alias] = part;
+    }
     const children = renderNestedChildrenForPart(
       out,
       character,
@@ -1268,6 +1253,10 @@ function renderPartElement(
   )}" data-character-slot-id="${esc(part.slotId)}" data-character-role="${esc(
     part.role,
   )}" data-character-variant="${esc(variantKeyForPart(part))}"${
+    part.variant?.kind ? ` data-character-variant-kind="${esc(part.variant.kind)}"` : ""
+  }${
+    variantLabelForPart(part) ? ` data-character-variant-label="${esc(variantLabelForPart(part))}"` : ""
+  }${
     part.pose ? ` data-character-pose="${esc(part.pose)}"` : ""
   }${part.viseme ? ` data-character-viseme="${esc(part.viseme)}"` : ""}${
     part.eyeState ? ` data-character-eye-state="${esc(part.eyeState)}"` : ""
@@ -2020,10 +2009,6 @@ function slotContainerId(slotId: string): string {
 
 function partElementId(slotId: string, variant: string): string {
   return `char-part-${safeId(slotId)}-${safeId(variant)}`;
-}
-
-function variantKeyForPart(part: CharacterPart): string {
-  return part.viseme ?? part.eyeState ?? part.pose ?? part.id;
 }
 
 function safeId(value: string): string {

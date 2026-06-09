@@ -32,15 +32,20 @@ import { useMediaUrl } from "../hooks/useMediaUrl";
 import { useStudio } from "../store";
 import {
   createBlankCharacter,
+  CHARACTER_VARIANT_KIND_VALUES,
   defaultMotionBehaviorForRole,
   getPartSlotId,
   listCharacterSlots,
   makePart,
   normalizeCharacterSlots,
+  normalizePartVariant,
   normalizePartManifest,
+  partMatchesVariant,
   roleEnabledByManifest,
   roleLabel,
   saveCharacter,
+  variantKeyForPart,
+  variantLabelForPart,
   withInferredHumanParentIds,
 } from "./character-utils";
 import {
@@ -64,6 +69,7 @@ import type {
   CharacterPreset,
   CharacterRig,
   CharacterSlotRelation,
+  CharacterVariantKind,
   EyeState,
   ID,
   MouthViseme,
@@ -76,6 +82,7 @@ import {
   availableCharacterAngles,
   bindSlotPartToAngle,
   buildDefaultRig,
+  rebuildRigPreservingConstraints,
   characterRigPrompt,
   computeBoneWorldTransforms,
   moveBone,
@@ -157,6 +164,16 @@ const MOTION_BEHAVIOR_OPTIONS: Array<{ value: PartMotionBehavior; label: string 
   { value: "bounce", label: "Bounce" },
 ];
 
+const VARIANT_KIND_LABELS: Record<CharacterVariantKind, string> = {
+  pose: "Pose",
+  eyeState: "Eye state",
+  viseme: "Viseme",
+  handShape: "Hand shape",
+  mouthShape: "Mouth shape",
+  expression: "Expression",
+  custom: "Custom",
+};
+
 const SAMPLE_WORDS = ["Hello", "Shalom", "Mommy", "Welcome"];
 const EYE_STATES: EyeState[] = ["open", "half", "closed", "wink"];
 const HISTORY_LIMIT = 60;
@@ -197,7 +214,10 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   const [showBones, setShowBones] = useState(false);
   const [scale, setScale] = useState(0.7);
   const [mode, setMode] = useState<EditorMode>("select");
-  const [boundsMode, setBoundsMode] = useState<EditorBoundsMode>("frame");
+  // Default to visible-art hit-testing: a click selects a layer by its actual pixels (plus a
+  // small halo), not its whole transparent registration frame, so clicking empty space
+  // between overlapping layers no longer grabs the wrong one. Toggle back to "frame" anytime.
+  const [boundsMode, setBoundsMode] = useState<EditorBoundsMode>("art");
   // Focus mode for editing a layer's reach (hides bones/chrome, shows the traced reach outline).
   const [rangeEdit, setRangeEdit] = useState<RangeEdit | null>(null);
   // The traced reach outline as absolute canvas points (convex hull), while editing.
@@ -205,6 +225,9 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   // Live rotation reach (min/max degrees from rest) while twisting the layer.
   const [rotDraft, setRotDraft] = useState<{ min: number; max: number } | null>(null);
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  // True while a layer is actively being dragged / resized / rotated, so the other layers
+  // can blur to keep focus on it. Set at gesture start; cleared globally on pointerup below.
+  const [interacting, setInteracting] = useState(false);
   const [, setPreviewTick] = useState(0);
   const [status, setStatus] = useState<string | null>(null);
   const [mouthTestPlaying, setMouthTestPlaying] = useState(false);
@@ -398,6 +421,18 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  // Any pointer release ends the active drag/resize/rotate — clear the focus-blur flag once,
+  // centrally, so each gesture only has to switch it on.
+  useEffect(() => {
+    const clear = () => setInteracting(false);
+    window.addEventListener("pointerup", clear);
+    window.addEventListener("pointercancel", clear);
+    return () => {
+      window.removeEventListener("pointerup", clear);
+      window.removeEventListener("pointercancel", clear);
+    };
+  }, []);
+
   function restoreCharacterSnapshot(next: CharacterPreset) {
     setDoc(next);
     setSelectedPartId((id) => (id && next.parts.some((part) => part.id === id) ? id : null));
@@ -449,7 +484,12 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
   const withRig = (character: CharacterPreset, preserveRig = false): CharacterPreset => ({
     ...character,
-    rig: preserveRig ? normalizeCharacterRig(character) : buildDefaultRig(character),
+    // A structural rebuild (preserveRig = false) recomputes bones/bindings from the parts but
+    // must keep authored movement/rotation reaches — otherwise setting a pivot/area or moving a
+    // layer would silently wipe a slot's drag boundary and rotation clipping.
+    rig: preserveRig
+      ? normalizeCharacterRig(character)
+      : rebuildRigPreservingConstraints(character),
   });
 
   const pushUndoSnapshot = () => {
@@ -605,12 +645,25 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       const alphaBounds = await measureAlphaBoundsFromBlob(file, asset.width, asset.height);
       const id = uid();
       const label = options.label ?? asset.name;
+      const variantKey =
+        options.variantKey?.trim() ||
+        viseme ||
+        eyeState ||
+        detectVariantKey(file.name, role, side);
+      const variant = variantKey
+        ? {
+            key: variantKey,
+            ...(options.variantLabel?.trim() ? { name: options.variantLabel.trim() } : {}),
+            kind: options.variantKind ?? defaultVariantKindForRole(role, viseme, eyeState),
+          }
+        : undefined;
       const part = makePart(role, asset.id, {
         id,
         name: label,
         slotId: options.slotId ?? slotIdForImport(role, label, viseme, id, side),
         slotName: label,
         side,
+        variant,
         viseme,
         eyeState,
         alphaBounds,
@@ -910,6 +963,9 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   // The layer that movement-range controls act on: a selected slot, or the slot of the
   // selected part.
   const restrictSlotId = selectedSlotId ?? (selectedPart ? getPartSlotId(selectedPart) : null);
+  // While the active layer is being edited — a pivot/area tool is armed, or a drag/resize/
+  // rotate is underway — slightly blur every other layer so the focus is unmistakable.
+  const editingActive = !!restrictSlotId && (mode !== "select" || interacting);
   const focusEditing = !!rangeEdit;
 
   const canvasPointFromEvent = (e: React.PointerEvent) => {
@@ -952,40 +1008,79 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
   const pickPartAt = (point: { x: number; y: number }) => hitPartsAt(point)[0] ?? null;
 
+  // The parts the pivot / area tools act on. These tools are launched from the selected
+  // layer's inspector, so they target the active selection — the selected part, or every
+  // variant of the selected slot — never whatever happens to be topmost under the click.
+  // (Placing an arm's pivot over the shoulder must not grab the body underneath.) Empty
+  // when nothing is selected.
+  const activeToolPartIds = (): ID[] => {
+    if (selectedPartId) return [selectedPartId];
+    if (selectedSlotId) return partsInSlot(selectedSlotId).map((part) => part.id);
+    return [];
+  };
+
+  // Place the pivot at a canvas point on each given part (one undo step, selection left
+  // untouched). Every part maps the shared canvas point through its own transform, matching
+  // the single-part path so rotation stays consistent.
+  const setPivotForParts = (ids: ID[], point: { x: number; y: number }) => {
+    if (ids.length === 0) return;
+    const idSet = new Set(ids);
+    pushUndoSnapshot();
+    setDoc((d) => {
+      if (!d) return d;
+      return withRig({
+        ...d,
+        parts: d.parts.map((part) => {
+          if (!idSet.has(part.id)) return part;
+          const local = localPointForPart(part, point);
+          const pivot = {
+            x: Math.round(local.x + part.x),
+            y: Math.round(local.y + part.y),
+          };
+          return normalizePartPatch({ ...part, pivot }, { pivot });
+        }),
+        updatedAt: Date.now(),
+      });
+    });
+  };
+
+  // Set each given part's allowed-area to a padded box/ellipse of its own art (one undo
+  // step, selection left untouched).
+  const setBoundsForParts = (ids: ID[], shape: "rect" | "ellipse") => {
+    if (ids.length === 0) return;
+    const idSet = new Set(ids);
+    pushUndoSnapshot();
+    setDoc((d) => {
+      if (!d) return d;
+      return withRig({
+        ...d,
+        parts: d.parts.map((part) => {
+          if (!idSet.has(part.id)) return part;
+          const box = editorSelectionBounds(part, boundsMode);
+          const bounds = {
+            type: shape,
+            x: Math.round(part.x + box.x - box.width * 0.08),
+            y: Math.round(part.y + box.y - box.height * 0.08),
+            width: Math.round(box.width * 1.16),
+            height: Math.round(box.height * 1.16),
+          };
+          return normalizePartPatch({ ...part, bounds }, { bounds });
+        }),
+        updatedAt: Date.now(),
+      });
+    });
+  };
+
   const startCanvasPartDrag = (
     e: React.PointerEvent,
     part: CharacterPart,
     point: { x: number; y: number },
   ) => {
     if (e.button !== 0) return;
-    const localDown = localPointForPart(part, point);
+    // Reached only in select mode now — the pivot / area tools act on the active selection
+    // through handleCanvasPointerDown, not on the dragged subject.
     selectPart(part.id);
-
-    if (mode === "pivot") {
-      updatePart(part.id, {
-        pivot: {
-          x: Math.round(localDown.x + part.x),
-          y: Math.round(localDown.y + part.y),
-        },
-      });
-      setMode("select");
-      return;
-    }
-
-    if (mode.startsWith("bounds")) {
-      const bounds = editorSelectionBounds(part, boundsMode);
-      updatePart(part.id, {
-        bounds: {
-          type: mode === "bounds-ellipse" ? "ellipse" : "rect",
-          x: Math.round(part.x + bounds.x - bounds.width * 0.08),
-          y: Math.round(part.y + bounds.y - bounds.height * 0.08),
-          width: Math.round(bounds.width * 1.16),
-          height: Math.round(bounds.height * 1.16),
-        },
-      });
-      setMode("select");
-      return;
-    }
+    setInteracting(true);
 
     pushUndoSnapshot();
     const sx = e.clientX;
@@ -1046,6 +1141,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   // Drag every variant in a slot together by the same canvas delta.
   const startGroupDrag = (e: React.PointerEvent, slotId: ID) => {
     if (e.button !== 0) return;
+    setInteracting(true);
     pushUndoSnapshot();
     const snapshot = new Map(
       partsInSlot(slotId).map((p) => {
@@ -1172,6 +1268,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   const startGroupResize = (e: React.PointerEvent, slotId: ID, corner: ResizeCorner) => {
     if (e.button !== 0) return;
     e.stopPropagation();
+    setInteracting(true);
     pushUndoSnapshot();
     const parts = partsInSlot(slotId);
     const box = unionFrameBounds(parts);
@@ -1232,6 +1329,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
+    setInteracting(true);
     pushUndoSnapshot();
     const canvas = e.currentTarget.closest("[data-editor-canvas]") as HTMLDivElement | null;
     const rect = canvas?.getBoundingClientRect();
@@ -1553,10 +1651,19 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       return;
     }
 
-    // Pivot / bounds tools act on the topmost part immediately (one-shot).
+    // Pivot / area tools are one-shot and act on the active selection (their buttons live in
+    // the selected layer's inspector). The click only positions the pivot; selection is left
+    // untouched. With nothing selected, fall back to the topmost part under the click.
     if (mode !== "select") {
-      const picked = pickPartAt(point);
-      if (picked) startCanvasPartDrag(e, picked, point);
+      let ids = activeToolPartIds();
+      if (ids.length === 0) {
+        const picked = pickPartAt(point);
+        ids = picked ? [picked.id] : [];
+      }
+      if (ids.length === 0) return;
+      if (mode === "pivot") setPivotForParts(ids, point);
+      else setBoundsForParts(ids, mode === "bounds-ellipse" ? "ellipse" : "rect");
+      setMode("select");
       return;
     }
 
@@ -1566,10 +1673,13 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     if (showBones) {
       const candidates = hitPartsAt(point);
       const candidateIds = candidates.map((part) => part.id);
-      const { id, nextPick } = resolveDrillSelection(candidateIds, canvasLastPickRef.current, {
-        x: e.clientX,
-        y: e.clientY,
-      });
+      const { id, nextPick } = resolveDrillSelection(
+        candidateIds,
+        canvasLastPickRef.current,
+        { x: e.clientX, y: e.clientY },
+        undefined,
+        e.altKey,
+      );
       canvasLastPickRef.current = nextPick;
       if (!id) {
         setSelectedPartId(null);
@@ -1585,7 +1695,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     }
 
     // Figma-style select/drag (shared model — see select-drag.ts): a click selects the
-    // top part and drills under it on a repeat click; a drag moves the already-selected
+    // top part (Alt-click drills to the part underneath); a drag moves the already-selected
     // part from anywhere even when overlapped, or selects+drags an unselected part in one
     // gesture. Selection never changes mid-drag.
     const dragPoint = point;
@@ -1612,10 +1722,13 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     function onUp() {
       cleanup();
       if (dragging) return;
-      const { id, nextPick } = resolveDrillSelection(candidateIds, canvasLastPickRef.current, {
-        x: startX,
-        y: startY,
-      });
+      const { id, nextPick } = resolveDrillSelection(
+        candidateIds,
+        canvasLastPickRef.current,
+        { x: startX, y: startY },
+        undefined,
+        e.altKey,
+      );
       canvasLastPickRef.current = nextPick;
       if (!id) {
         setSelectedPartId(null);
@@ -1772,6 +1885,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   part={part}
                   selected={part.id === selectedPartId}
                   dimmed={focusEditing && getPartSlotId(part) !== rangeEdit?.slotId}
+                  blurred={editingActive && getPartSlotId(part) !== restrictSlotId}
                   preview={preview}
                   previewParentPart={previewParentPart}
                   allParts={doc.parts}
@@ -1797,7 +1911,10 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   preview={preview}
                   previewParentPart={previewParentPart}
                   allParts={doc.parts}
-                  onBeginChange={pushUndoSnapshot}
+                  onBeginChange={() => {
+                    setInteracting(true);
+                    pushUndoSnapshot();
+                  }}
                   onChange={(patch) => updatePart(selectedEditorPart.id, patch, { history: false })}
                 />
               )}
@@ -1917,6 +2034,9 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 interface ImportOptions {
   role?: PartRole;
   side?: CharacterPart["side"];
+  variantKey?: string;
+  variantLabel?: string;
+  variantKind?: CharacterVariantKind;
   viseme?: MouthViseme;
   eyeState?: EyeState;
   label?: string;
@@ -1983,8 +2103,14 @@ function UploadSlots({
   canvasHeight: number;
 }) {
   const [customSlotName, setCustomSlotName] = useState("");
+  const [variantSlotId, setVariantSlotId] = useState("");
+  const [variantKey, setVariantKey] = useState("");
+  const [variantName, setVariantName] = useState("");
   const normalizedCustomName = customSlotName.trim();
   const customSlotId = normalizedCustomName ? `custom:${slug(normalizedCustomName)}` : "";
+  const variantSlots = listCharacterSlots(parts);
+  const selectedVariantSlot = variantSlots.find((slot) => slot.id === variantSlotId);
+  const normalizedVariantKey = variantKey.trim();
   return (
     <div className="space-y-3">
       <div>
@@ -2014,6 +2140,75 @@ function UploadSlots({
             }
           />
         ))}
+      </div>
+      <div className="rounded border border-border bg-panel-2 p-2">
+        <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+          Add variant to existing slot
+        </div>
+        <div className="mb-2 text-[10px] leading-snug text-muted-foreground">
+          Use this for alternate images of the same animatable part, like hand open/fist/point.
+        </div>
+        <div className="grid gap-2">
+          <select
+            value={variantSlotId}
+            onChange={(e) => setVariantSlotId(e.target.value)}
+            aria-label="Variant slot"
+            className="min-w-0 rounded border border-border bg-background px-2 py-1"
+          >
+            <option value="">Choose slot</option>
+            {variantSlots.map((slot) => (
+              <option key={slot.id} value={slot.id}>
+                {slot.name}
+              </option>
+            ))}
+          </select>
+          <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
+            <input
+              value={variantKey}
+              onChange={(e) => setVariantKey(e.target.value)}
+              aria-label="Variant key"
+              placeholder="fist"
+              className="min-w-0 rounded border border-border bg-background px-2 py-1"
+            />
+            <input
+              value={variantName}
+              onChange={(e) => setVariantName(e.target.value)}
+              aria-label="Variant label"
+              placeholder="Fist"
+              className="min-w-0 rounded border border-border bg-background px-2 py-1"
+            />
+            <SlotUpload
+              label="Upload"
+              compact
+              disabled={!selectedVariantSlot || !normalizedVariantKey}
+              filled={Boolean(
+                selectedVariantSlot &&
+                  normalizedVariantKey &&
+                  selectedVariantSlot.parts.some(
+                    (part) => partMatchesVariant(part, normalizedVariantKey),
+                  ),
+              )}
+              onUpload={(file) => {
+                if (!selectedVariantSlot || !normalizedVariantKey) return;
+                const representative = selectedVariantSlot.parts[0];
+                onImport(file, {
+                  role: selectedVariantSlot.role,
+                  side: representative?.side,
+                  label: selectedVariantSlot.name,
+                  slotId: selectedVariantSlot.id,
+                  variantKey: normalizedVariantKey,
+                  variantLabel: variantName.trim() || normalizedVariantKey,
+                  variantKind: defaultVariantKindForRole(
+                    selectedVariantSlot.role,
+                    undefined,
+                    undefined,
+                  ),
+                  zIndex: representative?.zIndex,
+                });
+              }}
+            />
+          </div>
+        </div>
       </div>
       <div className="rounded border border-border bg-panel-2 p-2">
         <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
@@ -2127,19 +2322,24 @@ function SlotUpload({
   label,
   filled,
   compact,
+  disabled,
   onUpload,
 }: {
   label: string;
   filled: boolean;
   compact?: boolean;
+  disabled?: boolean;
   onUpload: (file: File) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   return (
     <>
       <button
-        onClick={() => inputRef.current?.click()}
-        className={`flex items-center justify-between gap-2 rounded border px-2 text-left hover:bg-panel ${
+        onClick={() => {
+          if (!disabled) inputRef.current?.click();
+        }}
+        disabled={disabled}
+        className={`flex items-center justify-between gap-2 rounded border px-2 text-left hover:bg-panel disabled:cursor-not-allowed disabled:opacity-50 ${
           compact ? "py-1" : "py-2"
         } ${filled ? "border-primary/60 bg-primary/10" : "border-border bg-panel-2"}`}
       >
@@ -2205,22 +2405,25 @@ const VISEME_ORDER: MouthViseme[] = ["rest", "A", "E", "O", "U", "MBP", "FV", "L
 const EYE_STATE_ORDER: EyeState[] = ["open", "half", "closed", "wink"];
 
 function variantLabel(part: CharacterPart) {
-  if (part.role === "mouth" && part.viseme) return part.viseme;
-  if (part.role === "eye" && part.eyeState) return part.eyeState;
-  return part.name;
+  return variantLabelForPart(part);
 }
 
 function orderVariants(parts: CharacterPart[]) {
   return parts.slice().sort((a, b) => {
     if (a.role === "mouth" && b.role === "mouth") {
-      return VISEME_ORDER.indexOf(a.viseme ?? "rest") - VISEME_ORDER.indexOf(b.viseme ?? "rest");
+      return (
+        VISEME_ORDER.indexOf((a.viseme ?? variantKeyForPart(a)) as MouthViseme) -
+        VISEME_ORDER.indexOf((b.viseme ?? variantKeyForPart(b)) as MouthViseme)
+      );
     }
     if (a.role === "eye" && b.role === "eye") {
       return (
-        EYE_STATE_ORDER.indexOf(a.eyeState ?? "open") -
-        EYE_STATE_ORDER.indexOf(b.eyeState ?? "open")
+        EYE_STATE_ORDER.indexOf((a.eyeState ?? variantKeyForPart(a)) as EyeState) -
+        EYE_STATE_ORDER.indexOf((b.eyeState ?? variantKeyForPart(b)) as EyeState)
       );
     }
+    const byVariant = variantKeyForPart(a).localeCompare(variantKeyForPart(b));
+    if (byVariant !== 0) return byVariant;
     return a.zIndex - b.zIndex;
   });
 }
@@ -2439,7 +2642,7 @@ function LayerList({
           <span className="min-w-0 flex-1 truncate font-medium">
             {group.name}
             <span className="ml-1 text-[10px] font-normal text-muted-foreground">
-              {group.slotParts.length} parts
+              {group.slotParts.length} variants
             </span>
           </span>
           <button
@@ -2587,6 +2790,27 @@ function Inspector({
 
   const parentOptions = doc.parts.filter((p) => p.id !== part.id);
   const previewButtons = previewLabels(part);
+  const variantInputKey = part.variant?.key ?? part.viseme ?? part.eyeState ?? part.pose ?? "";
+  const variantKind =
+    part.variant?.kind ?? defaultVariantKindForRole(part.role, part.viseme, part.eyeState);
+  const updateVariant = (
+    patch: Partial<NonNullable<CharacterPart["variant"]>>,
+    semantic?: Pick<CharacterPart, "viseme" | "eyeState" | "pose">,
+  ) => {
+    const next = normalizePartVariant({
+      role: part.role,
+      pose: semantic?.pose ?? part.pose,
+      viseme: semantic?.viseme ?? part.viseme,
+      eyeState: semantic?.eyeState ?? part.eyeState,
+      variant: {
+        key: variantInputKey,
+        kind: variantKind,
+        ...part.variant,
+        ...patch,
+      },
+    });
+    return next;
+  };
 
   return (
     <div className="space-y-4">
@@ -2654,13 +2878,46 @@ function Inspector({
             <Field label="Mouth">
               <select
                 value={part.viseme ?? "rest"}
-                onChange={(e) => onChange(part.id, { viseme: e.target.value as MouthViseme })}
+                onChange={(e) => {
+                  const viseme = e.target.value as MouthViseme;
+                  onChange(part.id, {
+                    viseme,
+                    variant: updateVariant(
+                      { key: viseme, kind: "viseme" },
+                      { viseme, eyeState: part.eyeState, pose: part.pose },
+                    ),
+                  });
+                }}
                 className="w-full rounded border border-border bg-background px-2 py-1"
                 title={MOUTH_VISEME_DESCRIPTIONS[part.viseme ?? "rest"]}
               >
                 {MOUTH_VISEMES.map((viseme) => (
                   <option key={viseme} value={viseme}>
                     {viseme}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+          {part.role === "eye" && (
+            <Field label="Eye state">
+              <select
+                value={part.eyeState ?? "open"}
+                onChange={(e) => {
+                  const eyeState = e.target.value as EyeState;
+                  onChange(part.id, {
+                    eyeState,
+                    variant: updateVariant(
+                      { key: eyeState, kind: "eyeState" },
+                      { viseme: part.viseme, eyeState, pose: part.pose },
+                    ),
+                  });
+                }}
+                className="w-full rounded border border-border bg-background px-2 py-1"
+              >
+                {EYE_STATES.map((eyeState) => (
+                  <option key={eyeState} value={eyeState}>
+                    {eyeState}
                   </option>
                 ))}
               </select>
@@ -2680,6 +2937,53 @@ function Inspector({
               ))}
             </select>
           </Field>
+        </div>
+      </section>
+
+      <section className="rounded border border-border bg-panel-2 p-3">
+        <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+          Variant
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="Key">
+            <input
+              value={variantInputKey}
+              onChange={(e) => onChange(part.id, { variant: updateVariant({ key: e.target.value }) })}
+              placeholder="open"
+              className="w-full rounded border border-border bg-background px-2 py-1"
+            />
+          </Field>
+          <Field label="Kind">
+            <select
+              value={variantKind}
+              onChange={(e) =>
+                onChange(part.id, {
+                  variant: updateVariant({ kind: e.target.value as CharacterVariantKind }),
+                })
+              }
+              className="w-full rounded border border-border bg-background px-2 py-1"
+            >
+              {CHARACTER_VARIANT_KIND_VALUES.map((kind) => (
+                <option key={kind} value={kind}>
+                  {VARIANT_KIND_LABELS[kind]}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <div className="col-span-2">
+            <Field label="Label">
+              <input
+                value={part.variant?.name ?? ""}
+                onChange={(e) =>
+                  onChange(part.id, {
+                    variant: updateVariant({ name: e.target.value || undefined }),
+                  })
+                }
+                placeholder={variantInputKey || part.name}
+                className="w-full rounded border border-border bg-background px-2 py-1"
+              />
+            </Field>
+          </div>
         </div>
       </section>
 
@@ -3108,6 +3412,24 @@ function RigPanel({
  * from that parent, in the parent's frame, so it rides along. Reach is a guide for generated motion;
  * manual dragging stays free.
  */
+// A compact set/not-set status chip: green dot when configured, amber dot when it still
+// needs setting. Gives the inspector an at-a-glance read of which limits are in place.
+function ConstraintPill({ set, label }: { set: boolean; label: string }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-medium ${
+        set
+          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+          : "border-amber-500/30 bg-amber-500/5 text-amber-300/90"
+      }`}
+      title={set ? `${label}: set` : `${label}: not set`}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${set ? "bg-emerald-400" : "bg-amber-400"}`} />
+      {label}
+    </span>
+  );
+}
+
 function RestrictMovementPanel({
   doc,
   slotId,
@@ -3154,6 +3476,21 @@ function RestrictMovementPanel({
         <span className="font-semibold uppercase tracking-wider text-muted-foreground">
           Bounds & host
         </span>
+      </div>
+
+      {/* At-a-glance status: green = set, amber = still needs setting. */}
+      <div className="mb-3 flex flex-wrap gap-1">
+        <ConstraintPill set={!!parentSlotId} label="Attached" />
+        <ConstraintPill set={!!hostSlotId} label="Drag boundary" />
+        <ConstraintPill set={hasPosReach} label="Drift" />
+        <ConstraintPill
+          set={hasRotReach}
+          label={
+            hasRotReach
+              ? `Twist ${constraint?.rotReach?.min}°/${constraint?.rotReach?.max}°`
+              : "Twist"
+          }
+        />
       </div>
 
       <Field label="Attach to layer">
@@ -3760,6 +4097,7 @@ function PartLayer({
   part,
   selected,
   dimmed = false,
+  blurred = false,
   preview,
   previewParentPart,
   allParts,
@@ -3767,37 +4105,26 @@ function PartLayer({
   part: CharacterPart;
   selected: boolean;
   dimmed?: boolean;
+  blurred?: boolean;
   preview: PreviewState | null;
   previewParentPart?: CharacterPart;
   allParts: CharacterPart[];
 }) {
   const url = useMediaUrl(part.mediaId);
-  const previewingTalk = preview?.kind === "talk";
-  const previewingBlink = preview?.kind === "blink" && preview.targetSlotId === part.slotId;
-  if (
-    part.role === "eye" &&
-    part.eyeState &&
-    part.eyeState !== "open" &&
-    !selected &&
-    !previewingBlink
-  ) {
-    return null;
-  }
-  if (
-    part.role === "mouth" &&
-    part.viseme &&
-    part.viseme !== "rest" &&
-    !selected &&
-    !previewingTalk
-  ) {
-    return null;
+  const sameSlotParts = allParts.filter((candidate) => getPartSlotId(candidate) === getPartSlotId(part));
+  if (sameSlotParts.length > 1 && !selected) {
+    const activeVariant =
+      activePreviewVariantForPart(part, preview) ??
+      defaultVariantForSlotParts(sameSlotParts, part.role);
+    if (activeVariant && !partMatchesVariant(part, activeVariant)) return null;
   }
   if (!part.visible && !selected) return null;
 
   const previewTransform = previewDelta(part, preview, previewParentPart, allParts);
   const baseOpacity = part.visible ? previewTransform.opacity : 0.28;
-  // In movement-range focus mode, fade everything except the layer being edited.
-  const opacity = dimmed ? baseOpacity * 0.12 : baseOpacity;
+  // In movement-range focus mode, fade everything except the layer being edited. While the
+  // active layer is being edited, the others get a slight blur (and a touch of fade) instead.
+  const opacity = dimmed ? baseOpacity * 0.12 : blurred ? baseOpacity * 0.7 : baseOpacity;
   const pivot = pivotForPart(part);
 
   return (
@@ -3812,6 +4139,8 @@ function PartLayer({
           height: part.height,
           zIndex: part.zIndex,
           opacity,
+          filter: blurred && !dimmed ? "blur(2px)" : undefined,
+          transition: "filter 120ms ease",
           pointerEvents: "none",
           transform: `rotate(${part.rotation + previewTransform.rotation}deg) scale(${previewTransform.scale}, ${previewTransform.scaleY ?? previewTransform.scale})`,
           transformOrigin: `${((pivot.x - part.x) / part.width) * 100}% ${((pivot.y - part.y) / part.height) * 100}%`,
@@ -4394,12 +4723,48 @@ function previewDelta(
   return previewMotionForPart(part, preview, t, wave);
 }
 
+function activePreviewVariantForPart(
+  part: CharacterPart,
+  preview: PreviewState | null,
+): string | undefined {
+  if (!preview || preview.targetSlotId !== getPartSlotId(part)) return undefined;
+  if (preview.kind === "blink" && part.role === "eye") {
+    const elapsed = Date.now() - preview.startedAt;
+    const t = Math.min(1, elapsed / preview.durationMs);
+    return t > 0.35 && t < 0.55 ? "closed" : "open";
+  }
+  if (preview.kind === "talk" && part.role === "mouth") {
+    if (preview.forcedViseme) return preview.forcedViseme;
+    const elapsed = Date.now() - preview.startedAt;
+    const t = Math.min(1, elapsed / preview.durationMs);
+    const visemes = preview.visemes ?? ["rest", "A", "E", "O", "MBP"];
+    const idx = Math.floor(t * visemes.length * 1.1) % visemes.length;
+    return visemes[idx];
+  }
+  return undefined;
+}
+
+function defaultVariantForSlotParts(parts: CharacterPart[], role: PartRole): string | undefined {
+  const visible = parts.filter((part) => part.visible);
+  const candidates = visible.length ? visible : parts;
+  if (role === "mouth") {
+    const rest = candidates.find((part) => partMatchesVariant(part, "rest"));
+    if (rest) return variantKeyForPart(rest);
+  }
+  if (role === "eye") {
+    const open = candidates.find((part) => partMatchesVariant(part, "open"));
+    if (open) return variantKeyForPart(open);
+  }
+  const first = candidates.slice().sort((a, b) => a.zIndex - b.zIndex)[0];
+  return first ? variantKeyForPart(first) : undefined;
+}
+
 function previewMotionForPart(part: CharacterPart, preview: PreviewState, t: number, wave: number) {
   if (preview.kind === "blink" && part.role === "eye") {
     const closedMoment = t > 0.35 && t < 0.55;
-    if (part.eyeState) {
-      const shouldShow =
-        (closedMoment && part.eyeState === "closed") || (!closedMoment && part.eyeState === "open");
+    if (part.eyeState || part.variant) {
+      const target = closedMoment ? "closed" : "open";
+      const shouldShow = partMatchesVariant(part, target);
       return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: 1, opacity: shouldShow ? 1 : 0 };
     }
     return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: closedMoment ? 0.12 : 1, opacity: 1 };
@@ -4438,7 +4803,7 @@ function previewMotionForPart(part: CharacterPart, preview: PreviewState, t: num
       dy: 0,
       rotation: 0,
       scale: 1,
-      opacity: !part.viseme || part.viseme === active ? 1 : 0,
+      opacity: !part.variant && !part.viseme ? 1 : partMatchesVariant(part, active) ? 1 : 0,
     };
   }
   return { dx: 0, dy: 0, rotation: 0, scale: 1, opacity: 1 };
@@ -4567,6 +4932,69 @@ function detectEyeState(filename: string): EyeState | undefined {
   if (name.includes("wink")) return "wink";
   if (name.includes("open")) return "open";
   return "open";
+}
+
+function detectVariantKey(
+  filename: string,
+  role: PartRole,
+  side: CharacterPart["side"],
+): string | undefined {
+  const stem = filename.replace(/\.[^.]+$/i, "");
+  const tokens = stem.split(/[^A-Za-z0-9]+/).filter(Boolean);
+  const ignored = new Set(["svg", "image", "asset", "part"]);
+  if (side) ignored.add(side);
+  if (side === "left") ignored.add("l");
+  if (side === "right") ignored.add("r");
+  for (const token of roleIgnoredTokens(role)) ignored.add(token);
+  const kept = tokens.filter((token) => !ignored.has(token.toLowerCase()));
+  return kept.length ? slug(kept.join("-")) : undefined;
+}
+
+function roleIgnoredTokens(role: PartRole): string[] {
+  switch (role) {
+    case "head":
+      return ["head"];
+    case "body":
+      return ["body", "torso"];
+    case "eye":
+      return ["eye", "eyes"];
+    case "iris":
+      return ["iris", "pupil"];
+    case "eyebrow":
+      return ["brow", "eyebrow"];
+    case "nose":
+      return ["nose"];
+    case "mouth":
+      return ["mouth", "lip", "lips", "viseme"];
+    case "arm":
+      return ["arm"];
+    case "hand":
+      return ["hand"];
+    case "leg":
+      return ["leg"];
+    case "foot":
+      return ["foot", "feet"];
+    case "hair":
+      return ["hair"];
+    case "accessory":
+      return ["accessory", "prop"];
+    case "static":
+      return ["static"];
+    case "custom":
+      return ["custom"];
+  }
+}
+
+function defaultVariantKindForRole(
+  role: PartRole,
+  viseme: MouthViseme | undefined,
+  eyeState: EyeState | undefined,
+): CharacterVariantKind {
+  if (viseme) return "viseme";
+  if (eyeState) return "eyeState";
+  if (role === "hand") return "handShape";
+  if (role === "mouth") return "mouthShape";
+  return role === "eye" ? "eyeState" : "pose";
 }
 
 function slotIdForImport(
@@ -4737,6 +5165,7 @@ function normalizePartPatch(part: CharacterPart, patch: Partial<CharacterPart>):
     anchorX,
     anchorY,
     pivot,
+    variant: normalizePartVariant(part),
     motionBehavior: part.motionBehavior ?? defaultMotionBehaviorForRole(part.role, part.viseme),
   };
 }

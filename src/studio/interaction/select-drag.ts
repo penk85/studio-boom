@@ -50,6 +50,10 @@ export function resolveDragSubject(
  * underneath, wrapping around). A click at a new spot or on a different stack resets to
  * the topmost candidate.
  *
+ * When `allowDrill` is false the repeat-click cycle is suppressed: every click resolves to
+ * the topmost candidate. Callers that prefer "plain click never changes which overlapped
+ * layer you get, hold a modifier to reach underneath" pass `allowDrill: event.altKey`.
+ *
  * @returns the id to select (or null when nothing is under the pointer) plus the
  * `nextPick` the caller should remember for the following click.
  */
@@ -58,11 +62,13 @@ export function resolveDrillSelection(
   lastPick: DrillPick | null,
   point: PointerPoint,
   radius: number = DEFAULT_DRILL_RADIUS,
+  allowDrill: boolean = true,
 ): { id: string | null; nextPick: DrillPick | null } {
   if (candidates.length === 0) return { id: null, nextPick: null };
 
   const key = candidates.join("|");
   const samePoint =
+    allowDrill &&
     !!lastPick &&
     lastPick.key === key &&
     Math.hypot(point.x - lastPick.x, point.y - lastPick.y) < radius;

@@ -9,6 +9,7 @@ import {
   moveBoneForSlot,
   moveSlotBinding,
   normalizeCharacterRig,
+  rebuildRigPreservingConstraints,
   setSlotHostConstraint,
   setSlotReach,
   setSlotRotReach,
@@ -206,6 +207,64 @@ describe("CharacterRig V1", () => {
     // Fewer than three points clears it.
     const cleared = setSlotReach(withReach, "slot:left-eye", [{ x: 0, y: 0 }]);
     expect(cleared.reaches.find((r) => r.slotId === "slot:left-eye")?.reach).toBeUndefined();
+  });
+
+  it("rebuild preserves authored movement/rotation reaches (buildDefaultRig drops them)", () => {
+    const character = makeRigCharacter();
+    let rig = buildDefaultRig(character);
+    rig = setSlotReach(rig, "slot:left-eye", [
+      { x: -10, y: -8 },
+      { x: 10, y: -8 },
+      { x: 10, y: 8 },
+      { x: -10, y: 8 },
+    ]);
+    rig = setSlotRotReach(rig, "slot:left-eye", { min: -30, max: 45 });
+    const authored: CharacterPreset = { ...character, rig };
+
+    // A plain rebuild from parts loses the reaches — this is the bug the editor's withRig hit.
+    expect(buildDefaultRig(authored).reaches).toEqual([]);
+
+    // The preserving rebuild keeps both reach and rotReach, and stays valid.
+    const rebuilt = rebuildRigPreservingConstraints(authored);
+    const eyeReach = rebuilt.reaches.find((r) => r.slotId === "slot:left-eye");
+    expect(eyeReach?.reach).toHaveLength(4);
+    expect(eyeReach?.rotReach).toEqual({ min: -30, max: 45 });
+    expect(validateCharacterRig(rebuilt).ok).toBe(true);
+  });
+
+  it("rebuild preserves a manually chosen host (drag boundary) but keeps inferred defaults", () => {
+    const character = makeRigCharacter();
+    // Manually constrain the body to stay inside the head (not an inferred default).
+    const rig = setSlotHostConstraint(buildDefaultRig(character), "role:body", "role:head", "insideHostBounds");
+    const authored: CharacterPreset = { ...character, rig };
+
+    const rebuilt = rebuildRigPreservingConstraints(authored);
+    const bodyHost = rebuilt.hostConstraints.find((c) => c.slotId === "role:body");
+    expect(bodyHost?.hostSlotId).toBe("role:head");
+    expect(bodyHost?.mode).toBe("insideHostBounds");
+    // Inferred face-slot host defaults still present for slots the user never touched.
+    expect(rebuilt.hostConstraints.some((c) => c.slotId === "slot:left-iris")).toBe(true);
+    expect(validateCharacterRig(rebuilt).ok).toBe(true);
+  });
+
+  it("rebuild drops a carried reach whose slot no longer exists", () => {
+    const character = makeRigCharacter();
+    const rig = setSlotReach(buildDefaultRig(character), "slot:left-eye", [
+      { x: -10, y: -8 },
+      { x: 10, y: -8 },
+      { x: 10, y: 8 },
+      { x: -10, y: 8 },
+    ]);
+    // Remove the eye part so its slot is gone; the stale reach must not survive (and must not
+    // break validation).
+    const withoutEye: CharacterPreset = {
+      ...character,
+      parts: character.parts.filter((p) => p.id !== "left-eye"),
+      rig,
+    };
+    const rebuilt = rebuildRigPreservingConstraints(withoutEye);
+    expect(rebuilt.reaches.some((r) => r.slotId === "slot:left-eye")).toBe(false);
+    expect(validateCharacterRig(rebuilt).ok).toBe(true);
   });
 
   it("infers and normalizes host constraints for face slots", () => {

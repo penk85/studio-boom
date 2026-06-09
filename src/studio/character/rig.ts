@@ -15,6 +15,7 @@ import type {
 import {
   getPartSlotId,
   listCharacterSlots,
+  partMatchesVariant,
   partsAvailableForAngle,
   roleLabel,
 } from "./character-utils";
@@ -89,6 +90,71 @@ export function buildDefaultRig(
     slotRelations: active?.slotRelations ?? [],
     hostConstraints: active?.hostConstraints ?? [],
     reaches: active?.reaches ?? [],
+  };
+}
+
+/**
+ * Recompute bones/bindings from the current parts (like {@link buildDefaultRig}) while carrying
+ * the user-authored movement/rotation reaches and host ("drag boundary") choices forward, per
+ * angle. A plain `buildDefaultRig` drops reaches and re-infers host constraints, so a from-scratch
+ * rebuild after a structural edit (set pivot, set area, move a layer) would otherwise silently
+ * wipe a slot's rotation-reach clipping and revert its drag boundary. Carried records are filtered
+ * to slots/bones that still exist so the result stays valid; freshly inferred host defaults are
+ * kept for any slot the user never configured.
+ */
+export function rebuildRigPreservingConstraints(character: CharacterPreset): CharacterRig {
+  const rebuilt = buildDefaultRig(character);
+  const prev = character.rig;
+  if (!prev) return rebuilt;
+
+  // Per-angle authored records — with a fallback to the top-level mirror for legacy saves that
+  // have no per-angle map.
+  const authoredReaches = (angleId: CharacterAngle): CharacterReach[] => {
+    const angleRig = prev.angles?.[angleId];
+    if (angleRig) return angleRig.reaches ?? [];
+    return angleId === prev.activeAngle ? prev.reaches ?? [] : [];
+  };
+  const authoredHosts = (angleId: CharacterAngle): CharacterHostConstraint[] => {
+    const angleRig = prev.angles?.[angleId];
+    if (angleRig) return angleRig.hostConstraints ?? [];
+    return angleId === prev.activeAngle ? prev.hostConstraints ?? [] : [];
+  };
+
+  const carry = (fresh: CharacterAngleRig, angleId: CharacterAngle): CharacterAngleRig => {
+    const slotSet = new Set(fresh.slotBindings.map((binding) => binding.slotId));
+    const boneSet = new Set(fresh.bones.map((bone) => bone.id));
+    const reaches = authoredReaches(angleId).filter((reach) => slotSet.has(reach.slotId));
+    const authored = authoredHosts(angleId)
+      .filter((c) => slotSet.has(c.slotId) && (!c.hostSlotId || slotSet.has(c.hostSlotId)))
+      .map((c) => (c.hostBoneId && !boneSet.has(c.hostBoneId) ? { ...c, hostBoneId: undefined } : c));
+    // Keep inferred host defaults for untouched slots; the user's explicit choice wins per slot.
+    const overridden = new Set(authored.map((c) => c.slotId));
+    const hostConstraints = [
+      ...fresh.hostConstraints.filter((c) => !overridden.has(c.slotId)),
+      ...authored,
+    ];
+    return {
+      ...fresh,
+      reaches: reaches.length > 0 ? reaches : fresh.reaches,
+      hostConstraints,
+    };
+  };
+
+  const angles = rebuilt.angles
+    ? (Object.fromEntries(
+        Object.entries(rebuilt.angles).map(([angleId, angleRig]) => [
+          angleId,
+          angleRig && isCharacterAngle(angleId) ? carry(angleRig, angleId) : angleRig,
+        ]),
+      ) as Partial<Record<CharacterAngle, CharacterAngleRig>>)
+    : rebuilt.angles;
+
+  const active = isCharacterAngle(rebuilt.activeAngle) ? angles?.[rebuilt.activeAngle] : undefined;
+  return {
+    ...rebuilt,
+    angles,
+    reaches: active?.reaches ?? rebuilt.reaches,
+    hostConstraints: active?.hostConstraints ?? rebuilt.hostConstraints,
   };
 }
 
@@ -1005,7 +1071,9 @@ function representativePart(slot: SlotLike): CharacterPart | undefined {
     slot.parts.find(
       (part) =>
         part.visible &&
-        (part.pose === "idle" || part.viseme === "rest" || part.eyeState === "open"),
+        (partMatchesVariant(part, "idle") ||
+          partMatchesVariant(part, "rest") ||
+          partMatchesVariant(part, "open")),
     ) ??
     slot.parts.find((part) => part.visible) ??
     slot.parts[0]

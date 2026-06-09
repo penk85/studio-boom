@@ -23,6 +23,8 @@ import {
   listCharacterSlots,
   pickActivePartForSlot,
   roleEnabledByManifest,
+  variantKeyForPart,
+  variantLabelForPart,
 } from "../character/character-utils";
 import { localAlphaBounds, pivotForPart } from "../character/alpha-bounds";
 import { faceTurnMotionForPart } from "../character/face-turn";
@@ -2384,14 +2386,10 @@ function isDirtyOverride(override: RecorderPartState | undefined, part?: Charact
 function variantOptionsForSlot(slot: CharacterSlot) {
   const variants = new Map<string, string>();
   for (const part of slot.parts) {
-    const value =
-      slot.role === "mouth"
-        ? (part.viseme ?? part.pose)
-        : slot.role === "eye"
-          ? (part.eyeState ?? part.pose)
-          : part.pose;
+    if (!part.variant && !part.pose && !part.viseme && !part.eyeState) continue;
+    const value = variantKeyForPart(part);
     if (!value) continue;
-    variants.set(value, variantLabel(slot.role, value));
+    variants.set(value, variantLabelForPart(part));
   }
   if (variants.size === 0) return [];
   const defaultValue = slot.role === "eye" ? "open" : slot.role === "mouth" ? "rest" : undefined;
