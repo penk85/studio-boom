@@ -346,7 +346,7 @@ describe("character JSON architecture", () => {
             },
             sockets: {
               mount: { id: "rightShoulder", x: 520, y: 330 },
-              outputs: [{ id: "wrist", x: 700, y: 370 }],
+              outputs: [{ id: "wrist", childSlotId: "slot:rightHand", x: 700, y: 370 }],
             },
             zOrder: ["right-upper-arm-explaining", "right-forearm-explaining"],
           },
@@ -373,7 +373,10 @@ describe("character JSON architecture", () => {
       artwork: { partIds: ["right-upper-arm-explaining", "right-forearm-explaining"] },
       rig: {
         controls: [{ id: "elbowBend", targetBoneId: "forearm" }],
-        sockets: { mount: { id: "rightShoulder" } },
+        sockets: {
+          mount: { id: "rightShoulder" },
+          outputs: [{ id: "wrist", childSlotId: "slot:rightHand" }],
+        },
       },
       aiMetadata: { tags: ["arm", "right", "bent", "explaining"] },
     });

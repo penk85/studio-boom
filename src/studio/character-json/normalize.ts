@@ -170,6 +170,10 @@ export function angleRigJsonFromPreset(
     slotRelations: rig.slotRelations.map((relation) => ({ ...relation })),
     hostConstraints: rig.hostConstraints.map((constraint) => ({ ...constraint })),
     reaches: rig.reaches.map((reach) => ({ ...reach })),
+    sockets: (rig.sockets ?? []).map((socket) => ({
+      ...socket,
+      variantAnchors: { ...socket.variantAnchors },
+    })),
     drawOrder: rig.drawOrder,
   };
 }

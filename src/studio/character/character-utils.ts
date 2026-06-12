@@ -5,6 +5,7 @@ import {
   DEFAULT_PART_MANIFEST,
   type CharacterAngle,
   type CharacterSlotVariant,
+  type CharacterSlotVariantPackage,
   type CharacterVariantKind,
   type ID,
   type CharacterPart,
@@ -15,7 +16,7 @@ import {
   type PartRole,
 } from "../types";
 import { legacyVisemeToStandard } from "../lipsync/viseme-schema";
-import { alphaCenterForPart } from "./alpha-bounds";
+import { alphaCenterForPart, pivotForPart } from "./alpha-bounds";
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
 const CHARACTER_ANGLE_VALUES: CharacterAngle[] = ["front", "3qL", "3qR", "sideL", "sideR"];
@@ -239,23 +240,48 @@ export function normalizePartVariant(
   };
 }
 
+export type VariantKeySource =
+  | "explicitKey"
+  | "package"
+  | "viseme"
+  | "eyeState"
+  | "pose"
+  | "idFallback";
+
+/**
+ * The resolved variant key plus which field won the fallback chain. The authoring UI shows this
+ * so "what key is this part, really?" is answerable at a glance; an `idFallback` in a
+ * multi-variant slot is a rig smell (the part can never pair with parent variants by name).
+ */
+export function variantKeySourceForPart(
+  part: Pick<CharacterPart, "variant" | "variantPackageId" | "pose" | "viseme" | "eyeState" | "id">,
+): { key: string; source: VariantKeySource } {
+  const explicit = part.variant?.key?.trim();
+  if (explicit) return { key: explicit, source: "explicitKey" };
+  if (part.variantPackageId) return { key: part.variantPackageId, source: "package" };
+  if (part.viseme) return { key: part.viseme, source: "viseme" };
+  if (part.eyeState) return { key: part.eyeState, source: "eyeState" };
+  if (part.pose) return { key: part.pose, source: "pose" };
+  return { key: part.id, source: "idFallback" };
+}
+
 export function variantKeyForPart(
   part: Pick<CharacterPart, "variant" | "variantPackageId" | "pose" | "viseme" | "eyeState" | "id">,
 ): string {
-  return (
-    part.variant?.key?.trim() ||
-    part.variantPackageId ||
-    part.viseme ||
-    part.eyeState ||
-    part.pose ||
-    part.id
-  );
+  return variantKeySourceForPart(part).key;
 }
 
 export function variantLabelForPart(
   part: Pick<CharacterPart, "variant" | "pose" | "viseme" | "eyeState" | "name">,
 ): string {
-  return part.variant?.name?.trim() || part.variant?.key?.trim() || part.viseme || part.eyeState || part.pose || part.name;
+  return (
+    part.variant?.name?.trim() ||
+    part.variant?.key?.trim() ||
+    part.viseme ||
+    part.eyeState ||
+    part.pose ||
+    part.name
+  );
 }
 
 export function variantAliasesForPart(
@@ -279,6 +305,78 @@ export function partMatchesVariant(
   return !!variantKey && variantAliasesForPart(part).includes(variantKey);
 }
 
+/**
+ * The variant a multi-variant slot displays when nothing selects one: mouths rest, eyes open,
+ * else the lowest visible layer. This is the rest-state vocabulary pose capture measures against.
+ */
+export function defaultVariantForSlotParts(
+  parts: CharacterPart[],
+  role: PartRole,
+): string | undefined {
+  const visible = parts.filter((part) => part.visible);
+  const candidates = visible.length ? visible : parts;
+  if (role === "mouth") {
+    const rest = candidates.find((part) => partMatchesVariant(part, "rest"));
+    if (rest) return variantKeyForPart(rest);
+  }
+  if (role === "eye") {
+    const open = candidates.find((part) => partMatchesVariant(part, "open"));
+    if (open) return variantKeyForPart(open);
+  }
+  const first = candidates.slice().sort((a, b) => a.zIndex - b.zIndex)[0];
+  return first ? variantKeyForPart(first) : undefined;
+}
+
+/**
+ * The part whose pivot represents a variant group — the same selection `keyedChildAnchor` uses
+ * for anchor inference, so art placement and anchor resolution can never disagree.
+ */
+export function anchorPartForVariant(
+  slotParts: CharacterPart[],
+  variantKey: string | undefined,
+): CharacterPart | undefined {
+  if (!variantKey) return undefined;
+  return (
+    slotParts.find((candidate) => candidate.visible && partMatchesVariant(candidate, variantKey)) ??
+    slotParts.find((candidate) => partMatchesVariant(candidate, variantKey))
+  );
+}
+
+/**
+ * Canvas offset (relative to the reference part's origin) that places `part` of a variant group
+ * so the group's anchor-part PIVOT lands where the reference part's pivot is — i.e. on the
+ * slot's bone/joint. One delta per variant group: other layers keep their authored layout
+ * relative to the anchor part. Identity (0,0) when part === anchorPart === referencePart, so
+ * the representative group renders exactly as before.
+ */
+export function pivotAlignedPartOffset(
+  referencePart: CharacterPart,
+  anchorPart: CharacterPart,
+  part: CharacterPart,
+): { x: number; y: number } {
+  const referencePivot = pivotForPart(referencePart);
+  const anchorPivot = pivotForPart(anchorPart);
+  return {
+    x:
+      referencePivot.x - referencePart.x - (anchorPivot.x - anchorPart.x) + (part.x - anchorPart.x),
+    y:
+      referencePivot.y - referencePart.y - (anchorPivot.y - anchorPart.y) + (part.y - anchorPart.y),
+  };
+}
+
+/** The variant key a rich variant package answers to, matching `variantKeyForPart` vocabulary. */
+export function variantKeyForPackage(
+  pkg: Pick<CharacterSlotVariantPackage, "id" | "key">,
+  parts?: Array<
+    Pick<CharacterPart, "variant" | "variantPackageId" | "pose" | "viseme" | "eyeState" | "id">
+  >,
+): string {
+  const explicit = pkg.key?.trim();
+  if (explicit) return explicit;
+  const part = parts?.find((candidate) => candidate.variantPackageId === pkg.id);
+  return part ? variantKeyForPart(part) : pkg.id;
+}
+
 function defaultVariantKindForPart(
   part: Pick<CharacterPart, "role" | "pose" | "viseme" | "eyeState">,
 ): CharacterVariantKind {
@@ -297,6 +395,26 @@ function uniqueStrings(values: Array<string | undefined>): string[] {
     if (normalized && !out.includes(normalized)) out.push(normalized);
   }
   return out;
+}
+
+/**
+ * When a character gains its first additional angle, parts that were implicitly shared with
+ * every angle (undefined `angleIds`) are claimed for the angles that existed before — front
+ * drawings stay on Front, and the new angle starts empty. Genuinely shared art opts back in
+ * via the part's Angles row. Parts already scoped are untouched.
+ */
+export function claimSharedPartsForAngles(
+  character: CharacterPreset,
+  existingAngles: CharacterAngle[],
+): CharacterPreset {
+  if (existingAngles.length === 0) return character;
+  let changed = false;
+  const parts = character.parts.map((part) => {
+    if (part.angleIds?.length || part.angleId) return part;
+    changed = true;
+    return { ...part, angleIds: [...existingAngles] };
+  });
+  return changed ? { ...character, parts } : character;
 }
 
 export function partAvailableForAngle(part: CharacterPart, angle: CharacterAngle): boolean {

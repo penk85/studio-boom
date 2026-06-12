@@ -142,8 +142,12 @@ export interface CharacterVariantClipping {
 export interface CharacterVariantSocket {
   id: ID;
   name?: string;
+  /** Child slot this socket anchors when the owning variant is active. */
+  childSlotId?: ID;
   x: number;
   y: number;
+  /** Child bone rest rotation (degrees, parent-relative) while this variant is active. */
+  rotation?: number;
 }
 
 export interface CharacterVariantRigPackage {
@@ -346,6 +350,19 @@ export interface CharacterBone {
   /** Parallax depth override for content driven by this bone. */
   depth?: number;
   angleOverrides?: Partial<Record<CharacterAngle, CharacterAngleTransformOverride>>;
+  /**
+   * Local rest-position/rotation overrides keyed by the PARENT slot's active variant key, so a
+   * parent variant swap (e.g. bent arm) re-anchors and re-angles this child bone (e.g. hand).
+   * Resolved from authored variant sockets or variant-paired child art at rig build; missing key
+   * = base x/y/rotation. `rotation` is the bone's parent-relative rest rotation in degrees while
+   * that variant is active (a hand on an outstretched arm is angled differently than on a
+   * relaxed arm). Always recomputed by rig builds — never carried forward by
+   * constraint-preserving rebuilds. `source` records the resolution path (diagnostics only).
+   */
+  parentVariantAnchors?: Record<
+    string,
+    { x: number; y: number; rotation?: number; source?: "socket" | "pairedArt" }
+  >;
 }
 
 export interface CharacterSlotBinding {
@@ -375,6 +392,25 @@ export interface CharacterSlotBinding {
   >;
 }
 
+/**
+ * A joint on the parent slot's bone, authored PER ANGLE: where the attached child rests under
+ * each parent variant. The joint's rest position is the child bone's base x/y (user-movable via
+ * the Bones overlay), so sockets hold only the per-variant overrides, in character canvas px.
+ * One socket per (parent, child) pair; per-angle records are the single source of truth and are
+ * carried across rig rebuilds like reaches/hostConstraints.
+ */
+export interface CharacterSlotSocket {
+  id: ID;
+  /** Owning parent slot (its bone owns the joint). */
+  slotId: ID;
+  /** The child slot attaching at this joint. */
+  childSlotId: ID;
+  /** Display label, e.g. "Wrist". */
+  name?: string;
+  /** Joint position/rotation per parent variant key, canvas px. */
+  variantAnchors: Record<string, { x: number; y: number; rotation?: number }>;
+}
+
 export interface CharacterAngleRig {
   angleId: CharacterAngle;
   bones: CharacterBone[];
@@ -385,6 +421,8 @@ export interface CharacterAngleRig {
   /** Host containment for manual drag/bounds metadata only. */
   hostConstraints: CharacterHostConstraint[];
   reaches: CharacterReach[];
+  /** Bone-owned joints with per-variant anchor overrides (authored here, per angle). */
+  sockets?: CharacterSlotSocket[];
 }
 
 /**
@@ -456,6 +494,11 @@ export interface CharacterRig {
   /** Host containment for manual drag/bounds metadata only. */
   hostConstraints: CharacterHostConstraint[];
   reaches: CharacterReach[];
+  /**
+   * DERIVED active-angle view of the per-angle socket records (like the other top-level
+   * mirrors). Never write this directly — mutate via the angle-rig socket helpers.
+   */
+  sockets?: CharacterSlotSocket[];
   /** Reserved shape for future mesh/control-point binding support. */
   mesh?: {
     version: 1;
@@ -525,6 +568,20 @@ export const DEFAULT_PARALLAX_CONFIG: ParallaxConfig = {
   intensity: 0.15,
 };
 
+/**
+ * A named, reusable arrangement of slot variants ("Standing", "Waving") — a convenience record
+ * layered over the character → angles → slots → variants hierarchy, never a structural tier.
+ * Poses control limbs: mouth/eye slots are owned by lip-sync and auto-blink at runtime.
+ */
+export interface CharacterPosePreset {
+  id: ID;
+  name: string;
+  /** slotId → variantKey. */
+  poses: Record<ID, string>;
+  /** Optional angle scoping. Undefined = available for all angles. */
+  angleIds?: CharacterAngle[];
+}
+
 export interface CharacterPreset {
   id: ID;
   name: string;
@@ -534,6 +591,10 @@ export interface CharacterPreset {
   /** Optional set of angle categories this character can present. */
   angles?: CharacterAngle[];
   parts: CharacterPart[];
+  /** Named poses (saved variant arrangements). */
+  posePresets?: CharacterPosePreset[];
+  /** The pose the editor parks on and new character clips start from. */
+  defaultPoseId?: ID;
   manifest: PartManifest;
   /** @deprecated kept for migration — use `parallax` instead. */
   parallaxEnabled?: boolean;

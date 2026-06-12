@@ -292,6 +292,14 @@ export interface AngleRigJson extends StudioBoomJsonArtifactBase {
   slotRelations?: AngleSlotRelationJson[];
   hostConstraints?: AngleHostConstraintJson[];
   reaches?: AngleReachJson[];
+  /** Bone-owned joints: per-variant anchor overrides for attached children (per angle). */
+  sockets?: Array<{
+    id: ID;
+    slotId: ID;
+    childSlotId: ID;
+    name?: string;
+    variantAnchors: Record<string, { x: number; y: number; rotation?: number }>;
+  }>;
   drawOrder: ID[];
 }
 

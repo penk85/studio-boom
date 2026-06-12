@@ -36,6 +36,9 @@ export function buildCharacterRigContextAiOut(
       "Bone transform tracks are parent-relative. Do not restate inherited parent motion on child bones.",
       "Slot variant tracks can swap any slot variant, including hands, clothing, props, eyes, and mouths.",
       "Depth is for parallax. Draw order is for visual stacking. Do not mix them.",
+      'Do not create a structural pose tier. Poses are per-slot variant maps and motion channel "variant" tracks.',
+      "To re-anchor a child slot when a parent variant is active (e.g. a hand on a bent arm), author a socket on the ANGLE RIG: { slotId: parent slot, childSlotId: child slot, variantAnchors: { <variantKey>: { x, y, rotation? } } }. Joints belong to the parent bone, per angle — a front-view socket never affects the side view. Without a socket, the child anchor is inferred from child art keyed to the same variant.",
+      "Rotation constraints: a slot's rotReach (reaches) limits twist from rest; a variant bone's rotationLimits override it while that variant is active. Motions exceeding these are clamped unless listed in constraints.allowOutOfBounds.",
     ],
     validKinds: {
       character: "studioBoom.character.v1",

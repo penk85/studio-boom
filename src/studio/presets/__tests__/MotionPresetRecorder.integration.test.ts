@@ -25,4 +25,35 @@ describe("MotionPresetRecorder source integration", () => {
     expect(source).not.toContain("function RiggedPosePreview");
     expect(source).not.toContain("useMediaUrl(part.mediaId)");
   });
+
+  it("clamps interactive edits through the shared motion-constraint boundary", () => {
+    const source = readFileSync(recorderPath, "utf8");
+
+    // Every override edit (slider, rotate drag, plane drag) routes through resolveMotionDelta,
+    // so the editor enforces the same reach/rotation limits as compiled playback.
+    expect(source).toContain("buildMotionConstraintContext");
+    expect(source).toContain("resolveMotionDelta({");
+    expect(source).toContain("unclampedLayers: new Set(allowOutOfBounds)");
+    // The escape hatch is carried from the loaded preset, saved back, and mirrored in preview.
+    expect(source).toContain("initialPreset?.allowOutOfBounds ?? []");
+    expect(source).toContain(
+      "allowOutOfBounds: allowOutOfBounds.length ? [...allowOutOfBounds] : undefined",
+    );
+    expect(source).toContain("allowOutOfBounds: allowOutOfBounds?.length");
+    // The override panel surfaces the effective limit and the per-slot toggle.
+    expect(source).toContain("effectiveReachForSlot");
+    expect(source).toContain("Allow out of bounds");
+  });
+
+  it("re-anchors child bones on variant swaps using composition data attributes", () => {
+    const source = readFileSync(recorderPath, "utf8");
+
+    expect(source).toContain("applyRecorderBoneAnchors");
+    expect(source).toContain("data-character-variant-anchors");
+    expect(source).toContain("recorderBaseLeft");
+    expect(source).toContain("recorderBaseTop");
+    // The anchor debugger is dev-only editor chrome.
+    expect(source).toContain("AnchorDebugOverlay");
+    expect(source).toContain("import.meta.env.DEV && showAnchorDebug");
+  });
 });

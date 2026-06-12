@@ -1,5 +1,9 @@
 # HyperFrames-First Character Document Architecture
 
+> The canonical vocabulary and ownership model (angles, slots, bones, joints, sockets,
+> variants, poses) is defined in [character-rig-architecture.md](./character-rig-architecture.md).
+> This document covers the HyperFrames document model, JSON artifacts, and motion contract.
+
 ## Summary
 
 Studio Boom characters are specialized HyperFrames sub-compositions. The canonical
@@ -855,3 +859,70 @@ The incorrect shape double-counts once the head is nested under the body.
 7. Add per-track or per-target `allowOutOfBounds` UI in Motion Editor.
 8. Keep mesh/deformation extensions behind the same character document command
    contract.
+
+## Variant Anchors and the Motion-Constraint Boundary (implemented June 2026)
+
+### Hierarchy (confirmed)
+
+The character hierarchy is **character → angles → slots → variants**. A "pose" is
+only a saved `Record<slotId, variantKey>` map (`CharacterClipMeta.poses`) plus
+motion `channel: "variant"` tracks — **never a structural schema tier**. This is
+also stated in the AI rig-context instructions so suggestions don't reinvent a
+`poses[]` schema object.
+
+### Variants carry children (`parentVariantAnchors`)
+
+A child bone's rest anchor can depend on its parent slot's active variant: a bent
+arm carries the hand to the bent wrist. `buildDefaultAngleRig` resolves, per
+parent variant key:
+
+1. **Authored socket** — the parent variant package's `rig.sockets.outputs` entry
+   whose `childSlotId` names the child slot: `socket − pivot(parentVariantPart)`.
+2. **Paired child art** — a child part keyed to the same variant key (a hand
+   drawn for the bent arm): `pivot(childPart) − pivot(parentVariantPart)`.
+3. **Fallback** — the representative-part offset (bone base `x/y`, no entry).
+   When a non-`containedFeature` slot relation explicitly gates the child on that
+   variant and no anchor source exists, a dev console warning fires.
+
+Anchors live on `CharacterBone.parentVariantAnchors` (with a debug-only `source`
+tag), are **derived data recomputed on every rig build**, and are never carried
+forward by `normalizeAngleRig` or `rebuildRigPreservingConstraints` — saved rigs
+always get freshly derived anchors. Hands drawn directly inside the arm artwork
+need no anchors and produce none.
+
+At composition time the anchors are scaled, expanded to every variant alias, and:
+
+- baked into the bone group's initial CSS `left/top` from the placed pose,
+- emitted as `data-character-variant-anchors` on the bone element (consumed by
+  the Motion Editor's live preview),
+- attached to variant slot events as `boneAnchors` and applied by the runtime
+  script via `gsap.set(selector, { left, top })` on swap, in `tl.set` events, and
+  in `resetInitialState`. Re-anchoring uses CSS `left/top`; the GSAP transform
+  channel stays owned by motion deltas.
+
+### One rotation-constraint vocabulary, one enforcement boundary
+
+`src/studio/character/motion-constraints.ts` is the single boundary every
+movement consumer passes through:
+
+- `effectiveReachForSlot(ctx, slotId, activeVariants)` — the slot's authored
+  `rotReach`, overridden by the active variant's bone `rotationLimits` while that
+  variant is selected (a fist may twist differently than an open hand).
+- `resolveMotionDelta({...})` — clamps `dx/dy/rotation` to the effective reach,
+  honoring the per-movement `allowOutOfBounds` escape hatch; returns
+  `clampReasons` and `effectiveReachSource` so the editor and AI debugging can
+  explain *why* a value stopped.
+- `childAnchorForVariant` / `parentSlotIdForBone` — anchor lookups shared by
+  composition and editor.
+
+Consumers: the compiled GSAP timeline (`buildMotionFrame`) and the Motion
+Editor's `updateOverride` (covering the rotation slider, rotate drag, and plane
+drag) — editing is WYSIWYG with playback. The recorder surfaces the effective
+limit next to the rotation row with an "Allow out of bounds" toggle that is
+loaded from, and saved back to, `MotionPreset.allowOutOfBounds`. Any future
+movement consumer (e.g. stage-level posing) must route through this boundary;
+nothing applies a raw delta to a character layer directly.
+
+A dev-only "Anchors" toggle in the Motion Editor overlays bone pivots and each
+resolved anchor with its resolution path (socket / paired art / fallback) as
+editor chrome — never rendered into composition HTML or export.

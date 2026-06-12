@@ -275,6 +275,27 @@ export function validateAngleRigJson(value: unknown): JsonValidationResult {
     if (slotId && !slotIds.has(slotId)) issues.error(`${path}.slotId`, `Missing slot "${slotId}".`);
   }
 
+  for (const [index, socket] of optionalArray(value.sockets).entries()) {
+    const path = `$.sockets[${index}]`;
+    if (!isRecord(socket)) {
+      issues.error(path, "Expected socket object.");
+      continue;
+    }
+    requiredString(socket, "id", `${path}.id`, issues);
+    const slotId = requiredString(socket, "slotId", `${path}.slotId`, issues);
+    if (slotId && !slotIds.has(slotId)) issues.error(`${path}.slotId`, `Missing slot "${slotId}".`);
+    const childSlotId = requiredString(socket, "childSlotId", `${path}.childSlotId`, issues);
+    if (childSlotId && !slotIds.has(childSlotId))
+      issues.error(`${path}.childSlotId`, `Missing slot "${childSlotId}".`);
+    if (!isRecord(socket.variantAnchors)) {
+      issues.error(`${path}.variantAnchors`, "Expected variantAnchors record.");
+    } else {
+      for (const [key, anchor] of Object.entries(socket.variantAnchors)) {
+        validateSocketLike(anchor, `${path}.variantAnchors["${key}"]`, issues);
+      }
+    }
+  }
+
   return issues.result();
 }
 
@@ -365,7 +386,10 @@ function validateOptionalVariantRigPackage(
     if (value.sockets.mount !== undefined)
       validateSocketLike(value.sockets.mount, `${path}.sockets.mount`, issues);
     for (const [index, socket] of optionalArray(value.sockets.outputs).entries()) {
-      validateSocketLike(socket, `${path}.sockets.outputs[${index}]`, issues);
+      const socketPath = `${path}.sockets.outputs[${index}]`;
+      validateSocketLike(socket, socketPath, issues);
+      if (isRecord(socket) && socket.childSlotId !== undefined && typeof socket.childSlotId !== "string")
+        issues.error(`${socketPath}.childSlotId`, "Expected string.");
     }
   }
   if (value.zOrder !== undefined) validateUniqueStringArray(value.zOrder, `${path}.zOrder`, issues);
@@ -400,6 +424,7 @@ function validateSocketLike(
   }
   finiteNumber(value.x, `${path}.x`, issues);
   finiteNumber(value.y, `${path}.y`, issues);
+  if (value.rotation !== undefined) finiteNumber(value.rotation, `${path}.rotation`, issues);
 }
 
 function validateOptionalNumberPair(

@@ -29,10 +29,17 @@ import {
 import { localAlphaBounds, pivotForPart } from "../character/alpha-bounds";
 import { faceTurnMotionForPart } from "../character/face-turn";
 import {
+  computeBoneWorldTransforms,
   normalizeCharacterRig,
   resolveSlotBinding,
   type ResolvedSlotBinding,
 } from "../character/rig";
+import {
+  buildMotionConstraintContext,
+  effectiveReachForSlot,
+  parentSlotIdForBone,
+  resolveMotionDelta,
+} from "../character/motion-constraints";
 import {
   angleRigJsonFromPreset,
   characterJsonFromPreset,
@@ -148,6 +155,16 @@ export function MotionPresetRecorder({
     [character.parts, character.manifest],
   );
   const rig = useMemo(() => normalizeCharacterRig(character), [character]);
+  // The same constraint boundary the compiled timeline clamps through — editing is WYSIWYG.
+  const constraintCtx = useMemo(
+    () =>
+      buildMotionConstraintContext({
+        reaches: rig.reaches,
+        variantPackages: character.variantPackages,
+        parts: character.parts,
+      }),
+    [rig.reaches, character.variantPackages, character.parts],
+  );
   const usesGeneratedMouth = !!character.mouthRig && character.mouthStyle === "rig";
   const generatedMouthPart = useMemo(
     () => (usesGeneratedMouth ? generatedMouthPreviewPart(character) : null),
@@ -166,6 +183,11 @@ export function MotionPresetRecorder({
   );
   const [overrides, setOverrides] = useState<Map<string, RecorderPartState>>(new Map());
   const [draftDirty, setDraftDirty] = useState(false);
+  // Layers this movement may push past the character's reach (slot ids and/or roles) — the
+  // per-movement escape hatch. Carried from the loaded preset and saved back with it.
+  const [allowOutOfBounds, setAllowOutOfBounds] = useState<string[]>(
+    () => initialPreset?.allowOutOfBounds ?? [],
+  );
   const [faceTurnX, setFaceTurnX] = useState(initialPreset?.keyposes?.[0]?.faceTurnX ?? 0);
   const [faceTurnY, setFaceTurnY] = useState(initialPreset?.keyposes?.[0]?.faceTurnY ?? 0);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
@@ -175,6 +197,8 @@ export function MotionPresetRecorder({
   const [lockedSlotIds, setLockedSlotIds] = useState<Set<string>>(new Set());
   const [fitScale, setFitScale] = useState(0.5);
   const [previewMode, setPreviewMode] = useState<"fit" | "export">("fit");
+  // Dev-only visual debugger for variant anchors (bone pivots, anchor targets, resolution path).
+  const [showAnchorDebug, setShowAnchorDebug] = useState(false);
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [playbackPreset, setPlaybackPreset] = useState<MotionPreset | null>(null);
   const [selectPopover, setSelectPopover] = useState<SelectPopover | null>(null);
@@ -285,6 +309,36 @@ export function MotionPresetRecorder({
   const selectedOverride = selectedSlotId
     ? (selectedOverrideFromMap ?? defaultOverride(selectedSlotId, selectedPart ?? undefined))
     : null;
+  const activeVariantsBySlot = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const [id, override] of overrides) {
+      if (override.poseSwap) map[id] = override.poseSwap;
+    }
+    return map;
+  }, [overrides]);
+  const selectedRotationLimit = useMemo(() => {
+    if (!selectedSlot) return null;
+    const { reach, source } = effectiveReachForSlot(
+      constraintCtx,
+      selectedSlot.id,
+      activeVariantsBySlot,
+    );
+    return reach?.rotReach
+      ? { ...reach.rotReach, variantLimited: source === "variantRotationLimits" }
+      : null;
+  }, [activeVariantsBySlot, constraintCtx, selectedSlot]);
+  const selectedAllowsOutOfBounds = selectedSlot
+    ? allowOutOfBounds.includes(selectedSlot.id) || allowOutOfBounds.includes(selectedSlot.role)
+    : false;
+  const setSelectedAllowOutOfBounds = (allowed: boolean) => {
+    if (!selectedSlot) return;
+    stopCompiledPreview();
+    setDraftDirty(true);
+    setAllowOutOfBounds((prev) => {
+      const withoutSlot = prev.filter((id) => id !== selectedSlot.id && id !== selectedSlot.role);
+      return allowed ? [...withoutSlot, selectedSlot.id] : withoutSlot;
+    });
+  };
 
   const currentRecordedParts = useCallback((): RecordedPartOverride[] => {
     const parts: RecordedPartOverride[] = [];
@@ -348,11 +402,12 @@ export function MotionPresetRecorder({
             category,
             duration,
             keyposes: playbackKeyposes,
+            allowOutOfBounds,
           })
         : null;
     setPlaybackPreset(preset);
     setPreviewPlaying(true);
-  }, [category, duration, keyposesForPlayback, name]);
+  }, [allowOutOfBounds, category, duration, keyposesForPlayback, name]);
 
   const stopCompiledPreview = useCallback(() => {
     setPreviewPlaying(false);
@@ -391,8 +446,7 @@ export function MotionPresetRecorder({
           ? { ...patch, poseSwap: undefined }
           : patch;
       const merged = { ...base, ...normalizedPatch };
-      next.set(
-        slotId,
+      const hostClamped =
         slot && curPart
           ? clampRecorderOverrideToHost({
               character,
@@ -406,8 +460,36 @@ export function MotionPresetRecorder({
               faceTurnX,
               faceTurnY,
             })
-          : merged,
-      );
+          : merged;
+      // Tone the edit down to the same effective reach the compiled timeline enforces
+      // (slot rotReach / active-variant rotation limits), honoring the escape hatch.
+      let resolved = hostClamped;
+      if (slot) {
+        const activeVariants: Record<string, string> = {};
+        for (const [id, override] of next) {
+          if (override.poseSwap) activeVariants[id] = override.poseSwap;
+        }
+        if (merged.poseSwap) activeVariants[slotId] = merged.poseSwap;
+        const limited = resolveMotionDelta({
+          ctx: constraintCtx,
+          slotId: slot.id,
+          role: slot.role,
+          activeVariants,
+          dx: hostClamped.dx,
+          dy: hostClamped.dy,
+          rotation: hostClamped.rotation,
+          unclampedLayers: new Set(allowOutOfBounds),
+        });
+        if (limited.clamped) {
+          resolved = {
+            ...hostClamped,
+            dx: round(limited.dx, 1),
+            dy: round(limited.dy, 1),
+            rotation: round(limited.rotation, 1),
+          };
+        }
+      }
+      next.set(slotId, resolved);
       return next;
     });
   };
@@ -559,6 +641,7 @@ export function MotionPresetRecorder({
       loop: initialPreset?.loop ?? false,
       tracks: [],
       keyposes: cloneKeyposes(playbackKeyposes).sort((a, b) => a.t - b.t),
+      allowOutOfBounds: allowOutOfBounds.length ? [...allowOutOfBounds] : undefined,
       builtin: false,
       createdAt: savingCopy ? now : (initialPreset?.createdAt ?? now),
       updatedAt: now,
@@ -696,6 +779,17 @@ export function MotionPresetRecorder({
                 Export size
               </button>
             </div>
+            {import.meta.env.DEV && (
+              <button
+                onClick={() => setShowAnchorDebug((prev) => !prev)}
+                className={`rounded border border-border px-2 py-1 text-[10px] ${
+                  showAnchorDebug ? "bg-primary/25 text-foreground" : "text-muted-foreground"
+                }`}
+                title="Show bone pivots, variant anchors, and each anchor's resolution path"
+              >
+                Anchors
+              </button>
+            )}
             <button
               onClick={onClose}
               className="rounded border border-border px-2 py-1 text-xs hover:bg-panel"
@@ -778,6 +872,9 @@ export function MotionPresetRecorder({
                     onChange={(patch) => updateOverride(selectedOverride.slotId, patch)}
                   />
                 )}
+                {import.meta.env.DEV && showAnchorDebug && (
+                  <AnchorDebugOverlay rig={rig} overrides={overrides} />
+                )}
               </div>
             </div>
             {selectPopover && (
@@ -820,6 +917,9 @@ export function MotionPresetRecorder({
               override={selectedOverride}
               usesGeneratedMouth={usesGeneratedMouth}
               advancedOpen={advancedOpen}
+              rotationLimit={selectedRotationLimit}
+              allowOutOfBounds={selectedAllowsOutOfBounds}
+              onAllowOutOfBoundsChange={setSelectedAllowOutOfBounds}
               onAdvancedOpenChange={setAdvancedOpen}
               onChange={(patch) => selectedSlotId && updateOverride(selectedSlotId, patch)}
               onResetAll={() => selectedSlotId && clearOverride(selectedSlotId)}
@@ -1198,6 +1298,9 @@ function PropertiesPanel({
   override,
   usesGeneratedMouth,
   advancedOpen,
+  rotationLimit,
+  allowOutOfBounds,
+  onAllowOutOfBoundsChange,
   onAdvancedOpenChange,
   onChange,
   onResetAll,
@@ -1207,6 +1310,9 @@ function PropertiesPanel({
   override: RecorderPartState | null;
   usesGeneratedMouth: boolean;
   advancedOpen: boolean;
+  rotationLimit: { min: number; max: number; variantLimited: boolean } | null;
+  allowOutOfBounds: boolean;
+  onAllowOutOfBoundsChange: (allowed: boolean) => void;
   onAdvancedOpenChange: (open: boolean) => void;
   onChange: (patch: Partial<RecorderPartState>) => void;
   onResetAll: () => void;
@@ -1307,6 +1413,28 @@ function PropertiesPanel({
           rest={0}
           onChange={(value) => onChange({ rotation: value })}
         />
+        {rotationLimit && (
+          <div className="flex items-center justify-between gap-2 pl-[72px] text-[10px] text-muted-foreground">
+            <span
+              title={
+                allowOutOfBounds
+                  ? "This movement may exceed the limit."
+                  : "Edits stop at this limit, matching playback."
+              }
+            >
+              Limit {round(rotationLimit.min, 1)}° to {round(rotationLimit.max, 1)}°
+              {rotationLimit.variantLimited ? " (variant)" : ""}
+            </span>
+            <label className="flex shrink-0 cursor-pointer items-center gap-1">
+              <input
+                type="checkbox"
+                checked={allowOutOfBounds}
+                onChange={(e) => onAllowOutOfBoundsChange(e.target.checked)}
+              />
+              Allow out of bounds
+            </label>
+          </div>
+        )}
       </div>
 
       <button
@@ -1486,7 +1614,15 @@ function RecorderHyperFramesPreview({
         character.canvasWidth,
         character.canvasHeight,
       );
-  }, [character.canvasHeight, character.canvasWidth, compositionId, editTargets, html, preset, time]);
+  }, [
+    character.canvasHeight,
+    character.canvasWidth,
+    compositionId,
+    editTargets,
+    html,
+    preset,
+    time,
+  ]);
 
   return (
     <>
@@ -1593,6 +1729,8 @@ function applyRecorderEditPose(
     el.style.transform = el.dataset.recorderBaseTransform;
     el.style.transformOrigin = "";
     el.style.opacity = el.dataset.recorderBaseOpacity;
+    if (el.dataset.recorderBaseLeft !== undefined) el.style.left = el.dataset.recorderBaseLeft;
+    if (el.dataset.recorderBaseTop !== undefined) el.style.top = el.dataset.recorderBaseTop;
   }
 
   for (const partEl of Array.from(
@@ -1630,6 +1768,7 @@ function applyRecorderEditPose(
     transformEl.style.opacity = String(ov.opacity);
 
     applyRecorderVariantPreview(slotEl, ov.poseSwap);
+    applyRecorderBoneAnchors(doc, slotEl, ov.poseSwap);
   }
 }
 
@@ -1666,8 +1805,119 @@ function applyRecorderVariantPreview(slotEl: HTMLElement, poseSwap: string | und
   }
 }
 
+/**
+ * Re-anchor child bones whose rest position depends on this slot's active variant (a bent arm
+ * carries the hand). Reads the `data-character-variant-anchors` JSON the composition baked onto
+ * the real iframe bone elements — no parallel React copy of the rig.
+ */
+function applyRecorderBoneAnchors(
+  doc: Document,
+  slotEl: HTMLElement,
+  poseSwap: string | undefined,
+): void {
+  const boneId = slotEl.getAttribute("data-character-bound-bone-id");
+  if (!boneId) return;
+  const childBones = Array.from(
+    doc.querySelectorAll<HTMLElement>(
+      `[data-character-parent-bone-id="${cssAttrValue(boneId)}"][data-character-variant-anchors]`,
+    ),
+  );
+  for (const boneEl of childBones) {
+    let parsed: {
+      base?: { left?: number; top?: number; rotation?: number };
+      anchors?: Record<string, { left?: number; top?: number; rotation?: number }>;
+    };
+    try {
+      parsed = JSON.parse(boneEl.getAttribute("data-character-variant-anchors") ?? "");
+    } catch {
+      continue;
+    }
+    boneEl.dataset.recorderBaseLeft ??= boneEl.style.left || "";
+    boneEl.dataset.recorderBaseTop ??= boneEl.style.top || "";
+    boneEl.dataset.recorderBaseAnchorTransform ??= boneEl.style.transform || "";
+    const anchor = poseSwap ? (parsed.anchors?.[poseSwap] ?? parsed.base) : undefined;
+    if (anchor && Number.isFinite(anchor.left) && Number.isFinite(anchor.top)) {
+      boneEl.style.left = `${anchor.left}px`;
+      boneEl.style.top = `${anchor.top}px`;
+      if (Number.isFinite(anchor.rotation))
+        boneEl.style.transform = `rotate(${anchor.rotation}deg)`;
+    } else {
+      boneEl.style.left = boneEl.dataset.recorderBaseLeft;
+      boneEl.style.top = boneEl.dataset.recorderBaseTop;
+      boneEl.style.transform = boneEl.dataset.recorderBaseAnchorTransform;
+    }
+  }
+}
+
 function cssAttrValue(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/**
+ * Dev-only editor chrome: marks every bone pivot, and for bones with parent-variant anchors the
+ * currently resolved anchor with its resolution path — socket (green), paired art (blue), or
+ * representative fallback (amber) — plus the parent slot's active variant key. Renders only in
+ * the recorder plane; never enters composition HTML or export.
+ */
+function AnchorDebugOverlay({
+  rig,
+  overrides,
+}: {
+  rig: ReturnType<typeof normalizeCharacterRig>;
+  overrides: Map<string, RecorderPartState>;
+}) {
+  const world = computeBoneWorldTransforms(rig);
+  const markers: Array<{ key: string; x: number; y: number; color: string; label?: string }> = [];
+  for (const bone of rig.bones) {
+    const at = world.get(bone.id);
+    if (!at) continue;
+    markers.push({ key: `pivot:${bone.id}`, x: at.x, y: at.y, color: "rgba(255,255,255,0.6)" });
+    if (!bone.parentVariantAnchors || !bone.parentId) continue;
+    const parentSlotId = parentSlotIdForBone(rig, bone.id);
+    const parentAt = world.get(bone.parentId);
+    if (!parentSlotId || !parentAt) continue;
+    const activeKey = overrides.get(parentSlotId)?.poseSwap;
+    const anchor = activeKey ? bone.parentVariantAnchors[activeKey] : undefined;
+    const source = anchor?.source ?? (activeKey ? "fallback" : "base");
+    const local = anchor ?? { x: bone.x, y: bone.y };
+    const color = source === "socket" ? "#4ade80" : source === "pairedArt" ? "#38bdf8" : "#fbbf24";
+    markers.push({
+      key: `anchor:${bone.id}`,
+      x: parentAt.x + local.x,
+      y: parentAt.y + local.y,
+      color,
+      label: `${bone.name} ← ${parentSlotId}${activeKey ? ` : ${activeKey}` : ""} (${source})`,
+    });
+  }
+  return (
+    <div className="pointer-events-none absolute inset-0 z-50">
+      {markers.map((marker) => (
+        <div
+          key={marker.key}
+          className="absolute"
+          style={{ left: marker.x, top: marker.y, transform: "translate(-50%, -50%)" }}
+        >
+          <div
+            className="rounded-full"
+            style={{
+              width: marker.label ? 10 : 6,
+              height: marker.label ? 10 : 6,
+              background: marker.color,
+              boxShadow: "0 0 0 1px rgba(0,0,0,0.8)",
+            }}
+          />
+          {marker.label && (
+            <div
+              className="absolute left-2 top-2 whitespace-nowrap rounded px-1 text-[9px]"
+              style={{ background: "rgba(0,0,0,0.75)", color: marker.color }}
+            >
+              {marker.label}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function recorderPreviewPreset({
@@ -1675,11 +1925,13 @@ function recorderPreviewPreset({
   category,
   duration,
   keyposes,
+  allowOutOfBounds,
 }: {
   name: string;
   category: MotionCategory;
   duration: number;
   keyposes: RecordedKeypose[];
+  allowOutOfBounds?: string[];
 }): MotionPreset {
   return {
     id: "__recorder_draft_motion",
@@ -1689,6 +1941,7 @@ function recorderPreviewPreset({
     loop: false,
     tracks: [],
     keyposes: cloneKeyposes(keyposes).sort((a, b) => a.t - b.t),
+    allowOutOfBounds: allowOutOfBounds?.length ? [...allowOutOfBounds] : undefined,
     builtin: false,
     createdAt: 0,
     updatedAt: 0,

@@ -6,6 +6,8 @@ import { buildCharacterCompositionHtml } from "../composition";
 import { blinkWindowsForClip } from "../eye-state";
 import { createDefaultMouthRig } from "../mouth-libraries";
 import { buildDefaultRig } from "../rig";
+import { upsertVariantSocket } from "../variant-pairing";
+import { makeVariantArmCharacter, withFistVariant } from "./fixtures";
 
 function makeCharacter() {
   return {
@@ -112,6 +114,7 @@ function extractScene(html: string) {
       slotId: string;
       key: string;
       variant?: { show?: string[] };
+      boneAnchors?: Array<{ selector: string; left: number; top: number }>;
       generatedMouth?: { components: Record<string, unknown> };
     }>;
   };
@@ -1337,9 +1340,7 @@ describe("buildCharacterCompositionHtml", () => {
     );
     const scene = extractScene(html);
 
-    expect(scene.slotEvents.some((event) => eventShowsVariant(event, "raspberry"))).toBe(
-      false,
-    );
+    expect(scene.slotEvents.some((event) => eventShowsVariant(event, "raspberry"))).toBe(false);
   });
 
   it("does not let auto blink override an active expression eye pose", () => {
@@ -1386,5 +1387,501 @@ describe("buildCharacterCompositionHtml", () => {
 
     expect(scene.slotEvents.some((event) => eventShowsVariant(event, "closed"))).toBe(true);
     expect(scene.slotEvents.every((event) => event.key !== "open")).toBe(true);
+  });
+});
+
+describe("parent variant bone anchors", () => {
+  // Canvas 600x900 rendered at 300x450 → scale 0.5. Hand bone base anchor is
+  // (10, 175) canvas px (straight hand pivot − arm pivot); the bent arm carries
+  // it to (80, 60). Scaled: base (5, 87.5), bent (40, 30).
+  const bentArmPreset: MotionPreset = {
+    id: "bend-arm",
+    name: "Bend arm",
+    category: "gesture",
+    duration: 1,
+    loop: false,
+    tracks: [],
+    keyposes: [
+      { t: 0, parts: [{ partRole: "arm", slotId: "slot:right-arm", poseSwap: "bent" }] },
+      { t: 1, parts: [{ partRole: "arm", slotId: "slot:right-arm", poseSwap: "bent" }] },
+    ],
+    createdAt: 0,
+    updatedAt: 0,
+  };
+
+  function handBoneTag(html: string): string {
+    const match = html.match(/<div id="char-bone-bone-slot-right-hand[^"]*"[^>]*>/);
+    expect(match).not.toBeNull();
+    return match![0];
+  }
+
+  it("emits scaled variant anchors on the child bone element", () => {
+    const html = build({ autoBlink: false }, new Map(), makeVariantArmCharacter());
+    const bone = handBoneTag(html);
+    expect(bone).toContain("data-character-variant-anchors=");
+    const attr = bone.match(/data-character-variant-anchors="([^"]+)"/);
+    const parsed = JSON.parse(attr![1].replace(/&quot;/g, '"')) as {
+      base: { left: number; top: number };
+      anchors: Record<string, { left: number; top: number }>;
+    };
+    expect(parsed.base).toEqual({ left: 5, top: 87.5, rotation: 0 });
+    expect(parsed.anchors.bent).toEqual({ left: 40, top: 30, rotation: 0 });
+    // Aliases of the bent arm part resolve to the same anchor.
+    expect(parsed.anchors["arm-bent"]).toEqual({ left: 40, top: 30, rotation: 0 });
+    // The straight (representative) variant needs no entry — base applies.
+    expect(bone).toContain("left:5px");
+    expect(bone).toContain("top:87.5px");
+  });
+
+  it("bakes the initial bone anchor from the placed pose", () => {
+    const html = build(
+      { autoBlink: false, poses: { "slot:right-arm": "bent" } },
+      new Map(),
+      makeVariantArmCharacter(),
+    );
+    const bone = handBoneTag(html);
+    expect(bone).toContain("left:40px");
+    expect(bone).toContain("top:30px");
+  });
+
+  it("re-anchors the hand bone through variant slot events when a motion bends the arm", () => {
+    const html = build(
+      {
+        autoBlink: false,
+        motions: [{ id: "applied-bend", presetId: bentArmPreset.id, offset: 0, intensity: 1 }],
+      },
+      new Map([[bentArmPreset.id, bentArmPreset]]),
+      makeVariantArmCharacter(),
+    );
+    const scene = extractScene(html);
+    const armEvents = scene.slotEvents.filter((event) => event.slotId === "slot:right-arm");
+    const bentEvent = armEvents.find((event) => event.key === "bent");
+    expect(bentEvent?.boneAnchors).toBeDefined();
+    const anchor = bentEvent!.boneAnchors!.find((entry) =>
+      entry.selector.startsWith("#char-bone-bone-slot-right-hand"),
+    );
+    expect(anchor).toMatchObject({ left: 40, top: 30 });
+    // After the motion ends the arm returns to straight, restoring the base anchor.
+    const straightEvent = armEvents.find(
+      (event) => event.key !== "bent" && event.boneAnchors?.length,
+    );
+    expect(
+      straightEvent?.boneAnchors?.find((entry) =>
+        entry.selector.startsWith("#char-bone-bone-slot-right-hand"),
+      ),
+    ).toMatchObject({ left: 5, top: 87.5 });
+    // The runtime applies anchors on swap and reset.
+    expect(html).toContain("event.boneAnchors");
+  });
+
+  it("emits no anchor attributes for variant-less characters", () => {
+    const html = build();
+    expect(html).not.toContain("data-character-variant-anchors=");
+  });
+});
+
+describe("pivot-aligned variant placement", () => {
+  // Canvas 600x900 rendered at 300x450 → scale 0.5. The contract under test: in a bone-bound
+  // variant slot, the DISPLAYED art's pivot rides the joint (and therefore any pinned socket),
+  // regardless of which variant is showing or where it was drawn on the canvas.
+  function tagStyle(html: string, pattern: RegExp): string {
+    const match = html.match(pattern);
+    expect(match, `no element matching ${pattern}`).not.toBeNull();
+    return match![0].match(/style="([^"]*)"/)![1];
+  }
+
+  function leftTop(style: string): { left: number; top: number } {
+    const left = style.match(/left:(-?[\d.]+)px/);
+    const top = style.match(/top:(-?[\d.]+)px/);
+    expect(left, `no left in ${style}`).not.toBeNull();
+    expect(top, `no top in ${style}`).not.toBeNull();
+    return { left: Number(left![1]), top: Number(top![1]) };
+  }
+
+  function elementPos(html: string, idPrefix: string): { left: number; top: number } {
+    return leftTop(tagStyle(html, new RegExp(`<div id="${idPrefix}[^"]*"[^>]*>`)));
+  }
+
+  function partPos(html: string, partId: string): { left: number; top: number } {
+    return leftTop(
+      tagStyle(html, new RegExp(`<[a-z]+ [^>]*data-character-part-id="${partId}"[^>]*>`)),
+    );
+  }
+
+  it("lands the displayed non-rep variant's pivot exactly on the pinned socket", () => {
+    // The user's reported bug: a wrist socket pinned for the bent arm, with the hand showing a
+    // non-representative variant — the hand art used to sit offset from the socket by the
+    // difference between its pivot and the representative's pivot.
+    const socket = { x: 400, y: 250 };
+    const character = upsertVariantSocket(makeVariantArmCharacter(), {
+      parentSlotId: "slot:right-arm",
+      variantKey: "bent",
+      childSlotId: "slot:right-hand",
+      ...socket,
+    });
+    const html = build(
+      { autoBlink: false, poses: { "slot:right-arm": "bent", "slot:right-hand": "bent" } },
+      new Map(),
+      character,
+    );
+    const body = elementPos(html, "char-bone-bone-role-body");
+    const arm = elementPos(html, "char-bone-bone-slot-right-arm");
+    const handBone = elementPos(html, "char-bone-bone-slot-right-hand");
+    const container = elementPos(html, "char-slot-slot-right-hand");
+    const art = partPos(html, "hand-bent");
+    // hand-bent pivot (370,230) − authored xy (360,220) = (10,10), scaled by 0.5.
+    const pivotInArt = { x: 5, y: 5 };
+    expect(body.left + arm.left + handBone.left + container.left + art.left + pivotInArt.x).toBe(
+      socket.x * 0.5,
+    );
+    expect(body.top + arm.top + handBone.top + container.top + art.top + pivotInArt.y).toBe(
+      socket.y * 0.5,
+    );
+  });
+
+  it("rides a non-rep variant chosen at rest on the representative's joint instead of floating at its drawn spot", () => {
+    // Bent-hand art picked while the arm stays straight: it must attach at the straight wrist
+    // (the hand bone's base anchor), not display at its authored canvas position.
+    const html = build(
+      { autoBlink: false, poses: { "slot:right-hand": "bent" } },
+      new Map(),
+      makeVariantArmCharacter(),
+    );
+    const art = partPos(html, "hand-bent");
+    // pivotAligned offset = pivotLocal(straight)(10,5) − pivotLocal(bent)(10,10) = (0,−5) × 0.5.
+    expect(art).toEqual({ left: 0, top: -2.5 });
+    // Full chain lands the displayed pivot on the straight wrist pivot (300,345) × 0.5.
+    const body = elementPos(html, "char-bone-bone-role-body");
+    const arm = elementPos(html, "char-bone-bone-slot-right-arm");
+    const handBone = elementPos(html, "char-bone-bone-slot-right-hand");
+    const container = elementPos(html, "char-slot-slot-right-hand");
+    expect(body.left + arm.left + handBone.left + container.left + art.left + 5).toBe(150);
+    expect(body.top + arm.top + handBone.top + container.top + art.top + 5).toBe(172.5);
+  });
+
+  it("keeps the representative group at its authored position (byte-stable placement)", () => {
+    const html = build({ autoBlink: false }, new Map(), makeVariantArmCharacter());
+    expect(partPos(html, "hand-straight")).toEqual({ left: 0, top: 0 });
+    expect(partPos(html, "arm-straight")).toEqual({ left: 0, top: 0 });
+  });
+
+  it("aligns multi-layer variants as one group, preserving the layers' relative layout", () => {
+    const base = makeVariantArmCharacter();
+    const character: CharacterPreset = {
+      ...base,
+      parts: [
+        ...base.parts,
+        makePart("arm", "expl-upper-media", {
+          id: "expl-upper",
+          slotId: "slot:right-arm",
+          side: "right",
+          variant: { key: "explaining", name: "Explaining arm", kind: "pose" },
+          x: 320,
+          y: 200,
+          width: 48,
+          height: 96,
+          zIndex: 7,
+          pivot: { x: 340, y: 220 },
+        }),
+        makePart("arm", "expl-fore-media", {
+          id: "expl-fore",
+          slotId: "slot:right-arm",
+          side: "right",
+          variant: { key: "explaining", name: "Explaining arm", kind: "pose" },
+          x: 356,
+          y: 260,
+          width: 72,
+          height: 42,
+          zIndex: 8,
+          pivot: { x: 392, y: 281 },
+        }),
+      ],
+    };
+    const html = build({ autoBlink: false }, new Map(), character);
+    const upper = partPos(html, "expl-upper");
+    const fore = partPos(html, "expl-fore");
+    // Group anchor = first matching layer (expl-upper): pivotLocal(rep arm)(10,10) −
+    // pivotLocal(expl-upper)(20,20) = (−10,−10) × 0.5.
+    expect(upper).toEqual({ left: -5, top: -5 });
+    // The second layer moves by the SAME group delta: relative layout (36,60) × 0.5 preserved.
+    expect(fore.left - upper.left).toBe(18);
+    expect(fore.top - upper.top).toBe(30);
+  });
+
+  it("keeps face builders on authored placement (eyes and mouths are not joint attachments)", () => {
+    const html = build({ autoBlink: false });
+    // eye-closed authored offset from eye-open: (0,4) × 0.5 — NOT alpha/pivot aligned.
+    expect(partPos(html, "eye-closed")).toEqual({ left: 0, top: 2 });
+    // mouth-raspberry authored offset from mouth-rest: (−20,−10) × 0.5.
+    expect(partPos(html, "mouth-raspberry")).toEqual({ left: -10, top: -5 });
+  });
+
+  it("rotates a swapped variant about the joint, not its authored canvas offset", () => {
+    const preset: MotionPreset = {
+      id: "bent-hand-twist",
+      name: "Bent hand twist",
+      category: "gesture",
+      duration: 1,
+      loop: false,
+      tracks: [],
+      keyposes: [
+        {
+          t: 0,
+          parts: [
+            {
+              target: "slot",
+              partRole: "hand",
+              slotId: "slot:right-hand",
+              poseSwap: "bent",
+              rotation: 10,
+            },
+          ],
+        },
+        {
+          t: 1,
+          parts: [
+            {
+              target: "slot",
+              partRole: "hand",
+              slotId: "slot:right-hand",
+              poseSwap: "bent",
+              rotation: 10,
+            },
+          ],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = build(
+      {
+        autoBlink: false,
+        motions: [{ id: "applied-twist", presetId: preset.id, offset: 0, intensity: 1 }],
+      },
+      new Map([[preset.id, preset]]),
+      makeVariantArmCharacter(),
+    );
+    const scene = extractScene(html);
+    const origins = [
+      ...scene.initialTargets,
+      ...scene.motionSegments.flatMap((segment) => segment.targets),
+    ]
+      .filter((target) => target.selector.startsWith("#char-slot-slot-right-hand"))
+      .map((target) => target.vars.transformOrigin)
+      .filter((origin): origin is string => origin !== undefined);
+    expect(origins.length).toBeGreaterThan(0);
+    // The joint sits at container-local (10,5) of the 40×40 base box — for every frame,
+    // including the ones displaying the swapped bent hand (which used to read "200% -275%").
+    for (const origin of origins) expect(origin).toBe("25% 12.5%");
+  });
+});
+
+describe("variant rotation limits in compiled playback", () => {
+  // withFistVariant: the fist variant package limits hand rotation to [-15, 15], tighter than
+  // anything the motion asks for. The motion holds the fist while rotating the hand to 60°.
+  const rotatePastLimit: MotionPreset = {
+    id: "fist-twist",
+    name: "Fist twist",
+    category: "gesture",
+    duration: 1,
+    loop: false,
+    tracks: [],
+    keyposes: [
+      {
+        t: 0,
+        parts: [
+          {
+            target: "slot",
+            partRole: "hand",
+            slotId: "slot:right-hand",
+            poseSwap: "fist",
+            rotation: 60,
+          },
+        ],
+      },
+      {
+        t: 1,
+        parts: [
+          {
+            target: "slot",
+            partRole: "hand",
+            slotId: "slot:right-hand",
+            poseSwap: "fist",
+            rotation: 60,
+          },
+        ],
+      },
+    ],
+    createdAt: 0,
+    updatedAt: 0,
+  };
+
+  function handRotations(html: string): number[] {
+    const scene = extractScene(html);
+    const all = [
+      ...scene.initialTargets,
+      ...scene.motionSegments.flatMap((segment) => segment.targets),
+    ];
+    return all
+      .filter((target) => target.selector.includes("right-hand"))
+      .map((target) => target.vars.rotation)
+      .filter((rotation): rotation is number => typeof rotation === "number");
+  }
+
+  it("clamps motion rotation to the active variant's rotation limits", () => {
+    const html = build(
+      {
+        autoBlink: false,
+        motions: [{ id: "applied-twist", presetId: rotatePastLimit.id, offset: 0, intensity: 1 }],
+      },
+      new Map([[rotatePastLimit.id, rotatePastLimit]]),
+      withFistVariant(makeVariantArmCharacter()),
+    );
+    const rotations = handRotations(html);
+    expect(rotations.length).toBeGreaterThan(0);
+    expect(Math.max(...rotations)).toBe(15);
+    expect(rotations.every((rotation) => rotation <= 15)).toBe(true);
+  });
+
+  it("lets allowOutOfBounds push past the variant limit", () => {
+    const unclamped: MotionPreset = {
+      ...rotatePastLimit,
+      id: "fist-twist-free",
+      allowOutOfBounds: ["slot:right-hand"],
+    };
+    const html = build(
+      {
+        autoBlink: false,
+        motions: [{ id: "applied-free", presetId: unclamped.id, offset: 0, intensity: 1 }],
+      },
+      new Map([[unclamped.id, unclamped]]),
+      withFistVariant(makeVariantArmCharacter()),
+    );
+    const rotations = handRotations(html);
+    expect(Math.max(...rotations)).toBe(60);
+  });
+
+  it("treats a hand drawn inside the arm art as plain variants — no anchors, no warnings", () => {
+    const base = makeVariantArmCharacter();
+    const character = {
+      ...base,
+      // No hand slot at all: the hand pixels live inside each arm variant's artwork.
+      parts: base.parts.filter((part) => part.slotId !== "slot:right-hand"),
+    };
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...parts: unknown[]) => {
+      warnings.push(parts.join(" "));
+    };
+    try {
+      const html = build(
+        { autoBlink: false, poses: { "slot:right-arm": "bent" } },
+        new Map(),
+        character,
+      );
+      expect(html).not.toContain("data-character-variant-anchors=");
+      expect(warnings.filter((entry) => entry.includes("fallback anchor"))).toEqual([]);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+});
+
+describe("anchor rotation in compiled playback", () => {
+  // The wrist joint is authored on the rig (bone-owned, per angle) — the post-refactor path.
+  const rotatedSocketCharacter = (): CharacterPreset =>
+    upsertVariantSocket(makeVariantArmCharacter(), {
+      parentSlotId: "slot:right-arm",
+      variantKey: "bent",
+      childSlotId: "slot:right-hand",
+      x: 352,
+      y: 248,
+      rotation: -35,
+    });
+
+  it("bakes the variant rotation into the initial bone transform for a placed pose", () => {
+    const html = build(
+      { autoBlink: false, poses: { "slot:right-arm": "bent" } },
+      new Map(),
+      rotatedSocketCharacter(),
+    );
+    const bone = html.match(/<div id="char-bone-bone-slot-right-hand[^"]*"[^>]*>/)![0];
+    expect(bone).toContain("rotate(-35deg)");
+  });
+
+  it("carries rotation through variant slot events", () => {
+    const preset: MotionPreset = {
+      id: "bend-arm-rot",
+      name: "Bend arm",
+      category: "gesture",
+      duration: 1,
+      loop: false,
+      tracks: [],
+      keyposes: [
+        { t: 0, parts: [{ partRole: "arm", slotId: "slot:right-arm", poseSwap: "bent" }] },
+        { t: 1, parts: [{ partRole: "arm", slotId: "slot:right-arm", poseSwap: "bent" }] },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = build(
+      {
+        autoBlink: false,
+        motions: [{ id: "applied-bend", presetId: preset.id, offset: 0, intensity: 1 }],
+      },
+      new Map([[preset.id, preset]]),
+      rotatedSocketCharacter(),
+    );
+    const scene = extractScene(html);
+    const bentEvent = scene.slotEvents.find(
+      (event) => event.slotId === "slot:right-arm" && event.key === "bent",
+    );
+    const anchor = bentEvent?.boneAnchors?.find((entry) =>
+      entry.selector.startsWith("#char-bone-bone-slot-right-hand"),
+    ) as { rotation?: number } | undefined;
+    expect(anchor?.rotation).toBe(-35);
+    expect(html).toContain("rotation: anchor.rotation");
+  });
+});
+
+describe("per-angle artwork in compiled output", () => {
+  it("a side-view build contains no front-only parts (no stacked angle art)", () => {
+    const base = makeVariantArmCharacter();
+    const character: CharacterPreset = {
+      ...base,
+      angles: ["front", "sideL"],
+      parts: [
+        // Front-only drawings…
+        ...base.parts.map((part) => ({ ...part, angleIds: ["front" as const] })),
+        // …plus one side-view body in the same slot vocabulary.
+        makePart("body", "side-body-media", {
+          id: "side-body",
+          slotId: "role:body",
+          angleIds: ["sideL"],
+          x: 120,
+          y: 130,
+          width: 160,
+          height: 320,
+          zIndex: 1,
+        }),
+      ],
+      rig: undefined,
+    };
+    const sideRig = buildDefaultRig(character, "sideL");
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_side",
+      clipId: "clip-side",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character: { ...character, rig: { ...sideRig, activeAngle: "sideL" } },
+      meta: { characterId: character.id, poses: {}, autoBlink: false },
+      motionPresets: new Map(),
+    });
+    expect(html).toContain('src="asset:side-body-media"');
+    // Front drawings must not stack into the side view's render/export.
+    expect(html).not.toContain('src="asset:body-media"');
+    expect(html).not.toContain('src="asset:arm-straight-media"');
+    expect(html).not.toContain('src="asset:hand-straight-media"');
   });
 });

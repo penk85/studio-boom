@@ -1,8 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
+  anchorPartForVariant,
+  claimSharedPartsForAngles,
   listCharacterSlots,
   pickActivePart,
   pickActivePartForSlot,
+  pivotAlignedPartOffset,
   roleEnabledByManifest,
   normalizePartRole,
   getPartSlotId,
@@ -10,7 +13,9 @@ import {
   inferHumanParentPartId,
   withInferredHumanParentIds,
 } from "../character-utils";
+import { pivotForPart } from "../alpha-bounds";
 import type { CharacterPart, CharacterPreset, PartManifest } from "../../types";
+import { makeVariantArmCharacter } from "./fixtures";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -375,5 +380,73 @@ describe("pickActivePartForSlot", () => {
     const slot = { id: "role:mouth", role: "mouth" as const, name: "Mouth", parts: [rest, aPart] };
     const result = pickActivePartForSlot(slot, { viseme: "A" });
     expect(result?.id).toBe(aPart.id);
+  });
+});
+
+describe("anchorPartForVariant / pivotAlignedPartOffset", () => {
+  const handParts = () =>
+    makeVariantArmCharacter().parts.filter((part) => part.slotId === "slot:right-hand");
+
+  it("picks the first visible matching part, falling back to hidden matches", () => {
+    const parts = handParts();
+    expect(anchorPartForVariant(parts, "bent")?.id).toBe("hand-bent");
+    const hiddenBent = parts.map((part) =>
+      part.id === "hand-bent" ? { ...part, visible: false } : part,
+    );
+    expect(anchorPartForVariant(hiddenBent, "bent")?.id).toBe("hand-bent");
+    expect(anchorPartForVariant(parts, undefined)).toBeUndefined();
+    expect(anchorPartForVariant(parts, "no-such-key")).toBeUndefined();
+  });
+
+  it("is the identity for the representative group", () => {
+    const rep = handParts().find((part) => part.id === "hand-straight")!;
+    expect(pivotAlignedPartOffset(rep, rep, rep)).toEqual({ x: 0, y: 0 });
+  });
+
+  it("places a single-part variant so its pivot lands on the reference pivot", () => {
+    const parts = handParts();
+    const rep = parts.find((part) => part.id === "hand-straight")!;
+    const bent = parts.find((part) => part.id === "hand-bent")!;
+    const offset = pivotAlignedPartOffset(rep, bent, bent);
+    // Rendered canvas position = rep.xy + offset; the placed pivot must equal the rep pivot.
+    const placedPivot = {
+      x: rep.x + offset.x + (pivotForPart(bent).x - bent.x),
+      y: rep.y + offset.y + (pivotForPart(bent).y - bent.y),
+    };
+    expect(placedPivot).toEqual(pivotForPart(rep));
+  });
+
+  it("moves multi-layer variants as a group, preserving relative layout", () => {
+    const parts = handParts();
+    const rep = parts.find((part) => part.id === "hand-straight")!;
+    const anchor = parts.find((part) => part.id === "hand-bent")!;
+    const cuff: CharacterPart = {
+      ...anchor,
+      id: "hand-bent-cuff",
+      x: anchor.x + 12,
+      y: anchor.y - 8,
+    };
+    const anchorOffset = pivotAlignedPartOffset(rep, anchor, anchor);
+    const cuffOffset = pivotAlignedPartOffset(rep, anchor, cuff);
+    expect(cuffOffset.x - anchorOffset.x).toBe(cuff.x - anchor.x);
+    expect(cuffOffset.y - anchorOffset.y).toBe(cuff.y - anchor.y);
+  });
+});
+
+describe("claimSharedPartsForAngles", () => {
+  it("stamps only implicitly-shared parts and leaves scoped parts alone", () => {
+    const shared = makePart({ id: "body", role: "body", slotId: "role:body" });
+    const scoped = makePart({
+      id: "side-arm",
+      role: "arm",
+      slotId: "slot:right-arm",
+      angleIds: ["sideL"],
+    });
+    const character = { parts: [shared, scoped] } as CharacterPreset;
+    const claimed = claimSharedPartsForAngles(character, ["front"]);
+    expect(claimed.parts.find((part) => part.id === "body")?.angleIds).toEqual(["front"]);
+    expect(claimed.parts.find((part) => part.id === "side-arm")?.angleIds).toEqual(["sideL"]);
+    // Nothing implicitly shared → same reference (no-op).
+    expect(claimSharedPartsForAngles(claimed, ["front"])).toBe(claimed);
   });
 });

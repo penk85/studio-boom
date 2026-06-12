@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { CharacterPreset, CharacterRig } from "../../types";
 import { createBlankCharacter, makePart } from "../character-utils";
+import { makeVariantArmCharacter } from "./fixtures";
 import {
   activeDepthForSlot,
   buildDefaultRig,
   clampMotionDeltaToReach,
+  clearSlotSocketAnchor,
+  upsertSlotSocketAnchor,
   computeBoneWorldTransforms,
   moveBoneForSlot,
   moveSlotBinding,
@@ -83,6 +86,111 @@ function makeRigCharacter(): CharacterPreset {
     ],
   };
 }
+
+describe("parent variant child anchors", () => {
+  it("re-anchors the hand bone from child art paired to the bent arm variant", () => {
+    const rig = buildDefaultRig(makeVariantArmCharacter());
+    const hand = rig.bones.find((bone) => bone.id === "bone:slot:right-hand");
+    expect(hand?.parentId).toBe("bone:slot:right-arm");
+    // Base anchor comes from the straight (representative) hand: pivot 300,345 − arm pivot 290,170.
+    expect(hand?.x).toBe(10);
+    expect(hand?.y).toBe(175);
+    // Bent arm carries the hand to the bent-hand pivot: 370,230 − 290,170.
+    expect(hand?.parentVariantAnchors).toEqual({ bent: { x: 80, y: 60, source: "pairedArt" } });
+  });
+
+  it("prefers an authored joint socket over paired child art", () => {
+    const character = makeVariantArmCharacter();
+    const withSocket = upsertSlotSocketAnchor(buildDefaultRig(character), {
+      parentSlotId: "slot:right-arm",
+      childSlotId: "slot:right-hand",
+      variantKey: "bent",
+      x: 352,
+      y: 248,
+    });
+    const rig = normalizeCharacterRig({ ...character, rig: withSocket });
+    const hand = rig.bones.find((bone) => bone.id === "bone:slot:right-hand");
+    expect(hand?.parentVariantAnchors).toEqual({ bent: { x: 62, y: 78, source: "socket" } });
+  });
+
+  it("scopes joints to their angle — a front wrist never moves the side-view hand", () => {
+    const character: CharacterPreset = {
+      ...makeVariantArmCharacter(),
+      angles: ["front", "sideL"],
+    };
+    const withSocket = upsertSlotSocketAnchor(
+      buildDefaultRig(character),
+      {
+        parentSlotId: "slot:right-arm",
+        childSlotId: "slot:right-hand",
+        variantKey: "bent",
+        x: 352,
+        y: 248,
+      },
+      "front",
+    );
+    const rig = normalizeCharacterRig({ ...character, rig: withSocket });
+    const handOn = (angle: "front" | "sideL") =>
+      rig.angles?.[angle]?.bones.find((bone) => bone.id === "bone:slot:right-hand");
+    expect(handOn("front")?.parentVariantAnchors?.bent?.source).toBe("socket");
+    // The side skeleton falls back to its own paired art — the front joint does not leak.
+    expect(handOn("sideL")?.parentVariantAnchors?.bent?.source).toBe("pairedArt");
+  });
+
+  it("carries authored joints across constraint-preserving rebuilds and clears cleanly", () => {
+    const character = makeVariantArmCharacter();
+    const withSocket = upsertSlotSocketAnchor(buildDefaultRig(character), {
+      parentSlotId: "slot:right-arm",
+      childSlotId: "slot:right-hand",
+      variantKey: "bent",
+      x: 352,
+      y: 248,
+      rotation: -35,
+    });
+    const rebuilt = rebuildRigPreservingConstraints({ ...character, rig: withSocket });
+    expect(rebuilt.sockets).toHaveLength(1);
+    expect(rebuilt.sockets?.[0].variantAnchors.bent).toEqual({ x: 352, y: 248, rotation: -35 });
+    // Re-pinning the position preserves the authored rotation.
+    const moved = upsertSlotSocketAnchor(rebuilt, {
+      parentSlotId: "slot:right-arm",
+      childSlotId: "slot:right-hand",
+      variantKey: "bent",
+      x: 360,
+      y: 240,
+    });
+    expect(moved.sockets?.[0].variantAnchors.bent).toEqual({ x: 360, y: 240, rotation: -35 });
+    // Clearing the only anchor drops the joint record entirely.
+    const cleared = clearSlotSocketAnchor(moved, {
+      parentSlotId: "slot:right-arm",
+      childSlotId: "slot:right-hand",
+      variantKey: "bent",
+    });
+    expect(cleared.sockets).toHaveLength(0);
+  });
+
+  it("computes no anchors for variant-less characters", () => {
+    const rig = buildDefaultRig(makeRigCharacter());
+    for (const bone of rig.bones) {
+      expect(bone.parentVariantAnchors).toBeUndefined();
+    }
+  });
+
+  it("keeps freshly derived anchors when a saved rig restates the bone", () => {
+    const character = makeVariantArmCharacter();
+    const built = buildDefaultRig(character);
+    const staleBones = built.bones.map((bone) =>
+      bone.id === "bone:slot:right-hand"
+        ? { ...bone, parentVariantAnchors: { bent: { x: 1, y: 1 } } }
+        : bone,
+    );
+    const normalized = normalizeCharacterRig({
+      ...character,
+      rig: { ...built, bones: staleBones },
+    });
+    const hand = normalized.bones.find((bone) => bone.id === "bone:slot:right-hand");
+    expect(hand?.parentVariantAnchors).toEqual({ bent: { x: 80, y: 60, source: "pairedArt" } });
+  });
+});
 
 describe("CharacterRig V1", () => {
   it("builds an FK leg hierarchy where parent rotation affects the child bone", () => {

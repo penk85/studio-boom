@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { EYE_PRESETS, MOUTH_PRESETS, generatePresetBlob } from "./presets";
 import { clamp } from "./mouth-morph";
 import {
@@ -13,7 +13,6 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
-  Download,
   Eye,
   EyeOff,
   Lock,
@@ -34,6 +33,7 @@ import {
   createBlankCharacter,
   CHARACTER_VARIANT_KIND_VALUES,
   defaultMotionBehaviorForRole,
+  defaultVariantForSlotParts,
   getPartSlotId,
   listCharacterSlots,
   makePart,
@@ -43,11 +43,40 @@ import {
   partMatchesVariant,
   roleEnabledByManifest,
   roleLabel,
+  claimSharedPartsForAngles,
+  partAvailableForAngle,
   saveCharacter,
   variantKeyForPart,
+  variantKeySourceForPart,
   variantLabelForPart,
   withInferredHumanParentIds,
+  type VariantKeySource,
 } from "./character-utils";
+import {
+  anchorEntryForChild,
+  anchorSourceForChild,
+  buildRigHealthReport,
+  collectVariantKeyIssues,
+  migrateLegacyVariantSockets,
+  removeVariantSocket,
+  renameVariantKeyEverywhere,
+  setVariantAnchorRotation,
+  slotVariantKeys,
+  upsertVariantSocketAtPoint,
+  variantPreviewDeltas,
+  type RigHealthReport,
+  type VariantKeyIssue,
+  type VariantPreviewShift,
+} from "./variant-pairing";
+import { parentSlotIdForBone } from "./motion-constraints";
+import {
+  applyPosePreset,
+  capturePosePreset,
+  defaultPosePresetForCharacter,
+  poseMatchesPreview,
+  posePresetsForAngle,
+  seedDefaultPosePreset,
+} from "./pose-presets";
 import {
   alphaMaskContains,
   alphaCenterForPart,
@@ -66,6 +95,7 @@ import type {
   CharacterAngle,
   CharacterPart,
   CharacterPartBounds,
+  CharacterPosePreset,
   CharacterPreset,
   CharacterRig,
   CharacterSlotRelation,
@@ -78,12 +108,12 @@ import type {
   PartRole,
 } from "../types";
 import {
+  ANGLE_LABELS,
   CHARACTER_ANGLES,
   availableCharacterAngles,
   bindSlotPartToAngle,
   buildDefaultRig,
   rebuildRigPreservingConstraints,
-  characterRigPrompt,
   computeBoneWorldTransforms,
   moveBone,
   moveBoneForSlot,
@@ -99,7 +129,6 @@ import {
   setSlotReach,
   setSlotRotReach,
   slotIdsForBoneSubtree,
-  validateCharacterRig,
 } from "./rig";
 
 interface Props {
@@ -266,7 +295,17 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         useStudio.getState().registerCharacterPreset(row);
       }
       const normalized = withInferredHumanParentIds(normalizeCharacterSlots(row));
-      setDoc({ ...normalized, rig: normalizeCharacterRig(normalized) });
+      // One-time: legacy variant-package sockets become per-angle rig joints (the bone owns
+      // the joint). Conservative and idempotent; the autosave persists the converted shape.
+      const migrated = migrateLegacyVariantSockets(normalized);
+      // A character should never sit in a non-pose: seed a "Standing" default once (the
+      // autosave persists it), then park the editor on the default pose.
+      const seeded = seedDefaultPosePreset(migrated) ?? migrated;
+      setDoc({ ...seeded, rig: normalizeCharacterRig(seeded) });
+      const defaultPose = defaultPosePresetForCharacter(seeded);
+      setVariantPreview(defaultPose ? applyPosePreset(seeded, defaultPose) : {});
+      setActivePoseId(defaultPose?.id ?? null);
+      setEditorPhase(seeded.parts.length === 0 ? "build" : "pose");
       setHistoryPast([]);
       setHistoryFuture([]);
     })();
@@ -284,15 +323,311 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     historyFutureRef.current = historyFuture;
   }, [historyFuture]);
 
+  const [saveState, setSaveState] = useState<"saved" | "saving">("saved");
   useEffect(() => {
     if (!doc) return;
+    setSaveState("saving");
     const t = window.setTimeout(() => {
       void saveCharacter(doc).then((saved) => {
         useStudio.getState().registerCharacterPreset(saved);
+        setSaveState("saved");
       });
     }, 450);
     return () => window.clearTimeout(t);
   }, [doc]);
+
+  // Per-part variant key problems (near-miss pairing, id-fallback keys) surfaced as chips/dots.
+  const variantKeyIssues = useMemo(
+    () => (doc ? collectVariantKeyIssues(doc) : new Map<ID, VariantKeyIssue[]>()),
+    [doc],
+  );
+
+  // The editor works in three phases: Build (get art in), Rig (skeleton & limits), Pose
+  // (variants & poses). Phases change which panels/overlays show — never which gestures exist.
+  const [editorPhase, setEditorPhase] = useState<"build" | "rig" | "pose">("build");
+  const switchPhase = (phase: "build" | "rig" | "pose") => {
+    setEditorPhase(phase);
+    // Sensible overlay defaults per phase; the floating view toggles can override.
+    setShowBones(phase === "rig");
+    setShowAnchors(phase === "rig");
+    if (phase !== "rig") setSelectedBoneId(null);
+  };
+
+  // Transient confirmations auto-dismiss; armed modes get the persistent ModeBanner instead.
+  const [statusUndo, setStatusUndo] = useState(false);
+  const setStatusUndoable = (text: string) => {
+    setStatus(text);
+    setStatusUndo(true);
+  };
+  useEffect(() => {
+    if (!status) return;
+    const t = window.setTimeout(() => {
+      setStatus(null);
+      setStatusUndo(false);
+    }, 3500);
+    return () => window.clearTimeout(t);
+  }, [status]);
+
+  // Hover identification chip state (the handler lives below with the other canvas handlers).
+  const [hoverHit, setHoverHit] = useState<{ x: number; y: number; label: string } | null>(null);
+
+  // Keyboard: Esc backs out of any armed mode (then clears selection); Delete removes the
+  // selected part; arrows nudge; 1/2/3 switch phases. All no-ops while typing in a field.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+      )
+        return;
+      if (e.key === "Escape") {
+        if (socketPlacement) setSocketPlacement(null);
+        else if (rangeEdit) exitReachEdit();
+        else if (mode !== "select") setMode("select");
+        else {
+          setSelectedPartId(null);
+          setSelectedSlotId(null);
+          setSelectedBoneId(null);
+        }
+        return;
+      }
+      if (e.key === "1") return switchPhase("build");
+      if (e.key === "2") return switchPhase("rig");
+      if (e.key === "3") return switchPhase("pose");
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedPartId) {
+        e.preventDefault();
+        removePart(selectedPartId);
+        setStatusUndoable("Part deleted");
+        return;
+      }
+      const nudge = e.shiftKey ? 10 : 1;
+      const arrow =
+        e.key === "ArrowLeft"
+          ? { dx: -nudge, dy: 0 }
+          : e.key === "ArrowRight"
+            ? { dx: nudge, dy: 0 }
+            : e.key === "ArrowUp"
+              ? { dx: 0, dy: -nudge }
+              : e.key === "ArrowDown"
+                ? { dx: 0, dy: nudge }
+                : null;
+      if (arrow) {
+        if (selectedPartId) {
+          const part = doc?.parts.find((candidate) => candidate.id === selectedPartId);
+          if (part) {
+            e.preventDefault();
+            updatePart(selectedPartId, { x: part.x + arrow.dx, y: part.y + arrow.dy });
+          }
+        } else if (selectedSlotId) {
+          e.preventDefault();
+          applyGroupMove(selectedSlotId, arrow.dx, arrow.dy);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
+  // Sticky in-place variant preview per slot (arm "bent" + hand "fist" can hold together while
+  // children are inspected or anchored). Display state only — never persisted.
+  const [variantPreview, setVariantPreview] = useState<Record<ID, string>>({});
+  // The pose preset the preview was last set from (null = Rest / manual). Display state only.
+  const [activePoseId, setActivePoseId] = useState<ID | null>(null);
+  // Which pose chip's "…" menu is open (toolbar popover).
+  const [poseMenuId, setPoseMenuId] = useState<ID | null>(null);
+  const [addAngleMenuOpen, setAddAngleMenuOpen] = useState(false);
+  const [showAnchors, setShowAnchors] = useState(false);
+  const variantShift = useMemo<VariantPreviewShift>(
+    () =>
+      doc ? variantPreviewDeltas(doc, variantPreview) : { parts: new Map(), bones: new Map() },
+    [doc, variantPreview],
+  );
+  const previewVariant = (slotId: ID, key: string) =>
+    setVariantPreview((prev) => (prev[slotId] === key ? prev : { ...prev, [slotId]: key }));
+  const clearVariantPreview = (slotId?: ID) =>
+    setVariantPreview((prev) => {
+      if (!slotId) return {};
+      if (!(slotId in prev)) return prev;
+      const next = { ...prev };
+      delete next[slotId];
+      return next;
+    });
+  // Live anchor-edit drag: while a parent variant is previewed, dragging the child moves its
+  // variant anchor (socket), not its rest position. dx/dy are the in-flight canvas offsets.
+  const [anchorDrag, setAnchorDrag] = useState<{
+    childSlotId: ID;
+    parentSlotId: ID;
+    variantKey: string;
+    dx: number;
+    dy: number;
+  } | null>(null);
+  // One-shot "pin anchor" placement armed from the Anchor section: the next canvas click
+  // writes the socket at the clicked point.
+  const [socketPlacement, setSocketPlacement] = useState<{
+    childSlotId: ID;
+    parentSlotId: ID;
+    variantKey: string;
+  } | null>(null);
+  const rigHealthReport = useMemo<RigHealthReport>(
+    () => (doc ? buildRigHealthReport(doc) : { anchorRows: [], warnings: [] }),
+    [doc],
+  );
+
+  // ── Pose presets ──────────────────────────────────────────────────────────
+  const activePose = useMemo(
+    () =>
+      doc && activePoseId
+        ? (doc.posePresets?.find((preset) => preset.id === activePoseId) ?? null)
+        : null,
+    [doc, activePoseId],
+  );
+  /** The active pose as an applicable map (stale keys filtered) — null when on Rest/manual. */
+  const appliedPoseMap = useMemo(
+    () => (doc && activePose ? applyPosePreset(doc, activePose) : null),
+    [doc, activePose],
+  );
+  const poseModified = useMemo(
+    () => (doc && activePose ? !poseMatchesPreview(activePose, variantPreview, doc) : false),
+    [doc, activePose, variantPreview],
+  );
+
+  const applyPose = (preset: CharacterPosePreset) => {
+    if (!doc) return;
+    setVariantPreview(applyPosePreset(doc, preset));
+    setActivePoseId(preset.id);
+  };
+  const showRestPose = () => {
+    setVariantPreview({});
+    setActivePoseId(null);
+  };
+  // Inline naming popover (no native prompt dialogs).
+  const [posePrompt, setPosePrompt] = useState<
+    { kind: "new" } | { kind: "rename"; poseId: ID } | null
+  >(null);
+  const [posePromptValue, setPosePromptValue] = useState("");
+  const savePoseAsNew = () => {
+    setPosePromptValue("New pose");
+    setPosePrompt({ kind: "new" });
+  };
+  const confirmPosePrompt = () => {
+    if (!doc || !posePrompt) return;
+    const name = posePromptValue.trim();
+    if (!name) return;
+    if (posePrompt.kind === "new") {
+      const preset = capturePosePreset(doc, variantPreview, { name });
+      updateDoc({ posePresets: [...(doc.posePresets ?? []), preset] });
+      setActivePoseId(preset.id);
+      setStatus(`Pose saved — ${name}`);
+    } else {
+      updateDoc({
+        posePresets: (doc.posePresets ?? []).map((candidate) =>
+          candidate.id === posePrompt.poseId ? { ...candidate, name } : candidate,
+        ),
+      });
+    }
+    setPosePrompt(null);
+  };
+  const updateActivePose = () => {
+    if (!doc || !activePose) return;
+    const captured = capturePosePreset(doc, variantPreview, {
+      name: activePose.name,
+      angleIds: activePose.angleIds,
+    });
+    updateDoc({
+      posePresets: (doc.posePresets ?? []).map((preset) =>
+        preset.id === activePose.id ? { ...captured, id: activePose.id } : preset,
+      ),
+    });
+    setStatus(`Pose updated — ${activePose.name}`);
+  };
+  const renamePose = (poseId: ID) => {
+    const preset = doc?.posePresets?.find((candidate) => candidate.id === poseId);
+    if (!preset) return;
+    setPosePromptValue(preset.name);
+    setPosePrompt({ kind: "rename", poseId });
+  };
+  const setDefaultPose = (poseId: ID) => updateDoc({ defaultPoseId: poseId });
+  const togglePoseAngleScope = (poseId: ID) => {
+    if (!doc) return;
+    const rig = normalizeCharacterRig(doc);
+    updateDoc({
+      posePresets: (doc.posePresets ?? []).map((preset) =>
+        preset.id === poseId
+          ? {
+              ...preset,
+              angleIds: preset.angleIds?.length ? undefined : [rig.activeAngle],
+            }
+          : preset,
+      ),
+    });
+  };
+  const deletePose = (poseId: ID) => {
+    if (!doc) return;
+    const remaining = (doc.posePresets ?? []).filter((preset) => preset.id !== poseId);
+    updateDoc({
+      posePresets: remaining,
+      defaultPoseId: doc.defaultPoseId === poseId ? remaining[0]?.id : doc.defaultPoseId,
+    });
+    if (activePoseId === poseId) setActivePoseId(null);
+  };
+  /** Reset a deviating slot back to what the active pose says (or clear it). */
+  const resetSlotToPose = (slotId: ID) => {
+    const poseKey = appliedPoseMap?.[slotId];
+    if (poseKey) previewVariant(slotId, poseKey);
+    else clearVariantPreview(slotId);
+  };
+
+  const setActiveAngleFromToolbar = (activeAngle: CharacterAngle) => {
+    if (!doc) return;
+    const angles = availableCharacterAngles(doc);
+    const addingNewAngle = !angles.includes(activeAngle);
+    const nextAngles = CHARACTER_ANGLES.filter(
+      (angle) => angle === activeAngle || angles.includes(angle),
+    );
+    pushUndoSnapshot();
+    setDoc((d) => {
+      if (!d) return d;
+      // A new angle starts empty: implicitly-shared parts are claimed for the angles that
+      // existed before, so front drawings stay on Front. Shared props opt back in explicitly.
+      const claimed = addingNewAngle
+        ? claimSharedPartsForAngles(d, availableCharacterAngles(d))
+        : d;
+      const next = {
+        ...claimed,
+        angles: nextAngles,
+        rig: { ...normalizeCharacterRig(claimed), activeAngle },
+        updatedAt: Date.now(),
+      };
+      return { ...next, rig: normalizeCharacterRig(next) };
+    });
+    if (addingNewAngle) {
+      setStatus(
+        `${ANGLE_LABELS[activeAngle]} starts empty — existing artwork stays on its angle. ` +
+          `Upload ${ANGLE_LABELS[activeAngle]} drawings into the same slots, or mark a prop ` +
+          `as Shared in its Angles row to show it on every angle.`,
+      );
+    }
+    // Selection from another angle would point at art that is no longer on the canvas.
+    const stillVisible = (partId: ID | null) => {
+      const part = partId ? doc.parts.find((candidate) => candidate.id === partId) : null;
+      return !!part && partAvailableForAngle(part, activeAngle);
+    };
+    if (selectedPartId && !stillVisible(selectedPartId)) {
+      setSelectedPartId(null);
+      setSelectedSlotId(null);
+    } else if (
+      selectedSlotId &&
+      !doc.parts.some(
+        (part) =>
+          getPartSlotId(part) === selectedSlotId && partAvailableForAngle(part, activeAngle),
+      )
+    ) {
+      setSelectedSlotId(null);
+    }
+    // variantPreview / pose stay: keys are angle-agnostic vocabulary; the new angle's own
+    // skeleton and art realize the same pose (or fall back where a key has no art yet).
+  };
 
   useEffect(() => {
     if (!doc || !wrapRef.current) return;
@@ -591,6 +926,37 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     });
   };
 
+  // Explicit variant-key edits propagate: renaming "bent" follows through joint anchors, pose
+  // presets, and gated relations instead of silently orphaning them (phase-one mitigation until
+  // variants get stable internal ids). Semantic reassignment (viseme/eyeState/pose selects) is
+  // NOT a rename and goes through plain updatePart.
+  const updatePartVariant = (id: ID, patch: Partial<CharacterPart>) => {
+    const original = doc?.parts.find((part) => part.id === id);
+    if (!doc || !original) return;
+    const isExplicitKeyEdit =
+      "variant" in patch && !("viseme" in patch) && !("eyeState" in patch) && !("pose" in patch);
+    const nextPart = normalizePartPatch({ ...original, ...patch }, patch);
+    const oldKey = variantKeyForPart(original);
+    const newKey = variantKeyForPart(nextPart);
+    if (!isExplicitKeyEdit || oldKey === newKey) {
+      updatePart(id, patch);
+      return;
+    }
+    pushUndoSnapshot();
+    setDoc((d) => {
+      if (!d) return d;
+      const withPart = {
+        ...d,
+        parts: d.parts.map((part) =>
+          part.id === id ? normalizePartPatch({ ...part, ...patch }, patch) : part,
+        ),
+        updatedAt: Date.now(),
+      };
+      const renamed = renameVariantKeyEverywhere(withPart, getPartSlotId(original), oldKey, newKey);
+      return { ...renamed, rig: normalizeCharacterRig(renamed) };
+    });
+  };
+
   const addPart = (part: CharacterPart) => {
     pushUndoSnapshot();
     setDoc((d) =>
@@ -646,10 +1012,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       const id = uid();
       const label = options.label ?? asset.name;
       const variantKey =
-        options.variantKey?.trim() ||
-        viseme ||
-        eyeState ||
-        detectVariantKey(file.name, role, side);
+        options.variantKey?.trim() || viseme || eyeState || detectVariantKey(file.name, role, side);
       const variant = variantKey
         ? {
             key: variantKey,
@@ -667,6 +1030,8 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         viseme,
         eyeState,
         alphaBounds,
+        // Each angle owns its drawings: new art belongs to the angle it was uploaded into.
+        angleIds: [normalizeCharacterRig(doc).activeAngle],
         ...fitted,
         ...options.placement,
         zIndex: options.zIndex ?? maxZ(doc.parts) + 1,
@@ -943,14 +1308,16 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     }
   };
 
-  const exportData = JSON.stringify(normalizeCharacterSlots(doc), null, 2);
   const manifest = normalizePartManifest(doc.manifest);
   const previewParentPart =
     preview?.targetRole === "head"
       ? orderedParts.find((part) => part.id === preview.targetPartId)
       : undefined;
-  const visibleEditorParts = orderedParts.filter((part) =>
-    roleEnabledByManifest(part.role, manifest),
+  // Each angle owns its drawings: the canvas and layer list show only the active angle's parts.
+  const editorActiveAngle = normalizeCharacterRig(doc).activeAngle;
+  const visibleEditorParts = orderedParts.filter(
+    (part) =>
+      roleEnabledByManifest(part.role, manifest) && partAvailableForAngle(part, editorActiveAngle),
   );
   const selectedEditorPart = selectedPart
     ? visibleEditorParts.find((part) => part.id === selectedPart.id)
@@ -977,8 +1344,38 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     };
   };
 
+  // Re-anchor shift for a part: the variant-preview offset/rotation plus the in-flight anchor drag.
+  const partShift = (
+    part: CharacterPart,
+  ): { dx: number; dy: number; rotation: number } | undefined => {
+    const base = variantShift.parts.get(part.id);
+    if (anchorDrag && getPartSlotId(part) === anchorDrag.childSlotId) {
+      return {
+        dx: (base?.dx ?? 0) + anchorDrag.dx,
+        dy: (base?.dy ?? 0) + anchorDrag.dy,
+        rotation: base?.rotation ?? 0,
+      };
+    }
+    return base;
+  };
+
+  // The animation-test delta plus the variant-preview re-anchor shift — every hit test and
+  // local-point mapping must use this so clicks land on the art where it is actually drawn.
+  const partPreviewTransform = (part: CharacterPart) => {
+    const base = previewDelta(part, preview, previewParentPart, doc.parts);
+    const shift = partShift(part);
+    return shift
+      ? {
+          ...base,
+          dx: base.dx + shift.dx,
+          dy: base.dy + shift.dy,
+          rotation: base.rotation + shift.rotation,
+        }
+      : base;
+  };
+
   const localPointForPart = (part: CharacterPart, point: { x: number; y: number }) =>
-    canvasPointToPartLocal(part, point, previewDelta(part, preview, previewParentPart, doc.parts));
+    canvasPointToPartLocal(part, point, partPreviewTransform(part));
 
   // Ordered stack of parts under a point, topmost first (alpha-exact before padded
   // hits), with locked parts excluded — the candidate list the select/drag model
@@ -992,7 +1389,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       .sort((a, b) => b.zIndex - a.zIndex);
 
     for (const part of candidates) {
-      const transform = previewDelta(part, preview, previewParentPart, doc.parts);
+      const transform = partPreviewTransform(part);
       if (transform.opacity <= 0.05 && part.id !== selectedPartId) continue;
       const local = canvasPointToPartLocal(part, point, transform);
       if (boundsMode === "frame") {
@@ -1388,12 +1785,109 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
   // Once a select-mode drag actually begins, dispatch to a slot-group drag (multi-variant
   // slots) or a single-part drag. Both select the subject and install their own listeners.
+  // When a child's parent slot previews a non-default variant, dragging that child edits its
+  // variant anchor (socket) instead of its rest position — the user-chosen "small corrections"
+  // gesture. Returns null when ordinary rest-position dragging should apply.
+  const anchorDragContextForSlot = (
+    slotId: ID,
+  ): { childSlotId: ID; parentSlotId: ID; variantKey: string } | null => {
+    const rig = normalizeCharacterRig(doc);
+    const boneId = rig.slotBindings.find((binding) => binding.slotId === slotId)?.boneId;
+    const parentSlotId = boneId ? parentSlotIdForBone(rig, boneId) : undefined;
+    if (!parentSlotId) return null;
+    const previewKey = variantPreview[parentSlotId];
+    if (!previewKey) return null;
+    const parentParts = doc.parts.filter((part) => getPartSlotId(part) === parentSlotId);
+    const defaultKey = defaultVariantForSlotParts(parentParts, parentParts[0]?.role ?? "custom");
+    // Previewing the rest variant means the art sits at its rest anchor — drags stay rest edits.
+    if (!previewKey || previewKey === defaultKey) return null;
+    return { childSlotId: slotId, parentSlotId, variantKey: previewKey };
+  };
+
+  const slotDisplayName = (slotId: ID) =>
+    doc.parts.find((part) => getPartSlotId(part) === slotId)?.slotName ?? slotId;
+
+  const startAnchorDrag = (
+    e: React.PointerEvent,
+    context: { childSlotId: ID; parentSlotId: ID; variantKey: string },
+  ) => {
+    e.preventDefault();
+    pushUndoSnapshot();
+    const childName = slotDisplayName(context.childSlotId);
+    const parentName = slotDisplayName(context.parentSlotId);
+    setAnchorDrag({ ...context, dx: 0, dy: 0 });
+    const startX = e.clientX;
+    const startY = e.clientY;
+    // The anchor's current canvas position: the child bone at rest plus the preview shift.
+    const rig = normalizeCharacterRig(doc);
+    const world = computeBoneWorldTransforms(rig);
+    const boneId = rig.slotBindings.find(
+      (binding) => binding.slotId === context.childSlotId,
+    )?.boneId;
+    const boneWorld = boneId ? world.get(boneId) : undefined;
+    const previewOffset = (boneId && variantShift.bones.get(boneId)) || { dx: 0, dy: 0 };
+    const startAnchor = boneWorld
+      ? { x: boneWorld.x + previewOffset.dx, y: boneWorld.y + previewOffset.dy }
+      : null;
+
+    const onMove = (ev: PointerEvent) => {
+      const dx = (ev.clientX - startX) / scale;
+      const dy = (ev.clientY - startY) / scale;
+      setAnchorDrag((current) => (current ? { ...current, dx, dy } : current));
+    };
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      setAnchorDrag(null);
+      if (!startAnchor) return;
+      const dx = (ev.clientX - startX) / scale;
+      const dy = (ev.clientY - startY) / scale;
+      const next = upsertVariantSocketAtPoint(doc, {
+        parentSlotId: context.parentSlotId,
+        variantKey: context.variantKey,
+        childSlotId: context.childSlotId,
+        anchorPoint: { x: startAnchor.x + dx, y: startAnchor.y + dy },
+      });
+      updateDoc({ rig: next.rig }, { history: false });
+      setStatus(`Anchor pinned — ${childName} rides ${parentName} : ${context.variantKey}`);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  const clearSocket = (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => {
+    pushUndoSnapshot();
+    const next = removeVariantSocket(doc, context);
+    updateDoc({ rig: next.rig }, { history: false });
+    setStatus(
+      `Anchor cleared — ${slotDisplayName(context.childSlotId)} uses the inferred anchor again`,
+    );
+  };
+
+  const setAnchorRotation = (
+    context: { parentSlotId: ID; variantKey: string; childSlotId: ID },
+    rotation: number,
+  ) => {
+    pushUndoSnapshot();
+    const next = setVariantAnchorRotation(doc, { ...context, rotation });
+    updateDoc({ rig: next.rig }, { history: false });
+    setStatus(
+      `Anchor angle — ${slotDisplayName(context.childSlotId)} at ${rotation}° under ` +
+        `${slotDisplayName(context.parentSlotId)} : ${context.variantKey}`,
+    );
+  };
+
   const startCanvasDragForSubject = (
     e: React.PointerEvent,
     part: CharacterPart,
     point: { x: number; y: number },
   ) => {
     const slotId = getPartSlotId(part);
+    const anchorContext = anchorDragContextForSlot(slotId);
+    if (anchorContext) {
+      startAnchorDrag(e, anchorContext);
+      return;
+    }
     const editingVariant =
       selectedPart && !selectedSlotId && getPartSlotId(selectedPart) === slotId;
     if (!editingVariant && partsInSlot(slotId).length > 1) {
@@ -1651,6 +2145,25 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       return;
     }
 
+    // One-shot anchor placement armed from the Anchor section: the click point becomes the
+    // child's anchor under the armed parent variant. Mirrors the pivot tool's act-and-disarm.
+    if (socketPlacement) {
+      pushUndoSnapshot();
+      const next = upsertVariantSocketAtPoint(doc, {
+        parentSlotId: socketPlacement.parentSlotId,
+        variantKey: socketPlacement.variantKey,
+        childSlotId: socketPlacement.childSlotId,
+        anchorPoint: point,
+      });
+      updateDoc({ rig: next.rig }, { history: false });
+      setStatus(
+        `Anchor pinned — ${slotDisplayName(socketPlacement.childSlotId)} rides ` +
+          `${slotDisplayName(socketPlacement.parentSlotId)} : ${socketPlacement.variantKey}`,
+      );
+      setSocketPlacement(null);
+      return;
+    }
+
     // Pivot / area tools are one-shot and act on the active selection (their buttons live in
     // the selected layer's inspector). The click only positions the pivot; selection is left
     // untouched. With nothing selected, fall back to the topmost part under the click.
@@ -1747,6 +2260,62 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     window.addEventListener("pointerup", onUp);
   };
 
+  // Hover identification: name the art under the cursor without clicking.
+  const handleCanvasHover = (e: React.PointerEvent) => {
+    if (mode !== "select" || interacting || anchorDrag || rangeEdit) {
+      if (hoverHit) setHoverHit(null);
+      return;
+    }
+    const point = canvasPointFromEvent(e);
+    if (!point) return;
+    const top = hitPartsAt(point)[0];
+    if (!top) {
+      if (hoverHit) setHoverHit(null);
+      return;
+    }
+    const slotName = top.slotName ?? roleLabel(top.role);
+    const variant = variantLabelForPart(top);
+    setHoverHit({
+      x: point.x,
+      y: point.y,
+      label: variant && variant !== slotName ? `${slotName} · ${variant}` : slotName,
+    });
+  };
+
+  // One consistent banner for every armed mode — what's happening, and how to get out.
+  const modeBanner = (() => {
+    if (anchorDrag)
+      return {
+        text: `Editing anchor — ${slotDisplayName(anchorDrag.childSlotId)} rides ${slotDisplayName(
+          anchorDrag.parentSlotId,
+        )} : ${anchorDrag.variantKey}. Release to pin.`,
+      };
+    if (socketPlacement)
+      return {
+        text: `Click where ${slotDisplayName(socketPlacement.childSlotId)} should anchor under ${slotDisplayName(
+          socketPlacement.parentSlotId,
+        )} : ${socketPlacement.variantKey}.`,
+        cancel: () => setSocketPlacement(null),
+      };
+    if (rangeEdit)
+      return {
+        text: "Tracing reach — sweep the layer to its farthest comfortable spots; drag the blue knob to set twist.",
+        cancel: exitReachEdit,
+        cancelLabel: "Done",
+      };
+    if (mode === "pivot")
+      return {
+        text: "Click where this part should rotate around.",
+        cancel: () => setMode("select"),
+      };
+    if (mode === "bounds-rect" || mode === "bounds-ellipse")
+      return {
+        text: "Click the canvas to place the allowed-movement area.",
+        cancel: () => setMode("select"),
+      };
+    return null;
+  })();
+
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <header className="flex items-center gap-3 border-b border-border bg-panel px-4 py-2">
@@ -1761,6 +2330,32 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           onChange={(e) => updateDoc({ name: e.target.value })}
           className="min-w-0 rounded border border-transparent bg-transparent px-2 py-1 text-sm font-semibold hover:border-border focus:border-primary focus:outline-none"
         />
+        <div className="flex items-center justify-center">
+          <div className="flex overflow-hidden rounded border border-border">
+            {(
+              [
+                { phase: "build", label: "Build", hint: "Upload and arrange artwork" },
+                { phase: "rig", label: "Rig", hint: "Skeleton, anchors, and movement limits" },
+                { phase: "pose", label: "Pose", hint: "Variants and saved poses" },
+              ] as const
+            ).map(({ phase, label, hint }) => (
+              <button
+                key={phase}
+                type="button"
+                aria-pressed={editorPhase === phase}
+                onClick={() => switchPhase(phase)}
+                className={`px-3 py-1 text-xs ${
+                  editorPhase === phase
+                    ? "bg-primary/25 text-foreground"
+                    : "text-muted-foreground hover:bg-panel-2"
+                }`}
+                title={hint}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="ml-auto flex items-center gap-2">
           <button
             type="button"
@@ -1782,34 +2377,14 @@ export function CharacterEditor({ characterId, onClose }: Props) {
             <Redo2 size={13} />
             Redo
           </button>
-          {CANVAS_PRESETS.map((preset) => (
-            <button
-              key={preset.label}
-              onClick={() => updateDoc({ canvasWidth: preset.width, canvasHeight: preset.height })}
-              className="rounded border border-border px-2 py-1 text-xs hover:bg-panel-2"
-            >
-              {preset.label}
-            </button>
-          ))}
-          <button
-            type="button"
-            onClick={toggleBones}
-            className={`flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-panel-2 ${
-              showBones ? "border-primary text-primary" : "border-border text-muted-foreground"
+          <span
+            className={`text-[10px] ${
+              saveState === "saved" ? "text-emerald-400" : "text-muted-foreground"
             }`}
-            title={showBones ? "Hide bone controls" : "Show bone controls"}
+            title="The editor saves automatically as you work"
           >
-            {showBones ? <Eye size={13} /> : <EyeOff size={13} />}
-            Bones
-          </button>
-          <button
-            onClick={() => navigator.clipboard?.writeText(exportData)}
-            className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-panel-2"
-            title="Copy structured character data"
-          >
-            <Download size={13} />
-            Export
-          </button>
+            {saveState === "saved" ? "✓ Saved" : "Saving…"}
+          </span>
           <button
             onClick={async () => {
               const saved = await saveCharacter(doc);
@@ -1818,30 +2393,244 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               onClose();
             }}
             className="rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-90"
+            title="Everything is already saved — this just closes the editor"
           >
-            Save & close
+            Done
           </button>
         </div>
       </header>
 
+      {/* Angle → pose toolbar: the angle picks the rig, the pose picks the limb arrangement. */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-border bg-panel px-4 py-1.5 text-xs">
+        <div className="flex items-center gap-1">
+          <span className="mr-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+            Angle
+          </span>
+          <div className="flex overflow-hidden rounded border border-border">
+            {availableCharacterAngles(doc).map((angle) => {
+              const active = normalizeCharacterRig(doc).activeAngle === angle;
+              return (
+                <button
+                  key={angle}
+                  type="button"
+                  onClick={() => setActiveAngleFromToolbar(angle)}
+                  className={`px-2 py-1 text-[11px] ${
+                    active
+                      ? "bg-primary/25 text-foreground"
+                      : "text-muted-foreground hover:bg-panel-2"
+                  }`}
+                >
+                  {ANGLE_LABELS[angle]}
+                </button>
+              );
+            })}
+          </div>
+          {CHARACTER_ANGLES.some((angle) => !availableCharacterAngles(doc).includes(angle)) && (
+            <span className="relative">
+              <button
+                type="button"
+                onClick={() => setAddAngleMenuOpen((open) => !open)}
+                className="rounded border border-dashed border-border px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+                title="Add another view of this character — it starts with its own empty set of drawings"
+              >
+                + Add angle
+              </button>
+              {addAngleMenuOpen && (
+                <div className="absolute left-0 top-full z-[70] mt-1 min-w-32 rounded border border-border bg-panel p-1 text-[11px] shadow-xl">
+                  {CHARACTER_ANGLES.filter(
+                    (angle) => !availableCharacterAngles(doc).includes(angle),
+                  ).map((angle) => (
+                    <button
+                      key={angle}
+                      type="button"
+                      onClick={() => {
+                        setAddAngleMenuOpen(false);
+                        setActiveAngleFromToolbar(angle);
+                        switchPhase("build");
+                      }}
+                      className="block w-full rounded px-2 py-1 text-left hover:bg-panel-2"
+                    >
+                      {ANGLE_LABELS[angle]}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </span>
+          )}
+        </div>
+        {editorPhase === "pose" && (
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+            <span className="mr-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+              Pose
+            </span>
+            <button
+              type="button"
+              onClick={showRestPose}
+              className={`rounded-full border px-2.5 py-0.5 text-[11px] ${
+                activePoseId === null
+                  ? "border-primary bg-primary/20 text-foreground"
+                  : "border-border text-muted-foreground hover:bg-panel-2"
+              }`}
+              title="Show the raw rest art with no pose applied"
+            >
+              Rest
+            </button>
+            {(doc.posePresets ?? []).map((preset) => {
+              const rigAngle = normalizeCharacterRig(doc).activeAngle;
+              const availableHere = !preset.angleIds?.length || preset.angleIds.includes(rigAngle);
+              const isActive = preset.id === activePoseId;
+              const isDefault = preset.id === doc.defaultPoseId;
+              return (
+                <span key={preset.id} className="relative inline-flex">
+                  <button
+                    type="button"
+                    disabled={!availableHere}
+                    onClick={() => applyPose(preset)}
+                    className={`rounded-full border px-2.5 py-0.5 text-[11px] ${
+                      isActive
+                        ? "border-primary bg-primary/20 text-foreground"
+                        : "border-border text-muted-foreground hover:bg-panel-2"
+                    } ${availableHere ? "" : "opacity-40"}`}
+                    title={
+                      availableHere
+                        ? `Apply ${preset.name}`
+                        : `Saved for ${(preset.angleIds ?? []).map((a) => ANGLE_LABELS[a]).join(", ")}`
+                    }
+                  >
+                    {preset.name}
+                    {isDefault && <span className="ml-1 text-amber-300">★</span>}
+                    {isActive && poseModified && (
+                      <span
+                        className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-amber-400 align-middle"
+                        title="Edited since this pose was applied"
+                      />
+                    )}
+                  </button>
+                  {isActive && (
+                    <button
+                      type="button"
+                      onClick={() => setPoseMenuId(poseMenuId === preset.id ? null : preset.id)}
+                      className="ml-0.5 rounded px-1 text-muted-foreground hover:text-foreground"
+                      title="Pose options"
+                    >
+                      …
+                    </button>
+                  )}
+                  {poseMenuId === preset.id && (
+                    <div className="absolute left-0 top-full z-[70] mt-1 min-w-36 rounded border border-border bg-panel p-1 text-[11px] shadow-xl">
+                      {[
+                        { label: "Rename", action: () => renamePose(preset.id) },
+                        {
+                          label: isDefault ? "Default pose ✓" : "Set as default",
+                          action: () => setDefaultPose(preset.id),
+                        },
+                        {
+                          label: preset.angleIds?.length
+                            ? "Available on all angles"
+                            : `Only ${ANGLE_LABELS[rigAngle]}`,
+                          action: () => togglePoseAngleScope(preset.id),
+                        },
+                        { label: "Delete", action: () => deletePose(preset.id), danger: true },
+                      ].map((item) => (
+                        <button
+                          key={item.label}
+                          type="button"
+                          onClick={() => {
+                            setPoseMenuId(null);
+                            item.action();
+                          }}
+                          className={`block w-full rounded px-2 py-1 text-left hover:bg-panel-2 ${
+                            item.danger ? "text-destructive" : ""
+                          }`}
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </span>
+              );
+            })}
+            {poseModified && activePose && (
+              <button
+                type="button"
+                onClick={updateActivePose}
+                className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300 hover:bg-amber-500/20"
+                title={`Save the current arrangement into "${activePose.name}"`}
+              >
+                Update {activePose.name}
+              </button>
+            )}
+            <span className="relative inline-flex">
+              <button
+                type="button"
+                onClick={savePoseAsNew}
+                className="rounded border border-dashed border-border px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                title="Save the current arrangement as a new pose"
+              >
+                + Save pose
+              </button>
+              {posePrompt && (
+                <div className="absolute right-0 top-full z-[70] mt-1 flex items-center gap-1 rounded border border-border bg-panel p-1.5 shadow-xl">
+                  <input
+                    autoFocus
+                    value={posePromptValue}
+                    onChange={(e) => setPosePromptValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") confirmPosePrompt();
+                      if (e.key === "Escape") setPosePrompt(null);
+                    }}
+                    onFocus={(e) => e.target.select()}
+                    placeholder="Pose name"
+                    className="w-32 rounded border border-border bg-input px-2 py-0.5 text-[11px]"
+                  />
+                  <button
+                    type="button"
+                    onClick={confirmPosePrompt}
+                    className="rounded border border-primary/50 bg-primary/15 px-2 py-0.5 text-[11px]"
+                  >
+                    {posePrompt.kind === "new" ? "Save" : "Rename"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPosePrompt(null)}
+                    className="rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+            </span>
+          </div>
+        )}
+      </div>
+
       <div className="flex min-h-0 flex-1">
         <aside className="w-72 shrink-0 overflow-auto border-r border-border bg-panel p-3 text-xs">
-          <StructureEditor
-            manifest={manifest}
-            onChange={(nextManifest) => updateDoc({ manifest: nextManifest })}
-          />
-          <UploadSlots
-            onImport={importSvg}
-            parts={doc.parts}
-            manifest={manifest}
-            canvasWidth={doc.canvasWidth}
-            canvasHeight={doc.canvasHeight}
-          />
+          {editorPhase === "build" && (
+            <>
+              <Accordion title="Body parts" defaultOpen={doc.parts.length === 0}>
+                <StructureEditor
+                  manifest={manifest}
+                  onChange={(nextManifest) => updateDoc({ manifest: nextManifest })}
+                />
+              </Accordion>
+              <UploadSlots
+                onImport={importSvg}
+                parts={doc.parts}
+                manifest={manifest}
+                canvasWidth={doc.canvasWidth}
+                canvasHeight={doc.canvasHeight}
+                activeAngle={editorActiveAngle}
+              />
+            </>
+          )}
           <LayerList
-            parts={orderedParts}
+            parts={orderedParts.filter((part) => partAvailableForAngle(part, editorActiveAngle))}
             rig={normalizeCharacterRig(doc)}
             selectedId={selectedPartId}
             selectedSlotId={selectedSlotId}
+            keyIssues={variantKeyIssues}
             onSelect={selectPart}
             onSelectSlot={selectSlot}
             onChange={updatePart}
@@ -1872,6 +2661,8 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               ref={canvasRef}
               data-editor-canvas
               onPointerDown={handleCanvasPointerDown}
+              onPointerMove={handleCanvasHover}
+              onPointerLeave={() => setHoverHit(null)}
               className="absolute left-0 top-0 origin-top-left"
               style={{
                 width: doc.canvasWidth,
@@ -1879,6 +2670,18 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                 transform: `scale(${scale})`,
               }}
             >
+              {hoverHit && (
+                <div
+                  className="pointer-events-none absolute z-[10050] -translate-y-full whitespace-nowrap rounded border border-border bg-panel/95 px-1.5 py-0.5 text-muted-foreground"
+                  style={{
+                    left: hoverHit.x + 12 / Math.max(0.0001, scale),
+                    top: hoverHit.y - 8 / Math.max(0.0001, scale),
+                    fontSize: 11 / Math.max(0.0001, scale),
+                  }}
+                >
+                  {hoverHit.label}
+                </div>
+              )}
               {visibleEditorParts.map((part) => (
                 <PartLayer
                   key={part.id}
@@ -1886,9 +2689,16 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   selected={part.id === selectedPartId}
                   dimmed={focusEditing && getPartSlotId(part) !== rangeEdit?.slotId}
                   blurred={editingActive && getPartSlotId(part) !== restrictSlotId}
+                  ghosted={
+                    !!selectedPart &&
+                    part.id !== selectedPartId &&
+                    getPartSlotId(part) === getPartSlotId(selectedPart)
+                  }
                   preview={preview}
                   previewParentPart={previewParentPart}
                   allParts={doc.parts}
+                  previewVariantKey={variantPreview[getPartSlotId(part)]}
+                  shift={partShift(part)}
                 />
               ))}
               {showBones && !focusEditing && (
@@ -1898,6 +2708,17 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   scale={scale}
                   onSelectBone={selectBone}
                   onStartBoneDrag={startBoneDrag}
+                />
+              )}
+              {(showAnchors || Object.keys(variantPreview).length > 0) && !focusEditing && (
+                <VariantAnchorOverlay
+                  doc={doc}
+                  variantPreview={variantPreview}
+                  variantShift={variantShift}
+                  anchorDrag={anchorDrag}
+                  emphasisSlotId={restrictSlotId}
+                  scale={scale}
+                  onStartAnchorDrag={startAnchorDrag}
                 />
               )}
               {selectedEditorPart && !focusEditing && (
@@ -1911,6 +2732,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   preview={preview}
                   previewParentPart={previewParentPart}
                   allParts={doc.parts}
+                  shift={partShift(selectedEditorPart)}
                   onBeginChange={() => {
                     setInteracting(true);
                     pushUndoSnapshot();
@@ -1918,15 +2740,39 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   onChange={(patch) => updatePart(selectedEditorPart.id, patch, { history: false })}
                 />
               )}
-              {selectedSlotId && selectedSlotBounds && !focusEditing && (
-                <GroupControlsOverlay
-                  bounds={selectedSlotBounds}
-                  scale={scale}
-                  onStartMove={(e) => startGroupDrag(e, selectedSlotId)}
-                  onStartResize={(e, corner) => startGroupResize(e, selectedSlotId, corner)}
-                  onStartRotate={(e) => startGroupRotate(e, selectedSlotId)}
-                />
-              )}
+              {selectedSlotId &&
+                selectedSlotBounds &&
+                !focusEditing &&
+                (() => {
+                  // Draw the group box where the slot's art currently sits (variant preview may
+                  // have re-anchored it). Handlers re-derive rest bounds internally, so this
+                  // offset is display-only.
+                  const slotShift = selectedSlotParts[0]
+                    ? partShift(selectedSlotParts[0])
+                    : undefined;
+                  const bounds = slotShift
+                    ? {
+                        ...selectedSlotBounds,
+                        x: selectedSlotBounds.x + slotShift.dx,
+                        y: selectedSlotBounds.y + slotShift.dy,
+                      }
+                    : selectedSlotBounds;
+                  return (
+                    <GroupControlsOverlay
+                      bounds={bounds}
+                      scale={scale}
+                      onStartMove={(e) => {
+                        // Same gesture as dragging the art: while the parent previews a
+                        // non-default variant, moving the group edits the anchor.
+                        const anchorContext = anchorDragContextForSlot(selectedSlotId);
+                        if (anchorContext) startAnchorDrag(e, anchorContext);
+                        else startGroupDrag(e, selectedSlotId);
+                      }}
+                      onStartResize={(e, corner) => startGroupResize(e, selectedSlotId, corner)}
+                      onStartRotate={(e) => startGroupRotate(e, selectedSlotId)}
+                    />
+                  );
+                })()}
               {rangeEdit && reachDraft && reachDraft.length >= 3 && (
                 <ReachOverlay
                   points={reachDraft}
@@ -1961,45 +2807,230 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           <div className="pointer-events-none absolute bottom-2 right-3 rounded bg-panel/80 px-2 py-1 text-[10px] text-muted-foreground">
             {doc.canvasWidth}×{doc.canvasHeight} · {Math.round(scale * 100)}%
           </div>
+          {editorPhase !== "build" && (
+            <div className="absolute bottom-2 left-3 flex gap-1">
+              <button
+                type="button"
+                aria-pressed={showBones}
+                onClick={toggleBones}
+                className={`flex items-center gap-1 rounded border bg-panel/90 px-2 py-1 text-[10px] ${
+                  showBones ? "border-primary text-primary" : "border-border text-muted-foreground"
+                }`}
+                title={
+                  showBones ? "Hide the skeleton" : "Show the skeleton — drag joints to adjust"
+                }
+              >
+                {showBones ? <Eye size={11} /> : <EyeOff size={11} />}
+                Bones
+              </button>
+              <button
+                type="button"
+                aria-pressed={showAnchors}
+                onClick={() => setShowAnchors((shown) => !shown)}
+                className={`flex items-center gap-1 rounded border bg-panel/90 px-2 py-1 text-[10px] ${
+                  showAnchors
+                    ? "border-primary text-primary"
+                    : "border-border text-muted-foreground"
+                }`}
+                title="Show where each child re-anchors per parent variant"
+              >
+                {showAnchors ? <Eye size={11} /> : <EyeOff size={11} />}
+                Anchors
+              </button>
+            </div>
+          )}
+          {modeBanner && (
+            <div
+              role="status"
+              className="absolute left-1/2 top-3 z-[80] flex -translate-x-1/2 items-center gap-3 rounded-full border border-primary/50 bg-panel/95 px-4 py-1.5 text-xs text-foreground shadow-[var(--shadow-panel)]"
+            >
+              <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-primary" />
+              {modeBanner.text}
+              {modeBanner.cancel && (
+                <button
+                  type="button"
+                  onClick={modeBanner.cancel}
+                  className="rounded border border-border px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+                >
+                  {modeBanner.cancelLabel ?? "Cancel"} (Esc)
+                </button>
+              )}
+            </div>
+          )}
           {status && (
-            <div className="absolute left-4 top-4 rounded border border-border bg-panel/95 px-3 py-2 text-xs shadow-[var(--shadow-panel)]">
+            <div
+              role="status"
+              className="absolute bottom-10 left-3 flex items-center gap-2 rounded border border-border bg-panel/95 px-3 py-2 text-xs shadow-[var(--shadow-panel)]"
+            >
               {status}
+              {statusUndo && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    undoCharacterHistory();
+                    setStatus(null);
+                    setStatusUndo(false);
+                  }}
+                  className="rounded border border-border px-2 py-0.5 text-[10px] text-primary hover:bg-panel-2"
+                >
+                  Undo
+                </button>
+              )}
+            </div>
+          )}
+          {visibleEditorParts.length === 0 && (
+            <div className="pointer-events-none absolute inset-0 grid place-items-center">
+              <div className="max-w-xs rounded border border-dashed border-border bg-panel/80 p-4 text-center text-xs text-muted-foreground">
+                {doc.parts.length === 0 ? (
+                  <>
+                    <div className="mb-1 font-medium text-foreground">Drop SVG drawings here</div>
+                    …or use the Upload slots on the left. You're building the{" "}
+                    {ANGLE_LABELS[editorActiveAngle]} view.
+                  </>
+                ) : (
+                  <>
+                    <div className="mb-1 font-medium text-foreground">
+                      {ANGLE_LABELS[editorActiveAngle]} has no drawings yet
+                    </div>
+                    Upload {ANGLE_LABELS[editorActiveAngle]} versions into the same slots — other
+                    angles keep their own artwork.
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+          {(Object.keys(variantPreview).length > 0 || activePose) && (
+            <div className="absolute right-4 top-4 flex max-w-72 flex-col items-end gap-1">
+              {activePose && (
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-panel/95 px-2 py-0.5 text-[10px] text-primary shadow-[var(--shadow-panel)]">
+                  <span className="truncate">
+                    Pose: {activePose.name}
+                    {poseModified ? " · edited" : ""}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={showRestPose}
+                    className="rounded text-muted-foreground hover:text-foreground"
+                    title="Back to rest (no pose)"
+                  >
+                    ×
+                  </button>
+                </span>
+              )}
+              {Object.entries(variantPreview)
+                // With a pose active, only call out slots deviating from it.
+                .filter(([slotId, key]) => !appliedPoseMap || appliedPoseMap[slotId] !== key)
+                .map(([slotId, key]) => (
+                  <span
+                    key={slotId}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-panel/95 px-2 py-0.5 text-[10px] text-primary shadow-[var(--shadow-panel)]"
+                  >
+                    <span className="truncate">
+                      {doc.parts.find((part) => getPartSlotId(part) === slotId)?.slotName ?? slotId}
+                    </span>
+                    <span className="font-mono">{key}</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        appliedPoseMap ? resetSlotToPose(slotId) : clearVariantPreview(slotId)
+                      }
+                      className="rounded text-muted-foreground hover:text-foreground"
+                      title={
+                        appliedPoseMap
+                          ? "Back to the pose's variant"
+                          : "Stop previewing this variant"
+                      }
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              {activePose && poseModified && appliedPoseMap && (
+                <button
+                  type="button"
+                  onClick={() => setVariantPreview({ ...appliedPoseMap })}
+                  className="rounded border border-border bg-panel/95 px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+                >
+                  Reset to pose
+                </button>
+              )}
+              {!activePose && Object.keys(variantPreview).length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => clearVariantPreview()}
+                  className="rounded border border-border bg-panel/95 px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+                >
+                  Reset all previews
+                </button>
+              )}
             </div>
           )}
         </main>
 
         <aside className="w-80 shrink-0 overflow-auto border-l border-border bg-panel p-3 text-xs">
           <div className="space-y-4">
-            <CanvasControls doc={doc} onChange={(patch) => updateDoc(patch)} />
-            <RigPanel
-              doc={doc}
-              selectedBoneId={selectedBoneId}
-              selectedSlotId={selectedSlotId ?? (selectedPart ? getPartSlotId(selectedPart) : null)}
-              selectedPart={selectedPart}
-              showBones={showBones}
-              onSelectBone={selectBone}
-              onRigChange={(rig) => updateDoc({ rig })}
-            />
-            {restrictSlotId && (
-              <RestrictMovementPanel
-                doc={doc}
-                slotId={restrictSlotId}
-                editing={rangeEdit?.slotId === restrictSlotId}
-                onEnterEdit={enterReachEdit}
-                onExitEdit={exitReachEdit}
-                onAttachTo={(parentSlotId) => setSlotAttachTo(restrictSlotId, parentSlotId)}
-                onHostChange={(hostSlotId) => setSlotHost(restrictSlotId, hostSlotId)}
-                onHostModeChange={(mode) => setSlotHostMode(restrictSlotId, mode)}
-                onClear={() => clearReach(restrictSlotId)}
-              />
+            {editorPhase === "build" && (
+              <CanvasSection doc={doc} onChange={(patch) => updateDoc(patch)} />
             )}
-            <RigAssistant doc={doc} onChange={(patch) => updateDoc(patch)} />
+            {editorPhase === "rig" && (
+              <>
+                <SkeletonCard
+                  doc={doc}
+                  selectedBoneId={selectedBoneId}
+                  selectedSlotId={
+                    selectedSlotId ?? (selectedPart ? getPartSlotId(selectedPart) : null)
+                  }
+                  selectedPart={selectedPart}
+                  showBones={showBones}
+                  onRigChange={(rig) => updateDoc({ rig })}
+                  onResetRig={() => {
+                    updateDoc({ rig: buildDefaultRig(doc) });
+                    setStatusUndoable("Skeleton reset to default");
+                  }}
+                />
+                {restrictSlotId && (
+                  <RestrictMovementPanel
+                    doc={doc}
+                    slotId={restrictSlotId}
+                    editing={rangeEdit?.slotId === restrictSlotId}
+                    onEnterEdit={enterReachEdit}
+                    onExitEdit={exitReachEdit}
+                    onAttachTo={(parentSlotId) => setSlotAttachTo(restrictSlotId, parentSlotId)}
+                    onHostChange={(hostSlotId) => setSlotHost(restrictSlotId, hostSlotId)}
+                    onHostModeChange={(mode) => setSlotHostMode(restrictSlotId, mode)}
+                    onClear={() => clearReach(restrictSlotId)}
+                  />
+                )}
+                <RigHealthPanel
+                  doc={doc}
+                  report={rigHealthReport}
+                  defaultOpen
+                  onJumpTo={(row) => {
+                    if (row.childSlotId) selectSlot(row.childSlotId);
+                    if (row.parentSlotId && row.variantKey)
+                      previewVariant(row.parentSlotId, row.variantKey);
+                    setShowAnchors(true);
+                  }}
+                />
+              </>
+            )}
             {selectedSlotId && selectedSlotBounds ? (
               <GroupInspector
                 doc={doc}
                 slotId={selectedSlotId}
                 parts={selectedSlotParts}
                 bounds={selectedSlotBounds}
+                keyIssues={variantKeyIssues}
+                phase={editorPhase}
+                onSwitchPhase={switchPhase}
+                previewedKey={variantPreview[selectedSlotId]}
+                variantPreview={variantPreview}
+                socketPlacement={socketPlacement}
+                onPreviewVariant={previewVariant}
+                onClearPreview={clearVariantPreview}
+                onArmPlacement={setSocketPlacement}
+                onClearSocket={clearSocket}
+                onSetRotation={setAnchorRotation}
                 onMove={(dx, dy) => applyGroupMove(selectedSlotId, dx, dy)}
                 onScale={(anchor, sx, sy) => applyGroupScale(selectedSlotId, anchor, sx, sy)}
                 onRotate={(anchor, degrees) => applyGroupRotate(selectedSlotId, anchor, degrees)}
@@ -2016,9 +3047,22 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                 part={selectedPart}
                 mode={mode}
                 boundsMode={boundsMode}
+                keyIssues={variantKeyIssues}
+                phase={editorPhase}
+                onSwitchPhase={switchPhase}
+                onSelectSlot={selectSlot}
+                variantPreview={variantPreview}
+                anchorDragContext={
+                  selectedPart ? anchorDragContextForSlot(getPartSlotId(selectedPart)) : null
+                }
+                socketPlacement={socketPlacement}
+                onPreviewVariant={previewVariant}
+                onArmPlacement={setSocketPlacement}
+                onClearSocket={clearSocket}
+                onSetRotation={setAnchorRotation}
                 onModeChange={setMode}
                 onBoundsModeChange={setBoundsMode}
-                onChange={updatePart}
+                onChange={updatePartVariant}
                 onRemove={removePart}
                 onDuplicate={duplicatePart}
                 onPreview={setPreview}
@@ -2095,12 +3139,14 @@ function UploadSlots({
   manifest,
   canvasWidth,
   canvasHeight,
+  activeAngle,
 }: {
   onImport: (file: File, options?: ImportOptions) => void;
   parts: CharacterPart[];
   manifest: PartManifest;
   canvasWidth: number;
   canvasHeight: number;
+  activeAngle: CharacterAngle;
 }) {
   const [customSlotName, setCustomSlotName] = useState("");
   const [variantSlotId, setVariantSlotId] = useState("");
@@ -2120,16 +3166,23 @@ function UploadSlots({
         <div className="mt-1 text-[11px] text-muted-foreground">
           Drop SVGs on the canvas or upload into a slot.
         </div>
+        <div className="mt-1 rounded border border-primary/40 bg-primary/10 px-2 py-1 text-[11px] text-primary">
+          Uploading into: {ANGLE_LABELS[activeAngle]} — each angle has its own drawings.
+        </div>
       </div>
       <div className="grid grid-cols-2 gap-2">
         {SLOT_DEFS.filter(
           (slot) =>
-            slot.role !== "eye" && slot.role !== "iris" && roleEnabledByManifest(slot.role, manifest),
+            slot.role !== "eye" &&
+            slot.role !== "iris" &&
+            roleEnabledByManifest(slot.role, manifest),
         ).map((slot) => (
           <SlotUpload
             key={`${slot.label}-${slot.role}`}
             label={slot.label}
-            filled={parts.some((p) => p.slotName === slot.label)}
+            filled={parts.some(
+              (p) => p.slotName === slot.label && partAvailableForAngle(p, activeAngle),
+            )}
             onUpload={(file) =>
               onImport(file, {
                 role: slot.role,
@@ -2183,10 +3236,10 @@ function UploadSlots({
               disabled={!selectedVariantSlot || !normalizedVariantKey}
               filled={Boolean(
                 selectedVariantSlot &&
-                  normalizedVariantKey &&
-                  selectedVariantSlot.parts.some(
-                    (part) => partMatchesVariant(part, normalizedVariantKey),
-                  ),
+                normalizedVariantKey &&
+                selectedVariantSlot.parts.some((part) =>
+                  partMatchesVariant(part, normalizedVariantKey),
+                ),
               )}
               onUpload={(file) => {
                 if (!selectedVariantSlot || !normalizedVariantKey) return;
@@ -2434,6 +3487,7 @@ function LayerPartRow({
   indented,
   indentLevel = indented ? 1 : 0,
   label,
+  warning = false,
   onSelect,
   onChange,
   onRemove,
@@ -2443,10 +3497,12 @@ function LayerPartRow({
   indented?: boolean;
   indentLevel?: number;
   label?: string;
+  warning?: boolean;
   onSelect: () => void;
   onChange: (patch: Partial<CharacterPart>) => void;
   onRemove: () => void;
 }) {
+  const thumbUrl = useMediaUrl(part.mediaId);
   return (
     <div
       onClick={onSelect}
@@ -2455,6 +3511,15 @@ function LayerPartRow({
       }`}
       style={indentLevel > 0 ? { marginLeft: indentLevel * 12 } : undefined}
     >
+      {warning && (
+        <span
+          className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400"
+          title="Variant key problem — select to see details"
+        />
+      )}
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center overflow-hidden rounded-sm bg-white/80">
+        {thumbUrl && <img src={thumbUrl} alt="" className="max-h-full max-w-full object-contain" />}
+      </span>
       <span className="min-w-0 flex-1 truncate">
         {label ?? (indented ? variantLabel(part) : (part.slotName ?? part.name))}
         {!indented && (
@@ -2522,6 +3587,7 @@ function LayerList({
   rig,
   selectedId,
   selectedSlotId,
+  keyIssues,
   onSelect,
   onSelectSlot,
   onChange,
@@ -2535,6 +3601,7 @@ function LayerList({
   rig: CharacterRig;
   selectedId: ID | null;
   selectedSlotId: ID | null;
+  keyIssues: Map<ID, VariantKeyIssue[]>;
   onSelect: (id: ID) => void;
   onSelectSlot: (slotId: ID) => void;
   onChange: (id: ID, patch: Partial<CharacterPart>) => void;
@@ -2707,6 +3774,9 @@ function LayerList({
                 selected={part.id === selectedId}
                 indentLevel={depth + 1}
                 label={variantLabel(part)}
+                warning={
+                  keyIssues.get(part.id)?.some((issue) => issue.severity === "warning") ?? false
+                }
                 onSelect={() => onSelect(part.id)}
                 onChange={(patch) => onChange(part.id, patch)}
                 onRemove={() => onRemove(part.id)}
@@ -2724,9 +3794,7 @@ function LayerList({
       <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
         Layers
       </div>
-      <div className="space-y-1">
-        {roots.map((group) => renderLayerGroup(group))}
-      </div>
+      <div className="space-y-1">{roots.map((group) => renderLayerGroup(group))}</div>
     </div>
   );
 }
@@ -2760,6 +3828,17 @@ function Inspector({
   part,
   mode,
   boundsMode,
+  keyIssues,
+  phase,
+  onSwitchPhase,
+  onSelectSlot,
+  variantPreview,
+  anchorDragContext,
+  socketPlacement,
+  onPreviewVariant,
+  onArmPlacement,
+  onClearSocket,
+  onSetRotation,
   onModeChange,
   onBoundsModeChange,
   onChange,
@@ -2771,6 +3850,23 @@ function Inspector({
   part: CharacterPart | null;
   mode: EditorMode;
   boundsMode: EditorBoundsMode;
+  keyIssues: Map<ID, VariantKeyIssue[]>;
+  phase: "build" | "rig" | "pose";
+  onSwitchPhase: (phase: "build" | "rig" | "pose") => void;
+  onSelectSlot: (slotId: ID) => void;
+  variantPreview: Record<ID, string>;
+  /** Set when dragging this part on the canvas would pin its anchor (parent variant previewed). */
+  anchorDragContext: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
+  socketPlacement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
+  onPreviewVariant: (slotId: ID, key: string) => void;
+  onArmPlacement: (
+    placement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null,
+  ) => void;
+  onClearSocket: (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => void;
+  onSetRotation: (
+    context: { parentSlotId: ID; variantKey: string; childSlotId: ID },
+    rotation: number,
+  ) => void;
   onModeChange: (mode: EditorMode) => void;
   onBoundsModeChange: (mode: EditorBoundsMode) => void;
   onChange: (id: ID, patch: Partial<CharacterPart>) => void;
@@ -2814,294 +3910,449 @@ function Inspector({
 
   return (
     <div className="space-y-4">
-      <section className="rounded border border-border bg-panel-2 p-3">
-        <div className="mb-3 flex items-center gap-2">
-          <input
-            value={part.name}
-            onChange={(e) => onChange(part.id, { name: e.target.value, slotName: e.target.value })}
-            className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 font-medium"
-          />
-          <button
-            onClick={() => onDuplicate(part)}
-            className="rounded border border-border p-1.5"
-            title="Duplicate"
-          >
-            <Copy size={14} />
-          </button>
-          <button
-            onClick={() => onRemove(part.id)}
-            className="rounded border border-border p-1.5 text-destructive"
-            title="Delete"
-          >
-            <Trash2 size={14} />
-          </button>
-        </div>
-
-        <div className="grid grid-cols-2 gap-2">
-          <Field label="Role">
-            <select
-              value={part.role}
-              onChange={(e) =>
-                onChange(part.id, {
-                  role: e.target.value as PartRole,
-                  motionBehavior: defaultMotionBehaviorForRole(
-                    e.target.value as PartRole,
-                    part.viseme,
-                  ),
-                })
-              }
-              className="w-full rounded border border-border bg-background px-2 py-1"
+      {phase !== "build" && (
+        <section className="rounded border border-border bg-panel-2 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="truncate font-medium text-foreground">
+                <button
+                  type="button"
+                  onClick={() => onSelectSlot(getPartSlotId(part))}
+                  className="text-muted-foreground hover:text-foreground"
+                  title="Select the whole layer group"
+                >
+                  {part.slotName ?? roleLabel(part.role)}
+                </button>
+                <span className="text-muted-foreground"> › </span>
+                {variantLabelForPart(part)}
+              </div>
+              <div className="text-[10px] text-muted-foreground">{roleLabel(part.role)}</div>
+            </div>
+            <button
+              type="button"
+              onClick={() => onSwitchPhase("build")}
+              className="shrink-0 rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
+              title="Rename, transform, or retag this drawing in the Build phase"
             >
-              {ROLE_OPTIONS.map((role) => (
-                <option key={role} value={role}>
-                  {roleLabel(role)}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Motion behavior">
-            <select
-              value={part.motionBehavior ?? "none"}
-              onChange={(e) =>
-                onChange(part.id, { motionBehavior: e.target.value as PartMotionBehavior })
-              }
-              className="w-full rounded border border-border bg-background px-2 py-1"
-            >
-              {MOTION_BEHAVIOR_OPTIONS.map((item) => (
-                <option key={item.value} value={item.value}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-          </Field>
-          {part.role === "mouth" && (
-            <Field label="Mouth">
-              <select
-                value={part.viseme ?? "rest"}
-                onChange={(e) => {
-                  const viseme = e.target.value as MouthViseme;
-                  onChange(part.id, {
-                    viseme,
-                    variant: updateVariant(
-                      { key: viseme, kind: "viseme" },
-                      { viseme, eyeState: part.eyeState, pose: part.pose },
-                    ),
-                  });
-                }}
-                className="w-full rounded border border-border bg-background px-2 py-1"
-                title={MOUTH_VISEME_DESCRIPTIONS[part.viseme ?? "rest"]}
-              >
-                {MOUTH_VISEMES.map((viseme) => (
-                  <option key={viseme} value={viseme}>
-                    {viseme}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          )}
-          {part.role === "eye" && (
-            <Field label="Eye state">
-              <select
-                value={part.eyeState ?? "open"}
-                onChange={(e) => {
-                  const eyeState = e.target.value as EyeState;
-                  onChange(part.id, {
-                    eyeState,
-                    variant: updateVariant(
-                      { key: eyeState, kind: "eyeState" },
-                      { viseme: part.viseme, eyeState, pose: part.pose },
-                    ),
-                  });
-                }}
-                className="w-full rounded border border-border bg-background px-2 py-1"
-              >
-                {EYE_STATES.map((eyeState) => (
-                  <option key={eyeState} value={eyeState}>
-                    {eyeState}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          )}
-          <Field label="Attach To">
-            <select
-              value={part.parentId ?? ""}
-              onChange={(e) => onChange(part.id, { parentId: e.target.value || undefined })}
-              className="w-full rounded border border-border bg-background px-2 py-1"
-            >
-              <option value="">None</option>
-              {parentOptions.map((candidate) => (
-                <option key={candidate.id} value={candidate.id}>
-                  {candidate.slotName ?? candidate.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-        </div>
-      </section>
-
-      <section className="rounded border border-border bg-panel-2 p-3">
-        <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-          Variant
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          <Field label="Key">
-            <input
-              value={variantInputKey}
-              onChange={(e) => onChange(part.id, { variant: updateVariant({ key: e.target.value }) })}
-              placeholder="open"
-              className="w-full rounded border border-border bg-background px-2 py-1"
-            />
-          </Field>
-          <Field label="Kind">
-            <select
-              value={variantKind}
-              onChange={(e) =>
-                onChange(part.id, {
-                  variant: updateVariant({ kind: e.target.value as CharacterVariantKind }),
-                })
-              }
-              className="w-full rounded border border-border bg-background px-2 py-1"
-            >
-              {CHARACTER_VARIANT_KIND_VALUES.map((kind) => (
-                <option key={kind} value={kind}>
-                  {VARIANT_KIND_LABELS[kind]}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <div className="col-span-2">
-            <Field label="Label">
-              <input
-                value={part.variant?.name ?? ""}
-                onChange={(e) =>
-                  onChange(part.id, {
-                    variant: updateVariant({ name: e.target.value || undefined }),
-                  })
-                }
-                placeholder={variantInputKey || part.name}
-                className="w-full rounded border border-border bg-background px-2 py-1"
-              />
-            </Field>
+              Edit artwork →
+            </button>
           </div>
-        </div>
-      </section>
+          {phase === "pose" && (
+            <div className="mt-2">
+              <VariantKeyChip part={part} issues={keyIssues.get(part.id) ?? []} />
+            </div>
+          )}
+          {phase === "pose" && anchorDragContext && (
+            <div className="mt-2 text-[10px] leading-snug text-muted-foreground">
+              Drag this layer on the canvas to adjust its anchor —{" "}
+              <button
+                type="button"
+                onClick={() => onSwitchPhase("rig")}
+                className="text-foreground underline-offset-2 hover:underline"
+              >
+                fine controls in Rig →
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+      {phase === "build" && (
+        <>
+          <section className="rounded border border-border bg-panel-2 p-3">
+            <div className="mb-1 text-[10px] text-muted-foreground">
+              <button
+                type="button"
+                onClick={() => onSelectSlot(getPartSlotId(part))}
+                className="hover:text-foreground"
+                title="Select the whole layer group"
+              >
+                {part.slotName ?? roleLabel(part.role)}
+              </button>
+              {" › "}
+              {variantLabelForPart(part)}
+            </div>
+            <div className="mb-3 flex items-center gap-2">
+              <input
+                value={part.name}
+                onChange={(e) =>
+                  onChange(part.id, { name: e.target.value, slotName: e.target.value })
+                }
+                className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 font-medium"
+              />
+              <button
+                onClick={() => onDuplicate(part)}
+                className="rounded border border-border p-1.5"
+                title="Duplicate"
+              >
+                <Copy size={14} />
+              </button>
+              <button
+                onClick={() => onRemove(part.id)}
+                className="rounded border border-border p-1.5 text-destructive"
+                title="Delete"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
 
-      <section className="rounded border border-border bg-panel-2 p-3">
-        <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-          Transform
-        </div>
-        <div className="mb-3 grid grid-cols-2 gap-1 rounded border border-border bg-background p-1">
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Role">
+                <select
+                  value={part.role}
+                  onChange={(e) =>
+                    onChange(part.id, {
+                      role: e.target.value as PartRole,
+                      motionBehavior: defaultMotionBehaviorForRole(
+                        e.target.value as PartRole,
+                        part.viseme,
+                      ),
+                    })
+                  }
+                  className="w-full rounded border border-border bg-background px-2 py-1"
+                >
+                  {ROLE_OPTIONS.map((role) => (
+                    <option key={role} value={role}>
+                      {roleLabel(role)}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Motion behavior">
+                <select
+                  value={part.motionBehavior ?? "none"}
+                  onChange={(e) =>
+                    onChange(part.id, { motionBehavior: e.target.value as PartMotionBehavior })
+                  }
+                  className="w-full rounded border border-border bg-background px-2 py-1"
+                >
+                  {MOTION_BEHAVIOR_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              {part.role === "mouth" && (
+                <Field label="Mouth">
+                  <select
+                    value={part.viseme ?? "rest"}
+                    onChange={(e) => {
+                      const viseme = e.target.value as MouthViseme;
+                      onChange(part.id, {
+                        viseme,
+                        variant: updateVariant(
+                          { key: viseme, kind: "viseme" },
+                          { viseme, eyeState: part.eyeState, pose: part.pose },
+                        ),
+                      });
+                    }}
+                    className="w-full rounded border border-border bg-background px-2 py-1"
+                    title={MOUTH_VISEME_DESCRIPTIONS[part.viseme ?? "rest"]}
+                  >
+                    {MOUTH_VISEMES.map((viseme) => (
+                      <option key={viseme} value={viseme}>
+                        {viseme}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+              {part.role === "eye" && (
+                <Field label="Eye state">
+                  <select
+                    value={part.eyeState ?? "open"}
+                    onChange={(e) => {
+                      const eyeState = e.target.value as EyeState;
+                      onChange(part.id, {
+                        eyeState,
+                        variant: updateVariant(
+                          { key: eyeState, kind: "eyeState" },
+                          { viseme: part.viseme, eyeState, pose: part.pose },
+                        ),
+                      });
+                    }}
+                    className="w-full rounded border border-border bg-background px-2 py-1"
+                  >
+                    {EYE_STATES.map((eyeState) => (
+                      <option key={eyeState} value={eyeState}>
+                        {eyeState}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+              <Field label="Attach To">
+                <select
+                  value={part.parentId ?? ""}
+                  onChange={(e) => onChange(part.id, { parentId: e.target.value || undefined })}
+                  className="w-full rounded border border-border bg-background px-2 py-1"
+                >
+                  <option value="">None</option>
+                  {parentOptions.map((candidate) => (
+                    <option key={candidate.id} value={candidate.id}>
+                      {candidate.slotName ?? candidate.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+          </section>
+
+          <section className="rounded border border-border bg-panel-2 p-3">
+            <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+              Variant
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Key">
+                <input
+                  value={variantInputKey}
+                  onChange={(e) =>
+                    onChange(part.id, { variant: updateVariant({ key: e.target.value }) })
+                  }
+                  placeholder="open"
+                  className="w-full rounded border border-border bg-background px-2 py-1"
+                />
+              </Field>
+              <Field label="Kind">
+                <select
+                  value={variantKind}
+                  onChange={(e) =>
+                    onChange(part.id, {
+                      variant: updateVariant({ kind: e.target.value as CharacterVariantKind }),
+                    })
+                  }
+                  className="w-full rounded border border-border bg-background px-2 py-1"
+                >
+                  {CHARACTER_VARIANT_KIND_VALUES.map((kind) => (
+                    <option key={kind} value={kind}>
+                      {VARIANT_KIND_LABELS[kind]}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <div className="col-span-2">
+                <Field label="Label">
+                  <input
+                    value={part.variant?.name ?? ""}
+                    onChange={(e) =>
+                      onChange(part.id, {
+                        variant: updateVariant({ name: e.target.value || undefined }),
+                      })
+                    }
+                    placeholder={variantInputKey || part.name}
+                    className="w-full rounded border border-border bg-background px-2 py-1"
+                  />
+                </Field>
+              </div>
+              <div className="col-span-2">
+                <VariantKeyChip part={part} issues={keyIssues.get(part.id) ?? []} />
+              </div>
+            </div>
+          </section>
+
+          {availableCharacterAngles(doc).length > 1 && (
+            <section className="rounded border border-border bg-panel-2 p-3">
+              <div className="mb-1 font-semibold uppercase tracking-wider text-muted-foreground">
+                Angles
+              </div>
+              <div className="mb-2 text-[10px] leading-snug text-muted-foreground">
+                Which views show this drawing. All checked = shared with every angle (props,
+                accessories), including ones added later.
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {availableCharacterAngles(doc).map((angle) => {
+                  const available = availableCharacterAngles(doc);
+                  const effective = part.angleIds?.length
+                    ? part.angleIds
+                    : part.angleId
+                      ? [part.angleId]
+                      : available;
+                  const checked = effective.includes(angle);
+                  const lastOne = checked && effective.length === 1;
+                  return (
+                    <label
+                      key={angle}
+                      className={`flex items-center gap-1 text-[10px] ${
+                        lastOne ? "opacity-70" : "cursor-pointer"
+                      }`}
+                      title={
+                        lastOne
+                          ? "A drawing must belong to at least one angle"
+                          : `Show this drawing on ${ANGLE_LABELS[angle]}`
+                      }
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={lastOne}
+                        onChange={(e) => {
+                          const next = e.target.checked
+                            ? [...effective.filter((a) => a !== angle), angle]
+                            : effective.filter((a) => a !== angle);
+                          const coversAll = available.every((a) => next.includes(a));
+                          onChange(part.id, {
+                            angleIds: coversAll ? undefined : next,
+                            angleId: undefined,
+                          });
+                        }}
+                      />
+                      {ANGLE_LABELS[angle]}
+                    </label>
+                  );
+                })}
+                {!part.angleIds?.length && !part.angleId && (
+                  <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[9px] text-emerald-300">
+                    Shared
+                  </span>
+                )}
+              </div>
+            </section>
+          )}
           <button
             type="button"
-            onClick={() => onBoundsModeChange("frame")}
-            className={`flex items-center justify-center gap-1 rounded px-2 py-1 ${
-              boundsMode === "frame" ? "bg-primary text-primary-foreground" : "hover:bg-panel"
-            }`}
-            title="Use the full transparent registration frame for editor controls"
+            onClick={() => onSwitchPhase("rig")}
+            className="w-full rounded border border-dashed border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
+            title="Anchors, movement limits, and the skeleton live in the Rig phase"
           >
-            <Maximize2 size={12} />
-            Frame
+            Rig this layer →
           </button>
-          <button
-            type="button"
-            onClick={() => onBoundsModeChange("art")}
-            className={`flex items-center justify-center gap-1 rounded px-2 py-1 ${
-              boundsMode === "art" ? "bg-primary text-primary-foreground" : "hover:bg-panel"
-            }`}
-            title="Use the visible non-transparent art bounds for editor controls"
-          >
-            <Minimize2 size={12} />
-            Art
-          </button>
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          <NumberField label="X" value={part.x} onChange={(x) => onChange(part.id, { x })} />
-          <NumberField label="Y" value={part.y} onChange={(y) => onChange(part.id, { y })} />
-          <NumberField
-            label="Width"
-            value={part.width}
-            onChange={(width) => onChange(part.id, { width })}
-          />
-          <NumberField
-            label="Height"
-            value={part.height}
-            onChange={(height) => onChange(part.id, { height })}
-          />
-          <NumberField
-            label="Rotate"
-            value={part.rotation}
-            onChange={(rotation) => onChange(part.id, { rotation })}
-          />
-          <NumberField
-            label="Draw Order"
-            value={part.zIndex}
-            onChange={(zIndex) => onChange(part.id, { zIndex })}
-          />
-          <NumberField
-            label="Depth (2.5D)"
-            value={part.depth}
-            onChange={(depth) => onChange(part.id, { depth })}
-          />
-        </div>
-      </section>
+        </>
+      )}
 
-      <section className="rounded border border-border bg-panel-2 p-3">
-        <div className="mb-2 flex items-center justify-between">
-          <span className="font-semibold uppercase tracking-wider text-muted-foreground">
-            Motion Helpers
-          </span>
-          <button
-            onClick={() => onModeChange(mode === "select" ? "pivot" : "select")}
-            className={`flex items-center gap-1 rounded border px-2 py-1 ${
-              mode === "pivot" ? "border-primary bg-primary/15" : "border-border"
-            }`}
-          >
-            <MousePointer2 size={13} />
-            Set Pivot
-          </button>
-        </div>
-        <div className="mb-3 grid grid-cols-2 gap-2">
-          <NumberField
-            label="Pivot X"
-            value={Math.round((part.pivot ?? alphaCenterForPart(part)).x)}
-            onChange={(x) =>
-              onChange(part.id, { pivot: { x, y: (part.pivot ?? alphaCenterForPart(part)).y } })
-            }
-          />
-          <NumberField
-            label="Pivot Y"
-            value={Math.round((part.pivot ?? alphaCenterForPart(part)).y)}
-            onChange={(y) =>
-              onChange(part.id, { pivot: { x: (part.pivot ?? alphaCenterForPart(part)).x, y } })
-            }
-          />
-        </div>
-        <div className="flex gap-2">
-          <button
-            onClick={() => onModeChange(mode === "bounds-rect" ? "select" : "bounds-rect")}
-            className={`flex-1 rounded border px-2 py-1 ${mode === "bounds-rect" ? "border-primary bg-primary/15" : "border-border"}`}
-          >
-            Rect Area
-          </button>
-          <button
-            onClick={() => onModeChange(mode === "bounds-ellipse" ? "select" : "bounds-ellipse")}
-            className={`flex-1 rounded border px-2 py-1 ${mode === "bounds-ellipse" ? "border-primary bg-primary/15" : "border-border"}`}
-          >
-            Ellipse Area
-          </button>
-        </div>
-        {part.bounds && (
-          <button
-            onClick={() => onChange(part.id, { bounds: undefined })}
-            className="mt-2 text-[11px] text-destructive"
-          >
-            Clear allowed area
-          </button>
-        )}
-      </section>
+      {phase === "rig" && (
+        <VariantAnchorSection
+          doc={doc}
+          childSlotId={getPartSlotId(part)}
+          variantPreview={variantPreview}
+          socketPlacement={socketPlacement}
+          onPreviewVariant={onPreviewVariant}
+          onArmPlacement={onArmPlacement}
+          onClearSocket={onClearSocket}
+          onSetRotation={onSetRotation}
+        />
+      )}
 
-      {part.role === "mouth" && (
+      {phase === "build" && (
+        <>
+          <section className="rounded border border-border bg-panel-2 p-3">
+            <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+              Transform
+            </div>
+            <div className="mb-3 grid grid-cols-2 gap-1 rounded border border-border bg-background p-1">
+              <button
+                type="button"
+                onClick={() => onBoundsModeChange("frame")}
+                className={`flex items-center justify-center gap-1 rounded px-2 py-1 ${
+                  boundsMode === "frame" ? "bg-primary text-primary-foreground" : "hover:bg-panel"
+                }`}
+                title="Use the full transparent registration frame for editor controls"
+              >
+                <Maximize2 size={12} />
+                Frame
+              </button>
+              <button
+                type="button"
+                onClick={() => onBoundsModeChange("art")}
+                className={`flex items-center justify-center gap-1 rounded px-2 py-1 ${
+                  boundsMode === "art" ? "bg-primary text-primary-foreground" : "hover:bg-panel"
+                }`}
+                title="Use the visible non-transparent art bounds for editor controls"
+              >
+                <Minimize2 size={12} />
+                Art
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <NumberField label="X" value={part.x} onChange={(x) => onChange(part.id, { x })} />
+              <NumberField label="Y" value={part.y} onChange={(y) => onChange(part.id, { y })} />
+              <NumberField
+                label="Width"
+                value={part.width}
+                onChange={(width) => onChange(part.id, { width })}
+              />
+              <NumberField
+                label="Height"
+                value={part.height}
+                onChange={(height) => onChange(part.id, { height })}
+              />
+              <NumberField
+                label="Rotate"
+                value={part.rotation}
+                onChange={(rotation) => onChange(part.id, { rotation })}
+              />
+              <NumberField
+                label="Draw Order"
+                value={part.zIndex}
+                onChange={(zIndex) => onChange(part.id, { zIndex })}
+              />
+              <NumberField
+                label="Depth (2.5D)"
+                value={part.depth}
+                onChange={(depth) => onChange(part.id, { depth })}
+              />
+            </div>
+          </section>
+
+          <section className="rounded border border-border bg-panel-2 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+                Motion Helpers
+              </span>
+              <button
+                onClick={() => onModeChange(mode === "select" ? "pivot" : "select")}
+                className={`flex items-center gap-1 rounded border px-2 py-1 ${
+                  mode === "pivot" ? "border-primary bg-primary/15" : "border-border"
+                }`}
+              >
+                <MousePointer2 size={13} />
+                Set Pivot
+              </button>
+            </div>
+            <div className="mb-3 grid grid-cols-2 gap-2">
+              <NumberField
+                label="Pivot X"
+                value={Math.round((part.pivot ?? alphaCenterForPart(part)).x)}
+                onChange={(x) =>
+                  onChange(part.id, { pivot: { x, y: (part.pivot ?? alphaCenterForPart(part)).y } })
+                }
+              />
+              <NumberField
+                label="Pivot Y"
+                value={Math.round((part.pivot ?? alphaCenterForPart(part)).y)}
+                onChange={(y) =>
+                  onChange(part.id, { pivot: { x: (part.pivot ?? alphaCenterForPart(part)).x, y } })
+                }
+              />
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => onModeChange(mode === "bounds-rect" ? "select" : "bounds-rect")}
+                className={`flex-1 rounded border px-2 py-1 ${mode === "bounds-rect" ? "border-primary bg-primary/15" : "border-border"}`}
+              >
+                Rect Area
+              </button>
+              <button
+                onClick={() =>
+                  onModeChange(mode === "bounds-ellipse" ? "select" : "bounds-ellipse")
+                }
+                className={`flex-1 rounded border px-2 py-1 ${mode === "bounds-ellipse" ? "border-primary bg-primary/15" : "border-border"}`}
+              >
+                Ellipse Area
+              </button>
+            </div>
+            {part.bounds && (
+              <button
+                onClick={() => onChange(part.id, { bounds: undefined })}
+                className="mt-2 text-[11px] text-destructive"
+              >
+                Clear allowed area
+              </button>
+            )}
+          </section>
+        </>
+      )}
+
+      {phase === "pose" && part.role === "mouth" && (
         <section className="rounded border border-border bg-panel-2 p-3">
           <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
             Test Talk
@@ -3130,7 +4381,7 @@ function Inspector({
         </section>
       )}
 
-      {previewButtons.length > 0 && (
+      {phase === "pose" && previewButtons.length > 0 && (
         <section className="rounded border border-border bg-panel-2 p-3">
           <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
             Preview
@@ -3161,29 +4412,34 @@ function Inspector({
   );
 }
 
-function CanvasControls({
+/** Canvas size for the whole character (Build phase). Angles are managed in the toolbar. */
+function CanvasSection({
   doc,
   onChange,
 }: {
   doc: CharacterPreset;
   onChange: (patch: Partial<CharacterPreset>) => void;
 }) {
-  const rig = normalizeCharacterRig(doc);
-  const angles = availableCharacterAngles(doc);
-  const selectAngle = (activeAngle: CharacterAngle) => {
-    const nextAngles = CHARACTER_ANGLES.filter(
-      (angle) => angle === activeAngle || angles.includes(angle),
-    );
-    onChange({ angles: nextAngles, rig: { ...rig, activeAngle } });
-  };
   return (
     <section className="rounded border border-border bg-panel-2 p-3">
       <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
         Canvas
       </div>
-      <div className="mb-2 rounded border border-border bg-background px-2 py-1.5 text-[10px] leading-snug text-muted-foreground">
-        Active angle is discrete in V1. Depth, bone offsets, and selected slot variants can be
-        overridden per angle.
+      <div className="mb-2 flex flex-wrap gap-1">
+        {CANVAS_PRESETS.map((preset) => (
+          <button
+            key={preset.label}
+            type="button"
+            onClick={() => onChange({ canvasWidth: preset.width, canvasHeight: preset.height })}
+            className={`rounded border px-2 py-1 text-[11px] hover:bg-panel ${
+              doc.canvasWidth === preset.width && doc.canvasHeight === preset.height
+                ? "border-primary bg-primary/15 text-foreground"
+                : "border-border text-muted-foreground"
+            }`}
+          >
+            {preset.label}
+          </button>
+        ))}
       </div>
       <div className="grid grid-cols-2 gap-2">
         <NumberField
@@ -3196,125 +4452,57 @@ function CanvasControls({
           value={doc.canvasHeight}
           onChange={(canvasHeight) => onChange({ canvasHeight })}
         />
-        <Field label="Active Angle">
-          <select
-            value={rig.activeAngle}
-            onChange={(e) => selectAngle(e.target.value as CharacterAngle)}
-            className="w-full rounded border border-border bg-background px-2 py-1"
-          >
-            {CHARACTER_ANGLES.map((angle) => (
-              <option key={angle} value={angle}>
-                {angle}
-                {angles.includes(angle) ? "" : " (add)"}
-              </option>
-            ))}
-          </select>
-        </Field>
       </div>
     </section>
   );
 }
 
-function RigAssistant({
-  doc,
-  onChange,
+/** Simple collapsible section used to fold setup-time tools out of the way. */
+function Accordion({
+  title,
+  defaultOpen = false,
+  children,
 }: {
-  doc: CharacterPreset;
-  onChange: (patch: Partial<CharacterPreset>) => void;
+  title: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
 }) {
-  const [draft, setDraft] = useState("");
-  const [message, setMessage] = useState<string | null>(null);
-  const rig = normalizeCharacterRig(doc);
-
-  const copyPrompt = () => {
-    void navigator.clipboard?.writeText(characterRigPrompt(doc));
-    setMessage("Prompt copied.");
-  };
-
-  const applyDraft = () => {
-    try {
-      const parsed = JSON.parse(draft) as CharacterRig | { rig?: CharacterRig };
-      const candidate = "rig" in parsed && parsed.rig ? parsed.rig : (parsed as CharacterRig);
-      const validation = validateCharacterRig(candidate);
-      if (!validation.ok) {
-        setMessage(validation.errors.join(" "));
-        return;
-      }
-      onChange({ rig: candidate });
-      setMessage("Rig applied.");
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Could not parse rig JSON.");
-    }
-  };
-
+  const [open, setOpen] = useState(defaultOpen);
   return (
-    <section className="rounded border border-border bg-panel-2 p-3">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <span className="font-semibold uppercase tracking-wider text-muted-foreground">
-          Rig Assistant
-        </span>
-        <span className="text-[10px] text-muted-foreground">{rig.bones.length} bones</span>
-      </div>
-      <div className="mb-2 grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          onClick={() => onChange({ rig: buildDefaultRig(doc) })}
-          className="rounded border border-border px-2 py-1 hover:bg-panel"
-        >
-          Rebuild
-        </button>
-        <button
-          type="button"
-          onClick={copyPrompt}
-          className="rounded border border-border px-2 py-1 hover:bg-panel"
-        >
-          Copy AI prompt
-        </button>
-      </div>
-      <div className="mb-2 rounded border border-accent/30 bg-accent/10 px-2 py-1.5 text-[10px] leading-snug text-muted-foreground">
-        Paste either a raw <code className="font-mono text-foreground">CharacterRig</code> object or{" "}
-        <code className="font-mono text-foreground">{'{"rig": {...}}'}</code>. Required shape:{" "}
-        <code className="font-mono text-foreground">
-          {
-            "version:1, activeAngle, angles{}, bones[], slotBindings[], drawOrder[], slotRelations[], hostConstraints[], reaches[]"
-          }
-        </code>
-        . Bone ids must be acyclic, and each slot binding must reference an existing slot and bone.
-      </div>
-      <textarea
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        placeholder="Paste reviewed CharacterRig JSON"
-        className="h-20 w-full resize-none rounded border border-border bg-background px-2 py-1 font-mono text-[10px]"
-      />
+    <section className="mb-3 rounded border border-border bg-panel-2 p-2">
       <button
         type="button"
-        onClick={applyDraft}
-        className="mt-2 w-full rounded border border-border px-2 py-1 hover:bg-panel"
+        onClick={() => setOpen((prev) => !prev)}
+        className="flex w-full items-center justify-between text-left font-semibold uppercase tracking-wider text-muted-foreground"
       >
-        Validate & apply
+        {title}
+        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
       </button>
-      {message && <div className="mt-2 text-[10px] text-muted-foreground">{message}</div>}
+      {open && <div className="mt-2">{children}</div>}
     </section>
   );
 }
 
-function RigPanel({
+/**
+ * Rig-phase skeleton card: the selected bone's transform, per-angle slot binding, and the
+ * reset-to-default escape hatch. Bones are selected by clicking them on the canvas.
+ */
+function SkeletonCard({
   doc,
   selectedBoneId,
   selectedSlotId,
   selectedPart,
   showBones,
-  onSelectBone,
   onRigChange,
+  onResetRig,
 }: {
   doc: CharacterPreset;
   selectedBoneId: ID | null;
   selectedSlotId: ID | null;
   selectedPart: CharacterPart | null;
   showBones: boolean;
-  onSelectBone: (boneId: ID) => void;
   onRigChange: (rig: CharacterRig) => void;
+  onResetRig: () => void;
 }) {
   const rig = normalizeCharacterRig(doc);
   const selectedBone = rig.bones.find((bone) => bone.id === selectedBoneId) ?? null;
@@ -3327,28 +4515,17 @@ function RigPanel({
   return (
     <section className="rounded border border-border bg-panel-2 p-3">
       <div className="mb-2 flex items-center justify-between gap-2">
-        <span className="font-semibold uppercase tracking-wider text-muted-foreground">Rig</span>
+        <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+          Skeleton
+        </span>
         <span className="text-[10px] text-muted-foreground">{rig.bones.length} bones</span>
-      </div>
-      <div className="mb-3 max-h-28 space-y-1 overflow-auto">
-        {rig.bones.map((bone) => (
-          <button
-            key={bone.id}
-            type="button"
-            onClick={() => onSelectBone(bone.id)}
-            className={`flex w-full items-center justify-between gap-2 rounded border px-2 py-1 text-left hover:bg-panel ${
-              bone.id === selectedBoneId ? "border-primary bg-primary/15" : "border-border"
-            }`}
-          >
-            <span className="truncate">{bone.name}</span>
-            <span className="shrink-0 text-[10px] text-muted-foreground">{bone.role}</span>
-          </button>
-        ))}
       </div>
       <div className="mb-3 rounded border border-border bg-background px-2 py-1.5 text-[10px] leading-snug text-muted-foreground">
         {showBones
-          ? "Bones shown — drag the joints to position the skeleton; artwork stays put. Hide bones (top bar) to drag the layers themselves."
-          : "Bones hidden — drag layers on the canvas to reposition artwork. Show bones to adjust the skeleton."}
+          ? selectedBone
+            ? `Editing ${selectedBone.name} — drag it on the canvas or fine-tune below.`
+            : "Click a joint on the canvas to select it; drag joints to position the skeleton."
+          : "Show Bones (bottom-left of the canvas) to see and adjust the skeleton."}
       </div>
       {selectedBone && (
         <div className="mb-3 grid grid-cols-2 gap-2">
@@ -3402,7 +4579,54 @@ function RigPanel({
           )}
         </div>
       )}
+      <ConfirmButton
+        label="Reset skeleton to default"
+        confirmLabel="Click again to confirm reset"
+        onConfirm={onResetRig}
+        title="Rebuild the skeleton from the artwork — recovers from a tangled rig (movement limits are kept)"
+      />
     </section>
+  );
+}
+
+/** Two-step destructive button: first click arms it, second confirms; disarms after 3s. */
+function ConfirmButton({
+  label,
+  confirmLabel,
+  onConfirm,
+  title,
+}: {
+  label: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+  title?: string;
+}) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = window.setTimeout(() => setArmed(false), 3000);
+    return () => window.clearTimeout(t);
+  }, [armed]);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (!armed) {
+          setArmed(true);
+          return;
+        }
+        setArmed(false);
+        onConfirm();
+      }}
+      className={`mt-3 w-full rounded border px-2 py-1 text-[10px] ${
+        armed
+          ? "border-amber-500/50 bg-amber-500/10 text-amber-300"
+          : "border-border text-muted-foreground hover:text-foreground"
+      }`}
+      title={title}
+    >
+      {armed ? confirmLabel : label}
+    </button>
   );
 }
 
@@ -3414,6 +4638,346 @@ function RigPanel({
  */
 // A compact set/not-set status chip: green dot when configured, amber dot when it still
 // needs setting. Gives the inspector an at-a-glance read of which limits are in place.
+/**
+ * The whole-character verification checklist: every child anchor with its resolution path plus
+ * key/pivot warnings, read from the same derived rig data the runtime uses. Clicking a row
+ * reassembles the visual context — selects the child, previews the parent variant, shows anchors.
+ */
+function RigHealthPanel({
+  doc,
+  report,
+  defaultOpen = false,
+  onJumpTo,
+}: {
+  doc: CharacterPreset;
+  report: RigHealthReport;
+  defaultOpen?: boolean;
+  onJumpTo: (row: { childSlotId?: ID; parentSlotId?: ID; variantKey?: string }) => void;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const warningCount = report.warnings.filter((entry) => entry.severity === "warning").length;
+  const slotLabel = (slotId: ID) =>
+    doc.parts.find((part) => getPartSlotId(part) === slotId)?.slotName ?? slotId;
+  if (report.anchorRows.length === 0 && report.warnings.length === 0) return null;
+  return (
+    <section className="rounded border border-border bg-panel-2 p-3">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className="flex w-full items-center justify-between text-left"
+      >
+        <span className="flex items-center gap-1.5 font-semibold uppercase tracking-wider text-muted-foreground">
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${
+              warningCount > 0 ? "bg-amber-400" : "bg-emerald-400"
+            }`}
+          />
+          Rig health
+          {warningCount > 0 && <span className="text-amber-300">· {warningCount}</span>}
+        </span>
+        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+      </button>
+      {open && (
+        <div className="mt-2 space-y-3">
+          {report.warnings.length > 0 && (
+            <div className="space-y-1">
+              {report.warnings.map((warning, index) => (
+                <button
+                  key={index}
+                  type="button"
+                  onClick={() => onJumpTo(warning)}
+                  className={`block w-full rounded border px-2 py-1 text-left text-[10px] leading-snug hover:bg-panel ${
+                    warning.severity === "warning"
+                      ? "border-amber-500/30 bg-amber-500/5 text-amber-300/90"
+                      : "border-border text-muted-foreground"
+                  }`}
+                >
+                  {warning.message}
+                </button>
+              ))}
+            </div>
+          )}
+          {report.anchorRows.length > 0 && (
+            <div className="space-y-1">
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                Anchors
+              </div>
+              {report.anchorRows.map((row) => (
+                <button
+                  key={`${row.childSlotId}:${row.variantKey}`}
+                  type="button"
+                  onClick={() => onJumpTo(row)}
+                  className="flex w-full items-center gap-1.5 rounded border border-border px-2 py-1 text-left text-[10px] hover:bg-panel"
+                  title="Select the layer, preview the parent variant, and show the anchor"
+                >
+                  <span
+                    className="h-1.5 w-1.5 shrink-0 rounded-full"
+                    style={{ background: ANCHOR_SOURCE_COLORS[row.source] }}
+                  />
+                  <span className="min-w-0 flex-1 truncate">
+                    {slotLabel(row.childSlotId)} ← {slotLabel(row.parentSlotId)}{" "}
+                    <span className="font-mono">{row.variantKey}</span>
+                  </span>
+                  <span className="shrink-0 text-muted-foreground">
+                    {row.source === "pairedArt" ? "paired art" : row.source} · {row.anchor.x},
+                    {row.anchor.y}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Where a child slot sits under each of its parent slot's variants: pick a parent variant (which
+ * also previews it in place so the limb you anchor onto is visible), see how the anchor resolves,
+ * pin it by clicking the canvas, or clear an authored socket.
+ */
+function VariantAnchorSection({
+  doc,
+  childSlotId,
+  variantPreview,
+  socketPlacement,
+  onPreviewVariant,
+  onArmPlacement,
+  onClearSocket,
+  onSetRotation,
+}: {
+  doc: CharacterPreset;
+  childSlotId: ID;
+  variantPreview: Record<ID, string>;
+  socketPlacement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
+  onPreviewVariant: (slotId: ID, key: string) => void;
+  onArmPlacement: (
+    placement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null,
+  ) => void;
+  onClearSocket: (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => void;
+  onSetRotation: (
+    context: { parentSlotId: ID; variantKey: string; childSlotId: ID },
+    rotation: number,
+  ) => void;
+}) {
+  const rig = normalizeCharacterRig(doc);
+  const boneId = rig.slotBindings.find((binding) => binding.slotId === childSlotId)?.boneId;
+  const parentSlotId = boneId ? parentSlotIdForBone(rig, boneId) : undefined;
+  if (!parentSlotId) return null;
+  const parentKeys = slotVariantKeys(doc, parentSlotId);
+  const hasPackages = (doc.variantPackages ?? []).some((pkg) => pkg.slotId === parentSlotId);
+  if (parentKeys.length <= 1 && !hasPackages) return null;
+  const parentName =
+    doc.parts.find((part) => getPartSlotId(part) === parentSlotId)?.slotName ?? parentSlotId;
+  const selectedKey = variantPreview[parentSlotId] ?? "";
+  const anchorEntry = selectedKey ? anchorEntryForChild(doc, childSlotId, selectedKey) : undefined;
+  const source = selectedKey ? (anchorEntry?.source ?? "fallback") : null;
+  const armed = socketPlacement?.childSlotId === childSlotId;
+  const sourceLabel =
+    source === "socket" ? "pinned socket" : source === "pairedArt" ? "paired art" : "rest fallback";
+  return (
+    <section className="rounded border border-border bg-panel-2 p-3">
+      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+        Anchor
+      </div>
+      <div className="mb-2 text-[10px] leading-snug text-muted-foreground">
+        Where this layer sits under <span className="text-foreground">{parentName}</span>'s
+        variants. Picking one shows it in place.
+      </div>
+      <label className="mb-2 grid grid-cols-[64px_1fr] items-center gap-2 text-[10px]">
+        <span className="text-muted-foreground">Variant</span>
+        <select
+          value={selectedKey}
+          onChange={(e) => {
+            if (e.target.value) onPreviewVariant(parentSlotId, e.target.value);
+            if (armed) onArmPlacement(null);
+          }}
+          className="w-full rounded border border-border bg-input px-2 py-1"
+        >
+          <option value="">— pick a {parentName} variant —</option>
+          {parentKeys.map((key) => (
+            <option key={key} value={key}>
+              {key}
+            </option>
+          ))}
+        </select>
+      </label>
+      {selectedKey && source && (
+        <div className="mb-2 flex items-center gap-1.5 text-[10px]">
+          <span
+            className="h-1.5 w-1.5 rounded-full"
+            style={{ background: ANCHOR_SOURCE_COLORS[source] }}
+          />
+          <span className="text-muted-foreground">
+            Resolves from <span className="text-foreground">{sourceLabel}</span>
+          </span>
+        </div>
+      )}
+      {selectedKey && (
+        <label className="mb-2 grid grid-cols-[64px_1fr] items-center gap-2 text-[10px]">
+          <span
+            className="text-muted-foreground"
+            title="How this layer is angled under the selected variant — a hand on an outstretched arm tilts differently than on a relaxed arm"
+          >
+            Angle
+          </span>
+          <input
+            type="number"
+            step={1}
+            value={anchorEntry?.rotation ?? 0}
+            onChange={(e) => {
+              const rotation = Number(e.target.value);
+              if (Number.isFinite(rotation))
+                onSetRotation({ parentSlotId, variantKey: selectedKey, childSlotId }, rotation);
+            }}
+            className="w-full rounded border border-border bg-input px-2 py-1"
+          />
+        </label>
+      )}
+      {selectedKey && !armed && (
+        <div className="mb-2 text-[10px] leading-snug text-muted-foreground">
+          Tip: while the variant is showing, drag the layer on the canvas (or its colored dot) to
+          pin this anchor where you drop it.
+        </div>
+      )}
+      {armed ? (
+        <div className="space-y-1">
+          <div className="rounded border border-primary/50 bg-primary/10 px-2 py-1 text-[10px] text-primary">
+            Click the canvas where this layer should anchor under {parentName} : {selectedKey}.
+          </div>
+          <button
+            type="button"
+            onClick={() => onArmPlacement(null)}
+            className="w-full rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <div className="flex gap-1">
+          <button
+            type="button"
+            disabled={!selectedKey}
+            onClick={() =>
+              selectedKey && onArmPlacement({ childSlotId, parentSlotId, variantKey: selectedKey })
+            }
+            className="flex-1 rounded border border-border px-2 py-1 text-[10px] hover:bg-panel disabled:opacity-40"
+            title="Then click the canvas where this layer should anchor — or just drag the layer while the variant is previewed"
+          >
+            Pin anchor{selectedKey ? ` under ${parentName} : ${selectedKey}` : ""}
+          </button>
+          {source === "socket" && selectedKey && (
+            <button
+              type="button"
+              onClick={() => onClearSocket({ parentSlotId, variantKey: selectedKey, childSlotId })}
+              className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
+              title="Remove the pinned socket and fall back to the inferred anchor"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** A variant chip with a real thumbnail of its artwork — recognition over recall. */
+function VariantGridButton({
+  part,
+  issues,
+  previewed,
+  onClick,
+}: {
+  part: CharacterPart;
+  issues: VariantKeyIssue[];
+  previewed: boolean;
+  onClick: () => void;
+}) {
+  const url = useMediaUrl(part.mediaId);
+  const hasWarning = issues.some((issue) => issue.severity === "warning");
+  const resolvedKey = variantKeyForPart(part);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex items-center gap-2 rounded border p-1.5 text-left text-[10px] hover:bg-panel ${
+        previewed ? "border-primary bg-primary/15" : "border-border bg-background"
+      }`}
+      title={
+        hasWarning
+          ? issues.map((issue) => issue.message).join("\n")
+          : `Show ${variantLabelForPart(part)} in place`
+      }
+    >
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded border border-border bg-white/90">
+        {url ? (
+          <img src={url} alt="" className="max-h-full max-w-full object-contain" />
+        ) : (
+          <span className="text-[8px] text-muted-foreground">…</span>
+        )}
+      </span>
+      <span className="min-w-0">
+        <span className="flex items-center gap-1">
+          {hasWarning && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />}
+          <span className="truncate">{variantLabelForPart(part)}</span>
+        </span>
+        <span className="block truncate font-mono text-[9px] text-muted-foreground">
+          {resolvedKey}
+        </span>
+      </span>
+    </button>
+  );
+}
+
+const VARIANT_KEY_SOURCE_LABELS: Record<VariantKeySource, string> = {
+  explicitKey: "explicit key",
+  package: "package",
+  viseme: "viseme",
+  eyeState: "eye state",
+  pose: "pose",
+  idFallback: "id fallback",
+};
+
+/**
+ * The part's *resolved* variant key — what pairing, poses, and motion variant tracks actually
+ * match against — plus which field won the fallback chain and any pairing problems.
+ */
+function VariantKeyChip({ part, issues }: { part: CharacterPart; issues: VariantKeyIssue[] }) {
+  const { key, source } = variantKeySourceForPart(part);
+  const hasWarning = issues.some((issue) => issue.severity === "warning");
+  const tone = hasWarning
+    ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
+    : "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
+  return (
+    <div className="space-y-1">
+      <span
+        className={`inline-flex max-w-full items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium ${tone}`}
+        title="The key this part answers to at runtime — parent/child pairing matches it exactly."
+      >
+        <span
+          className={`h-1.5 w-1.5 shrink-0 rounded-full ${hasWarning ? "bg-amber-400" : "bg-emerald-400"}`}
+        />
+        <span className="truncate font-mono">{key}</span>
+        <span className="shrink-0 text-muted-foreground">
+          · {VARIANT_KEY_SOURCE_LABELS[source]}
+        </span>
+      </span>
+      {issues.map((issue, index) => (
+        <div
+          key={index}
+          className={`text-[10px] leading-snug ${
+            issue.severity === "warning" ? "text-amber-300/90" : "text-muted-foreground"
+          }`}
+        >
+          {issue.message}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ConstraintPill({ set, label }: { set: boolean; label: string }) {
   return (
     <span
@@ -3765,6 +5329,164 @@ function RotationReachOverlay({
   );
 }
 
+const ANCHOR_SOURCE_COLORS = {
+  socket: "#4ade80",
+  pairedArt: "#38bdf8",
+  fallback: "#fbbf24",
+} as const;
+
+/**
+ * Editor chrome marking, for every bone whose anchor depends on its parent slot's variant, the
+ * parent pivot (white) and the currently resolved child anchor — colored by resolution path
+ * (socket green / paired art blue / fallback amber), matching the Motion Editor's overlay.
+ */
+function VariantAnchorOverlay({
+  doc,
+  variantPreview,
+  variantShift,
+  anchorDrag,
+  emphasisSlotId,
+  scale,
+  onStartAnchorDrag,
+}: {
+  doc: CharacterPreset;
+  variantPreview: Record<ID, string>;
+  variantShift: VariantPreviewShift;
+  anchorDrag: { childSlotId: ID; dx: number; dy: number } | null;
+  emphasisSlotId: ID | null;
+  scale: number;
+  onStartAnchorDrag: (
+    e: React.PointerEvent,
+    context: { childSlotId: ID; parentSlotId: ID; variantKey: string },
+  ) => void;
+}) {
+  const rig = normalizeCharacterRig(doc);
+  const world = computeBoneWorldTransforms(rig);
+  const slotName = (slotId: ID) =>
+    doc.parts.find((part) => getPartSlotId(part) === slotId)?.slotName ?? slotId;
+  const dotRadius = Math.max(4, 5 / Math.max(0.0001, scale));
+  const fontSize = Math.max(9, 10 / Math.max(0.0001, scale));
+  const markers: Array<{
+    boneId: string;
+    x: number;
+    y: number;
+    parentX: number;
+    parentY: number;
+    color: string;
+    label: string;
+    faded: boolean;
+    /** Set when a parent variant is previewed — the marker is then a draggable anchor handle. */
+    dragContext: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
+  }> = [];
+  for (const bone of rig.bones) {
+    if (!bone.parentId) continue;
+    const at = world.get(bone.id);
+    const parentAt = world.get(bone.parentId);
+    const childSlotId = rig.slotBindings.find((binding) => binding.boneId === bone.id)?.slotId;
+    const parentSlotId = parentSlotIdForBone(rig, bone.id);
+    if (!at || !parentAt || !childSlotId || !parentSlotId) continue;
+    // Anchors only matter under a parent that actually has variants — but show those children
+    // even before any anchor is authored, so the Anchors toggle always has a visible effect.
+    if (!bone.parentVariantAnchors && slotVariantKeys(doc, parentSlotId).length <= 1) continue;
+    const activeKey = variantPreview[parentSlotId];
+    const entry = activeKey ? bone.parentVariantAnchors?.[activeKey] : undefined;
+    const source = entry?.source ?? "fallback";
+    const shift = variantShift.bones.get(bone.id) ?? { dx: 0, dy: 0 };
+    const dragShift =
+      anchorDrag && anchorDrag.childSlotId === childSlotId
+        ? { dx: anchorDrag.dx, dy: anchorDrag.dy }
+        : { dx: 0, dy: 0 };
+    const parentShift = variantShift.bones.get(bone.parentId) ?? { dx: 0, dy: 0 };
+    markers.push({
+      boneId: bone.id,
+      x: at.x + shift.dx + dragShift.dx,
+      y: at.y + shift.dy + dragShift.dy,
+      parentX: parentAt.x + parentShift.dx,
+      parentY: parentAt.y + parentShift.dy,
+      color: activeKey ? ANCHOR_SOURCE_COLORS[source] : "#94a3b8",
+      label: `${slotName(childSlotId)} ← ${slotName(parentSlotId)} : ${activeKey ?? "rest"}${
+        activeKey ? ` (${source === "pairedArt" ? "paired art" : source})` : ""
+      }`,
+      faded: !!emphasisSlotId && childSlotId !== emphasisSlotId && parentSlotId !== emphasisSlotId,
+      dragContext: activeKey ? { childSlotId, parentSlotId, variantKey: activeKey } : null,
+    });
+  }
+  if (markers.length === 0) return null;
+  return (
+    <svg
+      className="pointer-events-none absolute inset-0"
+      width={doc.canvasWidth}
+      height={doc.canvasHeight}
+      style={{ zIndex: 11000 }}
+    >
+      {markers.map((marker) => (
+        <g key={marker.boneId} opacity={marker.faded ? 0.25 : 1}>
+          <line
+            x1={marker.parentX}
+            y1={marker.parentY}
+            x2={marker.x}
+            y2={marker.y}
+            stroke={marker.color}
+            strokeDasharray={`${4 / Math.max(0.0001, scale)} ${3 / Math.max(0.0001, scale)}`}
+            strokeWidth={Math.max(1, 1.5 / Math.max(0.0001, scale))}
+          />
+          <circle
+            cx={marker.parentX}
+            cy={marker.parentY}
+            r={dotRadius * 0.7}
+            fill="rgba(255,255,255,0.85)"
+            stroke="#0f172a"
+            strokeWidth={Math.max(0.75, 1 / Math.max(0.0001, scale))}
+          />
+          {marker.dragContext ? (
+            <g
+              className="pointer-events-auto cursor-move"
+              role="button"
+              aria-label={`Drag to move the ${marker.label} anchor`}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onStartAnchorDrag(e, marker.dragContext!);
+              }}
+            >
+              {/* Generous invisible hit area — the visible dot is small at editor zoom. */}
+              <circle cx={marker.x} cy={marker.y} r={dotRadius * 2.4} fill="transparent" />
+              <circle
+                cx={marker.x}
+                cy={marker.y}
+                r={dotRadius}
+                fill={marker.color}
+                stroke="#0f172a"
+                strokeWidth={Math.max(0.75, 1 / Math.max(0.0001, scale))}
+              />
+              <title>Drag to move this anchor (writes the socket on release)</title>
+            </g>
+          ) : (
+            <circle
+              cx={marker.x}
+              cy={marker.y}
+              r={dotRadius}
+              fill={marker.color}
+              stroke="#0f172a"
+              strokeWidth={Math.max(0.75, 1 / Math.max(0.0001, scale))}
+            />
+          )}
+          <text
+            x={marker.x + dotRadius + 3}
+            y={marker.y - dotRadius - 3}
+            fill={marker.color}
+            stroke="rgba(15,23,42,0.85)"
+            strokeWidth={3}
+            paintOrder="stroke"
+            fontSize={fontSize}
+          >
+            {marker.label}
+          </text>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
 function RigBonesOverlay({
   doc,
   selectedBoneId,
@@ -3936,6 +5658,17 @@ function GroupInspector({
   slotId,
   parts,
   bounds,
+  keyIssues,
+  phase,
+  onSwitchPhase,
+  previewedKey,
+  variantPreview,
+  socketPlacement,
+  onPreviewVariant,
+  onClearPreview,
+  onArmPlacement,
+  onClearSocket,
+  onSetRotation,
   onMove,
   onScale,
   onRotate,
@@ -3950,6 +5683,22 @@ function GroupInspector({
   slotId: ID;
   parts: CharacterPart[];
   bounds: { x: number; y: number; width: number; height: number };
+  keyIssues: Map<ID, VariantKeyIssue[]>;
+  phase: "build" | "rig" | "pose";
+  onSwitchPhase: (phase: "build" | "rig" | "pose") => void;
+  previewedKey?: string;
+  variantPreview: Record<ID, string>;
+  socketPlacement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
+  onPreviewVariant: (slotId: ID, key: string) => void;
+  onClearPreview: (slotId: ID) => void;
+  onArmPlacement: (
+    placement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null,
+  ) => void;
+  onClearSocket: (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => void;
+  onSetRotation: (
+    context: { parentSlotId: ID; variantKey: string; childSlotId: ID },
+    rotation: number,
+  ) => void;
   onMove: (dx: number, dy: number) => void;
   onScale: (anchor: { x: number; y: number }, scaleX: number, scaleY: number) => void;
   onRotate: (anchor: { x: number; y: number }, degrees: number) => void;
@@ -3975,43 +5724,68 @@ function GroupInspector({
   return (
     <div className="space-y-4">
       <section className="rounded border border-primary/50 bg-primary/10 p-3">
-        <div className="mb-1 font-medium">{name} group</div>
-        <div className="mb-3 text-[11px] text-muted-foreground">
-          Move or resize all {parts.length} variants together. Edit one frame by selecting it below.
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <span className="font-medium">{name} group</span>
+          {phase !== "build" && (
+            <button
+              type="button"
+              onClick={() => onSwitchPhase("build")}
+              className="shrink-0 rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
+              title="Move, resize, or retag this group in the Build phase"
+            >
+              Edit artwork →
+            </button>
+          )}
         </div>
-        <div className="grid grid-cols-2 gap-2">
-          <NumberField
-            label="X"
-            value={Math.round(bounds.x)}
-            onChange={(x) => onMove(x - bounds.x, 0)}
-          />
-          <NumberField
-            label="Y"
-            value={Math.round(bounds.y)}
-            onChange={(y) => onMove(0, y - bounds.y)}
-          />
-          <NumberField
-            label="Width"
-            value={Math.round(bounds.width)}
-            onChange={(w) =>
-              onScale({ x: bounds.x, y: bounds.y }, Math.max(8, w) / Math.max(1, bounds.width), 1)
-            }
-          />
-          <NumberField
-            label="Height"
-            value={Math.round(bounds.height)}
-            onChange={(h) =>
-              onScale({ x: bounds.x, y: bounds.y }, 1, Math.max(8, h) / Math.max(1, bounds.height))
-            }
-          />
-          <NumberField
-            label="Rotate"
-            value={averageRotation}
-            onChange={(rotation) => onRotate(center, rotation - averageRotation)}
-          />
-        </div>
+        {phase === "build" && (
+          <>
+            <div className="mb-3 text-[11px] text-muted-foreground">
+              Move or resize all {parts.length} variants together. Edit one frame by selecting it
+              below.
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <NumberField
+                label="X"
+                value={Math.round(bounds.x)}
+                onChange={(x) => onMove(x - bounds.x, 0)}
+              />
+              <NumberField
+                label="Y"
+                value={Math.round(bounds.y)}
+                onChange={(y) => onMove(0, y - bounds.y)}
+              />
+              <NumberField
+                label="Width"
+                value={Math.round(bounds.width)}
+                onChange={(w) =>
+                  onScale(
+                    { x: bounds.x, y: bounds.y },
+                    Math.max(8, w) / Math.max(1, bounds.width),
+                    1,
+                  )
+                }
+              />
+              <NumberField
+                label="Height"
+                value={Math.round(bounds.height)}
+                onChange={(h) =>
+                  onScale(
+                    { x: bounds.x, y: bounds.y },
+                    1,
+                    Math.max(8, h) / Math.max(1, bounds.height),
+                  )
+                }
+              />
+              <NumberField
+                label="Rotate"
+                value={averageRotation}
+                onChange={(rotation) => onRotate(center, rotation - averageRotation)}
+              />
+            </div>
+          </>
+        )}
       </section>
-      {isMouth && (
+      {phase === "pose" && isMouth && (
         <section className="rounded border border-border bg-panel-2 p-3">
           <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
             Test Lip Sync
@@ -4075,20 +5849,45 @@ function GroupInspector({
         <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
           Variants
         </div>
-        <div className="grid grid-cols-3 gap-1">
-          {orderVariants(parts).map((part) => (
+        <div className="mb-2 text-[10px] text-muted-foreground">
+          Click a variant to show it in place — children re-anchor live.
+          {previewedKey && (
             <button
-              key={part.id}
               type="button"
-              onClick={() => onSelectPart(part.id)}
-              className="truncate rounded border border-border bg-background px-2 py-1 text-[10px] hover:bg-panel"
-              title={`Edit ${variantLabel(part)}`}
+              onClick={() => onClearPreview(slotId)}
+              className="ml-1 rounded border border-border px-1.5 py-0.5 text-[9px] text-muted-foreground hover:text-foreground"
             >
-              {variantLabel(part)}
+              Reset preview
             </button>
+          )}
+        </div>
+        <div className="grid grid-cols-2 gap-1.5">
+          {orderVariants(parts).map((part) => (
+            <VariantGridButton
+              key={part.id}
+              part={part}
+              issues={keyIssues.get(part.id) ?? []}
+              previewed={previewedKey === variantKeyForPart(part)}
+              onClick={() => {
+                onSelectPart(part.id);
+                onPreviewVariant(slotId, variantKeyForPart(part));
+              }}
+            />
           ))}
         </div>
       </section>
+      {phase === "rig" && (
+        <VariantAnchorSection
+          doc={doc}
+          childSlotId={slotId}
+          variantPreview={variantPreview}
+          socketPlacement={socketPlacement}
+          onPreviewVariant={onPreviewVariant}
+          onArmPlacement={onArmPlacement}
+          onClearSocket={onClearSocket}
+          onSetRotation={onSetRotation}
+        />
+      )}
     </div>
   );
 }
@@ -4098,33 +5897,64 @@ function PartLayer({
   selected,
   dimmed = false,
   blurred = false,
+  ghosted = false,
   preview,
   previewParentPart,
   allParts,
+  previewVariantKey,
+  shift,
 }: {
   part: CharacterPart;
   selected: boolean;
   dimmed?: boolean;
   blurred?: boolean;
+  /**
+   * A sibling variant of this slot is selected: render this variant as a faint blurred ghost
+   * for spatial context instead of hiding it (or stacking the default at full opacity).
+   */
+  ghosted?: boolean;
   preview: PreviewState | null;
   previewParentPart?: CharacterPart;
   allParts: CharacterPart[];
+  /** The slot's in-place variant preview key — wins over the default variant resolution. */
+  previewVariantKey?: string;
+  /** Variant-preview re-anchor offset (canvas px) + rotation when a parent previews a variant. */
+  shift?: { dx: number; dy: number; rotation?: number };
 }) {
   const url = useMediaUrl(part.mediaId);
-  const sameSlotParts = allParts.filter((candidate) => getPartSlotId(candidate) === getPartSlotId(part));
-  if (sameSlotParts.length > 1 && !selected) {
+  const sameSlotParts = allParts.filter(
+    (candidate) => getPartSlotId(candidate) === getPartSlotId(part),
+  );
+  const ghost = ghosted && sameSlotParts.length > 1 && part.visible;
+  if (sameSlotParts.length > 1 && !selected && !ghost) {
     const activeVariant =
+      previewVariantKey ??
       activePreviewVariantForPart(part, preview) ??
       defaultVariantForSlotParts(sameSlotParts, part.role);
     if (activeVariant && !partMatchesVariant(part, activeVariant)) return null;
   }
-  if (!part.visible && !selected) return null;
+  if (!part.visible && !selected && !previewVariantKey) return null;
 
-  const previewTransform = previewDelta(part, preview, previewParentPart, allParts);
+  const baseTransform = previewDelta(part, preview, previewParentPart, allParts);
+  const previewTransform = shift
+    ? {
+        ...baseTransform,
+        dx: baseTransform.dx + shift.dx,
+        dy: baseTransform.dy + shift.dy,
+        rotation: baseTransform.rotation + (shift.rotation ?? 0),
+      }
+    : baseTransform;
   const baseOpacity = part.visible ? previewTransform.opacity : 0.28;
   // In movement-range focus mode, fade everything except the layer being edited. While the
   // active layer is being edited, the others get a slight blur (and a touch of fade) instead.
-  const opacity = dimmed ? baseOpacity * 0.12 : blurred ? baseOpacity * 0.7 : baseOpacity;
+  // Ghosted sibling variants render faint and blurred purely for spatial context.
+  const opacity = ghost
+    ? baseOpacity * 0.16
+    : dimmed
+      ? baseOpacity * 0.12
+      : blurred
+        ? baseOpacity * 0.7
+        : baseOpacity;
   const pivot = pivotForPart(part);
 
   return (
@@ -4139,7 +5969,7 @@ function PartLayer({
           height: part.height,
           zIndex: part.zIndex,
           opacity,
-          filter: blurred && !dimmed ? "blur(2px)" : undefined,
+          filter: ghost ? "blur(1.5px)" : blurred && !dimmed ? "blur(2px)" : undefined,
           transition: "filter 120ms ease",
           pointerEvents: "none",
           transform: `rotate(${part.rotation + previewTransform.rotation}deg) scale(${previewTransform.scale}, ${previewTransform.scaleY ?? previewTransform.scale})`,
@@ -4169,6 +5999,7 @@ function PartControlsOverlay({
   preview,
   previewParentPart,
   allParts,
+  shift,
   onBeginChange,
   onChange,
 }: {
@@ -4181,10 +6012,20 @@ function PartControlsOverlay({
   preview: PreviewState | null;
   previewParentPart?: CharacterPart;
   allParts: CharacterPart[];
+  /** Variant-preview re-anchor offset/rotation — the chrome must sit where the art is drawn. */
+  shift?: { dx: number; dy: number; rotation?: number };
   onBeginChange: () => void;
   onChange: (patch: Partial<CharacterPart>) => void;
 }) {
-  const previewTransform = previewDelta(part, preview, previewParentPart, allParts);
+  const baseTransform = previewDelta(part, preview, previewParentPart, allParts);
+  const previewTransform = shift
+    ? {
+        ...baseTransform,
+        dx: baseTransform.dx + shift.dx,
+        dy: baseTransform.dy + shift.dy,
+        rotation: baseTransform.rotation + (shift.rotation ?? 0),
+      }
+    : baseTransform;
   const pivot = pivotForPart(part);
   const selection = editorSelectionBounds(part, boundsMode);
   const control = editorControlBounds(part, scale, boundsMode);
@@ -4742,21 +6583,6 @@ function activePreviewVariantForPart(
     return visemes[idx];
   }
   return undefined;
-}
-
-function defaultVariantForSlotParts(parts: CharacterPart[], role: PartRole): string | undefined {
-  const visible = parts.filter((part) => part.visible);
-  const candidates = visible.length ? visible : parts;
-  if (role === "mouth") {
-    const rest = candidates.find((part) => partMatchesVariant(part, "rest"));
-    if (rest) return variantKeyForPart(rest);
-  }
-  if (role === "eye") {
-    const open = candidates.find((part) => partMatchesVariant(part, "open"));
-    if (open) return variantKeyForPart(open);
-  }
-  const first = candidates.slice().sort((a, b) => a.zIndex - b.zIndex)[0];
-  return first ? variantKeyForPart(first) : undefined;
 }
 
 function previewMotionForPart(part: CharacterPart, preview: PreviewState, t: number, wave: number) {

@@ -25,6 +25,7 @@ import {
 } from "../character/character-utils";
 import { thumbnailBoundsForParts } from "./character-thumbnail-bounds";
 import { ensureStarterCharacterSeeded } from "../character/starter";
+import { defaultPoseForCharacter } from "../character/pose-presets";
 import { ensureMotionPresetsSeeded } from "../presets/seed";
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
 
@@ -202,6 +203,7 @@ function CharactersTab() {
     name: string,
     canvasWidth = 600,
     canvasHeight = 900,
+    character?: CharacterPreset,
   ) => {
     if (!project) return;
     const trackIndex = Math.max(
@@ -223,7 +225,8 @@ function CharactersTab() {
       compositionKind: "character",
       character: {
         characterId,
-        poses: {},
+        // Characters start in their default pose — a non-pose doesn't make sense.
+        poses: character ? defaultPoseForCharacter(character) : {},
         autoBlink: true,
       },
       name,
@@ -335,7 +338,7 @@ function CharactersTab() {
               <button
                 onClick={() => {
                   registerCharacterPreset(c);
-                  placeOnTimeline(c.id, c.name, c.canvasWidth, c.canvasHeight);
+                  placeOnTimeline(c.id, c.name, c.canvasWidth, c.canvasHeight, c);
                 }}
                 disabled={!project}
                 className="flex-1 rounded bg-primary/30 px-2 py-1 text-[11px] hover:bg-primary/50 disabled:opacity-50"
