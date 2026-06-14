@@ -333,6 +333,47 @@ describe("buildCharacterCompositionHtml", () => {
     expect(irisTarget?.vars.y).toBe(4);
   });
 
+  it("keeps eye size changes on the eye target in compiled playback", () => {
+    const preset: MotionPreset = {
+      id: "eye-size",
+      name: "Eye size",
+      category: "expression",
+      duration: 1,
+      loop: false,
+      tracks: [],
+      keyposes: [
+        {
+          t: 0,
+          parts: [
+            {
+              partRole: "eye",
+              slotId: "slot:left-eye",
+              scale: 1.5,
+              scaleX: 0.8,
+              scaleY: 0.6,
+            },
+          ],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = build(
+      {
+        autoBlink: false,
+        motions: [{ id: "applied-eye-size", presetId: preset.id, offset: 0, intensity: 1 }],
+      },
+      new Map([[preset.id, preset]]),
+    );
+    const scene = extractScene(html);
+    const eyeTarget = scene.initialTargets.find((target) =>
+      target.selector.includes("char-slot-slot-left-eye"),
+    );
+
+    expect(eyeTarget?.vars.scaleX).toBe(1.2);
+    expect(eyeTarget?.vars.scaleY).toBe(0.9);
+  });
+
   it("renders any nested child slot through slotRelations and parent variant gates", () => {
     const characterBase = {
       ...createBlankCharacter("Mouth child actor"),

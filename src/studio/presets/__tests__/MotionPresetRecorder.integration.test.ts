@@ -56,4 +56,24 @@ describe("MotionPresetRecorder source integration", () => {
     expect(source).toContain("AnchorDebugOverlay");
     expect(source).toContain("import.meta.env.DEV && showAnchorDebug");
   });
+
+  it("derives editable slots from the active character angle", () => {
+    const source = readFileSync(recorderPath, "utf8");
+
+    expect(source).toContain("partsAvailableForAngle(character.parts, rig.activeAngle)");
+  });
+
+  it("keeps recorder geometry aligned with rig-bound and swapped variants", () => {
+    const source = readFileSync(recorderPath, "utf8");
+
+    expect(source).toContain("resolveSlotBinding(rig, slot.id)?.effectivePartId");
+    expect(source).toContain("function recorderPartPlacement");
+    expect(source).toContain("pivotAlignedPartOffset");
+    expect(source).toContain("recorderSlotTransformOrigin");
+    expect(source).toContain("recorderBaseTransformOrigin");
+    expect(source).toContain('transformTarget.kind === "bone"');
+    expect(source).toContain("defaultPoseForCharacter(character)");
+    expect(source).toContain("poseKey: override?.poseSwap ?? basePoses[slot.id]");
+    expect(source).toContain("poses: basePoses");
+  });
 });

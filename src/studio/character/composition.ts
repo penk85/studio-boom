@@ -242,7 +242,8 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
   const stage = ensureStage(doc, args.compositionId, duration, width, height);
   const scaleX = width / Math.max(1, args.character.canvasWidth);
   const scaleY = height / Math.max(1, args.character.canvasHeight);
-  const dom = buildPuppetDom(args.character, args.meta, scaleX, scaleY);
+  const characterRig = normalizeCharacterRig(args.character);
+  const dom = buildPuppetDom(args.character, characterRig, args.meta, scaleX, scaleY);
 
   stage.innerHTML = "";
   stage.insertAdjacentHTML("beforeend", dom.html.join("\n"));
@@ -266,8 +267,10 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
       ),
     );
   });
-  const effectiveMeta: CharacterClipMeta = { ...args.meta, visemes: combinedVisemes };
-  const characterRig = normalizeCharacterRig(args.character);
+  const effectiveMeta: CharacterClipMeta = {
+    ...args.meta,
+    visemes: [...combinedVisemes].sort((a, b) => a.t - b.t),
+  };
 
   appendCharacterStyles(doc);
   appendCharacterTimelineScript(doc, {
@@ -421,11 +424,11 @@ function appendCharacterStyles(doc: Document): void {
 
 function buildPuppetDom(
   character: CharacterPreset,
+  rig: ReturnType<typeof normalizeCharacterRig>,
   meta: CharacterClipMeta,
   scaleX: number,
   scaleY: number,
 ): PuppetDom {
-  const rig = normalizeCharacterRig(character);
   const out: PuppetDom = {
     html: [
       `<div data-character-root="true" data-character-id="${esc(
@@ -2131,7 +2134,7 @@ function slotRenderKeys(render: SlotRenderStrategy): string[] {
 
 function lastVisemeAt(visemes: Array<{ t: number; v: MouthViseme }>, time: number): MouthViseme {
   let active: MouthViseme = "rest";
-  for (const entry of [...visemes].sort((a, b) => a.t - b.t)) {
+  for (const entry of visemes) {
     if (entry.t <= time + 0.0001) active = entry.v;
     else break;
   }

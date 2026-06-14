@@ -20,17 +20,22 @@ import { db, getMediaUrl, uid } from "../db";
 import { useStudio } from "../store";
 import { buildCharacterCompositionHtml, characterAssetIds } from "../character/composition";
 import {
+  anchorPartForVariant,
   listCharacterSlots,
+  partsAvailableForAngle,
+  pivotAlignedPartOffset,
   pickActivePartForSlot,
   roleEnabledByManifest,
   variantKeyForPart,
   variantLabelForPart,
 } from "../character/character-utils";
-import { localAlphaBounds, pivotForPart } from "../character/alpha-bounds";
+import { localAlphaBounds } from "../character/alpha-bounds";
 import { faceTurnMotionForPart } from "../character/face-turn";
+import { defaultPoseForCharacter } from "../character/pose-presets";
 import {
   computeBoneWorldTransforms,
   normalizeCharacterRig,
+  representativePart,
   resolveSlotBinding,
   type ResolvedSlotBinding,
 } from "../character/rig";
@@ -130,8 +135,19 @@ interface RecorderEditPreviewTarget {
   slotId: string;
   part: CharacterPart;
   override: RecorderPartState;
+  poseKey?: string;
   faceTurnX: number;
   faceTurnY: number;
+}
+
+interface RecorderPartPlacement {
+  x: number;
+  y: number;
+  containerX: number;
+  containerY: number;
+  offsetX: number;
+  offsetY: number;
+  transformTarget: "slot" | "bone";
 }
 
 export function MotionPresetRecorder({
@@ -147,14 +163,14 @@ export function MotionPresetRecorder({
   onSaved?: (preset: MotionPreset) => void;
   copyOnSave?: boolean;
 }) {
+  const rig = useMemo(() => normalizeCharacterRig(character), [character]);
   const slots = useMemo(
     () =>
-      listCharacterSlots(character.parts).filter((slot) =>
+      listCharacterSlots(partsAvailableForAngle(character.parts, rig.activeAngle)).filter((slot) =>
         roleEnabledByManifest(slot.role, character.manifest),
       ),
-    [character.parts, character.manifest],
+    [character.parts, character.manifest, rig.activeAngle],
   );
-  const rig = useMemo(() => normalizeCharacterRig(character), [character]);
   // The same constraint boundary the compiled timeline clamps through — editing is WYSIWYG.
   const constraintCtx = useMemo(
     () =>
@@ -210,19 +226,26 @@ export function MotionPresetRecorder({
   const wrapRef = useRef<HTMLDivElement>(null);
   const planeRef = useRef<HTMLDivElement>(null);
   const lastPickRef = useRef<DrillPick | null>(null);
+  const basePoses = useMemo(() => defaultPoseForCharacter(character), [character]);
   const characterJson = useMemo(() => characterJsonFromPreset(character), [character]);
   const activeAngleRig = useMemo(() => angleRigJsonFromPreset(character), [character]);
   const activePartForSlot = useCallback(
     (slot: CharacterSlot, poseSwap?: string) => {
       if (usesGeneratedMouth && slot.role === "mouth" && generatedMouthPart)
         return generatedMouthPart;
+      const poseKey = poseSwap ?? basePoses[slot.id];
+      const bindingPartId = resolveSlotBinding(rig, slot.id)?.effectivePartId;
+      const boundPart = bindingPartId
+        ? slot.parts.find((part) => part.id === bindingPartId && part.visible)
+        : undefined;
+      if (!poseKey && boundPart) return boundPart;
       return pickActivePartForSlot(slot, {
-        pose: poseSwap,
-        viseme: slot.role === "mouth" ? (poseSwap ?? "rest") : undefined,
-        eyeState: slot.role === "eye" ? (poseSwap ?? "open") : undefined,
+        pose: poseKey,
+        viseme: slot.role === "mouth" ? (poseKey ?? "rest") : undefined,
+        eyeState: slot.role === "eye" ? (poseKey ?? "open") : undefined,
       });
     },
-    [generatedMouthPart, usesGeneratedMouth],
+    [basePoses, generatedMouthPart, rig, usesGeneratedMouth],
   );
 
   useEffect(() => {
@@ -310,12 +333,12 @@ export function MotionPresetRecorder({
     ? (selectedOverrideFromMap ?? defaultOverride(selectedSlotId, selectedPart ?? undefined))
     : null;
   const activeVariantsBySlot = useMemo(() => {
-    const map: Record<string, string> = {};
+    const map: Record<string, string> = { ...basePoses };
     for (const [id, override] of overrides) {
       if (override.poseSwap) map[id] = override.poseSwap;
     }
     return map;
-  }, [overrides]);
+  }, [basePoses, overrides]);
   const selectedRotationLimit = useMemo(() => {
     if (!selectedSlot) return null;
     const { reach, source } = effectiveReachForSlot(
@@ -425,12 +448,13 @@ export function MotionPresetRecorder({
           slotId: slot.id,
           part,
           override: override ?? defaultOverride(slot.id, part),
+          poseKey: override?.poseSwap ?? basePoses[slot.id],
           faceTurnX,
           faceTurnY,
         };
       })
       .filter((target): target is RecorderEditPreviewTarget => !!target);
-  }, [activePartForSlot, faceTurnX, faceTurnY, overrides, previewPlaying, slots]);
+  }, [activePartForSlot, basePoses, faceTurnX, faceTurnY, overrides, previewPlaying, slots]);
 
   const updateOverride = (slotId: string, patch: Partial<RecorderPartState>) => {
     stopCompiledPreview();
@@ -465,7 +489,7 @@ export function MotionPresetRecorder({
       // (slot rotReach / active-variant rotation limits), honoring the escape hatch.
       let resolved = hostClamped;
       if (slot) {
-        const activeVariants: Record<string, string> = {};
+        const activeVariants: Record<string, string> = { ...basePoses };
         for (const [id, override] of next) {
           if (override.poseSwap) activeVariants[id] = override.poseSwap;
         }
@@ -535,6 +559,7 @@ export function MotionPresetRecorder({
           character.canvasWidth,
           faceTurnY,
           character.canvasHeight,
+          recorderPartPlacement(slot, part, rig),
         );
         return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
       })
@@ -855,6 +880,7 @@ export function MotionPresetRecorder({
               >
                 <RecorderHyperFramesPreview
                   character={character}
+                  basePoses={basePoses}
                   preset={previewPlaying ? playbackPreset : null}
                   time={time}
                   editTargets={editPreviewTargets}
@@ -863,6 +889,7 @@ export function MotionPresetRecorder({
                   <SelectionHandles
                     part={selectedPart}
                     override={selectedOverride}
+                    placement={recorderPartPlacement(selectedSlot, selectedPart, rig)}
                     scale={displayScale}
                     faceTurnX={faceTurnX}
                     faceTurnY={faceTurnY}
@@ -1549,11 +1576,13 @@ function PropertyRow({
 
 function RecorderHyperFramesPreview({
   character,
+  basePoses,
   preset,
   time,
   editTargets,
 }: {
   character: CharacterPreset;
+  basePoses: Record<string, string>;
   preset: MotionPreset | null;
   time: number;
   editTargets: RecorderEditPreviewTarget[];
@@ -1571,7 +1600,7 @@ function RecorderHyperFramesPreview({
       character,
       meta: {
         characterId: character.id,
-        poses: {},
+        poses: basePoses,
         autoBlink: false,
         motions: preset
           ? [
@@ -1588,7 +1617,7 @@ function RecorderHyperFramesPreview({
       },
       motionPresets,
     });
-  }, [character, compositionId, preset]);
+  }, [basePoses, character, compositionId, preset]);
   const [html, setHtml] = useState<string | null>(null);
 
   useEffect(() => {
@@ -1722,12 +1751,13 @@ function applyRecorderEditPose(
     doc.querySelectorAll<HTMLElement>('[data-character-slot="true"], [data-character-bone="true"]'),
   )) {
     el.dataset.recorderBaseTransform ??= el.style.transform || "";
+    el.dataset.recorderBaseTransformOrigin ??= el.style.transformOrigin || "";
     el.dataset.recorderBaseOpacity ??= el.style.opacity || "";
     el.style.translate = "";
     el.style.rotate = "";
     el.style.scale = "";
     el.style.transform = el.dataset.recorderBaseTransform;
-    el.style.transformOrigin = "";
+    el.style.transformOrigin = el.dataset.recorderBaseTransformOrigin;
     el.style.opacity = el.dataset.recorderBaseOpacity;
     if (el.dataset.recorderBaseLeft !== undefined) el.style.left = el.dataset.recorderBaseLeft;
     if (el.dataset.recorderBaseTop !== undefined) el.style.top = el.dataset.recorderBaseTop;
@@ -1745,7 +1775,8 @@ function applyRecorderEditPose(
       `[data-character-slot-id="${cssAttrValue(target.slotId)}"]`,
     );
     if (!slotEl) continue;
-    const transformEl = recorderTransformElementForSlot(doc, slotEl);
+    const transformTarget = recorderTransformElementForSlot(doc, slotEl);
+    const transformEl = transformTarget.element;
     const ov = target.override;
     const turn = faceTurnMotionForPart(
       target.part,
@@ -1757,6 +1788,10 @@ function applyRecorderEditPose(
     const scaleX = ov.scale * ov.scaleX * turn.scaleX;
     const scaleY = ov.scale * ov.scaleY * turn.scaleY;
 
+    const poseKey = ov.poseSwap ?? target.poseKey;
+    applyRecorderVariantPreview(slotEl, poseKey);
+    applyRecorderBoneAnchors(doc, slotEl, poseKey);
+
     transformEl.style.translate = `${round(ov.dx + turn.dx, 3)}px ${round(ov.dy + turn.dy, 3)}px`;
     transformEl.style.rotate = `${round(ov.rotation + turn.rotation, 3)}deg`;
     transformEl.style.scale = `${round(scaleX, 4)} ${round(scaleY, 4)}`;
@@ -1764,29 +1799,32 @@ function applyRecorderEditPose(
       ov.skewX + turn.skewX,
       3,
     )}deg, ${round(ov.skewY + turn.skewY, 3)}deg)`;
-    transformEl.style.transformOrigin = `${ov.originX * 100}% ${ov.originY * 100}%`;
+    transformEl.style.transformOrigin =
+      transformTarget.kind === "bone"
+        ? "0px 0px"
+        : recorderSlotTransformOrigin(slotEl, poseKey, ov);
     transformEl.style.opacity = String(ov.opacity);
-
-    applyRecorderVariantPreview(slotEl, ov.poseSwap);
-    applyRecorderBoneAnchors(doc, slotEl, ov.poseSwap);
   }
 }
 
-function recorderTransformElementForSlot(doc: Document, slotEl: HTMLElement): HTMLElement {
+function recorderTransformElementForSlot(
+  doc: Document,
+  slotEl: HTMLElement,
+): { element: HTMLElement; kind: "slot" | "bone" } {
   const boneId = slotEl.getAttribute("data-character-bound-bone-id");
-  if (!boneId) return slotEl;
+  if (!boneId) return { element: slotEl, kind: "slot" };
   const boneEl = doc.querySelector<HTMLElement>(
     `[data-character-bone-id="${cssAttrValue(boneId)}"]`,
   );
-  if (!boneEl) return slotEl;
+  if (!boneEl) return { element: slotEl, kind: "slot" };
   const hasChildBone = !!doc.querySelector(
     `[data-character-parent-bone-id="${cssAttrValue(boneId)}"]`,
   );
-  return hasChildBone ? boneEl : slotEl;
+  return hasChildBone ? { element: boneEl, kind: "bone" } : { element: slotEl, kind: "slot" };
 }
 
 function applyRecorderVariantPreview(slotEl: HTMLElement, poseSwap: string | undefined): void {
-  const partEls = Array.from(slotEl.querySelectorAll<HTMLElement>('[data-character-part="true"]'));
+  const partEls = recorderPartElementsForSlot(slotEl);
   if (!poseSwap) {
     for (const partEl of partEls) {
       partEl.style.opacity = partEl.dataset.recorderBaseOpacity ?? partEl.style.opacity;
@@ -1803,6 +1841,57 @@ function applyRecorderVariantPreview(slotEl: HTMLElement, poseSwap: string | und
     ];
     partEl.style.opacity = keys.includes(poseSwap) ? "1" : "0";
   }
+}
+
+function recorderSlotTransformOrigin(
+  slotEl: HTMLElement,
+  poseSwap: string | undefined,
+  override: RecorderPartState,
+): string {
+  const partEl = recorderActivePartElementForSlot(slotEl, poseSwap);
+  if (!partEl) return `${override.originX * 100}% ${override.originY * 100}%`;
+  const left = parseCssPx(partEl.style.left);
+  const top = parseCssPx(partEl.style.top);
+  const width = parseCssPx(partEl.style.width);
+  const height = parseCssPx(partEl.style.height);
+  if (![left, top, width, height].every(Number.isFinite)) {
+    return `${override.originX * 100}% ${override.originY * 100}%`;
+  }
+  return `${round(left + override.originX * width, 3)}px ${round(
+    top + override.originY * height,
+    3,
+  )}px`;
+}
+
+function recorderActivePartElementForSlot(
+  slotEl: HTMLElement,
+  poseSwap: string | undefined,
+): HTMLElement | undefined {
+  const partEls = recorderPartElementsForSlot(slotEl);
+  if (poseSwap) {
+    const matched = partEls.find((partEl) =>
+      [
+        partEl.getAttribute("data-character-part-id"),
+        partEl.getAttribute("data-character-variant"),
+        partEl.getAttribute("data-character-pose"),
+        partEl.getAttribute("data-character-viseme"),
+        partEl.getAttribute("data-character-eye-state"),
+      ].includes(poseSwap),
+    );
+    if (matched) return matched;
+  }
+  return partEls.find((partEl) => (partEl.style.opacity || "1") !== "0") ?? partEls[0];
+}
+
+function recorderPartElementsForSlot(slotEl: HTMLElement): HTMLElement[] {
+  const slotId = slotEl.getAttribute("data-character-slot-id");
+  return Array.from(slotEl.querySelectorAll<HTMLElement>('[data-character-part="true"]')).filter(
+    (partEl) => !slotId || partEl.getAttribute("data-character-slot-id") === slotId,
+  );
+}
+
+function parseCssPx(value: string): number {
+  return Number.parseFloat(value || "0");
 }
 
 /**
@@ -1951,6 +2040,7 @@ function recorderPreviewPreset({
 function SelectionHandles({
   part,
   override,
+  placement,
   scale,
   faceTurnX,
   faceTurnY,
@@ -1961,6 +2051,7 @@ function SelectionHandles({
 }: {
   part: CharacterPart;
   override: RecorderPartState;
+  placement: RecorderPartPlacement;
   scale: number;
   faceTurnX: number;
   faceTurnY: number;
@@ -2001,8 +2092,8 @@ function SelectionHandles({
     if (e.button !== 0) return;
     const rect = planeRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const pivotX = rect.left + (part.x + override.dx + turn.dx + pivotLocal.x) * scale;
-    const pivotY = rect.top + (part.y + override.dy + turn.dy + pivotLocal.y) * scale;
+    const pivotX = rect.left + (placement.x + override.dx + turn.dx + pivotLocal.x) * scale;
+    const pivotY = rect.top + (placement.y + override.dy + turn.dy + pivotLocal.y) * scale;
     const startAngle = Math.atan2(e.clientY - pivotY, e.clientX - pivotX) * (180 / Math.PI);
     const startRot = override.rotation;
     const move = (ev: PointerEvent) => {
@@ -2022,8 +2113,8 @@ function SelectionHandles({
     if (e.button !== 0) return;
     const rect = planeRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const pivotX = rect.left + (part.x + override.dx + turn.dx + pivotLocal.x) * scale;
-    const pivotY = rect.top + (part.y + override.dy + turn.dy + pivotLocal.y) * scale;
+    const pivotX = rect.left + (placement.x + override.dx + turn.dx + pivotLocal.x) * scale;
+    const pivotY = rect.top + (placement.y + override.dy + turn.dy + pivotLocal.y) * scale;
     const startDist = Math.hypot(e.clientX - pivotX, e.clientY - pivotY);
     const startScaleValue = override.scale;
     const move = (ev: PointerEvent) => {
@@ -2048,8 +2139,14 @@ function SelectionHandles({
       const canvasX = (ev.clientX - rect.left) / scale;
       const canvasY = (ev.clientY - rect.top) / scale;
       onChange({
-        originX: round((canvasX - part.x - override.dx - turn.dx) / Math.max(1, part.width), 3),
-        originY: round((canvasY - part.y - override.dy - turn.dy) / Math.max(1, part.height), 3),
+        originX: round(
+          (canvasX - placement.x - override.dx - turn.dx) / Math.max(1, part.width),
+          3,
+        ),
+        originY: round(
+          (canvasY - placement.y - override.dy - turn.dy) / Math.max(1, part.height),
+          3,
+        ),
       });
     };
     move(e.nativeEvent);
@@ -2065,8 +2162,8 @@ function SelectionHandles({
     <div
       className="pointer-events-none absolute"
       style={{
-        left: part.x + override.dx + turn.dx,
-        top: part.y + override.dy + turn.dy,
+        left: placement.x + override.dx + turn.dx,
+        top: placement.y + override.dy + turn.dy,
         width: part.width,
         height: part.height,
         transform: `rotate(${part.rotation + override.rotation + turn.rotation}deg) scale(${
@@ -2074,7 +2171,7 @@ function SelectionHandles({
         }, ${override.scale * override.scaleY * turn.scaleY}) skew(${
           override.skewX + turn.skewX
         }deg, ${override.skewY + turn.skewY}deg)`,
-        transformOrigin: `${override.originX * 100}% ${override.originY * 100}%`,
+        transformOrigin: `${pivotLocal.x}px ${pivotLocal.y}px`,
         zIndex: 9999,
       }}
     >
@@ -2493,6 +2590,7 @@ function clampRecorderOverrideToHost({
     character.canvasWidth,
     faceTurnY,
     character.canvasHeight,
+    recorderPartPlacement(hostSlot, hostPart, rig),
   );
   const subjectBounds = transformedBounds(
     part,
@@ -2501,6 +2599,7 @@ function clampRecorderOverrideToHost({
     character.canvasWidth,
     faceTurnY,
     character.canvasHeight,
+    recorderPartPlacement(slot, part, rig),
   );
   let dx = override.dx;
   let dy = override.dy;
@@ -2663,6 +2762,68 @@ function variantLabel(role: PartRole, value: string) {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+function recorderPartPlacement(
+  slot: CharacterSlot,
+  part: CharacterPart,
+  rig: ReturnType<typeof normalizeCharacterRig>,
+): RecorderPartPlacement {
+  const binding = resolveSlotBinding(rig, slot.id);
+  const basePart = recorderContainerBasePart(slot, rig, variantKeyForPart(part)) ?? part;
+  const boneWorld = binding
+    ? computeBoneWorldTransforms(rig).get(binding.effectiveBoneId)
+    : undefined;
+  const containerX = binding && boneWorld ? boneWorld.x + binding.x : basePart.x;
+  const containerY = binding && boneWorld ? boneWorld.y + binding.y : basePart.y;
+  const offset = recorderPartOffset(slot, part, basePart, binding);
+  return {
+    x: containerX + offset.x,
+    y: containerY + offset.y,
+    containerX,
+    containerY,
+    offsetX: offset.x,
+    offsetY: offset.y,
+    transformTarget: binding && boneHasChild(rig, binding.effectiveBoneId) ? "bone" : "slot",
+  };
+}
+
+function recorderContainerBasePart(
+  slot: CharacterSlot,
+  rig: ReturnType<typeof normalizeCharacterRig>,
+  poseKey?: string,
+): CharacterPart | undefined {
+  const bindingPartId = resolveSlotBinding(rig, slot.id)?.effectivePartId;
+  if (bindingPartId) {
+    const bound = slot.parts.find((part) => part.id === bindingPartId && part.visible);
+    if (!poseKey && bound) return bound;
+  }
+  return pickActivePartForSlot(slot, {
+    pose: poseKey,
+    viseme: slot.role === "mouth" ? (poseKey ?? "rest") : undefined,
+    eyeState: slot.role === "eye" ? (poseKey ?? "open") : undefined,
+  });
+}
+
+function recorderPartOffset(
+  slot: CharacterSlot,
+  part: CharacterPart,
+  basePart: CharacterPart,
+  binding: ResolvedSlotBinding | undefined,
+): { x: number; y: number } {
+  if (!binding || slot.role === "eye" || slot.role === "mouth") {
+    return { x: part.x - basePart.x, y: part.y - basePart.y };
+  }
+  const referencePart = representativePart(slot) ?? basePart;
+  return pivotAlignedPartOffset(
+    referencePart,
+    anchorPartForVariant(slot.parts, variantKeyForPart(part)) ?? part,
+    part,
+  );
+}
+
+function boneHasChild(rig: ReturnType<typeof normalizeCharacterRig>, boneId: string): boolean {
+  return rig.bones.some((bone) => bone.parentId === boneId);
+}
+
 function transformedBounds(
   part: CharacterPart,
   override: RecorderPartState | undefined,
@@ -2670,17 +2831,19 @@ function transformedBounds(
   canvasWidth: number,
   faceTurnY = 0,
   canvasHeight = canvasWidth,
+  placement?: RecorderPartPlacement,
 ) {
   const ov = override ?? defaultOverride(part.slotId, part);
   const turn = faceTurnMotionForPart(part, faceTurnX, canvasWidth, faceTurnY, canvasHeight);
   const alphaRect = localAlphaBounds(part);
-  const pivot = pivotForPart(part);
-  const pivotLocalX = pivot.x - part.x;
-  const pivotLocalY = pivot.y - part.y;
+  const baseX = placement?.x ?? part.x;
+  const baseY = placement?.y ?? part.y;
+  const pivotLocalX = ov.originX * part.width;
+  const pivotLocalY = ov.originY * part.height;
   const scaleX = ov.scale * ov.scaleX * turn.scaleX;
   const scaleY = ov.scale * ov.scaleY * turn.scaleY;
-  const left = part.x + ov.dx + turn.dx + pivotLocalX + (alphaRect.x - pivotLocalX) * scaleX;
-  const top = part.y + ov.dy + turn.dy + pivotLocalY + (alphaRect.y - pivotLocalY) * scaleY;
+  const left = baseX + ov.dx + turn.dx + pivotLocalX + (alphaRect.x - pivotLocalX) * scaleX;
+  const top = baseY + ov.dy + turn.dy + pivotLocalY + (alphaRect.y - pivotLocalY) * scaleY;
   const width = alphaRect.width * scaleX;
   const height = alphaRect.height * scaleY;
   return { left, top, right: left + width, bottom: top + height };

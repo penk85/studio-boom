@@ -177,7 +177,11 @@ export async function setMediaVoiceData(
   return (await db.media.get(id)) ?? null;
 }
 
-export type MediaUsageKind = "project-asset" | "character-part" | "head-variant";
+export type MediaUsageKind =
+  | "project-asset"
+  | "character-part"
+  | "head-variant"
+  | "variant-package-artwork";
 
 export interface MediaUsage {
   mediaId: string;
@@ -259,7 +263,7 @@ export function collectProjectMediaUsages(project: Project, onlyMediaId?: string
   return usages;
 }
 
-function collectCharacterMediaUsages(
+export function collectCharacterMediaUsages(
   character: CharacterPreset,
   onlyMediaId?: string,
 ): MediaUsage[] {
@@ -284,6 +288,16 @@ function collectCharacterMediaUsages(
       ownerName: character.name,
       detail: variant.direction,
     });
+  }
+  for (const variant of character.variantPackages ?? []) {
+    for (const layer of variant.artwork?.layers ?? []) {
+      push(layer.mediaId, {
+        kind: "variant-package-artwork",
+        ownerId: character.id,
+        ownerName: character.name,
+        detail: layer.name ?? variant.displayName,
+      });
+    }
   }
   return usages;
 }
