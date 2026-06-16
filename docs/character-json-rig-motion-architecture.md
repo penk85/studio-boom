@@ -78,15 +78,15 @@ fixing broken HTML; they are the official authoring API for a character document
 Examples:
 
 ```ts
-setBoneTransform(html, { boneId, x, y, rotation, depth })
-setSlotBinding(html, { slotId, boneId, x, y, rotation, scaleX, scaleY })
-setSlotVariant(html, { slotId, variantId })
-addSlotVariant(html, { slotId, variant })
-setReachLimit(html, { slotId, reach, rotReach })
-setHostConstraint(html, { slotId, hostSlotId, mode })
-setActiveAngle(html, { angleId })
-applyMotionDraft(html, { motion })
-commitMotion(html, { motion })
+setBoneTransform(html, { boneId, x, y, rotation, depth });
+setSlotBinding(html, { slotId, boneId, x, y, rotation, scaleX, scaleY });
+setSlotVariant(html, { slotId, variantId });
+addSlotVariant(html, { slotId, variant });
+setReachLimit(html, { slotId, reach, rotReach });
+setHostConstraint(html, { slotId, hostSlotId, mode });
+setActiveAngle(html, { angleId });
+applyMotionDraft(html, { motion });
+commitMotion(html, { motion });
 ```
 
 The command layer is the guardrail. Character Builder, Motion Editor, AI import,
@@ -268,6 +268,19 @@ character. It does not require every angle to have the same concrete bones or sl
 When imported, it should become character document commands that update identity,
 semantic aliases, custom slot definitions, and angle availability.
 
+`angles` is the authoritative list of views the character exposes. Angle rig files,
+`rig.angles`, and part-level `angleIds` must be validated against this list rather
+than treated as independent sources of truth. A rig entry for an unknown angle is
+stale data; artwork tagged to an unknown angle is invalid or needs migration.
+
+Studio Boom stores the body map as first-class `character.slots[]` records. A slot
+owns stable metadata such as name, role, side, semantic id, angle availability, and
+AI hints. Parts are angle/variant artwork records that point at a slot through
+`part.slotId`; `part.slotName` is only a legacy mirror for older call sites and is
+resynced from the slot record during normalization. This mirrors the authoring
+model used by mature 2D puppet tools: create a stable body slot first, then add
+angle-specific drawings, variants, sockets, and motion limits under it.
+
 ```json
 {
   "kind": "studioBoom.character.v1",
@@ -338,6 +351,12 @@ should become character document commands that update the active angle, bone
 structure, slot bindings, variants, reach, host constraints, depth, and draw order.
 
 `front` is not the master rig. It is just one angle.
+
+Semantic variant keys are shared vocabulary; concrete variant assets are angle
+specific. A pose can say `slot:rightArm = bent`, but the front angle and 3qR angle
+resolve that key to different artwork, sockets, and placement data. Importers should
+never satisfy a missing 3qR asset by silently borrowing the front asset unless that
+asset is explicitly marked as shared.
 
 ```json
 {
@@ -504,18 +523,18 @@ effects**. Studio Boom exposes the control vocabulary; the AI composes the movem
 The transform `channel` accepts these per-keyframe fields (all optional, `t`
 normalized `0..1`, `targetSpace: parentRelative`):
 
-| field | meaning | unit |
-| --- | --- | --- |
-| `dx`, `dy` | translate | px |
-| `scale` / `scaleX` / `scaleY` | uniform / axis scale | multiplier (1 = none) |
-| `skewX`, `skewY` | skew | deg |
-| `rotation` | 2D rotation (Z axis) | deg |
-| `rotationX` | 3D rotation about X (vertical flip) | deg |
-| `rotationY` | 3D rotation about Y (horizontal / card flip) | deg |
-| `transformPerspective` | 3D perspective depth (set for believable flips) | px |
-| `originX`, `originY` | transform origin within the part | 0..1 |
-| `opacity` | replaces base opacity | 0..1 |
-| `ease` | easing into this keyframe | name |
+| field                         | meaning                                         | unit                  |
+| ----------------------------- | ----------------------------------------------- | --------------------- |
+| `dx`, `dy`                    | translate                                       | px                    |
+| `scale` / `scaleX` / `scaleY` | uniform / axis scale                            | multiplier (1 = none) |
+| `skewX`, `skewY`              | skew                                            | deg                   |
+| `rotation`                    | 2D rotation (Z axis)                            | deg                   |
+| `rotationX`                   | 3D rotation about X (vertical flip)             | deg                   |
+| `rotationY`                   | 3D rotation about Y (horizontal / card flip)    | deg                   |
+| `transformPerspective`        | 3D perspective depth (set for believable flips) | px                    |
+| `originX`, `originY`          | transform origin within the part                | 0..1                  |
+| `opacity`                     | replaces base opacity                           | 0..1                  |
+| `ease`                        | easing into this keyframe                       | name                  |
 
 `ease` is honored per keyframe; supported names: `linear`, `easeIn`, `easeOut`,
 `easeInOut`, `soft`, `snappy`, `overshoot`, `bounce`, `elastic`, `hold`.
@@ -617,7 +636,8 @@ The Motion Editor should expose clear JSON buttons:
 - `Copy Active Angle Rig JSON`
 - `Copy Motion Request JSON`
 
-The copied outbound JSON should include:
+The copied outbound motion prompt should be plain key-value text with a compact
+motion context, not a full JSON dump of the authoring document. It should include:
 
 - character identity,
 - semantic bones and slots,
@@ -631,6 +651,33 @@ The copied outbound JSON should include:
   easings, channels, and target kinds),
 - schema instructions,
 - one small valid example (including a 3D / eased track).
+
+It should not include media IDs, artwork layers, full variant rig packages,
+complete draw-order arrays, or any other render/build internals. The app keeps
+the full `AngleRigJson` for validation and import; the AI receives only the
+motion-facing target map.
+
+The model's answer is still JSON (`studioBoom.ai.motionSuggestion.v1` or
+`studioBoom.motion.v1`) because paste/import needs strict validation. The prompt
+itself does not need JSON syntax and should prefer simple sections like
+`active_angle`, `facing`, `active_angle.bones`, `active_angle.slots`, and
+`controls.transform_fields`.
+
+The compact motion context should carry distilled locomotion metrics when they
+can be derived from the active angle:
+
+- canvas-space bone pivots, rest angles, segment vectors, and segment lengths,
+- rotation ranges derived from slot `rotReach`,
+- facing direction for the angle (`screenVector` / forward axis),
+- a ground/contact line plus plantable foot-slot hints,
+- near/far ordering for overlap decisions in 3/4 and side views,
+- cadence hints such as suggested step duration and stride range relative to
+  character height.
+
+These are descriptive prompt hints, not new renderer capabilities. Until the
+control surface includes depth/z fields or an IK/foot-lock solver exists, the
+prompt must say those are unavailable and the AI must not output depth/z
+keyframes.
 
 ### Paste In
 
@@ -738,7 +785,7 @@ export.
 Add a character-specific linter on top of native HyperFrames validation:
 
 ```ts
-lintCharacterDocument(html)
+lintCharacterDocument(html);
 ```
 
 It should catch:
@@ -872,23 +919,27 @@ also stated in the AI rig-context instructions so suggestions don't reinvent a
 
 ### Variants carry children (`parentVariantAnchors`)
 
-A child bone's rest anchor can depend on its parent slot's active variant: a bent
-arm carries the hand to the bent wrist. `buildDefaultAngleRig` resolves, per
-parent variant key:
+A child bone's rest anchor is owned by its angle-local socket: a wrist socket has
+a base `x/y/rotation` in the angle canvas, and a bent-arm variant can override
+that same socket so the hand moves to the bent wrist. `buildDefaultAngleRig`
+resolves, per parent variant key:
 
-1. **Authored socket** — the parent variant package's `rig.sockets.outputs` entry
-   whose `childSlotId` names the child slot: `socket − pivot(parentVariantPart)`.
+1. **Authored socket override** — the angle rig socket record
+   `{ slotId, childSlotId, x, y, rotation?, variantAnchors }`, using
+   `variantAnchors[variantKey] − pivot(parentSlotRestPart)`.
 2. **Paired child art** — a child part keyed to the same variant key (a hand
-   drawn for the bent arm): `pivot(childPart) − pivot(parentVariantPart)`.
+   drawn for the bent arm): `pivot(childPart) − pivot(parentSlotRestPart)`.
 3. **Fallback** — the representative-part offset (bone base `x/y`, no entry).
    When a non-`containedFeature` slot relation explicitly gates the child on that
    variant and no anchor source exists, a dev console warning fires.
 
-Anchors live on `CharacterBone.parentVariantAnchors` (with a debug-only `source`
-tag), are **derived data recomputed on every rig build**, and are never carried
-forward by `normalizeAngleRig` or `rebuildRigPreservingConstraints` — saved rigs
-always get freshly derived anchors. Hands drawn directly inside the arm artwork
-need no anchors and produce none.
+Base sockets live in `CharacterAngleRig.sockets` and are carried across rebuilds
+like reach and host constraints. Variant-resolved anchors live on
+`CharacterBone.parentVariantAnchors` (with a debug-only `source` tag), are
+**derived data recomputed on every rig build**, and are never carried forward by
+`normalizeAngleRig` or `rebuildRigPreservingConstraints` — saved rigs always get
+freshly derived variant anchors. Hands drawn directly inside the arm artwork need
+no child socket and produce no child anchor rows.
 
 At composition time the anchors are scaled, expanded to every variant alias, and:
 
@@ -911,7 +962,7 @@ movement consumer passes through:
 - `resolveMotionDelta({...})` — clamps `dx/dy/rotation` to the effective reach,
   honoring the per-movement `allowOutOfBounds` escape hatch; returns
   `clampReasons` and `effectiveReachSource` so the editor and AI debugging can
-  explain *why* a value stopped.
+  explain _why_ a value stopped.
 - `childAnchorForVariant` / `parentSlotIdForBone` — anchor lookups shared by
   composition and editor.
 

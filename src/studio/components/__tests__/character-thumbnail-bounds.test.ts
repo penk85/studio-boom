@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createBlankCharacter, makePart } from "../../character/character-utils";
-import { thumbnailBoundsForParts } from "../character-thumbnail-bounds";
+import { thumbnailBoundsForFrames, thumbnailBoundsForParts } from "../character-thumbnail-bounds";
 
 describe("thumbnailBoundsForParts", () => {
   it("crops around tight visible pixels instead of the whole source frame", () => {
@@ -44,6 +44,27 @@ describe("thumbnailBoundsForParts", () => {
 
     expect(rotatedBounds.width).toBeGreaterThan(baseBounds.width);
     expect(rotatedBounds.height).toBeGreaterThan(baseBounds.height);
+  });
+
+  it("can crop around runtime-resolved frames instead of raw part coordinates", () => {
+    const character = createBlankCharacter("Preview");
+    const part = makePart("foot", "foot-media", {
+      x: 20,
+      y: 30,
+      width: 80,
+      height: 40,
+      anchorX: 0.5,
+      anchorY: 0.5,
+    });
+
+    const rawBounds = thumbnailBoundsForParts([part], character);
+    const resolvedBounds = thumbnailBoundsForFrames(
+      [{ part, x: 260, y: 320, rotation: 0, scaleX: 1, scaleY: 1 }],
+      character,
+    );
+
+    expect(resolvedBounds.x).toBeGreaterThan(rawBounds.x + 200);
+    expect(resolvedBounds.y).toBeGreaterThan(rawBounds.y + 250);
   });
 
   it("matches object-contain placement for narrow source media", () => {

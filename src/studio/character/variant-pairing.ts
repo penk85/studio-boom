@@ -1,4 +1,10 @@
-import type { CharacterPart, CharacterPreset, CharacterSlotSocket, ID } from "../types";
+import type {
+  CharacterAngle,
+  CharacterPart,
+  CharacterPreset,
+  CharacterSlotSocket,
+  ID,
+} from "../types";
 import {
   anchorPartForVariant,
   getPartSlotId,
@@ -37,17 +43,21 @@ export function normalizeVariantKey(key: string): string {
 export function slotVariantKeys(
   character: Pick<CharacterPreset, "parts" | "variantPackages">,
   slotId: ID,
+  angle?: CharacterAngle,
 ): string[] {
   const keys: string[] = [];
   const push = (key: string | undefined) => {
     const trimmed = key?.trim();
     if (trimmed && !keys.includes(trimmed)) keys.push(trimmed);
   };
-  for (const part of character.parts) {
+  const parts = angle ? partsAvailableForAngle(character.parts, angle) : character.parts;
+  for (const part of parts) {
     if (getPartSlotId(part) === slotId) push(variantKeyForPart(part));
   }
   for (const pkg of character.variantPackages ?? []) {
-    if (pkg.slotId === slotId) push(variantKeyForPackage(pkg, character.parts));
+    if (pkg.slotId !== slotId) continue;
+    if (angle && pkg.angleIds?.length && !pkg.angleIds.includes(angle)) continue;
+    push(variantKeyForPackage(pkg, parts));
   }
   return keys;
 }
@@ -76,7 +86,8 @@ export function findVariantKeyNearMisses(character: CharacterPreset): VariantKey
   const rig = normalizeCharacterRig(character);
   const out: VariantKeyNearMiss[] = [];
   const partsBySlot = new Map<ID, CharacterPart[]>();
-  for (const part of character.parts) {
+  const activeParts = partsAvailableForAngle(character.parts, rig.activeAngle);
+  for (const part of activeParts) {
     const slotId = getPartSlotId(part);
     partsBySlot.set(slotId, [...(partsBySlot.get(slotId) ?? []), part]);
   }
@@ -85,7 +96,7 @@ export function findVariantKeyNearMisses(character: CharacterPreset): VariantKey
     const childSlotId = rig.slotBindings.find((binding) => binding.boneId === bone.id)?.slotId;
     const parentSlotId = parentSlotIdForBone(rig, bone.id);
     if (!childSlotId || !parentSlotId) continue;
-    const parentKeys = slotVariantKeys(character, parentSlotId);
+    const parentKeys = slotVariantKeys(character, parentSlotId, rig.activeAngle);
     if (parentKeys.length <= 1) continue;
     const childParts = partsBySlot.get(childSlotId) ?? [];
 
@@ -166,7 +177,7 @@ export function variantPreviewDeltas(
   });
 
   // Own-slot pivot alignment for previewed variant groups (one rigid translation per group).
-  const slots = listCharacterSlots(partsAvailableForAngle(character.parts, rig.activeAngle));
+  const slots = listCharacterSlots(character, { angle: rig.activeAngle, includeEmpty: false });
   const alignBySlot = new Map<ID, { dx: number; dy: number; partIds: Set<ID> }>();
   for (const [slotId, previewKey] of Object.entries(variantPreview)) {
     const slot = slots.find((candidate) => candidate.id === slotId);
@@ -554,6 +565,8 @@ export interface RigHealthWarning {
   parentSlotId?: ID;
   variantKey?: string;
   partId?: ID;
+  /** For cross-angle warnings: the specific angle this warning is about. */
+  affectedAngle?: CharacterAngle;
 }
 
 export interface RigHealthReport {
@@ -578,7 +591,7 @@ export function buildRigHealthReport(character: CharacterPreset): RigHealthRepor
     const childSlotId = rig.slotBindings.find((binding) => binding.boneId === bone.id)?.slotId;
     const parentSlotId = parentSlotIdForBone(rig, bone.id);
     if (!childSlotId || !parentSlotId) continue;
-    const parentKeys = slotVariantKeys(character, parentSlotId);
+    const parentKeys = slotVariantKeys(character, parentSlotId, rig.activeAngle);
     if (parentKeys.length <= 1) continue;
     for (const variantKey of parentKeys) {
       const entry = bone.parentVariantAnchors?.[variantKey];
@@ -643,7 +656,7 @@ export function buildRigHealthReport(character: CharacterPreset): RigHealthRepor
   // there. Info-level: it's the authoring checklist for a new angle, not an error.
   const allAngles = availableCharacterAngles(character);
   if (allAngles.length > 1) {
-    for (const slot of listCharacterSlots(character.parts)) {
+    for (const slot of listCharacterSlots(character, { includeEmpty: false })) {
       const perAngle = allAngles.map((angle) => ({
         angle,
         keys: new Set(
@@ -661,6 +674,7 @@ export function buildRigHealthReport(character: CharacterPreset): RigHealthRepor
             severity: "info",
             message: `${slotLabel(slot.id)} has no ${ANGLE_LABELS[entry.angle]} artwork yet.`,
             childSlotId: slot.id,
+            affectedAngle: entry.angle,
           });
         }
       }
@@ -669,15 +683,18 @@ export function buildRigHealthReport(character: CharacterPreset): RigHealthRepor
         const has = withArt.filter((entry) => entry.keys.has(key));
         const lacks = withArt.filter((entry) => !entry.keys.has(key));
         if (has.length === 0 || lacks.length === 0) continue;
-        warnings.push({
-          severity: "info",
-          message:
-            `"${key}" exists on ${has.map((entry) => ANGLE_LABELS[entry.angle]).join(", ")} ` +
-            `but is missing on ${lacks.map((entry) => ANGLE_LABELS[entry.angle]).join(", ")} — ` +
-            "pose chips fall back there.",
-          childSlotId: slot.id,
-          variantKey: key,
-        });
+        // Tag the warning with each affected angle separately so the panel can group them.
+        for (const lacking of lacks) {
+          warnings.push({
+            severity: "info",
+            message:
+              `"${key}" exists on ${has.map((entry) => ANGLE_LABELS[entry.angle]).join(", ")} ` +
+              `but is missing on ${ANGLE_LABELS[lacking.angle]} — pose chips fall back there.`,
+            childSlotId: slot.id,
+            variantKey: key,
+            affectedAngle: lacking.angle,
+          });
+        }
       }
     }
   }
@@ -685,7 +702,9 @@ export function buildRigHealthReport(character: CharacterPreset): RigHealthRepor
   // Parent slots that carry anchored children but whose pivot is still the auto-center default:
   // the pivot is the anchor reference, so an unconsidered pivot is worth a look (info only).
   for (const parentSlotId of anchoredParentSlots) {
-    const parts = character.parts.filter((part) => getPartSlotId(part) === parentSlotId);
+    const parts = partsAvailableForAngle(character.parts, rig.activeAngle).filter(
+      (part) => getPartSlotId(part) === parentSlotId,
+    );
     const rep = parts.find((part) => part.visible) ?? parts[0];
     if (!rep) continue;
     const pivot = pivotForPart(rep);

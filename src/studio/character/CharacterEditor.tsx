@@ -34,6 +34,7 @@ import {
   CHARACTER_VARIANT_KIND_VALUES,
   defaultMotionBehaviorForRole,
   defaultVariantForSlotParts,
+  findCharacterSlot,
   getPartSlotId,
   listCharacterSlots,
   makePart,
@@ -43,8 +44,10 @@ import {
   partMatchesVariant,
   roleEnabledByManifest,
   roleLabel,
+  withUpdatedCharacterSlot,
   claimSharedPartsForAngles,
   partAvailableForAngle,
+  removePartFromAngle,
   saveCharacter,
   variantKeyForPart,
   variantKeySourceForPart,
@@ -83,7 +86,9 @@ import {
   createAlphaHitMaskFromBlob,
   editorControlBounds,
   editorSelectionBounds,
+  localAuthoredBounds,
   localAlphaBounds,
+  localRectCanvasBounds,
   measureAlphaBoundsFromBlob,
   pivotForPart,
   pointInEditorHitBounds,
@@ -98,6 +103,7 @@ import type {
   CharacterPosePreset,
   CharacterPreset,
   CharacterRig,
+  CharacterSlot,
   CharacterSlotRelation,
   CharacterVariantKind,
   EyeState,
@@ -117,19 +123,21 @@ import {
   computeBoneWorldTransforms,
   moveBone,
   moveBoneForSlot,
-  movePartAndDescendants,
   moveSlotBinding,
   moveSlotParts,
   normalizeCharacterRig,
+  parentSlotIdForSlot,
   resolveSlotBinding,
   setBoneDepth,
   setBoneTransform,
   setSlotHostConstraint,
+  setSlotParentSocket,
   setSlotDepth,
   setSlotReach,
   setSlotRotReach,
   slotIdsForBoneSubtree,
 } from "./rig";
+import { buildCharacterRuntime, runtimePartPlacement, type RuntimePartPlacement } from "./runtime";
 
 interface Props {
   characterId: string;
@@ -155,10 +163,18 @@ const SLOT_DEFS: Array<{ label: string; role: PartRole; side?: CharacterPart["si
   { label: "Nose", role: "nose" },
   { label: "Left Arm", role: "arm", side: "left" },
   { label: "Right Arm", role: "arm", side: "right" },
+  { label: "Left Upper Arm", role: "upperArm", side: "left" },
+  { label: "Right Upper Arm", role: "upperArm", side: "right" },
+  { label: "Left Lower Arm", role: "lowerArm", side: "left" },
+  { label: "Right Lower Arm", role: "lowerArm", side: "right" },
   { label: "Left Hand", role: "hand", side: "left" },
   { label: "Right Hand", role: "hand", side: "right" },
   { label: "Left Leg", role: "leg", side: "left" },
   { label: "Right Leg", role: "leg", side: "right" },
+  { label: "Left Upper Leg", role: "upperLeg", side: "left" },
+  { label: "Right Upper Leg", role: "upperLeg", side: "right" },
+  { label: "Left Lower Leg", role: "lowerLeg", side: "left" },
+  { label: "Right Lower Leg", role: "lowerLeg", side: "right" },
   { label: "Left Foot", role: "foot", side: "left" },
   { label: "Right Foot", role: "foot", side: "right" },
   { label: "Hair Back", role: "hair", side: "back" },
@@ -175,14 +191,28 @@ const ROLE_OPTIONS: PartRole[] = [
   "nose",
   "mouth",
   "arm",
+  "upperArm",
+  "lowerArm",
   "hand",
   "leg",
+  "upperLeg",
+  "lowerLeg",
   "foot",
   "hair",
   "accessory",
   "static",
   "custom",
 ];
+
+const SLOT_SIDE_OPTIONS: Array<{ value: "" | NonNullable<CharacterPart["side"]>; label: string }> =
+  [
+    { value: "", label: "None" },
+    { value: "left", label: "Left" },
+    { value: "right", label: "Right" },
+    { value: "center", label: "Center" },
+    { value: "front", label: "Front" },
+    { value: "back", label: "Back" },
+  ];
 
 const MOTION_BEHAVIOR_OPTIONS: Array<{ value: PartMotionBehavior; label: string }> = [
   { value: "none", label: "None" },
@@ -228,6 +258,7 @@ const LIPSYNC_SAMPLES = Object.entries(
   .sort((a, b) => a.name.localeCompare(b.name));
 
 type EditorMode = "select" | "pivot" | "bounds-rect" | "bounds-ellipse";
+type BoneDragMode = "calibrate" | "moveArt";
 
 /** Focus-mode state while editing a layer's reach (sweep the layer to trace its limit). */
 interface RangeEdit {
@@ -241,6 +272,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   const [selectedSlotId, setSelectedSlotId] = useState<ID | null>(null);
   const [selectedBoneId, setSelectedBoneId] = useState<ID | null>(null);
   const [showBones, setShowBones] = useState(false);
+  const [boneDragMode, setBoneDragMode] = useState<BoneDragMode>("calibrate");
   const [scale, setScale] = useState(0.7);
   const [mode, setMode] = useState<EditorMode>("select");
   // Default to visible-art hit-testing: a click selects a layer by its actual pixels (plus a
@@ -437,6 +469,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   // Which pose chip's "…" menu is open (toolbar popover).
   const [poseMenuId, setPoseMenuId] = useState<ID | null>(null);
   const [addAngleMenuOpen, setAddAngleMenuOpen] = useState(false);
+  const [pendingDeleteAngle, setPendingDeleteAngle] = useState<CharacterAngle | null>(null);
   const [showAnchors, setShowAnchors] = useState(false);
   const variantShift = useMemo<VariantPreviewShift>(
     () =>
@@ -629,6 +662,44 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     // skeleton and art realize the same pose (or fall back where a key has no art yet).
   };
 
+  const deleteAngle = (angle: CharacterAngle) => {
+    if (!doc) return;
+    const remainingAngles = availableCharacterAngles(doc).filter((a) => a !== angle);
+    if (remainingAngles.length === 0) return; // can't delete the last angle
+    const fallback = remainingAngles[0];
+    pushUndoSnapshot();
+    setDoc((d) => {
+      if (!d) return d;
+      // Remove parts exclusively tagged to this angle; for parts tagged to this + others,
+      // drop just this angle from the list (the part stays on its other angles).
+      const parts = d.parts
+        .filter((p) => {
+          const ids = p.angleIds;
+          return !(Array.isArray(ids) && ids.length === 1 && ids[0] === angle);
+        })
+        .map((p) => {
+          const ids = p.angleIds;
+          if (!Array.isArray(ids) || !ids.includes(angle)) return p;
+          const next = ids.filter((a) => a !== angle);
+          return { ...p, angleIds: next.length ? next : undefined };
+        });
+      // Prune rig.angles to avoid bloating the saved document with stale angle data.
+      const prunedRigAngles = d.rig?.angles
+        ? Object.fromEntries(Object.entries(d.rig.angles).filter(([a]) => a !== angle))
+        : d.rig?.angles;
+      const withFallback: CharacterPreset = {
+        ...d,
+        parts,
+        angles: remainingAngles,
+        rig: d.rig ? { ...d.rig, activeAngle: fallback, angles: prunedRigAngles } : undefined,
+        updatedAt: Date.now(),
+      };
+      return { ...withFallback, rig: normalizeCharacterRig(withFallback) };
+    });
+    setPendingDeleteAngle(null);
+    setStatusUndoable(`${ANGLE_LABELS[angle]} deleted`);
+  };
+
   useEffect(() => {
     if (!doc || !wrapRef.current) return;
     const ro = new ResizeObserver(() => {
@@ -768,12 +839,12 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     };
   }, []);
 
+  const editorRuntime = useMemo(() => (doc ? buildCharacterRuntime(doc) : null), [doc]);
+
   function restoreCharacterSnapshot(next: CharacterPreset) {
     setDoc(next);
     setSelectedPartId((id) => (id && next.parts.some((part) => part.id === id) ? id : null));
-    setSelectedSlotId((id) =>
-      id && next.parts.some((part) => getPartSlotId(part) === id) ? id : null,
-    );
+    setSelectedSlotId((id) => (id && findCharacterSlot(next, id) ? id : null));
     setSelectedBoneId((id) =>
       id && normalizeCharacterRig(next).bones.some((bone) => bone.id === id) ? id : null,
     );
@@ -817,15 +888,18 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     );
   }
 
-  const withRig = (character: CharacterPreset, preserveRig = false): CharacterPreset => ({
-    ...character,
-    // A structural rebuild (preserveRig = false) recomputes bones/bindings from the parts but
-    // must keep authored movement/rotation reaches — otherwise setting a pivot/area or moving a
-    // layer would silently wipe a slot's drag boundary and rotation clipping.
-    rig: preserveRig
-      ? normalizeCharacterRig(character)
-      : rebuildRigPreservingConstraints(character),
-  });
+  const withRig = (character: CharacterPreset, preserveRig = false): CharacterPreset => {
+    const normalized = normalizeCharacterSlots(character);
+    return {
+      ...normalized,
+      // A structural rebuild (preserveRig = false) recomputes bones/bindings from the parts but
+      // must keep authored movement/rotation reaches — otherwise setting a pivot/area or moving a
+      // layer would silently wipe a slot's drag boundary and rotation clipping.
+      rig: preserveRig
+        ? normalizeCharacterRig(normalized)
+        : rebuildRigPreservingConstraints(normalized),
+    };
+  };
 
   const pushUndoSnapshot = () => {
     if (!docRef.current) return;
@@ -894,8 +968,12 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           ? patch.rotation - original.rotation
           : 0;
       const parentPivot = original ? pivotForPart(original) : null;
+      const rig = normalizeCharacterRig(d);
+      const originalSlotId = original ? getPartSlotId(original) : "";
       const descendantIds =
-        original && rotationDelta !== 0 ? descendantPartIds(d.parts, new Set([id])) : new Set<ID>();
+        original && rotationDelta !== 0
+          ? partIdsForSlotSubtree(d.parts, rig, originalSlotId, rig.activeAngle, false)
+          : new Set<ID>();
       return withRig({
         ...d,
         parts: d.parts.map((part) => {
@@ -970,18 +1048,13 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   };
 
   const removePart = (id: ID) => {
+    const angle = currentAngle();
     pushUndoSnapshot();
-    setDoc((d) =>
-      d
-        ? withRig({
-            ...d,
-            parts: d.parts
-              .filter((p) => p.id !== id)
-              .map((p) => (p.parentId === id ? { ...p, parentId: undefined } : p)),
-            updatedAt: Date.now(),
-          })
-        : d,
-    );
+    setDoc((d) => {
+      if (!d) return d;
+      const next = removePartFromAngle(d, id, angle).character;
+      return withRig({ ...next, updatedAt: Date.now() });
+    });
     if (selectedPartId === id) setSelectedPartId(null);
   };
 
@@ -1063,18 +1136,29 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     setSelectedSlotId(null);
   };
 
-  const partsInSlot = (slotId: ID) => doc.parts.filter((p) => getPartSlotId(p) === slotId);
+  const currentAngle = () => normalizeCharacterRig(doc).activeAngle;
+  const partsInSlot = (slotId: ID, angle: CharacterAngle = currentAngle()) =>
+    doc.parts.filter((p) => getPartSlotId(p) === slotId && partAvailableForAngle(p, angle));
+  const slotNameFor = (slotId: ID) => findCharacterSlot(doc, slotId)?.name ?? slotId;
+
+  const updateSlotRecord = (slotId: ID, patch: Partial<CharacterSlot>) => {
+    pushUndoSnapshot();
+    setDoc((d) => {
+      if (!d) return d;
+      return withRig({ ...withUpdatedCharacterSlot(d, slotId, patch), updatedAt: Date.now() });
+    });
+  };
 
   const toggleSlotVisible = (slotId: ID) => {
-    const anyVisible = partsInSlot(slotId).some((p) => p.visible);
+    const activeParts = partsInSlot(slotId);
+    const targetIds = new Set(activeParts.map((part) => part.id));
+    const anyVisible = activeParts.some((p) => p.visible);
     pushUndoSnapshot();
     setDoc((d) =>
       d
         ? withRig({
             ...d,
-            parts: d.parts.map((p) =>
-              getPartSlotId(p) === slotId ? { ...p, visible: !anyVisible } : p,
-            ),
+            parts: d.parts.map((p) => (targetIds.has(p.id) ? { ...p, visible: !anyVisible } : p)),
             updatedAt: Date.now(),
           })
         : d,
@@ -1084,15 +1168,15 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   // Lock cascades across a slot's variants — a locked slot ignores canvas clicks/drags
   // (still selectable from the Layers list so it can be unlocked).
   const toggleSlotLocked = (slotId: ID) => {
-    const anyLocked = partsInSlot(slotId).some((p) => p.locked);
+    const activeParts = partsInSlot(slotId);
+    const targetIds = new Set(activeParts.map((part) => part.id));
+    const anyLocked = activeParts.some((p) => p.locked);
     pushUndoSnapshot();
     setDoc((d) =>
       d
         ? withRig({
             ...d,
-            parts: d.parts.map((p) =>
-              getPartSlotId(p) === slotId ? { ...p, locked: !anyLocked } : p,
-            ),
+            parts: d.parts.map((p) => (targetIds.has(p.id) ? { ...p, locked: !anyLocked } : p)),
             updatedAt: Date.now(),
           })
         : d,
@@ -1100,13 +1184,14 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   };
 
   const nudgeSlotZ = (slotId: ID, delta: number) => {
+    const targetIds = new Set(partsInSlot(slotId).map((part) => part.id));
     pushUndoSnapshot();
     setDoc((d) =>
       d
         ? withRig({
             ...d,
             parts: d.parts.map((p) =>
-              getPartSlotId(p) === slotId ? { ...p, zIndex: p.zIndex + delta } : p,
+              targetIds.has(p.id) ? { ...p, zIndex: p.zIndex + delta } : p,
             ),
             updatedAt: Date.now(),
           })
@@ -1115,16 +1200,17 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   };
 
   const removeSlot = (slotId: ID) => {
+    const angle = currentAngle();
+    const targetIds = partsInSlot(slotId, angle).map((part) => part.id);
     pushUndoSnapshot();
-    setDoc((d) =>
-      d
-        ? withRig({
-            ...d,
-            parts: d.parts.filter((p) => getPartSlotId(p) !== slotId),
-            updatedAt: Date.now(),
-          })
-        : d,
-    );
+    setDoc((d) => {
+      if (!d) return d;
+      const next = targetIds.reduce(
+        (current, partId) => removePartFromAngle(current, partId, angle).character,
+        d,
+      );
+      return withRig({ ...next, updatedAt: Date.now() });
+    });
     if (selectedSlotId === slotId) setSelectedSlotId(null);
   };
 
@@ -1135,10 +1221,11 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       if (!d) return d;
       const rig = normalizeCharacterRig(d);
       const limited = clampSlotDeltaToHost(d, rig, slotId, dx, dy);
+      const angle = rig.activeAngle;
       return withRig(
         {
           ...d,
-          parts: moveSlotParts(d, slotId, limited.dx, limited.dy),
+          parts: moveSlotParts(d, slotId, limited.dx, limited.dy, angle),
           rig: moveSlotBinding(rig, slotId, limited.dx, limited.dy),
           updatedAt: Date.now(),
         },
@@ -1154,13 +1241,15 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     scaleX: number,
     scaleY: number,
   ) => {
+    const angle = currentAngle();
+    const targetIds = new Set(partsInSlot(slotId, angle).map((part) => part.id));
     pushUndoSnapshot();
     setDoc((d) =>
       d
         ? withRig({
             ...d,
             parts: d.parts.map((p) => {
-              if (getPartSlotId(p) !== slotId) return p;
+              if (!targetIds.has(p.id)) return p;
               const pivot = pivotForPart(p);
               return {
                 ...p,
@@ -1182,10 +1271,11 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
   const applyGroupRotate = (slotId: ID, anchor: { x: number; y: number }, degrees: number) => {
     if (!Number.isFinite(degrees) || degrees === 0) return;
+    const angle = currentAngle();
     pushUndoSnapshot();
     setDoc((d) => {
       if (!d) return d;
-      const targetIds = partAndDescendantIdsForSlot(d.parts, slotId);
+      const targetIds = partIdsForSlotSubtree(d.parts, normalizeCharacterRig(d), slotId, angle);
       return withRig({
         ...d,
         parts: d.parts.map((part) => {
@@ -1308,25 +1398,29 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     }
   };
 
+  // Each angle owns its drawings: the canvas and layer list show only the active angle's parts.
+  const resolvedEditorRuntime = editorRuntime!;
   const manifest = normalizePartManifest(doc.manifest);
+  const editorActiveAngle = resolvedEditorRuntime.angle;
+  const editorAngleParts = orderedParts.filter((part) =>
+    partAvailableForAngle(part, editorActiveAngle),
+  );
   const previewParentPart =
     preview?.targetRole === "head"
-      ? orderedParts.find((part) => part.id === preview.targetPartId)
+      ? editorAngleParts.find((part) => part.id === preview.targetPartId)
       : undefined;
-  // Each angle owns its drawings: the canvas and layer list show only the active angle's parts.
-  const editorActiveAngle = normalizeCharacterRig(doc).activeAngle;
-  const visibleEditorParts = orderedParts.filter(
-    (part) =>
-      roleEnabledByManifest(part.role, manifest) && partAvailableForAngle(part, editorActiveAngle),
+  const visibleEditorParts = editorAngleParts.filter((part) =>
+    roleEnabledByManifest(part.role, manifest),
   );
   const selectedEditorPart = selectedPart
     ? visibleEditorParts.find((part) => part.id === selectedPart.id)
     : null;
   const selectedSlotParts = selectedSlotId
-    ? doc.parts.filter((part) => getPartSlotId(part) === selectedSlotId)
+    ? doc.parts.filter(
+        (part) =>
+          getPartSlotId(part) === selectedSlotId && partAvailableForAngle(part, editorActiveAngle),
+      )
     : [];
-  const selectedSlotBounds =
-    selectedSlotParts.length > 0 ? unionFrameBounds(selectedSlotParts) : null;
   // The layer that movement-range controls act on: a selected slot, or the slot of the
   // selected part.
   const restrictSlotId = selectedSlotId ?? (selectedPart ? getPartSlotId(selectedPart) : null);
@@ -1359,20 +1453,28 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     return base;
   };
 
+  const runtimePlacementForPart = (part: CharacterPart): RuntimePartPlacement | undefined => {
+    const slotId = getPartSlotId(part);
+    const slot = resolvedEditorRuntime.slotById.get(slotId);
+    if (!slot) return undefined;
+    return runtimePartPlacement(slot, part, resolvedEditorRuntime, {
+      poseKey:
+        variantPreview[slotId] ??
+        activePreviewVariantForPart(part, preview) ??
+        variantKeyForPart(part),
+    });
+  };
+
   // The animation-test delta plus the variant-preview re-anchor shift — every hit test and
   // local-point mapping must use this so clicks land on the art where it is actually drawn.
   const partPreviewTransform = (part: CharacterPart) => {
-    const base = previewDelta(part, preview, previewParentPart, doc.parts);
+    const base = previewDelta(part, preview, previewParentPart, editorAngleParts);
     const shift = partShift(part);
-    return shift
-      ? {
-          ...base,
-          dx: base.dx + shift.dx,
-          dy: base.dy + shift.dy,
-          rotation: base.rotation + shift.rotation,
-        }
-      : base;
+    return composeEditorPartTransform(part, base, shift, runtimePlacementForPart(part));
   };
+
+  const selectedSlotBounds =
+    selectedSlotParts.length > 0 ? unionFrameBounds(selectedSlotParts, partPreviewTransform) : null;
 
   const localPointForPart = (part: CharacterPart, point: { x: number; y: number }) =>
     canvasPointToPartLocal(part, point, partPreviewTransform(part));
@@ -1392,11 +1494,15 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       const transform = partPreviewTransform(part);
       if (transform.opacity <= 0.05 && part.id !== selectedPartId) continue;
       const local = canvasPointToPartLocal(part, point, transform);
+      const inEditorBounds = pointInEditorHitBounds(part, local, scale, boundsMode);
       if (boundsMode === "frame") {
-        if (pointInEditorHitBounds(part, local, scale, boundsMode)) exact.push(part);
-      } else if (alphaMaskContains(alphaMaskRef.current.get(part.id), part, local)) {
+        if (inEditorBounds) exact.push(part);
+      } else if (
+        inEditorBounds &&
+        alphaMaskContains(alphaMaskRef.current.get(part.id), part, local)
+      ) {
         exact.push(part);
-      } else if (pointInEditorHitBounds(part, local, scale, boundsMode)) {
+      } else if (inEditorBounds) {
         padded.push(part);
       }
     }
@@ -1482,18 +1588,20 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     pushUndoSnapshot();
     const sx = e.clientX;
     const sy = e.clientY;
-    const ox = part.x;
-    const oy = part.y;
     const slotId = getPartSlotId(part);
     const rigSnapshot = normalizeCharacterRig(doc);
+    const angle = rigSnapshot.activeAngle;
+    const binding = resolveSlotBinding(rigSnapshot, slotId, angle);
+    const subtreeSlotIds = binding
+      ? slotIdsForBoneSubtree(rigSnapshot, binding.effectiveBoneId, angle)
+      : new Set<ID>([slotId]);
     let latestRig = rigSnapshot;
-    const partSnapshot = new Map(
-      doc.parts.map((snapshotPart) => {
-        const pivot = pivotForPart(snapshotPart);
-        return [snapshotPart.id, { x: snapshotPart.x, y: snapshotPart.y, pivot }] as const;
-      }),
-    );
-    const movesBone = doc.parts.some((candidate) => candidate.parentId === part.id);
+    const snapshot = doc.parts.map((snapshotPart) => {
+      const pivot = pivotForPart(snapshotPart);
+      return { id: snapshotPart.id, x: snapshotPart.x, y: snapshotPart.y, pivot };
+    });
+    const partSnapshot = new Map(snapshot.map((snapshotPart) => [snapshotPart.id, snapshotPart]));
+    const movesBone = subtreeSlotIds.size > 1;
     const move = (ev: PointerEvent) => {
       const dx = Math.round((ev.clientX - sx) / scale);
       const dy = Math.round((ev.clientY - sy) / scale);
@@ -1509,14 +1617,18 @@ export function CharacterEditor({ characterId, onClose }: Props) {
             pivot: snapshotPart.pivot,
           };
         });
-        const limited = movesBone
-          ? { dx, dy }
-          : clampSlotDeltaToHost({ ...d, parts: snapshotParts }, rigSnapshot, slotId, dx, dy);
+        const limited = clampSlotDeltaToHost(
+          { ...d, parts: snapshotParts },
+          rigSnapshot,
+          slotId,
+          dx,
+          dy,
+        );
         const appliedDx = limited.dx;
         const appliedDy = limited.dy;
         const parts = movesBone
-          ? movePartAndDescendants(snapshotParts, part.id, appliedDx, appliedDy)
-          : moveSlotParts({ ...d, parts: snapshotParts }, slotId, appliedDx, appliedDy);
+          ? moveSlotSetFromSnapshot(snapshotParts, snapshot, subtreeSlotIds, appliedDx, appliedDy)
+          : moveSlotParts({ ...d, parts: snapshotParts }, slotId, appliedDx, appliedDy, angle);
         const rig = movesBone
           ? moveBoneForSlot(rigSnapshot, slotId, appliedDx, appliedDy)
           : moveSlotBinding(rigSnapshot, slotId, appliedDx, appliedDy);
@@ -1549,6 +1661,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     const sx = e.clientX;
     const sy = e.clientY;
     const rigSnapshot = normalizeCharacterRig(doc);
+    const angle = rigSnapshot.activeAngle;
     let latestRig = rigSnapshot;
     const move = (ev: PointerEvent) => {
       const dx = Math.round((ev.clientX - sx) / scale);
@@ -1580,6 +1693,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               slotId,
               limited.dx,
               limited.dy,
+              angle,
             ),
             rig,
             updatedAt: Date.now(),
@@ -1605,8 +1719,10 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     selectBone(boneId);
     const sx = e.clientX;
     const sy = e.clientY;
-    // Bones drive the skeleton only; artwork stays put (drag layers with bones hidden instead).
-    const shouldMoveArt = false;
+    const pinArtwork = boneDragMode === "calibrate";
+    // Calibrate mode moves only the skeleton/socket and counter-moves slot bindings so art stays
+    // visually pinned. Move-art mode moves the affected art subtree with the socket so the builder
+    // canvas and generated HyperFrames character stay aligned.
     const rigSnapshot = normalizeCharacterRig(doc);
     let latestRig = rigSnapshot;
     const startBoneWorld = computeBoneWorldTransforms(rigSnapshot).get(boneId);
@@ -1620,7 +1736,8 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     const move = (ev: PointerEvent) => {
       const dx = Math.round((ev.clientX - sx) / scale);
       const dy = Math.round((ev.clientY - sy) / scale);
-      const rig = moveBone(rigSnapshot, boneId, dx, dy);
+      const movedRig = moveBone(rigSnapshot, boneId, dx, dy);
+      const rig = pinArtwork ? pinRigSlotPlacements(doc, rigSnapshot, movedRig, slotIds) : movedRig;
       latestRig = rig;
       const movedBoneWorld = computeBoneWorldTransforms(rig).get(boneId);
       const appliedDx =
@@ -1632,9 +1749,9 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           ? withRig(
               {
                 ...d,
-                parts: shouldMoveArt
-                  ? moveSlotSetFromSnapshot(d.parts, snapshot, slotIds, appliedDx, appliedDy)
-                  : d.parts,
+                parts: pinArtwork
+                  ? d.parts
+                  : moveSlotSetFromSnapshot(d.parts, snapshot, slotIds, appliedDx, appliedDy),
                 rig,
                 updatedAt: Date.now(),
               },
@@ -1647,6 +1764,9 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       applyLiveBoneTransform(latestRig, boneId);
+      if (pinArtwork) {
+        for (const slotId of slotIds) applyLiveSlotBinding(latestRig, slotId);
+      }
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -1739,7 +1859,8 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       y: rect.top + anchor.y * scale,
     };
     const startAngle = Math.atan2(e.clientY - anchorScreen.y, e.clientX - anchorScreen.x);
-    const targetIds = partAndDescendantIdsForSlot(doc.parts, slotId);
+    const angle = currentAngle();
+    const targetIds = partIdsForSlotSubtree(doc.parts, normalizeCharacterRig(doc), slotId, angle);
     const snapshot = doc.parts
       .filter((part) => targetIds.has(part.id))
       .map((part) => ({
@@ -1804,8 +1925,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     return { childSlotId: slotId, parentSlotId, variantKey: previewKey };
   };
 
-  const slotDisplayName = (slotId: ID) =>
-    doc.parts.find((part) => getPartSlotId(part) === slotId)?.slotName ?? slotId;
+  const slotDisplayName = (slotId: ID) => slotNameFor(slotId);
 
   const startAnchorDrag = (
     e: React.PointerEvent,
@@ -2043,15 +2163,24 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     window.addEventListener("pointerup", up);
   };
 
-  // Set which layer a slot is attached to (the parent carries it). Stored on part.parentId.
+  // Set which layer a slot is attached to for the active angle. Stored as a slot relation plus a
+  // base socket; individual parts keep their import-time parentId out of rig authoring.
   const setSlotAttachTo = (slotId: ID, parentSlotId: ID | "") => {
-    const parentRep = parentSlotId
-      ? (doc.parts.find((p) => getPartSlotId(p) === parentSlotId && p.visible) ??
-        doc.parts.find((p) => getPartSlotId(p) === parentSlotId))
-      : undefined;
+    const rig = normalizeCharacterRig(doc);
+    const activeAngle = rig.activeAngle;
+    const childParts = partsInSlot(slotId, activeAngle);
+    const childRep = childParts.find((part) => part.visible) ?? childParts[0];
+    const pivot = childRep ? pivotForPart(childRep) : undefined;
     updateDoc({
-      parts: doc.parts.map((p) =>
-        getPartSlotId(p) === slotId ? { ...p, parentId: parentRep?.id } : p,
+      rig: setSlotParentSocket(
+        rig,
+        {
+          childSlotId: slotId,
+          parentSlotId: parentSlotId || undefined,
+          x: pivot?.x,
+          y: pivot?.y,
+        },
+        activeAngle,
       ),
     });
   };
@@ -2096,7 +2225,10 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           if (!snap) return p;
           return { ...p, x: snap.x, y: snap.y, pivot: snap.pivot };
         });
-        return { ...d, parts: moveSlotParts({ ...d, parts: restored }, slotId, dx, dy) };
+        return {
+          ...d,
+          parts: moveSlotParts({ ...d, parts: restored }, slotId, dx, dy, currentAngle()),
+        };
       });
     };
     const up = () => {
@@ -2273,7 +2405,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       if (hoverHit) setHoverHit(null);
       return;
     }
-    const slotName = top.slotName ?? roleLabel(top.role);
+    const slotName = slotNameFor(getPartSlotId(top));
     const variant = variantLabelForPart(top);
     setHoverHit({
       x: point.x,
@@ -2401,66 +2533,96 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       </header>
 
       {/* Angle → pose toolbar: the angle picks the rig, the pose picks the limb arrangement. */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-border bg-panel px-4 py-1.5 text-xs">
-        <div className="flex items-center gap-1">
-          <span className="mr-1 text-[10px] uppercase tracking-wider text-muted-foreground">
-            Angle
-          </span>
-          <div className="flex overflow-hidden rounded border border-border">
-            {availableCharacterAngles(doc).map((angle) => {
-              const active = normalizeCharacterRig(doc).activeAngle === angle;
-              return (
+      <div className="flex items-stretch border-b border-border bg-panel text-xs">
+        {/* Angle tabs — each angle is a separate artwork/rig workspace */}
+        <div className="flex items-stretch">
+          {availableCharacterAngles(doc).map((angle) => {
+            const active = normalizeCharacterRig(doc).activeAngle === angle;
+            const canDelete = active && availableCharacterAngles(doc).length > 1;
+            const confirmingDelete = pendingDeleteAngle === angle;
+            return (
+              <span key={angle} className="relative flex items-stretch">
                 <button
-                  key={angle}
                   type="button"
                   onClick={() => setActiveAngleFromToolbar(angle)}
-                  className={`px-2 py-1 text-[11px] ${
+                  className={`border-b-2 py-2 pl-4 text-[11px] font-medium transition-colors ${
+                    canDelete ? "pr-1" : "pr-4"
+                  } ${
                     active
-                      ? "bg-primary/25 text-foreground"
-                      : "text-muted-foreground hover:bg-panel-2"
+                      ? "border-primary text-foreground"
+                      : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"
                   }`}
+                  title={`Switch to ${ANGLE_LABELS[angle]} view`}
                 >
                   {ANGLE_LABELS[angle]}
                 </button>
-              );
-            })}
-          </div>
-          {CHARACTER_ANGLES.some((angle) => !availableCharacterAngles(doc).includes(angle)) && (
-            <span className="relative">
-              <button
-                type="button"
-                onClick={() => setAddAngleMenuOpen((open) => !open)}
-                className="rounded border border-dashed border-border px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground"
-                title="Add another view of this character — it starts with its own empty set of drawings"
-              >
-                + Add angle
-              </button>
-              {addAngleMenuOpen && (
-                <div className="absolute left-0 top-full z-[70] mt-1 min-w-32 rounded border border-border bg-panel p-1 text-[11px] shadow-xl">
-                  {CHARACTER_ANGLES.filter(
-                    (angle) => !availableCharacterAngles(doc).includes(angle),
-                  ).map((angle) => (
-                    <button
-                      key={angle}
-                      type="button"
-                      onClick={() => {
-                        setAddAngleMenuOpen(false);
-                        setActiveAngleFromToolbar(angle);
-                        switchPhase("build");
-                      }}
-                      className="block w-full rounded px-2 py-1 text-left hover:bg-panel-2"
-                    >
-                      {ANGLE_LABELS[angle]}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </span>
-          )}
+                {canDelete && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (confirmingDelete) {
+                        deleteAngle(angle);
+                      } else {
+                        setPendingDeleteAngle(angle);
+                      }
+                    }}
+                    onBlur={() => {
+                      setTimeout(() => setPendingDeleteAngle((p) => (p === angle ? null : p)), 200);
+                    }}
+                    className={`border-b-2 border-primary py-2 pr-2 text-[10px] transition-colors ${
+                      confirmingDelete
+                        ? "text-destructive"
+                        : "text-muted-foreground/40 hover:text-muted-foreground"
+                    }`}
+                    title={
+                      confirmingDelete
+                        ? "Click again to confirm deletion"
+                        : `Delete ${ANGLE_LABELS[angle]} angle`
+                    }
+                  >
+                    {confirmingDelete ? "delete?" : "×"}
+                  </button>
+                )}
+              </span>
+            );
+          })}
         </div>
+        {CHARACTER_ANGLES.some((angle) => !availableCharacterAngles(doc).includes(angle)) && (
+          <span className="relative flex items-center">
+            <button
+              type="button"
+              onClick={() => setAddAngleMenuOpen((open) => !open)}
+              className="border-b-2 border-transparent px-3 py-2 text-[11px] text-muted-foreground hover:text-foreground"
+              title="Add another view of this character — it starts with its own empty set of drawings"
+            >
+              + Add angle
+            </button>
+            {addAngleMenuOpen && (
+              <div className="absolute left-0 top-full z-[70] mt-1 min-w-32 rounded border border-border bg-panel p-1 text-[11px] shadow-xl">
+                {CHARACTER_ANGLES.filter(
+                  (angle) => !availableCharacterAngles(doc).includes(angle),
+                ).map((angle) => (
+                  <button
+                    key={angle}
+                    type="button"
+                    onClick={() => {
+                      setAddAngleMenuOpen(false);
+                      setActiveAngleFromToolbar(angle);
+                      switchPhase("build");
+                    }}
+                    className="block w-full rounded px-2 py-1 text-left hover:bg-panel-2"
+                  >
+                    {ANGLE_LABELS[angle]}
+                  </button>
+                ))}
+              </div>
+            )}
+          </span>
+        )}
         {editorPhase === "pose" && (
-          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
-            <span className="mr-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+          <div className="flex min-w-0 flex-1 items-center gap-1 border-l border-border px-4">
+            <span className="mr-1 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">
               Pose
             </span>
             <button
@@ -2607,39 +2769,55 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
       <div className="flex min-h-0 flex-1">
         <aside className="w-72 shrink-0 overflow-auto border-r border-border bg-panel p-3 text-xs">
-          {editorPhase === "build" && (
-            <>
-              <Accordion title="Body parts" defaultOpen={doc.parts.length === 0}>
-                <StructureEditor
-                  manifest={manifest}
-                  onChange={(nextManifest) => updateDoc({ manifest: nextManifest })}
-                />
-              </Accordion>
-              <UploadSlots
-                onImport={importSvg}
-                parts={doc.parts}
-                manifest={manifest}
-                canvasWidth={doc.canvasWidth}
-                canvasHeight={doc.canvasHeight}
-                activeAngle={editorActiveAngle}
-              />
-            </>
-          )}
-          <LayerList
-            parts={orderedParts.filter((part) => partAvailableForAngle(part, editorActiveAngle))}
-            rig={normalizeCharacterRig(doc)}
-            selectedId={selectedPartId}
-            selectedSlotId={selectedSlotId}
-            keyIssues={variantKeyIssues}
-            onSelect={selectPart}
-            onSelectSlot={selectSlot}
-            onChange={updatePart}
-            onRemove={removePart}
-            onToggleSlotVisible={toggleSlotVisible}
-            onToggleSlotLocked={toggleSlotLocked}
-            onNudgeSlotZ={nudgeSlotZ}
-            onRemoveSlot={removeSlot}
-          />
+          <Accordion title="Body parts" defaultOpen={doc.parts.length === 0}>
+            <StructureEditor
+              manifest={manifest}
+              onChange={(nextManifest) => updateDoc({ manifest: nextManifest })}
+            />
+          </Accordion>
+          <Accordion title="Body map" defaultOpen>
+            <BodyMapPanel
+              doc={doc}
+              manifest={manifest}
+              activeAngle={editorActiveAngle}
+              selectedSlotId={selectedSlotId}
+              onSelectSlot={selectSlot}
+              onAddSlot={(slot) => {
+                updateSlotRecord(slot.id, slot);
+                setSelectedPartId(null);
+                setSelectedSlotId(slot.id);
+              }}
+              onUpdateSlot={updateSlotRecord}
+            />
+          </Accordion>
+          <Accordion title="Artwork" defaultOpen>
+            <UploadSlots
+              onImport={importSvg}
+              parts={doc.parts}
+              slots={doc.slots ?? []}
+              manifest={manifest}
+              canvasWidth={doc.canvasWidth}
+              canvasHeight={doc.canvasHeight}
+              activeAngle={editorActiveAngle}
+              selectedSlotId={selectedSlotId}
+            />
+            <LayerList
+              parts={orderedParts.filter((part) => partAvailableForAngle(part, editorActiveAngle))}
+              slots={doc.slots ?? []}
+              rig={normalizeCharacterRig(doc)}
+              selectedId={selectedPartId}
+              selectedSlotId={selectedSlotId}
+              keyIssues={variantKeyIssues}
+              onSelect={selectPart}
+              onSelectSlot={selectSlot}
+              onChange={updatePart}
+              onRemove={removePart}
+              onToggleSlotVisible={toggleSlotVisible}
+              onToggleSlotLocked={toggleSlotLocked}
+              onNudgeSlotZ={nudgeSlotZ}
+              onRemoveSlot={removeSlot}
+            />
+          </Accordion>
         </aside>
 
         <main
@@ -2696,9 +2874,10 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   }
                   preview={preview}
                   previewParentPart={previewParentPart}
-                  allParts={doc.parts}
+                  allParts={editorAngleParts}
                   previewVariantKey={variantPreview[getPartSlotId(part)]}
                   shift={partShift(part)}
+                  placement={runtimePlacementForPart(part)}
                 />
               ))}
               {showBones && !focusEditing && (
@@ -2731,8 +2910,9 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   onBoundsModeChange={setBoundsMode}
                   preview={preview}
                   previewParentPart={previewParentPart}
-                  allParts={doc.parts}
+                  allParts={editorAngleParts}
                   shift={partShift(selectedEditorPart)}
+                  placement={runtimePlacementForPart(selectedEditorPart)}
                   onBeginChange={() => {
                     setInteracting(true);
                     pushUndoSnapshot();
@@ -2744,22 +2924,9 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                 selectedSlotBounds &&
                 !focusEditing &&
                 (() => {
-                  // Draw the group box where the slot's art currently sits (variant preview may
-                  // have re-anchored it). Handlers re-derive rest bounds internally, so this
-                  // offset is display-only.
-                  const slotShift = selectedSlotParts[0]
-                    ? partShift(selectedSlotParts[0])
-                    : undefined;
-                  const bounds = slotShift
-                    ? {
-                        ...selectedSlotBounds,
-                        x: selectedSlotBounds.x + slotShift.dx,
-                        y: selectedSlotBounds.y + slotShift.dy,
-                      }
-                    : selectedSlotBounds;
                   return (
                     <GroupControlsOverlay
-                      bounds={bounds}
+                      bounds={selectedSlotBounds}
                       scale={scale}
                       onStartMove={(e) => {
                         // Same gesture as dragging the art: while the parent previews a
@@ -2817,12 +2984,48 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   showBones ? "border-primary text-primary" : "border-border text-muted-foreground"
                 }`}
                 title={
-                  showBones ? "Hide the skeleton" : "Show the skeleton — drag joints to adjust"
+                  showBones
+                    ? "Hide the skeleton"
+                    : "Show the skeleton — calibrate joints or move joints with art"
                 }
               >
                 {showBones ? <Eye size={11} /> : <EyeOff size={11} />}
                 Bones
               </button>
+              {showBones && (
+                <div
+                  role="group"
+                  aria-label="Bone drag mode"
+                  className="flex overflow-hidden rounded border border-border bg-panel/90 text-[10px]"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={boneDragMode === "calibrate"}
+                    onClick={() => setBoneDragMode("calibrate")}
+                    className={`px-2 py-1 ${
+                      boneDragMode === "calibrate"
+                        ? "bg-primary/15 text-primary"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                    title="Drag bones onto the artwork while images stay pinned"
+                  >
+                    Calibrate
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={boneDragMode === "moveArt"}
+                    onClick={() => setBoneDragMode("moveArt")}
+                    className={`border-l border-border px-2 py-1 ${
+                      boneDragMode === "moveArt"
+                        ? "bg-primary/15 text-primary"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                    title="Drag the joint and attached artwork together"
+                  >
+                    Move art
+                  </button>
+                </div>
+              )}
               <button
                 type="button"
                 aria-pressed={showAnchors}
@@ -2925,9 +3128,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                     key={slotId}
                     className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-panel/95 px-2 py-0.5 text-[10px] text-primary shadow-[var(--shadow-panel)]"
                   >
-                    <span className="truncate">
-                      {doc.parts.find((part) => getPartSlotId(part) === slotId)?.slotName ?? slotId}
-                    </span>
+                    <span className="truncate">{slotNameFor(slotId)}</span>
                     <span className="font-mono">{key}</span>
                     <button
                       type="button"
@@ -2967,107 +3168,133 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           )}
         </main>
 
-        <aside className="w-80 shrink-0 overflow-auto border-l border-border bg-panel p-3 text-xs">
-          <div className="space-y-4">
-            {editorPhase === "build" && (
-              <CanvasSection doc={doc} onChange={(patch) => updateDoc(patch)} />
-            )}
-            {editorPhase === "rig" && (
-              <>
-                <SkeletonCard
-                  doc={doc}
-                  selectedBoneId={selectedBoneId}
-                  selectedSlotId={
-                    selectedSlotId ?? (selectedPart ? getPartSlotId(selectedPart) : null)
-                  }
-                  selectedPart={selectedPart}
-                  showBones={showBones}
-                  onRigChange={(rig) => updateDoc({ rig })}
-                  onResetRig={() => {
-                    updateDoc({ rig: buildDefaultRig(doc) });
-                    setStatusUndoable("Skeleton reset to default");
-                  }}
-                />
-                {restrictSlotId && (
-                  <RestrictMovementPanel
+        <aside className="flex w-80 shrink-0 flex-col border-l border-border bg-panel text-xs">
+          <div className="flex shrink-0 border-b border-border">
+            {(
+              [
+                { ph: "build", label: "Build" },
+                { ph: "rig", label: "Rig" },
+                { ph: "pose", label: "Pose" },
+              ] as const
+            ).map(({ ph, label }) => (
+              <button
+                key={ph}
+                type="button"
+                onClick={() => switchPhase(ph)}
+                className={`flex-1 py-2 text-[11px] font-medium ${
+                  editorPhase === ph
+                    ? "border-b-2 border-primary text-foreground"
+                    : "border-b-2 border-transparent text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="flex-1 overflow-auto p-3">
+            <div className="space-y-4">
+              {editorPhase === "build" && (
+                <CanvasSection doc={doc} onChange={(patch) => updateDoc(patch)} />
+              )}
+              {editorPhase === "rig" && (
+                <>
+                  <SkeletonCard
                     doc={doc}
-                    slotId={restrictSlotId}
-                    editing={rangeEdit?.slotId === restrictSlotId}
-                    onEnterEdit={enterReachEdit}
-                    onExitEdit={exitReachEdit}
-                    onAttachTo={(parentSlotId) => setSlotAttachTo(restrictSlotId, parentSlotId)}
-                    onHostChange={(hostSlotId) => setSlotHost(restrictSlotId, hostSlotId)}
-                    onHostModeChange={(mode) => setSlotHostMode(restrictSlotId, mode)}
-                    onClear={() => clearReach(restrictSlotId)}
+                    selectedBoneId={selectedBoneId}
+                    selectedSlotId={
+                      selectedSlotId ?? (selectedPart ? getPartSlotId(selectedPart) : null)
+                    }
+                    selectedPart={selectedPart}
+                    showBones={showBones}
+                    onRigChange={(rig) => updateDoc({ rig })}
+                    onResetRig={() => {
+                      updateDoc({ rig: buildDefaultRig(doc) });
+                      setStatusUndoable("Skeleton reset to default");
+                    }}
                   />
-                )}
-                <RigHealthPanel
+                  {restrictSlotId && (
+                    <RestrictMovementPanel
+                      doc={doc}
+                      slotId={restrictSlotId}
+                      editing={rangeEdit?.slotId === restrictSlotId}
+                      onEnterEdit={enterReachEdit}
+                      onExitEdit={exitReachEdit}
+                      onAttachTo={(parentSlotId) => setSlotAttachTo(restrictSlotId, parentSlotId)}
+                      onHostChange={(hostSlotId) => setSlotHost(restrictSlotId, hostSlotId)}
+                      onHostModeChange={(mode) => setSlotHostMode(restrictSlotId, mode)}
+                      onClear={() => clearReach(restrictSlotId)}
+                    />
+                  )}
+                  <RigHealthPanel
+                    doc={doc}
+                    report={rigHealthReport}
+                    defaultOpen
+                    onJumpTo={(row) => {
+                      if (row.childSlotId) selectSlot(row.childSlotId);
+                      if (row.parentSlotId && row.variantKey)
+                        previewVariant(row.parentSlotId, row.variantKey);
+                      setShowAnchors(true);
+                    }}
+                  />
+                </>
+              )}
+              {selectedSlotId && selectedSlotBounds ? (
+                <GroupInspector
                   doc={doc}
-                  report={rigHealthReport}
-                  defaultOpen
-                  onJumpTo={(row) => {
-                    if (row.childSlotId) selectSlot(row.childSlotId);
-                    if (row.parentSlotId && row.variantKey)
-                      previewVariant(row.parentSlotId, row.variantKey);
-                    setShowAnchors(true);
-                  }}
+                  slotId={selectedSlotId}
+                  parts={selectedSlotParts}
+                  bounds={selectedSlotBounds}
+                  keyIssues={variantKeyIssues}
+                  phase={editorPhase}
+                  onSwitchPhase={switchPhase}
+                  previewedKey={variantPreview[selectedSlotId]}
+                  variantPreview={variantPreview}
+                  socketPlacement={socketPlacement}
+                  onPreviewVariant={previewVariant}
+                  onClearPreview={clearVariantPreview}
+                  onArmPlacement={setSocketPlacement}
+                  onClearSocket={clearSocket}
+                  onSetRotation={setAnchorRotation}
+                  onUpdateSlot={(patch) => updateSlotRecord(selectedSlotId, patch)}
+                  onMove={(dx, dy) => applyGroupMove(selectedSlotId, dx, dy)}
+                  onScale={(anchor, sx, sy) => applyGroupScale(selectedSlotId, anchor, sx, sy)}
+                  onRotate={(anchor, degrees) => applyGroupRotate(selectedSlotId, anchor, degrees)}
+                  onSelectPart={selectPart}
+                  lipSyncSamples={LIPSYNC_SAMPLES}
+                  mouthTestPlaying={mouthTestPlaying}
+                  onTestWord={(word) => testMouthWord(selectedSlotId, word)}
+                  onTestAudio={(url) => void playMouthClip(selectedSlotId, url)}
+                  onStopTestAudio={stopMouthTestAudio}
                 />
-              </>
-            )}
-            {selectedSlotId && selectedSlotBounds ? (
-              <GroupInspector
-                doc={doc}
-                slotId={selectedSlotId}
-                parts={selectedSlotParts}
-                bounds={selectedSlotBounds}
-                keyIssues={variantKeyIssues}
-                phase={editorPhase}
-                onSwitchPhase={switchPhase}
-                previewedKey={variantPreview[selectedSlotId]}
-                variantPreview={variantPreview}
-                socketPlacement={socketPlacement}
-                onPreviewVariant={previewVariant}
-                onClearPreview={clearVariantPreview}
-                onArmPlacement={setSocketPlacement}
-                onClearSocket={clearSocket}
-                onSetRotation={setAnchorRotation}
-                onMove={(dx, dy) => applyGroupMove(selectedSlotId, dx, dy)}
-                onScale={(anchor, sx, sy) => applyGroupScale(selectedSlotId, anchor, sx, sy)}
-                onRotate={(anchor, degrees) => applyGroupRotate(selectedSlotId, anchor, degrees)}
-                onSelectPart={selectPart}
-                lipSyncSamples={LIPSYNC_SAMPLES}
-                mouthTestPlaying={mouthTestPlaying}
-                onTestWord={(word) => testMouthWord(selectedSlotId, word)}
-                onTestAudio={(url) => void playMouthClip(selectedSlotId, url)}
-                onStopTestAudio={stopMouthTestAudio}
-              />
-            ) : (
-              <Inspector
-                doc={doc}
-                part={selectedPart}
-                mode={mode}
-                boundsMode={boundsMode}
-                keyIssues={variantKeyIssues}
-                phase={editorPhase}
-                onSwitchPhase={switchPhase}
-                onSelectSlot={selectSlot}
-                variantPreview={variantPreview}
-                anchorDragContext={
-                  selectedPart ? anchorDragContextForSlot(getPartSlotId(selectedPart)) : null
-                }
-                socketPlacement={socketPlacement}
-                onPreviewVariant={previewVariant}
-                onArmPlacement={setSocketPlacement}
-                onClearSocket={clearSocket}
-                onSetRotation={setAnchorRotation}
-                onModeChange={setMode}
-                onBoundsModeChange={setBoundsMode}
-                onChange={updatePartVariant}
-                onRemove={removePart}
-                onDuplicate={duplicatePart}
-                onPreview={setPreview}
-              />
-            )}
+              ) : (
+                <Inspector
+                  doc={doc}
+                  part={selectedPart}
+                  mode={mode}
+                  boundsMode={boundsMode}
+                  keyIssues={variantKeyIssues}
+                  phase={editorPhase}
+                  onSwitchPhase={switchPhase}
+                  onSelectSlot={selectSlot}
+                  variantPreview={variantPreview}
+                  anchorDragContext={
+                    selectedPart ? anchorDragContextForSlot(getPartSlotId(selectedPart)) : null
+                  }
+                  socketPlacement={socketPlacement}
+                  onPreviewVariant={previewVariant}
+                  onArmPlacement={setSocketPlacement}
+                  onClearSocket={clearSocket}
+                  onSetRotation={setAnchorRotation}
+                  onModeChange={setMode}
+                  onBoundsModeChange={setBoundsMode}
+                  onAttachSlot={setSlotAttachTo}
+                  onChange={updatePartVariant}
+                  onRemove={removePart}
+                  onDuplicate={duplicatePart}
+                  onPreview={setPreview}
+                />
+              )}
+            </div>
           </div>
         </aside>
       </div>
@@ -3133,20 +3360,184 @@ function StructureEditor({
   );
 }
 
+function BodyMapPanel({
+  doc,
+  manifest,
+  activeAngle,
+  selectedSlotId,
+  onSelectSlot,
+  onAddSlot,
+  onUpdateSlot,
+}: {
+  doc: CharacterPreset;
+  manifest: PartManifest;
+  activeAngle: CharacterAngle;
+  selectedSlotId: ID | null;
+  onSelectSlot: (slotId: ID) => void;
+  onAddSlot: (slot: CharacterSlot) => void;
+  onUpdateSlot: (slotId: ID, patch: Partial<CharacterSlot>) => void;
+}) {
+  const slots = listCharacterSlots(doc, { includeEmpty: true }).filter((slot) =>
+    roleEnabledByManifest(slot.role, manifest),
+  );
+  const selectedSlot = selectedSlotId
+    ? slots.find((slot) => slot.id === selectedSlotId)
+    : undefined;
+  const slotIds = new Set(slots.map((slot) => slot.id));
+  const missingSlots = SLOT_DEFS.filter((slot) => {
+    if (!roleEnabledByManifest(slot.role, manifest)) return false;
+    return !slotIds.has(`slot:${slug(slot.label)}`);
+  });
+
+  return (
+    <div className="space-y-2">
+      <div className="text-[10px] leading-snug text-muted-foreground">
+        Stable slots are shared by the character. Artwork inside a slot remains angle-specific
+        unless an uploaded drawing is marked shared.
+      </div>
+      <div className="space-y-1">
+        {slots.length === 0 ? (
+          <div className="rounded border border-dashed border-border px-2 py-3 text-center text-[11px] text-muted-foreground">
+            Add planned slots, then upload artwork for {ANGLE_LABELS[activeAngle]}.
+          </div>
+        ) : (
+          slots.map((slot) => {
+            const activeArtCount = slot.parts.filter((part) =>
+              partAvailableForAngle(part, activeAngle),
+            ).length;
+            return (
+              <button
+                key={slot.id}
+                type="button"
+                onClick={() => onSelectSlot(slot.id)}
+                className={`w-full rounded border px-2 py-1.5 text-left ${
+                  selectedSlotId === slot.id
+                    ? "border-primary bg-primary/15 text-foreground"
+                    : "border-border bg-background/50 text-muted-foreground hover:bg-panel"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="min-w-0 truncate font-medium text-foreground">{slot.name}</span>
+                  <span className="shrink-0 rounded-full border border-border px-1.5 py-0.5 text-[9px]">
+                    {activeArtCount || "no"} art
+                  </span>
+                </div>
+                <div className="mt-0.5 flex items-center gap-1 text-[9px]">
+                  <span>{roleLabel(slot.role)}</span>
+                  {slot.side && (
+                    <>
+                      <span>·</span>
+                      <span>{slot.side}</span>
+                    </>
+                  )}
+                </div>
+              </button>
+            );
+          })
+        )}
+      </div>
+      {selectedSlot && (
+        <div className="rounded border border-border bg-background/40 p-2">
+          <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Selected slot
+          </div>
+          <div className="grid gap-2">
+            <Field label="Name">
+              <input
+                value={selectedSlot.name}
+                onChange={(e) => onUpdateSlot(selectedSlot.id, { name: e.target.value })}
+                className="w-full rounded border border-border bg-background px-2 py-1"
+              />
+            </Field>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Role">
+                <select
+                  value={selectedSlot.role}
+                  onChange={(e) =>
+                    onUpdateSlot(selectedSlot.id, { role: e.target.value as PartRole })
+                  }
+                  className="w-full rounded border border-border bg-background px-2 py-1"
+                >
+                  {ROLE_OPTIONS.map((role) => (
+                    <option key={role} value={role}>
+                      {roleLabel(role)}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Side">
+                <select
+                  value={selectedSlot.side ?? ""}
+                  onChange={(e) =>
+                    onUpdateSlot(selectedSlot.id, {
+                      side: (e.target.value || undefined) as CharacterPart["side"] | undefined,
+                    })
+                  }
+                  className="w-full rounded border border-border bg-background px-2 py-1"
+                >
+                  {SLOT_SIDE_OPTIONS.map((option) => (
+                    <option key={option.value || "none"} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+          </div>
+        </div>
+      )}
+      {missingSlots.length > 0 && (
+        <div>
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Add planned slot
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {missingSlots.map((slot, index) => {
+              const id = `slot:${slug(slot.label)}`;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() =>
+                    onAddSlot({
+                      id,
+                      name: slot.label,
+                      role: slot.role,
+                      side: slot.side,
+                      sortOrder: index,
+                    })
+                  }
+                  className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-panel hover:text-foreground"
+                >
+                  {slot.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UploadSlots({
   onImport,
   parts,
+  slots,
   manifest,
   canvasWidth,
   canvasHeight,
   activeAngle,
+  selectedSlotId,
 }: {
   onImport: (file: File, options?: ImportOptions) => void;
   parts: CharacterPart[];
+  slots: CharacterSlot[];
   manifest: PartManifest;
   canvasWidth: number;
   canvasHeight: number;
   activeAngle: CharacterAngle;
+  selectedSlotId: ID | null;
 }) {
   const [customSlotName, setCustomSlotName] = useState("");
   const [variantSlotId, setVariantSlotId] = useState("");
@@ -3154,7 +3545,14 @@ function UploadSlots({
   const [variantName, setVariantName] = useState("");
   const normalizedCustomName = customSlotName.trim();
   const customSlotId = normalizedCustomName ? `custom:${slug(normalizedCustomName)}` : "";
-  const variantSlots = listCharacterSlots(parts);
+  const variantSlots = listCharacterSlots(
+    { parts, slots },
+    { angle: activeAngle, includeEmpty: false },
+  );
+  const bodySlots = listCharacterSlots({ parts, slots }, { includeEmpty: true });
+  const selectedSlot = selectedSlotId
+    ? bodySlots.find((slot) => slot.id === selectedSlotId)
+    : undefined;
   const selectedVariantSlot = variantSlots.find((slot) => slot.id === variantSlotId);
   const normalizedVariantKey = variantKey.trim();
   return (
@@ -3170,29 +3568,52 @@ function UploadSlots({
           Uploading into: {ANGLE_LABELS[activeAngle]} — each angle has its own drawings.
         </div>
       </div>
+      {selectedSlot && (
+        <div className="rounded border border-primary/30 bg-primary/10 p-2">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-primary">
+            Selected slot
+          </div>
+          <SlotUpload
+            label={`Upload ${selectedSlot.name}`}
+            compact
+            filled={selectedSlot.parts.some((part) => partAvailableForAngle(part, activeAngle))}
+            onUpload={(file) =>
+              onImport(file, {
+                role: selectedSlot.role,
+                side: selectedSlot.side,
+                label: selectedSlot.name,
+                slotId: selectedSlot.id,
+              })
+            }
+          />
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-2">
         {SLOT_DEFS.filter(
           (slot) =>
             slot.role !== "eye" &&
             slot.role !== "iris" &&
             roleEnabledByManifest(slot.role, manifest),
-        ).map((slot) => (
-          <SlotUpload
-            key={`${slot.label}-${slot.role}`}
-            label={slot.label}
-            filled={parts.some(
-              (p) => p.slotName === slot.label && partAvailableForAngle(p, activeAngle),
-            )}
-            onUpload={(file) =>
-              onImport(file, {
-                role: slot.role,
-                side: slot.side,
-                label: slot.label,
-                slotId: `slot:${slug(slot.label)}`,
-              })
-            }
-          />
-        ))}
+        ).map((slot) => {
+          const slotId = `slot:${slug(slot.label)}`;
+          return (
+            <SlotUpload
+              key={`${slot.label}-${slot.role}`}
+              label={slot.label}
+              filled={parts.some(
+                (p) => getPartSlotId(p) === slotId && partAvailableForAngle(p, activeAngle),
+              )}
+              onUpload={(file) =>
+                onImport(file, {
+                  role: slot.role,
+                  side: slot.side,
+                  label: slot.label,
+                  slotId,
+                })
+              }
+            />
+          );
+        })}
       </div>
       <div className="rounded border border-border bg-panel-2 p-2">
         <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
@@ -3246,7 +3667,7 @@ function UploadSlots({
                 const representative = selectedVariantSlot.parts[0];
                 onImport(file, {
                   role: selectedVariantSlot.role,
-                  side: representative?.side,
+                  side: selectedVariantSlot.side ?? representative?.side,
                   label: selectedVariantSlot.name,
                   slotId: selectedVariantSlot.id,
                   variantKey: normalizedVariantKey,
@@ -3584,6 +4005,7 @@ function LayerPartRow({
 
 function LayerList({
   parts,
+  slots,
   rig,
   selectedId,
   selectedSlotId,
@@ -3598,6 +4020,7 @@ function LayerList({
   onRemoveSlot,
 }: {
   parts: CharacterPart[];
+  slots: CharacterSlot[];
   rig: CharacterRig;
   selectedId: ID | null;
   selectedSlotId: ID | null;
@@ -3613,21 +4036,14 @@ function LayerList({
 }) {
   const [expanded, setExpanded] = useState<Set<ID>>(new Set());
 
-  const groups = new Map<ID, CharacterPart[]>();
-  for (const part of parts) {
-    const slotId = getPartSlotId(part);
-    const arr = groups.get(slotId) ?? [];
-    arr.push(part);
-    groups.set(slotId, arr);
-  }
-  const groupList = Array.from(groups.entries())
-    .map(([slotId, slotParts]) => ({
-      slotId,
-      slotParts,
-      topZ: Math.max(...slotParts.map((p) => p.zIndex)),
-      name: slotParts[0].slotName ?? roleLabel(slotParts[0].role),
-      role: slotParts[0].role,
-      side: slotParts.find((part) => part.side)?.side,
+  const groupList = listCharacterSlots({ parts, slots }, { includeEmpty: false })
+    .map((slot) => ({
+      slotId: slot.id,
+      slotParts: slot.parts,
+      topZ: Math.max(...slot.parts.map((p) => p.zIndex)),
+      name: slot.name,
+      role: slot.role,
+      side: slot.side ?? slot.parts.find((part) => part.side)?.side,
     }))
     .sort((a, b) => b.topZ - a.topZ);
   type LayerGroup = (typeof groupList)[number];
@@ -3841,6 +4257,7 @@ function Inspector({
   onSetRotation,
   onModeChange,
   onBoundsModeChange,
+  onAttachSlot,
   onChange,
   onRemove,
   onDuplicate,
@@ -3869,6 +4286,7 @@ function Inspector({
   ) => void;
   onModeChange: (mode: EditorMode) => void;
   onBoundsModeChange: (mode: EditorBoundsMode) => void;
+  onAttachSlot: (slotId: ID, parentSlotId: ID | "") => void;
   onChange: (id: ID, patch: Partial<CharacterPart>) => void;
   onRemove: (id: ID) => void;
   onDuplicate: (part: CharacterPart) => void;
@@ -3884,7 +4302,14 @@ function Inspector({
     );
   }
 
-  const parentOptions = doc.parts.filter((p) => p.id !== part.id);
+  const rig = normalizeCharacterRig(doc);
+  const activeAngle = rig.activeAngle;
+  const partSlotId = getPartSlotId(part);
+  const slot = findCharacterSlot(doc, partSlotId);
+  const parentOptions = listCharacterSlots(doc, { angle: activeAngle, includeEmpty: false }).filter(
+    (candidate) => candidate.id !== partSlotId,
+  );
+  const parentValue = parentSlotIdForSlot(rig, partSlotId) ?? "";
   const previewButtons = previewLabels(part);
   const variantInputKey = part.variant?.key ?? part.viseme ?? part.eyeState ?? part.pose ?? "";
   const variantKind =
@@ -3912,30 +4337,20 @@ function Inspector({
     <div className="space-y-4">
       {phase !== "build" && (
         <section className="rounded border border-border bg-panel-2 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="min-w-0">
-              <div className="truncate font-medium text-foreground">
-                <button
-                  type="button"
-                  onClick={() => onSelectSlot(getPartSlotId(part))}
-                  className="text-muted-foreground hover:text-foreground"
-                  title="Select the whole layer group"
-                >
-                  {part.slotName ?? roleLabel(part.role)}
-                </button>
-                <span className="text-muted-foreground"> › </span>
-                {variantLabelForPart(part)}
-              </div>
-              <div className="text-[10px] text-muted-foreground">{roleLabel(part.role)}</div>
+          <div className="min-w-0">
+            <div className="truncate font-medium text-foreground">
+              <button
+                type="button"
+                onClick={() => onSelectSlot(getPartSlotId(part))}
+                className="text-muted-foreground hover:text-foreground"
+                title="Select the whole layer group"
+              >
+                {slot?.name ?? roleLabel(part.role)}
+              </button>
+              <span className="text-muted-foreground"> › </span>
+              {variantLabelForPart(part)}
             </div>
-            <button
-              type="button"
-              onClick={() => onSwitchPhase("build")}
-              className="shrink-0 rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
-              title="Rename, transform, or retag this drawing in the Build phase"
-            >
-              Edit artwork →
-            </button>
+            <div className="text-[10px] text-muted-foreground">{roleLabel(part.role)}</div>
           </div>
           {phase === "pose" && (
             <div className="mt-2">
@@ -3966,7 +4381,7 @@ function Inspector({
                 className="hover:text-foreground"
                 title="Select the whole layer group"
               >
-                {part.slotName ?? roleLabel(part.role)}
+                {slot?.name ?? roleLabel(part.role)}
               </button>
               {" › "}
               {variantLabelForPart(part)}
@@ -3974,9 +4389,7 @@ function Inspector({
             <div className="mb-3 flex items-center gap-2">
               <input
                 value={part.name}
-                onChange={(e) =>
-                  onChange(part.id, { name: e.target.value, slotName: e.target.value })
-                }
+                onChange={(e) => onChange(part.id, { name: e.target.value })}
                 className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 font-medium"
               />
               <button
@@ -4081,16 +4494,16 @@ function Inspector({
                   </select>
                 </Field>
               )}
-              <Field label="Attach To">
+              <Field label="Socket parent">
                 <select
-                  value={part.parentId ?? ""}
-                  onChange={(e) => onChange(part.id, { parentId: e.target.value || undefined })}
+                  value={parentValue}
+                  onChange={(e) => onAttachSlot(partSlotId, e.target.value)}
                   className="w-full rounded border border-border bg-background px-2 py-1"
                 >
                   <option value="">None</option>
-                  {parentOptions.map((candidate) => (
-                    <option key={candidate.id} value={candidate.id}>
-                      {candidate.slotName ?? candidate.name}
+                  {parentOptions.map((slot) => (
+                    <option key={slot.id} value={slot.id}>
+                      {slot.name}
                     </option>
                   ))}
                 </select>
@@ -4655,10 +5068,43 @@ function RigHealthPanel({
   onJumpTo: (row: { childSlotId?: ID; parentSlotId?: ID; variantKey?: string }) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const [otherAnglesOpen, setOtherAnglesOpen] = useState(false);
+  const activeAngle = normalizeCharacterRig(doc).activeAngle;
   const warningCount = report.warnings.filter((entry) => entry.severity === "warning").length;
-  const slotLabel = (slotId: ID) =>
-    doc.parts.find((part) => getPartSlotId(part) === slotId)?.slotName ?? slotId;
+  const slotLabel = (slotId: ID) => findCharacterSlot(doc, slotId)?.name ?? slotId;
+
+  // Separate: current-angle warnings (no affectedAngle or affectedAngle === activeAngle) vs
+  // other-angle checklist items (affectedAngle for a different angle).
+  const thisAngleWarnings = report.warnings.filter(
+    (w) => !w.affectedAngle || w.affectedAngle === activeAngle,
+  );
+  const otherAngleWarnings = report.warnings.filter(
+    (w) => w.affectedAngle && w.affectedAngle !== activeAngle,
+  );
+
   if (report.anchorRows.length === 0 && report.warnings.length === 0) return null;
+
+  const WarningRow = ({
+    warning,
+    index,
+  }: {
+    warning: (typeof report.warnings)[number];
+    index: number;
+  }) => (
+    <button
+      key={index}
+      type="button"
+      onClick={() => onJumpTo(warning)}
+      className={`block w-full rounded border px-2 py-1 text-left text-[10px] leading-snug hover:bg-panel ${
+        warning.severity === "warning"
+          ? "border-amber-500/30 bg-amber-500/5 text-amber-300/90"
+          : "border-border text-muted-foreground"
+      }`}
+    >
+      {warning.message}
+    </button>
+  );
+
   return (
     <section className="rounded border border-border bg-panel-2 p-3">
       <button
@@ -4679,22 +5125,31 @@ function RigHealthPanel({
       </button>
       {open && (
         <div className="mt-2 space-y-3">
-          {report.warnings.length > 0 && (
+          {thisAngleWarnings.length > 0 && (
             <div className="space-y-1">
-              {report.warnings.map((warning, index) => (
-                <button
-                  key={index}
-                  type="button"
-                  onClick={() => onJumpTo(warning)}
-                  className={`block w-full rounded border px-2 py-1 text-left text-[10px] leading-snug hover:bg-panel ${
-                    warning.severity === "warning"
-                      ? "border-amber-500/30 bg-amber-500/5 text-amber-300/90"
-                      : "border-border text-muted-foreground"
-                  }`}
-                >
-                  {warning.message}
-                </button>
+              {thisAngleWarnings.map((warning, index) => (
+                <WarningRow key={index} warning={warning} index={index} />
               ))}
+            </div>
+          )}
+          {otherAngleWarnings.length > 0 && (
+            <div>
+              <button
+                type="button"
+                onClick={() => setOtherAnglesOpen((prev) => !prev)}
+                className="flex w-full items-center gap-1 text-left text-[10px] text-muted-foreground/60 hover:text-muted-foreground"
+              >
+                {otherAnglesOpen ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                {otherAngleWarnings.length} checklist item
+                {otherAngleWarnings.length !== 1 ? "s" : ""} for other angles
+              </button>
+              {otherAnglesOpen && (
+                <div className="mt-1 space-y-1 opacity-70">
+                  {otherAngleWarnings.map((warning, index) => (
+                    <WarningRow key={index} warning={warning} index={index} />
+                  ))}
+                </div>
+              )}
             </div>
           )}
           {report.anchorRows.length > 0 && (
@@ -4762,15 +5217,18 @@ function VariantAnchorSection({
   ) => void;
 }) {
   const rig = normalizeCharacterRig(doc);
-  const boneId = rig.slotBindings.find((binding) => binding.slotId === childSlotId)?.boneId;
-  const parentSlotId = boneId ? parentSlotIdForBone(rig, boneId) : undefined;
+  const parentSlotId = parentSlotIdForSlot(rig, childSlotId);
   if (!parentSlotId) return null;
-  const parentKeys = slotVariantKeys(doc, parentSlotId);
-  const hasPackages = (doc.variantPackages ?? []).some((pkg) => pkg.slotId === parentSlotId);
+  const parentKeys = slotVariantKeys(doc, parentSlotId, rig.activeAngle);
+  const hasPackages = (doc.variantPackages ?? []).some(
+    (pkg) =>
+      pkg.slotId === parentSlotId &&
+      (!pkg.angleIds?.length || pkg.angleIds.includes(rig.activeAngle)),
+  );
   if (parentKeys.length <= 1 && !hasPackages) return null;
-  const parentName =
-    doc.parts.find((part) => getPartSlotId(part) === parentSlotId)?.slotName ?? parentSlotId;
-  const selectedKey = variantPreview[parentSlotId] ?? "";
+  const parentName = findCharacterSlot(doc, parentSlotId)?.name ?? parentSlotId;
+  const previewKey = variantPreview[parentSlotId] ?? "";
+  const selectedKey = parentKeys.includes(previewKey) ? previewKey : "";
   const anchorEntry = selectedKey ? anchorEntryForChild(doc, childSlotId, selectedKey) : undefined;
   const source = selectedKey ? (anchorEntry?.source ?? "fallback") : null;
   const armed = socketPlacement?.childSlotId === childSlotId;
@@ -4779,11 +5237,11 @@ function VariantAnchorSection({
   return (
     <section className="rounded border border-border bg-panel-2 p-3">
       <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-        Anchor
+        Socket overrides
       </div>
       <div className="mb-2 text-[10px] leading-snug text-muted-foreground">
-        Where this layer sits under <span className="text-foreground">{parentName}</span>'s
-        variants. Picking one shows it in place.
+        Optional per-variant positions for this layer&apos;s base socket on{" "}
+        <span className="text-foreground">{parentName}</span>. Picking one shows it in place.
       </div>
       <label className="mb-2 grid grid-cols-[64px_1fr] items-center gap-2 text-[10px]">
         <span className="text-muted-foreground">Variant</span>
@@ -5016,15 +5474,12 @@ function RestrictMovementPanel({
   onClear: () => void;
 }) {
   const rig = normalizeCharacterRig(doc);
-  const slots = listCharacterSlots(doc.parts);
+  const slots = listCharacterSlots(doc, { angle: rig.activeAngle, includeEmpty: false });
   const slot = slots.find((s) => s.id === slotId);
-  const slotParts = doc.parts.filter((p) => getPartSlotId(p) === slotId);
-  const parentPart = slotParts.map((p) => p.parentId).find(Boolean)
-    ? doc.parts.find((p) => p.id === slotParts.map((sp) => sp.parentId).find(Boolean))
-    : undefined;
-  const parentSlotId = parentPart ? getPartSlotId(parentPart) : "";
+  const parentSlotId = parentSlotIdForSlot(rig, slotId) ?? "";
   const parentName = slots.find((s) => s.id === parentSlotId)?.name;
   const parentOptions = slots.filter((s) => s.id !== slotId);
+  const socket = (rig.sockets ?? []).find((entry) => entry.childSlotId === slotId);
   const hostConstraint = rig.hostConstraints.find((c) => c.slotId === slotId);
   const hostSlotId = hostConstraint?.hostSlotId ?? "";
   const hostName = slots.find((s) => s.id === hostSlotId)?.name;
@@ -5038,13 +5493,13 @@ function RestrictMovementPanel({
       <div className="mb-2 flex items-center gap-2">
         <Lock size={13} className="text-muted-foreground" />
         <span className="font-semibold uppercase tracking-wider text-muted-foreground">
-          Bounds & host
+          Attachment & reach
         </span>
       </div>
 
       {/* At-a-glance status: green = set, amber = still needs setting. */}
       <div className="mb-3 flex flex-wrap gap-1">
-        <ConstraintPill set={!!parentSlotId} label="Attached" />
+        <ConstraintPill set={!!parentSlotId} label={socket ? "Socket" : "Attached"} />
         <ConstraintPill set={!!hostSlotId} label="Drag boundary" />
         <ConstraintPill set={hasPosReach} label="Drift" />
         <ConstraintPill
@@ -5057,7 +5512,7 @@ function RestrictMovementPanel({
         />
       </div>
 
-      <Field label="Attach to layer">
+      <Field label="Socket parent">
         <select
           value={parentSlotId}
           onChange={(e) => onAttachTo(e.target.value)}
@@ -5072,9 +5527,11 @@ function RestrictMovementPanel({
         </select>
       </Field>
       <p className="mb-2 mt-1 text-[10px] leading-snug text-muted-foreground">
-        {parentName
-          ? `Carried by ${parentName} when it moves.`
-          : "Not attached — moves on its own."}
+        {parentName && socket
+          ? `${socket.name ?? "Socket"} at ${Math.round(socket.x)}, ${Math.round(socket.y)} on ${parentName}.`
+          : parentName
+            ? `Carried by ${parentName} when it moves.`
+            : "Not attached — moves on its own."}
       </p>
 
       <Field label="Drag boundary">
@@ -5362,8 +5819,7 @@ function VariantAnchorOverlay({
 }) {
   const rig = normalizeCharacterRig(doc);
   const world = computeBoneWorldTransforms(rig);
-  const slotName = (slotId: ID) =>
-    doc.parts.find((part) => getPartSlotId(part) === slotId)?.slotName ?? slotId;
+  const slotName = (slotId: ID) => findCharacterSlot(doc, slotId)?.name ?? slotId;
   const dotRadius = Math.max(4, 5 / Math.max(0.0001, scale));
   const fontSize = Math.max(9, 10 / Math.max(0.0001, scale));
   const markers: Array<{
@@ -5387,7 +5843,11 @@ function VariantAnchorOverlay({
     if (!at || !parentAt || !childSlotId || !parentSlotId) continue;
     // Anchors only matter under a parent that actually has variants — but show those children
     // even before any anchor is authored, so the Anchors toggle always has a visible effect.
-    if (!bone.parentVariantAnchors && slotVariantKeys(doc, parentSlotId).length <= 1) continue;
+    if (
+      !bone.parentVariantAnchors &&
+      slotVariantKeys(doc, parentSlotId, rig.activeAngle).length <= 1
+    )
+      continue;
     const activeKey = variantPreview[parentSlotId];
     const entry = activeKey ? bone.parentVariantAnchors?.[activeKey] : undefined;
     const source = entry?.source ?? "fallback";
@@ -5669,6 +6129,7 @@ function GroupInspector({
   onArmPlacement,
   onClearSocket,
   onSetRotation,
+  onUpdateSlot,
   onMove,
   onScale,
   onRotate,
@@ -5699,6 +6160,7 @@ function GroupInspector({
     context: { parentSlotId: ID; variantKey: string; childSlotId: ID },
     rotation: number,
   ) => void;
+  onUpdateSlot: (patch: Partial<CharacterSlot>) => void;
   onMove: (dx: number, dy: number) => void;
   onScale: (anchor: { x: number; y: number }, scaleX: number, scaleY: number) => void;
   onRotate: (anchor: { x: number; y: number }, degrees: number) => void;
@@ -5709,8 +6171,11 @@ function GroupInspector({
   onTestAudio: (url: string) => void;
   onStopTestAudio: () => void;
 }) {
-  const name = parts[0]?.slotName ?? roleLabel(parts[0]?.role ?? "custom");
-  const isMouth = parts[0]?.role === "mouth";
+  const slot = findCharacterSlot(doc, slotId);
+  const name = slot?.name ?? parts[0]?.slotName ?? roleLabel(parts[0]?.role ?? "custom");
+  const role = slot?.role ?? parts[0]?.role ?? "custom";
+  const side = slot?.side ?? parts.find((part) => part.side)?.side;
+  const isMouth = role === "mouth";
   const averageRotation =
     parts.length > 0
       ? Math.round(parts.reduce((sum, part) => sum + part.rotation, 0) / parts.length)
@@ -5724,19 +6189,56 @@ function GroupInspector({
   return (
     <div className="space-y-4">
       <section className="rounded border border-primary/50 bg-primary/10 p-3">
-        <div className="mb-1 flex items-center justify-between gap-2">
+        <div className="mb-1">
           <span className="font-medium">{name} group</span>
-          {phase !== "build" && (
-            <button
-              type="button"
-              onClick={() => onSwitchPhase("build")}
-              className="shrink-0 rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
-              title="Move, resize, or retag this group in the Build phase"
-            >
-              Edit artwork →
-            </button>
-          )}
         </div>
+        {phase === "build" && (
+          <div className="mb-3 grid gap-2 rounded border border-primary/20 bg-background/40 p-2">
+            <Field label="Slot name">
+              <input
+                value={name}
+                onChange={(e) => onUpdateSlot({ name: e.target.value })}
+                className="w-full rounded border border-border bg-background px-2 py-1"
+              />
+            </Field>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Role">
+                <select
+                  value={role}
+                  onChange={(e) => onUpdateSlot({ role: e.target.value as PartRole })}
+                  className="w-full rounded border border-border bg-background px-2 py-1"
+                >
+                  {ROLE_OPTIONS.map((option) => (
+                    <option key={option} value={option}>
+                      {roleLabel(option)}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Side">
+                <select
+                  value={side ?? ""}
+                  onChange={(e) =>
+                    onUpdateSlot({
+                      side: (e.target.value || undefined) as CharacterPart["side"] | undefined,
+                    })
+                  }
+                  className="w-full rounded border border-border bg-background px-2 py-1"
+                >
+                  {SLOT_SIDE_OPTIONS.map((option) => (
+                    <option key={option.value || "none"} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <div className="col-span-2 text-[10px] text-muted-foreground">
+                <span className="block uppercase tracking-wider">Slot id</span>
+                <span className="font-mono text-[9px] text-foreground">{slotId}</span>
+              </div>
+            </div>
+          </div>
+        )}
         {phase === "build" && (
           <>
             <div className="mb-3 text-[11px] text-muted-foreground">
@@ -5892,6 +6394,25 @@ function GroupInspector({
   );
 }
 
+type EditorPartTransform = ReturnType<typeof previewDelta>;
+
+function composeEditorPartTransform(
+  part: CharacterPart,
+  base: EditorPartTransform,
+  shift?: { dx: number; dy: number; rotation?: number },
+  placement?: RuntimePartPlacement,
+): EditorPartTransform {
+  return {
+    ...base,
+    dx: base.dx + (placement ? placement.x - part.x : 0) + (shift?.dx ?? 0),
+    dy: base.dy + (placement ? placement.y - part.y : 0) + (shift?.dy ?? 0),
+    rotation:
+      base.rotation + (placement ? placement.rotation - part.rotation : 0) + (shift?.rotation ?? 0),
+    scale: base.scale * (placement?.scaleX ?? 1),
+    scaleY: (base.scaleY ?? base.scale) * (placement?.scaleY ?? 1),
+  };
+}
+
 function PartLayer({
   part,
   selected,
@@ -5903,6 +6424,7 @@ function PartLayer({
   allParts,
   previewVariantKey,
   shift,
+  placement,
 }: {
   part: CharacterPart;
   selected: boolean;
@@ -5920,6 +6442,8 @@ function PartLayer({
   previewVariantKey?: string;
   /** Variant-preview re-anchor offset (canvas px) + rotation when a parent previews a variant. */
   shift?: { dx: number; dy: number; rotation?: number };
+  /** Resolved rig/socket placement; keeps builder art in the same place as generated output. */
+  placement?: RuntimePartPlacement;
 }) {
   const url = useMediaUrl(part.mediaId);
   const sameSlotParts = allParts.filter(
@@ -5936,14 +6460,7 @@ function PartLayer({
   if (!part.visible && !selected && !previewVariantKey) return null;
 
   const baseTransform = previewDelta(part, preview, previewParentPart, allParts);
-  const previewTransform = shift
-    ? {
-        ...baseTransform,
-        dx: baseTransform.dx + shift.dx,
-        dy: baseTransform.dy + shift.dy,
-        rotation: baseTransform.rotation + (shift.rotation ?? 0),
-      }
-    : baseTransform;
+  const previewTransform = composeEditorPartTransform(part, baseTransform, shift, placement);
   const baseOpacity = part.visible ? previewTransform.opacity : 0.28;
   // In movement-range focus mode, fade everything except the layer being edited. While the
   // active layer is being edited, the others get a slight blur (and a touch of fade) instead.
@@ -6000,6 +6517,7 @@ function PartControlsOverlay({
   previewParentPart,
   allParts,
   shift,
+  placement,
   onBeginChange,
   onChange,
 }: {
@@ -6014,18 +6532,13 @@ function PartControlsOverlay({
   allParts: CharacterPart[];
   /** Variant-preview re-anchor offset/rotation — the chrome must sit where the art is drawn. */
   shift?: { dx: number; dy: number; rotation?: number };
+  /** Resolved rig/socket placement; keeps the chrome on the generated character position. */
+  placement?: RuntimePartPlacement;
   onBeginChange: () => void;
   onChange: (patch: Partial<CharacterPart>) => void;
 }) {
   const baseTransform = previewDelta(part, preview, previewParentPart, allParts);
-  const previewTransform = shift
-    ? {
-        ...baseTransform,
-        dx: baseTransform.dx + shift.dx,
-        dy: baseTransform.dy + shift.dy,
-        rotation: baseTransform.rotation + (shift.rotation ?? 0),
-      }
-    : baseTransform;
+  const previewTransform = composeEditorPartTransform(part, baseTransform, shift, placement);
   const pivot = pivotForPart(part);
   const selection = editorSelectionBounds(part, boundsMode);
   const control = editorControlBounds(part, scale, boundsMode);
@@ -6474,8 +6987,15 @@ function previewLabels(part: CharacterPart): Array<{ kind: PreviewState["kind"];
     out.push({ kind: "blink", label: "Test Blink" });
   if (part.role === "mouth" || (part.role === "custom" && part.motionBehavior === "lipSync"))
     out.push({ kind: "talk", label: "Test Talk" });
-  if (part.role === "arm") out.push({ kind: "wave", label: "Test Wave" });
-  if (part.role === "leg" || part.role === "foot") out.push({ kind: "kick", label: "Test Kick" });
+  if (part.role === "arm" || part.role === "upperArm" || part.role === "lowerArm")
+    out.push({ kind: "wave", label: "Test Wave" });
+  if (
+    part.role === "leg" ||
+    part.role === "upperLeg" ||
+    part.role === "lowerLeg" ||
+    part.role === "foot"
+  )
+    out.push({ kind: "kick", label: "Test Kick" });
   if (part.role === "custom" && part.motionBehavior === "rotate")
     out.push({ kind: "wave", label: "Test Wave" });
   if (part.role === "head") out.push({ kind: "nod", label: "Test Nod" });
@@ -6595,10 +7115,22 @@ function previewMotionForPart(part: CharacterPart, preview: PreviewState, t: num
     }
     return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: closedMoment ? 0.12 : 1, opacity: 1 };
   }
-  if (preview.kind === "wave" && (part.role === "arm" || part.motionBehavior === "rotate")) {
+  if (
+    preview.kind === "wave" &&
+    (part.role === "arm" ||
+      part.role === "upperArm" ||
+      part.role === "lowerArm" ||
+      part.motionBehavior === "rotate")
+  ) {
     return { dx: 0, dy: 0, rotation: wave * 18, scale: 1, opacity: 1 };
   }
-  if (preview.kind === "kick" && (part.role === "leg" || part.role === "foot")) {
+  if (
+    preview.kind === "kick" &&
+    (part.role === "leg" ||
+      part.role === "upperLeg" ||
+      part.role === "lowerLeg" ||
+      part.role === "foot")
+  ) {
     return {
       dx: Math.round(Math.abs(wave) * 10),
       dy: 0,
@@ -6724,8 +7256,21 @@ function detectRole(filename: string): PartRole {
   if (name.includes("nose")) return "nose";
   if (name.includes("mouth") || name.includes("viseme") || name.includes("lip")) return "mouth";
   if (name.includes("hand")) return "hand";
+  if (name.includes("forearm") || name.includes("lower arm") || name.includes("lower-arm"))
+    return "lowerArm";
+  if (name.includes("bicep") || name.includes("upper arm") || name.includes("upper-arm"))
+    return "upperArm";
   if (name.includes("arm")) return "arm";
   if (name.includes("foot") || name.includes("feet")) return "foot";
+  if (
+    name.includes("shin") ||
+    name.includes("calf") ||
+    name.includes("lower leg") ||
+    name.includes("lower-leg")
+  )
+    return "lowerLeg";
+  if (name.includes("thigh") || name.includes("upper leg") || name.includes("upper-leg"))
+    return "upperLeg";
   if (name.includes("leg")) return "leg";
   if (name.includes("hair")) return "hair";
   if (name.includes("hat") || name.includes("glasses") || name.includes("accessory"))
@@ -6794,10 +7339,18 @@ function roleIgnoredTokens(role: PartRole): string[] {
       return ["mouth", "lip", "lips", "viseme"];
     case "arm":
       return ["arm"];
+    case "upperArm":
+      return ["upper", "upperarm", "arm", "bicep"];
+    case "lowerArm":
+      return ["lower", "lowerarm", "arm", "forearm"];
     case "hand":
       return ["hand"];
     case "leg":
       return ["leg"];
+    case "upperLeg":
+      return ["upper", "upperleg", "leg", "thigh"];
+    case "lowerLeg":
+      return ["lower", "lowerleg", "leg", "shin", "calf"];
     case "foot":
       return ["foot", "feet"];
     case "hair":
@@ -6852,26 +7405,63 @@ function maxZ(parts: CharacterPart[]) {
 }
 
 /** Axis-aligned union of the parts' frame rectangles, in canvas space. */
-function unionFrameBounds(parts: CharacterPart[]) {
-  const minX = Math.min(...parts.map((p) => p.x));
-  const minY = Math.min(...parts.map((p) => p.y));
-  const maxX = Math.max(...parts.map((p) => p.x + p.width));
-  const maxY = Math.max(...parts.map((p) => p.y + p.height));
-  return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
-}
-
-// Union of the parts' tight visible-pixel bounds (ignores transparent layer padding) in canvas
-// coords. Used to size the movement-range zone to actual art, not the full layer frame.
-function unionAlphaBounds(parts: CharacterPart[]) {
+function unionFrameBounds(
+  parts: CharacterPart[],
+  transformForPart?: (part: CharacterPart) => EditorPartTransform,
+) {
   const rects = parts.map((p) => {
-    const a = localAlphaBounds(p);
-    return { x: p.x + a.x, y: p.y + a.y, right: p.x + a.x + a.width, bottom: p.y + a.y + a.height };
+    const bounds = { x: 0, y: 0, width: p.width, height: p.height };
+    const transform = transformForPart?.(p);
+    return transform
+      ? localRectCanvasBoundsWithTransform(p, bounds, transform)
+      : localRectCanvasBounds(p, bounds);
   });
   const minX = Math.min(...rects.map((r) => r.x));
   const minY = Math.min(...rects.map((r) => r.y));
-  const maxX = Math.max(...rects.map((r) => r.right));
-  const maxY = Math.max(...rects.map((r) => r.bottom));
+  const maxX = Math.max(...rects.map((r) => r.x + r.width));
+  const maxY = Math.max(...rects.map((r) => r.y + r.height));
   return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+}
+
+function localRectCanvasBoundsWithTransform(
+  part: CharacterPart,
+  bounds: { x: number; y: number; width: number; height: number },
+  transform: EditorPartTransform,
+) {
+  const corners = [
+    { x: bounds.x, y: bounds.y },
+    { x: bounds.x + bounds.width, y: bounds.y },
+    { x: bounds.x, y: bounds.y + bounds.height },
+    { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
+  ].map((point) => partLocalPointToCanvas(part, point, transform));
+  const minX = Math.min(...corners.map((point) => point.x));
+  const minY = Math.min(...corners.map((point) => point.y));
+  const maxX = Math.max(...corners.map((point) => point.x));
+  const maxY = Math.max(...corners.map((point) => point.y));
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(1, maxX - minX),
+    height: Math.max(1, maxY - minY),
+  };
+}
+
+// Union of the parts' editor art bounds in canvas coords. Manual authored bounds win over
+// measured alpha bounds so drag boundaries match the user's visible orange bounds.
+function unionEditorArtBounds(parts: CharacterPart[]) {
+  const rects = parts.map((p) => {
+    const a = localAuthoredBounds(p) ?? localAlphaBounds(p);
+    return localRectCanvasBounds(p, a);
+  });
+  const minX = Math.min(...rects.map((r) => r.x));
+  const minY = Math.min(...rects.map((r) => r.y));
+  const maxX = Math.max(...rects.map((r) => r.x + r.width));
+  const maxY = Math.max(...rects.map((r) => r.y + r.height));
+  return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+}
+
+function unionHostClampBounds(parts: CharacterPart[], mode: "insideHostMask" | "insideHostBounds") {
+  return mode === "insideHostBounds" ? unionFrameBounds(parts) : unionEditorArtBounds(parts);
 }
 
 function moveSlotSetFromSnapshot(
@@ -6895,6 +7485,57 @@ function moveSlotSetFromSnapshot(
   });
 }
 
+function pinRigSlotPlacements(
+  character: CharacterPreset,
+  beforeRig: CharacterRig,
+  movedRig: CharacterRig,
+  slotIds: Set<ID>,
+): CharacterRig {
+  let pinnedRig = movedRig;
+  const beforeRuntime = buildCharacterRuntime({ ...character, rig: beforeRig });
+  const movedRuntime = buildCharacterRuntime({ ...character, rig: movedRig });
+  for (const slotId of slotIds) {
+    const beforeSlot = beforeRuntime.slotById.get(slotId);
+    const movedSlot = movedRuntime.slotById.get(slotId);
+    const movedBinding = movedRuntime.bindingBySlot.get(slotId);
+    if (!beforeSlot || !movedSlot || !movedBinding) continue;
+    const beforePart = beforeSlot.parts.find((part) => part.visible) ?? beforeSlot.parts[0];
+    const movedPart =
+      movedSlot.parts.find((part) => part.id === beforePart?.id) ??
+      movedSlot.parts.find((part) => part.visible) ??
+      movedSlot.parts[0];
+    if (!beforePart || !movedPart) continue;
+    const beforePlacement = runtimePartPlacement(beforeSlot, beforePart, beforeRuntime, {
+      poseKey: variantKeyForPart(beforePart),
+    });
+    const movedPlacement = runtimePartPlacement(movedSlot, movedPart, movedRuntime, {
+      poseKey: variantKeyForPart(movedPart),
+    });
+    const worldDelta = {
+      x: beforePlacement.x - movedPlacement.x,
+      y: beforePlacement.y - movedPlacement.y,
+    };
+    if (Math.abs(worldDelta.x) < 0.5 && Math.abs(worldDelta.y) < 0.5) continue;
+    const boneWorld = movedRuntime.worldByBone.get(movedBinding.effectiveBoneId);
+    const localDelta = rotateVector(worldDelta, -(boneWorld?.rotation ?? 0));
+    pinnedRig = moveSlotBinding(
+      pinnedRig,
+      slotId,
+      Math.round(localDelta.x),
+      Math.round(localDelta.y),
+      movedRig.activeAngle,
+    );
+  }
+  return pinnedRig;
+}
+
+function rotateVector(point: { x: number; y: number }, degrees: number): { x: number; y: number } {
+  const radians = (degrees * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  return { x: point.x * cos - point.y * sin, y: point.x * sin + point.y * cos };
+}
+
 function clampSlotDeltaToHost(
   character: CharacterPreset,
   rig: CharacterRig,
@@ -6908,12 +7549,17 @@ function clampSlotDeltaToHost(
   }
   const hostSlotId = constraint.hostSlotId;
   if (!hostSlotId || hostSlotId === slotId) return { dx, dy, clamped: false };
-  const slotParts = character.parts.filter((part) => getPartSlotId(part) === slotId);
-  const hostParts = character.parts.filter((part) => getPartSlotId(part) === hostSlotId);
+  const activeAngle = rig.activeAngle;
+  const slotParts = character.parts.filter(
+    (part) => getPartSlotId(part) === slotId && partAvailableForAngle(part, activeAngle),
+  );
+  const hostParts = character.parts.filter(
+    (part) => getPartSlotId(part) === hostSlotId && partAvailableForAngle(part, activeAngle),
+  );
   if (slotParts.length === 0 || hostParts.length === 0) return { dx, dy, clamped: false };
 
-  const subject = unionAlphaBounds(slotParts);
-  const host = unionAlphaBounds(hostParts);
+  const subject = unionHostClampBounds(slotParts, constraint.mode);
+  const host = unionHostClampBounds(hostParts, constraint.mode);
   const next = clampRectInsideHost(subject, host, dx, dy);
   return { ...next, clamped: next.dx !== dx || next.dy !== dy };
 }
@@ -6952,27 +7598,22 @@ function clampRectInsideHost(
   return { dx: Math.round(nextDx), dy: Math.round(nextDy) };
 }
 
-function descendantPartIds(parts: CharacterPart[], parentIds: Set<ID>): Set<ID> {
-  const out = new Set<ID>();
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const part of parts) {
-      if (out.has(part.id)) continue;
-      if (part.parentId && (parentIds.has(part.parentId) || out.has(part.parentId))) {
-        out.add(part.id);
-        changed = true;
-      }
-    }
-  }
-  return out;
-}
-
-function partAndDescendantIdsForSlot(parts: CharacterPart[], slotId: ID): Set<ID> {
-  const rootIds = new Set(
-    parts.filter((part) => getPartSlotId(part) === slotId).map((part) => part.id),
+function partIdsForSlotSubtree(
+  parts: CharacterPart[],
+  rig: CharacterRig,
+  slotId: ID,
+  angle: CharacterAngle,
+  includeRoot = true,
+): Set<ID> {
+  const binding = resolveSlotBinding(rig, slotId, angle);
+  const subtreeSlots = binding
+    ? slotIdsForBoneSubtree(rig, binding.effectiveBoneId, angle)
+    : new Set<ID>([slotId]);
+  if (!includeRoot) subtreeSlots.delete(slotId);
+  const scopedParts = parts.filter((part) => partAvailableForAngle(part, angle));
+  return new Set(
+    scopedParts.filter((part) => subtreeSlots.has(getPartSlotId(part))).map((part) => part.id),
   );
-  return new Set([...rootIds, ...descendantPartIds(parts, rootIds)]);
 }
 
 function normalizePartPatch(part: CharacterPart, patch: Partial<CharacterPart>): CharacterPart {

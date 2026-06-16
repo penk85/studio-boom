@@ -6,6 +6,7 @@ import { buildCharacterCompositionHtml } from "../composition";
 import { blinkWindowsForClip } from "../eye-state";
 import { createDefaultMouthRig } from "../mouth-libraries";
 import { buildDefaultRig } from "../rig";
+import { buildCharacterRuntime, resolveRuntimeSlotPart, runtimePartPlacement } from "../runtime";
 import { upsertVariantSocket } from "../variant-pairing";
 import { makeVariantArmCharacter, withFistVariant } from "./fixtures";
 
@@ -124,6 +125,10 @@ function eventShowsVariant(event: { variant?: { show?: string[] } }, value: stri
   return (event.variant?.show ?? []).some((id) => id.includes(value));
 }
 
+function cssNumber(value: number) {
+  return String(Math.round(value * 1000) / 1000);
+}
+
 describe("buildCharacterCompositionHtml", () => {
   it("generates explicit puppet DOM, asset refs, dimensions, and timeline registration", () => {
     const html = build();
@@ -234,6 +239,105 @@ describe("buildCharacterCompositionHtml", () => {
     expect(openIndex).toBeGreaterThan(-1);
     expect(irisIndex).toBeGreaterThan(openIndex);
     expect(closedIndex).toBeGreaterThan(irisIndex);
+  });
+
+  it("positions nested child slots from runtime socket placement, not raw art offsets", () => {
+    const character = {
+      ...createBlankCharacter("Eye actor"),
+      id: "eye-char",
+      parts: [
+        makePart("head", "head-media", {
+          id: "head",
+          slotId: "role:head",
+          x: 110,
+          y: 70,
+          width: 120,
+          height: 120,
+          zIndex: 4,
+        }),
+        makePart("eye", "eye-open-media", {
+          id: "eye-open",
+          slotId: "slot:left-eye",
+          side: "left",
+          eyeState: "open",
+          x: 140,
+          y: 112,
+          width: 32,
+          height: 20,
+          zIndex: 6,
+        }),
+        makePart("iris", "iris-media", {
+          id: "left-iris",
+          slotId: "slot:left-iris",
+          side: "left",
+          x: 152,
+          y: 116,
+          width: 8,
+          height: 8,
+          zIndex: 7,
+        }),
+      ],
+    };
+    const baseRig = buildDefaultRig(character);
+    const frontRig = baseRig.angles?.front;
+    if (!frontRig) throw new Error("Expected a front angle rig.");
+    const movedFrontRig = {
+      ...frontRig,
+      slotBindings: frontRig.slotBindings.map((binding) =>
+        binding.slotId === "slot:left-iris"
+          ? { ...binding, x: binding.x + 18, y: binding.y + 6 }
+          : binding,
+      ),
+    };
+    const rig = {
+      ...baseRig,
+      activeAngle: "front" as const,
+      angles: { ...baseRig.angles, front: movedFrontRig },
+      bones: movedFrontRig.bones,
+      slotBindings: movedFrontRig.slotBindings,
+      drawOrder: movedFrontRig.drawOrder,
+      slotRelations: movedFrontRig.slotRelations,
+      hostConstraints: movedFrontRig.hostConstraints,
+      reaches: movedFrontRig.reaches,
+      sockets: movedFrontRig.sockets,
+    };
+    const rigCharacter = { ...character, rig };
+    const runtime = buildCharacterRuntime(rigCharacter);
+    const irisSlot = runtime.slotById.get("slot:left-iris");
+    const eyeSlot = runtime.slotById.get("slot:left-eye");
+    if (!irisSlot || !eyeSlot) throw new Error("Expected eye and iris slots.");
+    const irisPart = resolveRuntimeSlotPart(irisSlot, runtime);
+    const eyePart = resolveRuntimeSlotPart(eyeSlot, runtime, "open");
+    if (!irisPart || !eyePart) throw new Error("Expected eye and iris parts.");
+    const irisPlacement = runtimePartPlacement(irisSlot, irisPart, runtime, {
+      basePart: irisPart,
+    });
+    const eyePlacement = runtimePartPlacement(eyeSlot, eyePart, runtime, { basePart: eyePart });
+    const expectedLeft = cssNumber(irisPlacement.x - eyePlacement.x);
+    const expectedTop = cssNumber(irisPlacement.y - eyePlacement.y);
+
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_iris_runtime_nested",
+      clipId: "clip-iris-runtime-nested",
+      width: character.canvasWidth,
+      height: character.canvasHeight,
+      duration: 4,
+      character: rigCharacter,
+      meta: {
+        characterId: "eye-char",
+        poses: {},
+        autoBlink: false,
+      },
+      motionPresets: new Map(),
+    });
+    const nestedSlot = html.match(
+      /<div[^>]*data-character-slot-id="slot:left-iris"[^>]*style="([^"]+)"/,
+    )?.[1];
+
+    expect(nestedSlot).toContain(`left:${expectedLeft}px`);
+    expect(nestedSlot).toContain(`top:${expectedTop}px`);
+    expect(nestedSlot).not.toContain("left:12px");
+    expect(nestedSlot).not.toContain("top:4px");
   });
 
   it("keeps nested iris slot motion on the iris target in compiled playback", () => {
@@ -491,6 +595,7 @@ describe("buildCharacterCompositionHtml", () => {
     const characterBase = {
       ...createBlankCharacter("Rig actor"),
       id: "rig-char",
+      angles: ["front", "3qL"] as CharacterPreset["angles"],
       parts: [
         makePart("body", "body-media", {
           id: "body",
@@ -525,16 +630,23 @@ describe("buildCharacterCompositionHtml", () => {
       ],
     };
     const rig = buildDefaultRig(characterBase);
+    const threeQuarterRig = rig.angles?.["3qL"];
     const character = {
       ...characterBase,
       rig: {
         ...rig,
         activeAngle: "3qL" as const,
-        slotBindings: rig.slotBindings.map((binding) =>
-          binding.slotId === "slot:left-eye"
-            ? { ...binding, depth: 5, angleOverrides: { "3qL": { depth: 7 } } }
-            : binding,
-        ),
+        angles: {
+          ...rig.angles,
+          "3qL": threeQuarterRig
+            ? {
+                ...threeQuarterRig,
+                slotBindings: threeQuarterRig.slotBindings.map((binding) =>
+                  binding.slotId === "slot:left-eye" ? { ...binding, depth: 7 } : binding,
+                ),
+              }
+            : threeQuarterRig,
+        },
       },
     };
     const html = buildCharacterCompositionHtml({
@@ -570,6 +682,7 @@ describe("buildCharacterCompositionHtml", () => {
     const characterBase = {
       ...createBlankCharacter("Angle actor"),
       id: "angle-char",
+      angles: ["front", "3qL"] as CharacterPreset["angles"],
       parts: [
         makePart("body", "body-front-media", {
           id: "body-front",
@@ -773,6 +886,111 @@ describe("buildCharacterCompositionHtml", () => {
     expect(
       animatedSelectors.some((selector) => selector.includes("char-slot-slot-left-foot")),
     ).toBe(false);
+  });
+
+  it("locks child bone translation when compiled motion also animates an ancestor bone", () => {
+    const preset: MotionPreset = {
+      id: "bad-fk-drift",
+      name: "Bad FK drift",
+      category: "gesture",
+      duration: 1,
+      loop: false,
+      tracks: [
+        {
+          target: "bone",
+          boneId: "bone:role:body",
+          partRole: "body",
+          keyframes: [
+            { t: 0, rotation: 0, ease: "linear" },
+            { t: 1, rotation: 10, ease: "linear" },
+          ],
+        },
+        {
+          target: "bone",
+          boneId: "bone:slot:right-arm",
+          partRole: "arm",
+          slotId: "slot:right-arm",
+          keyframes: [
+            { t: 0, dx: 0, dy: 0, rotation: 0, ease: "linear" },
+            { t: 1, dx: 40, dy: -20, rotation: 30, ease: "linear" },
+          ],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = build(
+      {
+        autoBlink: false,
+        motions: [{ id: "applied-bad-fk", presetId: preset.id, offset: 0, intensity: 1 }],
+      },
+      new Map([[preset.id, preset]]),
+      makeVariantArmCharacter(),
+    );
+    const scene = extractScene(html);
+    const armVars = [
+      ...scene.initialTargets,
+      ...scene.motionSegments.flatMap((segment) => segment.targets),
+    ]
+      .filter((target) => target.selector.startsWith("#char-bone-bone-slot-right-arm"))
+      .map((target) => target.vars);
+
+    expect(armVars.length).toBeGreaterThan(0);
+    expect(armVars.every((vars) => vars.x === 0)).toBe(true);
+    expect(armVars.every((vars) => vars.y === 0)).toBe(true);
+    expect(Math.max(...armVars.map((vars) => Number(vars.rotation)))).toBe(30);
+  });
+
+  it("lets an explicit bone allowOutOfBounds entry bypass FK translation locking", () => {
+    const preset: MotionPreset = {
+      id: "free-fk-drift",
+      name: "Free FK drift",
+      category: "gesture",
+      duration: 1,
+      loop: false,
+      allowOutOfBounds: ["bone:slot:right-arm"],
+      tracks: [
+        {
+          target: "bone",
+          boneId: "bone:role:body",
+          partRole: "body",
+          keyframes: [
+            { t: 0, rotation: 0, ease: "linear" },
+            { t: 1, rotation: 10, ease: "linear" },
+          ],
+        },
+        {
+          target: "bone",
+          boneId: "bone:slot:right-arm",
+          partRole: "arm",
+          slotId: "slot:right-arm",
+          keyframes: [
+            { t: 0, dx: 0, dy: 0, ease: "linear" },
+            { t: 1, dx: 40, dy: -20, ease: "linear" },
+          ],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = build(
+      {
+        autoBlink: false,
+        motions: [{ id: "applied-free-fk", presetId: preset.id, offset: 0, intensity: 1 }],
+      },
+      new Map([[preset.id, preset]]),
+      makeVariantArmCharacter(),
+    );
+    const scene = extractScene(html);
+    const armVars = [
+      ...scene.initialTargets,
+      ...scene.motionSegments.flatMap((segment) => segment.targets),
+    ]
+      .filter((target) => target.selector.startsWith("#char-bone-bone-slot-right-arm"))
+      .map((target) => target.vars);
+
+    expect(Math.max(...armVars.map((vars) => Number(vars.x)))).toBe(20);
+    expect(Math.min(...armVars.map((vars) => Number(vars.y)))).toBe(-10);
   });
 
   it("emits 3D transform vars (rotationY + transformPerspective) for a 3D bone motion", () => {

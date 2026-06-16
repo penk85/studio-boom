@@ -50,4 +50,52 @@ describe("CharacterEditor source integration", () => {
     expect(source).toContain("Select the whole layer group");
     expect(source).toContain("function VariantGridButton");
   });
+
+  it("keeps canvas variant visibility scoped to the active angle", () => {
+    const source = readFileSync(editorPath, "utf8");
+
+    expect(source).toContain("const editorAngleParts = orderedParts.filter");
+    expect(source).toContain("partAvailableForAngle(part, editorActiveAngle)");
+    expect(source).toContain("allParts={editorAngleParts}");
+    expect(source).not.toContain("allParts={doc.parts}");
+  });
+
+  it("keeps body map slots separate from active-angle artwork", () => {
+    const source = readFileSync(editorPath, "utf8");
+
+    expect(source).toContain('<Accordion title="Body map" defaultOpen>');
+    expect(source).toContain("function BodyMapPanel");
+    expect(source).toContain("listCharacterSlots(doc, { includeEmpty: true })");
+    expect(source).toContain("withUpdatedCharacterSlot");
+    expect(source).toContain("label={`Upload ${selectedSlot.name}`}");
+  });
+
+  it("uses authored bounds for editor art bounds and host clamping", () => {
+    const source = readFileSync(editorPath, "utf8");
+
+    expect(source).toContain("function unionEditorArtBounds");
+    expect(source).toContain("localAuthoredBounds(p) ?? localAlphaBounds(p)");
+    expect(source).toContain("localRectCanvasBounds(p, a)");
+    expect(source).toContain("function unionHostClampBounds");
+    expect(source).toContain("const subject = unionHostClampBounds(slotParts, constraint.mode)");
+    expect(source).toContain("const host = unionHostClampBounds(hostParts, constraint.mode)");
+  });
+
+  it("supports both skeleton calibration and moving artwork with socket/joint drags", () => {
+    const source = readFileSync(editorPath, "utf8");
+
+    expect(source).toContain('useState<BoneDragMode>("calibrate")');
+    expect(source).toContain("pinRigSlotPlacements(doc, rigSnapshot, movedRig, slotIds)");
+    expect(source).toContain("Calibrate");
+    expect(source).toContain("Move art");
+    expect(source).toContain("Calibrate mode moves only the skeleton/socket");
+    expect(source).toContain(
+      "moveSlotSetFromSnapshot(d.parts, snapshot, slotIds, appliedDx, appliedDy)",
+    );
+    expect(source).toContain(
+      "for (const slotId of slotIds) applyLiveSlotBinding(latestRig, slotId)",
+    );
+    expect(source).not.toContain("const shouldMoveArt = false");
+    expect(source).not.toContain("Bones drive the skeleton only; artwork stays put");
+  });
 });

@@ -11,7 +11,6 @@ import {
   listCharacterSlots,
   partAvailableForAngle,
   partMatchesVariant,
-  partsAvailableForAngle,
   roleLabel,
   variantKeyForPart,
 } from "../character/character-utils";
@@ -61,7 +60,7 @@ export function aiInFilename(name: string, suffix: string): string {
 
 export function characterJsonFromPreset(character: CharacterPreset): CharacterJson {
   const rig = normalizeCharacterRig(character);
-  const slots = listCharacterSlots(character.parts);
+  const slots = listCharacterSlots(character, { includeEmpty: true });
   const angles = availableCharacterAngles(character);
   const semanticBones = uniqueSemanticBones(rig);
   return {
@@ -89,14 +88,16 @@ export function characterJsonFromPreset(character: CharacterPreset): CharacterJs
         name: slot.name ?? roleLabel(slot.role),
         role: slot.role,
         semanticType: semanticTypeForSlot(slot.role, slot.name ?? representative?.name ?? ""),
-        angleIds: angles.filter((angle) =>
-          slot.parts.some((part) => partAvailableForAngle(part, angle)),
-        ),
+        angleIds:
+          slot.angleIds ??
+          angles.filter((angle) => slot.parts.some((part) => partAvailableForAngle(part, angle))),
         aliases: semanticAliases(
           slot.name ?? representative?.name ?? roleLabel(slot.role),
           slot.role,
         ),
-        aiHint: aiHintForSlot(slot.role, slot.name ?? representative?.name ?? roleLabel(slot.role)),
+        aiHint:
+          slot.aiHint ??
+          aiHintForSlot(slot.role, slot.name ?? representative?.name ?? roleLabel(slot.role)),
         defaultAttachment: rig.slotBindings.find((binding) => binding.slotId === slot.id)?.boneId,
         preferredRig: preferredRigForSlot(slot.role, slot.name ?? ""),
       };
@@ -112,7 +113,7 @@ export function angleRigJsonFromPreset(
     ...character,
     rig: { ...normalizeCharacterRig(character), activeAngle: angleId },
   });
-  const slots = listCharacterSlots(partsAvailableForAngle(character.parts, rig.activeAngle));
+  const slots = listCharacterSlots(character, { angle: rig.activeAngle, includeEmpty: false });
   const variantsBySlot = new Map(
     slots.map((slot) => [
       slot.id,
@@ -261,31 +262,35 @@ function variantsForParts(
   return Array.from(byVariant, ([id, groupedParts]) => {
     const representative = groupedParts[0];
     const explicitPackage = packages.find(
-      (variant) => variant.id === id || variant.key === id || groupedParts.some((part) => part.variantPackageId === variant.id),
+      (variant) =>
+        variant.id === id ||
+        variant.key === id ||
+        groupedParts.some((part) => part.variantPackageId === variant.id),
     );
     return {
       id,
       mediaId: representative.mediaId,
       name: representative.name,
-      displayName: explicitPackage?.displayName ?? representative.variant?.name ?? representative.name,
+      displayName:
+        explicitPackage?.displayName ?? representative.variant?.name ?? representative.name,
       slotCompatibility: explicitPackage?.slotCompatibility,
       angleIds:
         explicitPackage?.angleIds ??
-        uniqueAngles(groupedParts.flatMap((part) => part.angleIds ?? (part.angleId ? [part.angleId] : []))),
+        uniqueAngles(
+          groupedParts.flatMap((part) => part.angleIds ?? (part.angleId ? [part.angleId] : [])),
+        ),
       variant: representative.variant,
-      artwork:
-        explicitPackage?.artwork ??
-        {
-          partIds: groupedParts.map((part) => part.id),
-          layers: groupedParts.map((part) => ({
-            id: part.id,
-            partId: part.id,
-            mediaId: part.mediaId,
-            name: part.name,
-            role: part.role,
-            zIndex: part.zIndex,
-          })),
-        },
+      artwork: explicitPackage?.artwork ?? {
+        partIds: groupedParts.map((part) => part.id),
+        layers: groupedParts.map((part) => ({
+          id: part.id,
+          partId: part.id,
+          mediaId: part.mediaId,
+          name: part.name,
+          role: part.role,
+          zIndex: part.zIndex,
+        })),
+      },
       rig: explicitPackage?.rig,
       aiMetadata: explicitPackage?.aiMetadata,
       pose: representative.pose,
@@ -297,8 +302,7 @@ function variantsForParts(
 
 function defaultVariantForParts(parts: CharacterPart[]): string | undefined {
   const part =
-    parts.find((candidate) => partMatchesVariant(candidate, "rest")) ??
-    representativePart(parts);
+    parts.find((candidate) => partMatchesVariant(candidate, "rest")) ?? representativePart(parts);
   return part ? variantKeyForPart(part) : undefined;
 }
 
@@ -313,7 +317,22 @@ function semanticTypeForSlot(role: PartRole, label: string): SemanticType {
   if (role === "eye" || role === "iris" || role === "eyebrow" || role === "nose")
     return "faceFeature";
   if (role === "accessory") return "accessory";
-  if (["head", "body", "arm", "hand", "leg", "foot", "hair"].includes(role)) return "bodyPart";
+  if (
+    [
+      "head",
+      "body",
+      "arm",
+      "upperArm",
+      "lowerArm",
+      "hand",
+      "leg",
+      "upperLeg",
+      "lowerLeg",
+      "foot",
+      "hair",
+    ].includes(role)
+  )
+    return "bodyPart";
   if (text.includes("shirt") || text.includes("jacket") || text.includes("dress"))
     return "clothing";
   if (text.includes("tail") || text.includes("wing")) return "appendage";
@@ -324,6 +343,8 @@ function semanticTypeForSlot(role: PartRole, label: string): SemanticType {
 function preferredRigForSlot(role: PartRole, label: string): "single" | "chain" | "mesh" {
   const text = label.toLowerCase();
   if (role === "hair" || text.includes("tail") || text.includes("wing")) return "chain";
+  if (role === "upperArm" || role === "lowerArm" || role === "upperLeg" || role === "lowerLeg")
+    return "chain";
   return "single";
 }
 

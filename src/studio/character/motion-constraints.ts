@@ -4,6 +4,7 @@ import type {
   CharacterReach,
   CharacterSlotBinding,
   CharacterSlotVariantPackage,
+  PartRole,
 } from "../types";
 import { clampMotionDeltaToReach } from "./rig";
 import { variantKeyForPackage } from "./character-utils";
@@ -21,29 +22,53 @@ export type EffectiveReachSource = "slotRotReach" | "variantRotationLimits" | "n
 /** Active variant selection per slot (slotId → variant key), e.g. a motion frame's slot states. */
 export type ActiveVariantMap = ReadonlyMap<string, string> | Readonly<Record<string, string>>;
 
+const FK_JOINT_LOCK_ROLES = new Set<PartRole>([
+  "head",
+  "body",
+  "arm",
+  "upperArm",
+  "lowerArm",
+  "hand",
+  "leg",
+  "upperLeg",
+  "lowerLeg",
+  "foot",
+  "hair",
+  "accessory",
+  "custom",
+]);
+
 export interface MotionConstraintContext {
   reachBySlot: Map<string, CharacterReach>;
   /** slotId → variantKey → rotation limits from that variant's rig package bones. */
   variantRotationLimitsBySlot: Map<string, Map<string, { min: number; max: number }>>;
+  /** child bone id → parent bone id. Used to keep FK joints locked during motion playback. */
+  parentBoneByBone: Map<string, string>;
 }
 
 export function buildMotionConstraintContext(args: {
   reaches: CharacterReach[];
   variantPackages?: CharacterSlotVariantPackage[];
   parts?: CharacterPart[];
+  bones?: CharacterBone[];
 }): MotionConstraintContext {
   const reachBySlot = new Map(args.reaches.map((reach) => [reach.slotId, reach]));
   const variantRotationLimitsBySlot = new Map<string, Map<string, { min: number; max: number }>>();
+  const parentBoneByBone = new Map<string, string>();
+  for (const bone of args.bones ?? []) {
+    if (bone.parentId) parentBoneByBone.set(bone.id, bone.parentId);
+  }
   for (const pkg of args.variantPackages ?? []) {
     const limits = rotationLimitsForPackage(pkg);
     if (!limits) continue;
     const key = variantKeyForPackage(pkg, args.parts);
     const bySlot =
-      variantRotationLimitsBySlot.get(pkg.slotId) ?? new Map<string, { min: number; max: number }>();
+      variantRotationLimitsBySlot.get(pkg.slotId) ??
+      new Map<string, { min: number; max: number }>();
     bySlot.set(key, limits);
     variantRotationLimitsBySlot.set(pkg.slotId, bySlot);
   }
-  return { reachBySlot, variantRotationLimitsBySlot };
+  return { reachBySlot, variantRotationLimitsBySlot, parentBoneByBone };
 }
 
 /**
@@ -83,6 +108,19 @@ export interface ResolvedMotionDelta {
   effectiveReachSource: EffectiveReachSource;
 }
 
+export interface MotionDeltaLike {
+  dx: number;
+  dy: number;
+  scale?: number;
+  scaleX?: number;
+  scaleY?: number;
+  skewX?: number;
+  skewY?: number;
+  rotation: number;
+  rotationX?: number;
+  rotationY?: number;
+}
+
 /**
  * Tone a raw motion delta down to the layer's effective reach (drift polygon + twist range),
  * honoring the per-movement "allow out of bounds" escape hatch. `unclampedLayers` may contain
@@ -91,6 +129,7 @@ export interface ResolvedMotionDelta {
 export function resolveMotionDelta(args: {
   ctx: MotionConstraintContext;
   slotId: string;
+  boneId?: string;
   role?: string;
   activeVariants?: ActiveVariantMap;
   dx: number;
@@ -101,7 +140,9 @@ export function resolveMotionDelta(args: {
   const { reach, source } = effectiveReachForSlot(args.ctx, args.slotId, args.activeVariants);
   const overridden =
     !!args.unclampedLayers &&
-    (args.unclampedLayers.has(args.slotId) || (!!args.role && args.unclampedLayers.has(args.role)));
+    (args.unclampedLayers.has(args.slotId) ||
+      (!!args.boneId && args.unclampedLayers.has(args.boneId)) ||
+      (!!args.role && args.unclampedLayers.has(args.role)));
   if (overridden || !reach) {
     return {
       dx: args.dx,
@@ -124,6 +165,62 @@ export function resolveMotionDelta(args: {
     ...(clampReasons.length ? { clampReasons } : {}),
     effectiveReachSource: source,
   };
+}
+
+export interface ResolvedFkJointDelta {
+  dx: number;
+  dy: number;
+  clamped: boolean;
+  ancestorBoneId?: string;
+}
+
+/**
+ * Enforce FK joint locking for existing/bad presets that slipped through validation. If a child
+ * bone and one of its ancestors are both animated, the child may still rotate/scale locally, but
+ * child dx/dy would slide the authored joint socket away from the parent. Clamp that translation
+ * to zero unless the movement explicitly opts the slot/bone/role out of bounds.
+ */
+export function resolveFkJointDelta(args: {
+  ctx: MotionConstraintContext;
+  boneId?: string;
+  slotId: string;
+  role?: string;
+  dx: number;
+  dy: number;
+  animatedBoneIds: ReadonlySet<string>;
+  unclampedLayers?: ReadonlySet<string>;
+}): ResolvedFkJointDelta {
+  const overridden =
+    !!args.unclampedLayers &&
+    (args.unclampedLayers.has(args.slotId) ||
+      (!!args.boneId && args.unclampedLayers.has(args.boneId)) ||
+      (!!args.role && args.unclampedLayers.has(args.role)));
+  if (overridden || !args.boneId || (!args.dx && !args.dy)) {
+    return { dx: args.dx, dy: args.dy, clamped: false };
+  }
+  if (!roleUsesFkJointLock(args.role)) {
+    return { dx: args.dx, dy: args.dy, clamped: false };
+  }
+  const ancestorBoneId = ancestorBoneIds(args.ctx, args.boneId).find((id) =>
+    args.animatedBoneIds.has(id),
+  );
+  if (!ancestorBoneId) return { dx: args.dx, dy: args.dy, clamped: false };
+  return { dx: 0, dy: 0, clamped: true, ancestorBoneId };
+}
+
+export function motionDeltaMovesJoint(delta: MotionDeltaLike): boolean {
+  return (
+    Math.abs(delta.dx) > 0.0001 ||
+    Math.abs(delta.dy) > 0.0001 ||
+    Math.abs(delta.rotation) > 0.0001 ||
+    Math.abs(delta.rotationX ?? 0) > 0.0001 ||
+    Math.abs(delta.rotationY ?? 0) > 0.0001 ||
+    Math.abs((delta.scale ?? 1) - 1) > 0.0001 ||
+    Math.abs((delta.scaleX ?? 1) - 1) > 0.0001 ||
+    Math.abs((delta.scaleY ?? 1) - 1) > 0.0001 ||
+    Math.abs(delta.skewX ?? 0) > 0.0001 ||
+    Math.abs(delta.skewY ?? 0) > 0.0001
+  );
 }
 
 /**
@@ -157,6 +254,23 @@ function activeVariantFor(map: ActiveVariantMap | undefined, slotId: string): st
   if (!map) return undefined;
   if (map instanceof Map) return map.get(slotId);
   return (map as Readonly<Record<string, string>>)[slotId];
+}
+
+function ancestorBoneIds(ctx: MotionConstraintContext, boneId: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  let current = ctx.parentBoneByBone.get(boneId);
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    out.push(current);
+    current = ctx.parentBoneByBone.get(current);
+  }
+  return out;
+}
+
+function roleUsesFkJointLock(role: string | undefined): boolean {
+  if (!role) return true;
+  return FK_JOINT_LOCK_ROLES.has(role as PartRole);
 }
 
 function rotationLimitsForPackage(

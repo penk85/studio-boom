@@ -182,9 +182,9 @@ describe("poseMatchesPreview", () => {
     const waving = capturePosePreset(character, { "slot:right-arm": "bent" }, { name: "Waving" });
     const applied = applyPosePreset(character, waving);
     expect(poseMatchesPreview(waving, applied, character)).toBe(true);
-    expect(
-      poseMatchesPreview(waving, { ...applied, "slot:right-hand": "bent" }, character),
-    ).toBe(false);
+    expect(poseMatchesPreview(waving, { ...applied, "slot:right-hand": "bent" }, character)).toBe(
+      false,
+    );
     expect(
       poseMatchesPreview(waving, { ...applied, "slot:right-hand": "straight" }, character),
     ).toBe(true);
@@ -194,7 +194,11 @@ describe("poseMatchesPreview", () => {
     const character = withFace(makeVariantArmCharacter());
     const pose = capturePosePreset(character, {}, { name: "Standing" });
     expect(
-      poseMatchesPreview(pose, { ...applyPosePreset(character, pose), "role:mouth": "A" }, character),
+      poseMatchesPreview(
+        pose,
+        { ...applyPosePreset(character, pose), "role:mouth": "A" },
+        character,
+      ),
     ).toBe(true);
   });
 });

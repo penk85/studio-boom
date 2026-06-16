@@ -25,11 +25,8 @@ import {
 } from "../presets/apply";
 import {
   anchorPartForVariant,
-  listCharacterSlots,
   partMatchesVariant,
-  partsAvailableForAngle,
   pivotAlignedPartOffset,
-  roleEnabledByManifest,
   variantAliasesForPart,
   variantKeyForPart,
   variantLabelForPart,
@@ -49,28 +46,43 @@ import {
   type RigTransforms,
 } from "./mouth-libraries";
 import {
-  normalizeCharacterRig,
   representativePart,
   resolveSlotBinding,
   slotDrawIndex,
   type ResolvedSlotBinding,
 } from "./rig";
 import {
-  buildMotionConstraintContext,
   childAnchorForVariant,
+  motionDeltaMovesJoint,
   parentSlotIdForBone,
+  resolveFkJointDelta,
   resolveMotionDelta,
   type MotionConstraintContext,
 } from "./motion-constraints";
+import {
+  buildCharacterRuntime,
+  resolveRuntimeSlotPart,
+  runtimePartPlacement,
+  type CharacterRuntime,
+  type RuntimeCharacterSlot,
+  type RuntimePartPlacement,
+} from "./runtime";
 
 const VISEMES: MouthViseme[] = ["rest", "A", "E", "O", "U", "MBP", "FV", "L", "WQ", "Smile"];
 const MOTION_SAMPLE_FPS = 12;
 
-type CharacterSlotRef = ReturnType<typeof listCharacterSlots>[number];
+type CharacterSlotRef = RuntimeCharacterSlot;
+type RuntimeRig = CharacterRuntime["rig"];
 
 interface NestedSlotChild {
   slot: CharacterSlotRef;
   relation: CharacterSlotRelation;
+}
+
+interface NestedHostContext {
+  slot: CharacterSlotRef;
+  part: CharacterPart;
+  placement: RuntimePartPlacement;
 }
 
 interface BuildCharacterCompositionArgs {
@@ -242,8 +254,9 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
   const stage = ensureStage(doc, args.compositionId, duration, width, height);
   const scaleX = width / Math.max(1, args.character.canvasWidth);
   const scaleY = height / Math.max(1, args.character.canvasHeight);
-  const characterRig = normalizeCharacterRig(args.character);
-  const dom = buildPuppetDom(args.character, characterRig, args.meta, scaleX, scaleY);
+  const runtime = buildCharacterRuntime(args.character);
+  const characterRig = runtime.rig;
+  const dom = buildPuppetDom(args.character, runtime, args.meta, scaleX, scaleY);
 
   stage.innerHTML = "";
   stage.insertAdjacentHTML("beforeend", dom.html.join("\n"));
@@ -286,15 +299,9 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
     canvasHeight: args.character.canvasHeight,
     slotTimelines: dom.slotTimelines,
     boneAnchorTimelines: dom.boneAnchorTimelines,
-    constraintContext: buildMotionConstraintContext({
-      reaches: characterRig.reaches,
-      variantPackages: args.character.variantPackages,
-      parts: args.character.parts,
-    }),
-    activeAngle: characterRig.activeAngle,
-    parentBoneIds: new Set(
-      characterRig.bones.map((bone) => bone.parentId).filter((id): id is string => !!id),
-    ),
+    constraintContext: runtime.constraintContext,
+    activeAngle: runtime.angle,
+    parentBoneIds: runtime.parentBoneIds,
   });
 
   const normalized = normalizeNativeHyperframesHtml(
@@ -424,17 +431,18 @@ function appendCharacterStyles(doc: Document): void {
 
 function buildPuppetDom(
   character: CharacterPreset,
-  rig: ReturnType<typeof normalizeCharacterRig>,
+  runtime: CharacterRuntime,
   meta: CharacterClipMeta,
   scaleX: number,
   scaleY: number,
 ): PuppetDom {
+  const rig = runtime.rig;
   const out: PuppetDom = {
     html: [
       `<div data-character-root="true" data-character-id="${esc(
         character.id,
       )}" data-character-rig-version="${esc(rig.version)}" data-character-angle="${esc(
-        rig.activeAngle,
+        runtime.angle,
       )}">`,
     ],
     motionTargets: [],
@@ -445,9 +453,7 @@ function buildPuppetDom(
   const slotTargets: MotionTarget[] = [];
   const boneTargets: MotionTarget[] = [];
 
-  const slots = listCharacterSlots(partsAvailableForAngle(character.parts, rig.activeAngle)).filter(
-    (slot) => roleEnabledByManifest(slot.role, character.manifest),
-  );
+  const slots = runtime.slots;
   const hasMouthSlot = slots.some(
     (slot) => slot.role === "mouth" && slot.parts.some((p) => p.visible),
   );
@@ -468,7 +474,7 @@ function buildPuppetDom(
   const nestedChildrenByParentSlotId = new Map<string, NestedSlotChild[]>();
   for (const relation of rig.slotRelations ?? []) {
     if (relation.renderMode !== "nested") continue;
-    if (relation.characterViewIds?.length && !relation.characterViewIds.includes(rig.activeAngle))
+    if (relation.characterViewIds?.length && !relation.characterViewIds.includes(runtime.angle))
       continue;
     const childSlot = slotById.get(relation.childSlotId);
     const parentSlotId = parentSlotIdForRelation(relation, slots);
@@ -482,7 +488,7 @@ function buildPuppetDom(
 
   for (const slot of slots) {
     if (nestedSlotIds.has(slot.id)) continue;
-    const binding = resolveSlotBinding(rig, slot.id);
+    const binding = runtime.bindingBySlot.get(slot.id);
     if (binding && !binding.visible) continue;
     const boneId = binding?.effectiveBoneId ?? "bone:root";
     const newTargets = appendCapturedSlotToBone(boneId, () => {
@@ -495,11 +501,13 @@ function buildPuppetDom(
         scaleY,
         binding,
         rig,
+        runtime,
         nestedChildrenByParentSlotId,
       );
     });
-    if (binding && newTargets[0]) {
-      boneTargets.push(boneTargetForSlotTarget(newTargets[0], binding));
+    const directSlotTarget = newTargets.find((target) => target.slotId === slot.id);
+    if (binding && directSlotTarget) {
+      boneTargets.push(boneTargetForSlotTarget(directSlotTarget, binding));
     }
   }
 
@@ -524,7 +532,14 @@ function buildPuppetDom(
     });
   }
 
-  out.boneAnchorTimelines = buildBoneAnchorTimelines(rig, slotById, meta.poses, scaleX, scaleY);
+  out.boneAnchorTimelines = buildBoneAnchorTimelines(
+    rig,
+    runtime,
+    slotById,
+    meta.poses,
+    scaleX,
+    scaleY,
+  );
   renderBoneTree(out.html, rig, slotHtmlByBone, scaleX, scaleY, out.boneAnchorTimelines);
   out.motionTargets.push(...uniqueMotionTargets([...slotTargets, ...boneTargets]));
   // Bone targets whose rest rotation follows the parent variant: hand the motion builder the
@@ -552,7 +567,8 @@ function buildPuppetDom(
  * states (which may use pose/viseme/id aliases) resolve to the same anchor as canonical keys.
  */
 function buildBoneAnchorTimelines(
-  rig: ReturnType<typeof normalizeCharacterRig>,
+  rig: RuntimeRig,
+  runtime: CharacterRuntime,
   slotById: Map<string, CharacterSlotRef>,
   poses: Record<string, string>,
   scaleX: number,
@@ -580,12 +596,7 @@ function buildBoneAnchorTimelines(
       for (const alias of variantAliasesForPart(part)) anchors[alias] ??= scaled(anchor);
     }
     const base = { left: bone.x * scaleX, top: bone.y * scaleY, rotation: bone.rotation };
-    const initialPart = resolveActiveSlotPart(
-      parentSlot,
-      poses,
-      resolveSlotBinding(rig, parentSlotId),
-      rig,
-    );
+    const initialPart = resolveRuntimeSlotPart(parentSlot, runtime, poses[parentSlot.id]);
     const initialKey = initialPart ? variantKeyForPart(initialPart) : undefined;
     out.push({
       parentSlotId,
@@ -599,7 +610,7 @@ function buildBoneAnchorTimelines(
   return out;
 }
 
-function defaultGeneratedMouthBoneId(rig: ReturnType<typeof normalizeCharacterRig>): string {
+function defaultGeneratedMouthBoneId(rig: RuntimeRig): string {
   return (
     rig.bones.find((bone) => bone.role === "head")?.id ??
     rig.bones.find((bone) => bone.role === "body")?.id ??
@@ -609,7 +620,7 @@ function defaultGeneratedMouthBoneId(rig: ReturnType<typeof normalizeCharacterRi
 
 function renderBoneTree(
   html: string[],
-  rig: ReturnType<typeof normalizeCharacterRig>,
+  rig: RuntimeRig,
   slotHtmlByBone: Map<string, string[]>,
   scaleX: number,
   scaleY: number,
@@ -684,7 +695,7 @@ function uniqueMotionTargets(targets: MotionTarget[]): MotionTarget[] {
   return Array.from(out.values());
 }
 
-function boneZIndex(rig: ReturnType<typeof normalizeCharacterRig>, boneId: string): number {
+function boneZIndex(rig: RuntimeRig, boneId: string): number {
   const binding = rig.slotBindings.find((candidate) => candidate.boneId === boneId);
   return binding ? slotDrawIndex(rig, binding.slotId, 0) : 0;
 }
@@ -705,9 +716,10 @@ function buildSlotByRole(
   scaleX: number,
   scaleY: number,
   binding: ResolvedSlotBinding | undefined,
-  rig: ReturnType<typeof normalizeCharacterRig>,
+  rig: RuntimeRig,
+  runtime: CharacterRuntime,
   nestedChildrenByParentSlotId: Map<string, NestedSlotChild[]>,
-  hostPart?: CharacterPart,
+  host?: NestedHostContext,
 ): void {
   if (slot.role === "eye")
     buildEyeSlot(
@@ -719,8 +731,9 @@ function buildSlotByRole(
       scaleY,
       binding,
       rig,
+      runtime,
       nestedChildrenByParentSlotId,
-      hostPart,
+      host,
     );
   else if (slot.role === "mouth")
     buildMouthSlot(
@@ -732,8 +745,9 @@ function buildSlotByRole(
       scaleY,
       binding,
       rig,
+      runtime,
       nestedChildrenByParentSlotId,
-      hostPart,
+      host,
     );
   else
     buildGenericSlot(
@@ -745,29 +759,32 @@ function buildSlotByRole(
       scaleY,
       binding,
       rig,
+      runtime,
       nestedChildrenByParentSlotId,
-      hostPart,
+      host,
     );
 }
 
 function renderNestedChildrenForPart(
   out: PuppetDom,
   character: CharacterPreset,
-  parentSlotId: string,
+  parentSlot: CharacterSlotRef,
   parentPart: CharacterPart,
   poses: Record<string, string>,
   scaleX: number,
   scaleY: number,
-  rig: ReturnType<typeof normalizeCharacterRig>,
+  rig: RuntimeRig,
+  runtime: CharacterRuntime,
   nestedChildrenByParentSlotId: Map<string, NestedSlotChild[]>,
+  parentPlacement: RuntimePartPlacement,
 ): string {
-  const children = nestedChildrenByParentSlotId.get(parentSlotId) ?? [];
+  const children = nestedChildrenByParentSlotId.get(parentSlot.id) ?? [];
   if (children.length === 0) return "";
   return children
     .filter(({ relation }) => relationActiveForParentPart(relation, parentPart))
     .map(({ slot }) => {
       const beforeHtml = out.html.length;
-      const binding = resolveSlotBinding(rig, slot.id);
+      const binding = runtime.bindingBySlot.get(slot.id);
       if (binding && !binding.visible) return "";
       buildSlotByRole(
         out,
@@ -778,8 +795,9 @@ function renderNestedChildrenForPart(
         scaleY,
         binding,
         rig,
+        runtime,
         nestedChildrenByParentSlotId,
-        parentPart,
+        { slot: parentSlot, part: parentPart, placement: parentPlacement },
       );
       return out.html.splice(beforeHtml).join("");
     })
@@ -819,14 +837,13 @@ function buildEyeSlot(
   scaleX: number,
   scaleY: number,
   binding: ResolvedSlotBinding | undefined,
-  rig: ReturnType<typeof normalizeCharacterRig>,
+  rig: RuntimeRig,
+  runtime: CharacterRuntime,
   nestedChildrenByParentSlotId: Map<string, NestedSlotChild[]>,
-  hostPart?: CharacterPart,
+  host?: NestedHostContext,
 ): void {
   const variants = eyeVariantsForSlot(slot);
-  const anglePart = binding?.effectivePartId
-    ? slot.parts.find((part) => part.id === binding.effectivePartId)
-    : undefined;
+  const anglePart = resolveRuntimeSlotPart(slot, runtime, "open");
   const openVariant = variants.find((variant) => variant.state === "open");
   const basePart = anglePart ?? openVariant?.part ?? variants[0]?.part;
   if (!basePart) return;
@@ -839,7 +856,17 @@ function buildEyeSlot(
     openVariant?.state ??
     variants[0].state;
   out.html.push(
-    openSlotContainerForPart(containerId, slot, basePart, scaleX, scaleY, binding, rig, hostPart),
+    openSlotContainerForPart(
+      containerId,
+      slot,
+      basePart,
+      scaleX,
+      scaleY,
+      binding,
+      rig,
+      runtime,
+      host,
+    ),
   );
   for (const { state, part } of variants) {
     const id = partElementId(slot.id, state, part.id);
@@ -850,13 +877,15 @@ function buildEyeSlot(
     const children = renderNestedChildrenForPart(
       out,
       character,
-      slot.id,
+      slot,
       part,
       poses,
       scaleX,
       scaleY,
       rig,
+      runtime,
       nestedChildrenByParentSlotId,
+      runtimePartPlacement(slot, part, runtime, { basePart }),
     );
     out.html.push(
       renderPartElement(
@@ -896,9 +925,10 @@ function buildMouthSlot(
   scaleX: number,
   scaleY: number,
   binding: ResolvedSlotBinding | undefined,
-  rig: ReturnType<typeof normalizeCharacterRig>,
+  rig: RuntimeRig,
+  runtime: CharacterRuntime,
   nestedChildrenByParentSlotId: Map<string, NestedSlotChild[]>,
-  hostPart?: CharacterPart,
+  host?: NestedHostContext,
 ): void {
   if (character.mouthRig && character.mouthStyle === "rig") {
     buildGeneratedMouthSlot(
@@ -915,9 +945,7 @@ function buildMouthSlot(
   }
 
   const visibleParts = slot.parts.filter((part) => part.visible);
-  const anglePart = binding?.effectivePartId
-    ? visibleParts.find((part) => part.id === binding.effectivePartId)
-    : undefined;
+  const anglePart = resolveRuntimeSlotPart(slot, runtime, "rest");
   const restPart =
     anglePart ?? visibleParts.find((part) => partMatchesVariant(part, "rest")) ?? visibleParts[0];
   if (!restPart) return;
@@ -927,7 +955,17 @@ function buildMouthSlot(
   const variantParts: Record<string, CharacterPart> = {};
   const renderedIds = new Set<string>();
   out.html.push(
-    openSlotContainerForPart(containerId, slot, restPart, scaleX, scaleY, binding, rig, hostPart),
+    openSlotContainerForPart(
+      containerId,
+      slot,
+      restPart,
+      scaleX,
+      scaleY,
+      binding,
+      rig,
+      runtime,
+      host,
+    ),
   );
   for (const viseme of VISEMES) {
     const part = visibleParts.find((candidate) => partMatchesVariant(candidate, viseme));
@@ -941,13 +979,15 @@ function buildMouthSlot(
     const children = renderNestedChildrenForPart(
       out,
       character,
-      slot.id,
+      slot,
       part,
       poses,
       scaleX,
       scaleY,
       rig,
+      runtime,
       nestedChildrenByParentSlotId,
+      runtimePartPlacement(slot, part, runtime, { basePart: restPart }),
     );
     out.html.push(
       renderPartElement(id, part, restPart, viseme === "rest", scaleX, scaleY, children),
@@ -965,13 +1005,15 @@ function buildMouthSlot(
     const children = renderNestedChildrenForPart(
       out,
       character,
-      slot.id,
+      slot,
       part,
       poses,
       scaleX,
       scaleY,
       rig,
+      runtime,
       nestedChildrenByParentSlotId,
+      runtimePartPlacement(slot, part, runtime, { basePart: restPart }),
     );
     out.html.push(
       renderPartElement(id, part, restPart, part === restPart, scaleX, scaleY, children),
@@ -1005,7 +1047,7 @@ function buildGeneratedMouthSlot(
   scaleX: number,
   scaleY: number,
   binding?: ResolvedSlotBinding,
-  rig?: ReturnType<typeof normalizeCharacterRig>,
+  rig?: RuntimeRig,
   boundBoneId?: string,
 ): void {
   const mouthRig = character.mouthRig;
@@ -1217,26 +1259,6 @@ function buildFallbackMouthRig(
   });
 }
 
-/** The part a slot initially shows: the placed pose/binding variant, else angle match, else first visible. */
-function resolveActiveSlotPart(
-  slot: CharacterSlotRef,
-  poses: Record<string, string>,
-  binding: ResolvedSlotBinding | undefined,
-  rig: ReturnType<typeof normalizeCharacterRig>,
-): CharacterPart | undefined {
-  const visibleParts = slot.parts.filter((part) => part.visible);
-  const activePose = binding?.effectivePartId ?? poses[slot.id];
-  return (
-    (activePose ? visibleParts.find((part) => partMatchesVariant(part, activePose)) : undefined) ??
-    (rig.activeAngle
-      ? visibleParts.find(
-          (part) => partMatchesVariant(part, rig.activeAngle) || part.name === rig.activeAngle,
-        )
-      : undefined) ??
-    visibleParts[0]
-  );
-}
-
 function buildGenericSlot(
   out: PuppetDom,
   character: CharacterPreset,
@@ -1245,12 +1267,13 @@ function buildGenericSlot(
   scaleX: number,
   scaleY: number,
   binding: ResolvedSlotBinding | undefined,
-  rig: ReturnType<typeof normalizeCharacterRig>,
+  rig: RuntimeRig,
+  runtime: CharacterRuntime,
   nestedChildrenByParentSlotId: Map<string, NestedSlotChild[]>,
-  hostPart?: CharacterPart,
+  host?: NestedHostContext,
 ): void {
   const visibleParts = slot.parts.filter((part) => part.visible);
-  const activePart = resolveActiveSlotPart(slot, poses, binding, rig);
+  const activePart = resolveRuntimeSlotPart(slot, runtime, poses[slot.id]);
   if (!activePart) return;
 
   const containerId = slotContainerId(slot.id);
@@ -1263,7 +1286,17 @@ function buildGenericSlot(
   // part's group keeps rendering at its authored position.
   const referencePart = binding ? (representativePart(slot) ?? activePart) : undefined;
   out.html.push(
-    openSlotContainerForPart(containerId, slot, activePart, scaleX, scaleY, binding, rig, hostPart),
+    openSlotContainerForPart(
+      containerId,
+      slot,
+      activePart,
+      scaleX,
+      scaleY,
+      binding,
+      rig,
+      runtime,
+      host,
+    ),
   );
   for (const part of visibleParts) {
     const key = variantKeyForPart(part);
@@ -1275,13 +1308,15 @@ function buildGenericSlot(
     const children = renderNestedChildrenForPart(
       out,
       character,
-      slot.id,
+      slot,
       part,
       poses,
       scaleX,
       scaleY,
       rig,
+      runtime,
       nestedChildrenByParentSlotId,
+      runtimePartPlacement(slot, part, runtime, { basePart: activePart }),
     );
     const offset = referencePart
       ? pivotAlignedPartOffset(referencePart, anchorPartForVariant(visibleParts, key) ?? part, part)
@@ -1316,11 +1351,22 @@ function openSlotContainerForPart(
   scaleX: number,
   scaleY: number,
   binding: ResolvedSlotBinding | undefined,
-  rig: ReturnType<typeof normalizeCharacterRig>,
-  hostPart?: CharacterPart,
+  rig: RuntimeRig,
+  runtime: CharacterRuntime,
+  host?: NestedHostContext,
 ): string {
-  return hostPart
-    ? openNestedSlotContainer(containerId, slot, basePart, hostPart, scaleX, scaleY, binding, rig)
+  return host
+    ? openNestedSlotContainer(
+        containerId,
+        slot,
+        basePart,
+        host,
+        scaleX,
+        scaleY,
+        binding,
+        rig,
+        runtime,
+      )
     : openSlotContainer(containerId, slot, basePart, scaleX, scaleY, binding, rig);
 }
 
@@ -1331,7 +1377,7 @@ function openSlotContainer(
   scaleX: number,
   scaleY: number,
   binding: ResolvedSlotBinding | undefined,
-  rig: ReturnType<typeof normalizeCharacterRig>,
+  rig: RuntimeRig,
 ): string {
   const drawIndex = slotDrawIndex(rig, slot.id, basePart.zIndex);
   const left = binding ? binding.x : basePart.x;
@@ -1364,11 +1410,11 @@ function openSlotContainer(
   )}">`;
 }
 
-function hostSlotIdFor(rig: ReturnType<typeof normalizeCharacterRig>, slotId: string) {
+function hostSlotIdFor(rig: RuntimeRig, slotId: string) {
   return hostConstraintFor(rig, slotId)?.hostSlotId;
 }
 
-function hostConstraintFor(rig: ReturnType<typeof normalizeCharacterRig>, slotId: string) {
+function hostConstraintFor(rig: RuntimeRig, slotId: string) {
   return rig.hostConstraints.find((constraint) => constraint.slotId === slotId);
 }
 
@@ -1376,39 +1422,67 @@ function openNestedSlotContainer(
   containerId: string,
   slot: CharacterSlotRef,
   basePart: CharacterPart,
-  hostPart: CharacterPart,
+  host: NestedHostContext,
   scaleX: number,
   scaleY: number,
   binding: ResolvedSlotBinding | undefined,
-  rig: ReturnType<typeof normalizeCharacterRig>,
+  rig: RuntimeRig,
+  runtime: CharacterRuntime,
 ): string {
   const drawIndex = slotDrawIndex(rig, slot.id, basePart.zIndex);
-  const host = rig.hostConstraints.find((constraint) => constraint.slotId === slot.id);
+  const hostPart = host.part;
+  const hostConstraint = rig.hostConstraints.find((constraint) => constraint.slotId === slot.id);
+  const placement = runtimePartPlacement(slot, basePart, runtime, { basePart });
+  const local = nestedPlacementRelativeToHost(placement, host.placement);
   return `<div id="${esc(containerId)}" data-character-slot="true" data-character-slot-id="${esc(
     slot.id,
   )}"${binding ? ` data-character-bound-bone-id="${esc(binding.effectiveBoneId)}"` : ""}${
-    host?.hostSlotId ? ` data-character-host-slot-id="${esc(host.hostSlotId)}"` : ""
-  }${host?.hostBoneId ? ` data-character-host-bone-id="${esc(host.hostBoneId)}"` : ""}${
-    host?.mode ? ` data-character-host-mode="${esc(host.mode)}"` : ""
+    hostConstraint?.hostSlotId
+      ? ` data-character-host-slot-id="${esc(hostConstraint.hostSlotId)}"`
+      : ""
   }${
-    host?.reachPolicy ? ` data-character-reach-policy="${esc(host.reachPolicy)}"` : ""
+    hostConstraint?.hostBoneId
+      ? ` data-character-host-bone-id="${esc(hostConstraint.hostBoneId)}"`
+      : ""
+  }${hostConstraint?.mode ? ` data-character-host-mode="${esc(hostConstraint.mode)}"` : ""}${
+    hostConstraint?.reachPolicy
+      ? ` data-character-reach-policy="${esc(hostConstraint.reachPolicy)}"`
+      : ""
   } data-character-depth="${esc(binding?.effectiveDepth ?? basePart.depth)}" data-character-draw-order-index="${esc(
     drawIndex,
   )}" data-character-role="${esc(slot.role)}" data-character-side="${esc(
     basePart.side ?? "",
   )}" style="${esc(
     styleString({
-      left: (basePart.x - hostPart.x) * scaleX,
-      top: (basePart.y - hostPart.y) * scaleY,
+      left: local.x * scaleX,
+      top: local.y * scaleY,
       width: basePart.width * scaleX,
       height: basePart.height * scaleY,
       "z-index": Math.max(0, drawIndex - hostPart.zIndex),
       "transform-origin": `${basePart.anchorX * 100}% ${basePart.anchorY * 100}%`,
-      transform: `rotate(${basePart.rotation - hostPart.rotation}deg) scale(${
-        binding?.scaleX ?? 1
-      }, ${binding?.scaleY ?? 1})`,
+      transform: `rotate(${local.rotation}deg) scale(${local.scaleX}, ${local.scaleY})`,
     }),
   )}">`;
+}
+
+function nestedPlacementRelativeToHost(
+  placement: RuntimePartPlacement,
+  hostPlacement: RuntimePartPlacement,
+): { x: number; y: number; rotation: number; scaleX: number; scaleY: number } {
+  const radians = (-hostPlacement.rotation * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  const dx = placement.x - hostPlacement.x;
+  const dy = placement.y - hostPlacement.y;
+  const hostScaleX = finiteNonZero(hostPlacement.scaleX, 1);
+  const hostScaleY = finiteNonZero(hostPlacement.scaleY, 1);
+  return {
+    x: (dx * cos - dy * sin) / hostScaleX,
+    y: (dx * sin + dy * cos) / hostScaleY,
+    rotation: placement.rotation - hostPlacement.rotation,
+    scaleX: finiteNonZero(placement.scaleX, 1) / hostScaleX,
+    scaleY: finiteNonZero(placement.scaleY, 1) / hostScaleY,
+  };
 }
 
 function renderPartElement(
@@ -1651,7 +1725,7 @@ function appendCharacterTimelineScript(
     slotTimelines: SlotTimeline[];
     boneAnchorTimelines: BoneAnchorTimeline[];
     constraintContext: MotionConstraintContext;
-    activeAngle: ReturnType<typeof normalizeCharacterRig>["activeAngle"];
+    activeAngle: RuntimeRig["activeAngle"];
     parentBoneIds: Set<string>;
   },
 ): void {
@@ -1786,7 +1860,7 @@ function collectTimelineTimes(
   meta: CharacterClipMeta,
   presets: Map<string, MotionPreset>,
   blinkWindows: Array<{ start: number; end: number }>,
-  activeAngle: ReturnType<typeof normalizeCharacterRig>["activeAngle"],
+  activeAngle: RuntimeRig["activeAngle"],
 ): number[] {
   const times = new Set<number>([0, roundTime(duration)]);
   const step = 1 / MOTION_SAMPLE_FPS;
@@ -1848,7 +1922,7 @@ function buildMotionFrame(
   slots: SlotTimeline[],
   blinkWindows: Array<{ start: number; end: number }>,
   constraintCtx: MotionConstraintContext,
-  activeAngle: ReturnType<typeof normalizeCharacterRig>["activeAngle"],
+  activeAngle: RuntimeRig["activeAngle"],
   parentBoneIds: Set<string>,
 ) {
   const composed = composeMotionsAt(
@@ -1864,37 +1938,64 @@ function buildMotionFrame(
     blinkWindows,
     composed,
   });
+  const targetFrames = motionTargets.map((target) => {
+    // A layer's motion drives exactly one element: the bone group when the bone carries children
+    // (so they follow, pivoting at the joint), otherwise the slot element (anchor pivot). This
+    // avoids the double-application that made layers race ahead of their children.
+    const boneCarriesChildren = !!target.boneId && parentBoneIds.has(target.boneId);
+    const rawDelta =
+      target.kind === "bone"
+        ? boneCarriesChildren
+          ? deltaForBone(composed, target.role, target.slotId, target.boneId)
+          : deltaForBoneOnly(composed, target.boneId)
+        : boneCarriesChildren
+          ? emptyDelta()
+          : deltaFor(composed, target.role, target.slotId);
+    return { target, boneCarriesChildren, rawDelta };
+  });
+  const animatedBoneIds = new Set(
+    targetFrames
+      .filter(
+        (entry) =>
+          entry.target.kind === "bone" &&
+          !!entry.target.boneId &&
+          motionDeltaMovesJoint(entry.rawDelta),
+      )
+      .map((entry) => entry.target.boneId as string),
+  );
   return {
     time,
     slotStates,
-    targets: motionTargets.map((target) => {
-      // A layer's motion drives exactly one element: the bone group when the bone carries children
-      // (so they follow, pivoting at the joint), otherwise the slot element (anchor pivot). This
-      // avoids the double-application that made layers race ahead of their children.
-      const boneCarriesChildren = !!target.boneId && parentBoneIds.has(target.boneId);
-      const rawDelta =
-        target.kind === "bone"
-          ? boneCarriesChildren
-            ? deltaForBone(composed, target.role, target.slotId, target.boneId)
-            : deltaForBoneOnly(composed, target.boneId)
-          : boneCarriesChildren
-            ? emptyDelta()
-            : deltaFor(composed, target.role, target.slotId);
+    targets: targetFrames.map(({ target, boneCarriesChildren, rawDelta }) => {
+      const fkLocked = resolveFkJointDelta({
+        ctx: constraintCtx,
+        boneId: target.boneId,
+        slotId: target.slotId,
+        role: target.role,
+        dx: rawDelta.dx,
+        dy: rawDelta.dy,
+        animatedBoneIds,
+        unclampedLayers: composed.unclampedLayers,
+      });
+      const fkDelta = fkLocked.clamped
+        ? { ...rawDelta, dx: fkLocked.dx, dy: fkLocked.dy }
+        : rawDelta;
       // Tone preset motion down to the layer's effective reach (drift polygon + twist range,
       // variant rotation limits), unless an active movement opted this layer out of bounds.
       const limited = resolveMotionDelta({
         ctx: constraintCtx,
         slotId: target.slotId,
+        boneId: target.boneId,
         role: target.role,
         activeVariants: slotStates,
-        dx: rawDelta.dx,
-        dy: rawDelta.dy,
-        rotation: rawDelta.rotation,
+        dx: fkDelta.dx,
+        dy: fkDelta.dy,
+        rotation: fkDelta.rotation,
         unclampedLayers: composed.unclampedLayers,
       });
       const delta = limited.clamped
-        ? { ...rawDelta, dx: limited.dx, dy: limited.dy, rotation: limited.rotation }
-        : rawDelta;
+        ? { ...fkDelta, dx: limited.dx, dy: limited.dy, rotation: limited.rotation }
+        : fkDelta;
       const activePart = activePartForMotionTarget(target, composed, slotStates);
       const turn =
         activePart && shouldApplyFaceTurnToTarget(target, boneCarriesChildren)
@@ -2364,6 +2465,10 @@ function unique(values: string[]): string[] {
 
 function positiveNumber(value: number, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function finiteNonZero(value: number, fallback: number): number {
+  return Number.isFinite(value) && Math.abs(value) > 0.0001 ? value : fallback;
 }
 
 function roundTime(value: number): number {

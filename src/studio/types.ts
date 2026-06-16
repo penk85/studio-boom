@@ -66,8 +66,12 @@ export type PartRole =
   | "nose"
   | "mouth"
   | "arm"
+  | "upperArm"
+  | "lowerArm"
   | "hand"
   | "leg"
+  | "upperLeg"
+  | "lowerLeg"
   | "foot"
   | "hair"
   | "accessory"
@@ -224,7 +228,7 @@ export interface CharacterPart {
   id: ID;
   /** Stable animatable layer. Variants of the same layer share this id. */
   slotId: ID;
-  /** User-facing slot label, e.g. "Left brow" or "Mouth". */
+  /** @deprecated User-facing slot labels live on CharacterPreset.slots. */
   slotName?: string;
   role: PartRole;
   /** Display name, e.g. "Left Arm — raised". */
@@ -324,6 +328,27 @@ export interface HeadVariant {
 
 export type CharacterAngle = HeadDirection;
 
+/**
+ * First-class body-map entry. Parts are angle/variant artwork that point at these stable slots;
+ * rig sockets and motion tracks target the slot id, not a particular drawing.
+ */
+export interface CharacterSlot {
+  id: ID;
+  name: string;
+  role: PartRole;
+  side?: CharacterPart["side"];
+  /** Optional semantic id for AI/motion packs that should survive local slot renames. */
+  semanticSlotId?: ID;
+  /** Optional availability gate for slots that only exist in specific views. */
+  angleIds?: CharacterAngle[];
+  /** Manual order in slot lists, independent of artwork z-index. */
+  sortOrder?: number;
+  /** Optional UI accent for future body-map tooling. */
+  color?: string;
+  /** Optional short hint exported to AI-facing character schemas. */
+  aiHint?: string;
+}
+
 export interface CharacterAngleTransformOverride {
   x?: number;
   y?: number;
@@ -392,12 +417,19 @@ export interface CharacterSlotBinding {
   >;
 }
 
+export interface CharacterSocketAnchor {
+  /** Canvas-space position of the joint/socket for this angle. */
+  x: number;
+  y: number;
+  /** Optional child rest rotation when attached at this anchor, in degrees. */
+  rotation?: number;
+}
+
 /**
- * A joint on the parent slot's bone, authored PER ANGLE: where the attached child rests under
- * each parent variant. The joint's rest position is the child bone's base x/y (user-movable via
- * the Bones overlay), so sockets hold only the per-variant overrides, in character canvas px.
- * One socket per (parent, child) pair; per-angle records are the single source of truth and are
- * carried across rig rebuilds like reaches/hostConstraints.
+ * A socket is the data primitive for a joint: one angle-local attachment point that owns where a
+ * child slot connects to its parent slot. The base anchor is the rest joint; `variantAnchors`
+ * only records per-parent-variant overrides. Bones resolve from sockets, so this is the single
+ * authoring source for attachment placement.
  */
 export interface CharacterSlotSocket {
   id: ID;
@@ -407,8 +439,12 @@ export interface CharacterSlotSocket {
   childSlotId: ID;
   /** Display label, e.g. "Wrist". */
   name?: string;
+  /** Rest joint position/rotation for this parent/child pair, in character canvas px. */
+  x: number;
+  y: number;
+  rotation?: number;
   /** Joint position/rotation per parent variant key, canvas px. */
-  variantAnchors: Record<string, { x: number; y: number; rotation?: number }>;
+  variantAnchors: Record<string, CharacterSocketAnchor>;
 }
 
 export interface CharacterAngleRig {
@@ -590,6 +626,8 @@ export interface CharacterPreset {
   canvasHeight: number;
   /** Optional set of angle categories this character can present. */
   angles?: CharacterAngle[];
+  /** Stable body-map slots. Parts are variants/artwork inside these slots. */
+  slots?: CharacterSlot[];
   parts: CharacterPart[];
   /** Named poses (saved variant arrangements). */
   posePresets?: CharacterPosePreset[];

@@ -19,11 +19,10 @@ const NON_POSEABLE_ROLES = new Set(["mouth", "eye", "iris"]);
 
 /** Slots a pose meaningfully controls: multi-variant slots outside the face machinery. */
 export function poseableSlotIds(character: CharacterPreset): ID[] {
-  return listCharacterSlots(character.parts)
+  return listCharacterSlots(character, { includeEmpty: false })
     .filter(
       (slot) =>
-        !NON_POSEABLE_ROLES.has(slot.role) &&
-        slotVariantKeys(character, slot.id).length > 1,
+        !NON_POSEABLE_ROLES.has(slot.role) && slotVariantKeys(character, slot.id).length > 1,
     )
     .map((slot) => slot.id);
 }
@@ -38,7 +37,7 @@ export function capturePosePreset(
   variantPreview: Readonly<Record<ID, string>>,
   opts: { name: string; angleIds?: CharacterAngle[] },
 ): CharacterPosePreset {
-  const slots = listCharacterSlots(character.parts);
+  const slots = listCharacterSlots(character, { includeEmpty: false });
   const poses: Record<ID, string> = {};
   for (const slotId of poseableSlotIds(character)) {
     const slot = slots.find((candidate) => candidate.id === slotId);
@@ -63,7 +62,9 @@ export function applyPosePreset(
   character: CharacterPreset,
   preset: CharacterPosePreset,
 ): Record<ID, string> {
-  const slots = new Map(listCharacterSlots(character.parts).map((slot) => [slot.id, slot]));
+  const slots = new Map(
+    listCharacterSlots(character, { includeEmpty: false }).map((slot) => [slot.id, slot]),
+  );
   const out: Record<ID, string> = {};
   for (const [slotId, key] of Object.entries(preset.poses)) {
     const slot = slots.get(slotId);
@@ -122,7 +123,9 @@ export function poseMatchesPreview(
   variantPreview: Readonly<Record<ID, string>>,
   character: CharacterPreset,
 ): boolean {
-  const slots = new Map(listCharacterSlots(character.parts).map((slot) => [slot.id, slot]));
+  const slots = new Map(
+    listCharacterSlots(character, { includeEmpty: false }).map((slot) => [slot.id, slot]),
+  );
   const applied = applyPosePreset(character, preset);
   for (const slotId of poseableSlotIds(character)) {
     const slot = slots.get(slotId);

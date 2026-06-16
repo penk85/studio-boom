@@ -4,6 +4,7 @@ import { createBlankCharacter, makePart } from "../character-utils";
 import { makeVariantArmCharacter } from "./fixtures";
 import {
   activeDepthForSlot,
+  availableCharacterAngles,
   buildDefaultRig,
   clampMotionDeltaToReach,
   clearSlotSocketAnchor,
@@ -148,8 +149,14 @@ describe("parent variant child anchors", () => {
       rotation: -35,
     });
     const rebuilt = rebuildRigPreservingConstraints({ ...character, rig: withSocket });
-    expect(rebuilt.sockets).toHaveLength(1);
-    expect(rebuilt.sockets?.[0].variantAnchors.bent).toEqual({ x: 352, y: 248, rotation: -35 });
+    const rebuiltSocket = rebuilt.sockets?.find(
+      (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
+    );
+    expect(rebuiltSocket).toMatchObject({
+      x: 300,
+      y: 345,
+      variantAnchors: { bent: { x: 352, y: 248, rotation: -35 } },
+    });
     // Re-pinning the position preserves the authored rotation.
     const moved = upsertSlotSocketAnchor(rebuilt, {
       parentSlotId: "slot:right-arm",
@@ -158,14 +165,21 @@ describe("parent variant child anchors", () => {
       x: 360,
       y: 240,
     });
-    expect(moved.sockets?.[0].variantAnchors.bent).toEqual({ x: 360, y: 240, rotation: -35 });
-    // Clearing the only anchor drops the joint record entirely.
+    const movedSocket = moved.sockets?.find(
+      (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
+    );
+    expect(movedSocket?.variantAnchors.bent).toEqual({ x: 360, y: 240, rotation: -35 });
+    // Clearing the only override keeps the base rest socket.
     const cleared = clearSlotSocketAnchor(moved, {
       parentSlotId: "slot:right-arm",
       childSlotId: "slot:right-hand",
       variantKey: "bent",
     });
-    expect(cleared.sockets).toHaveLength(0);
+    const clearedSocket = cleared.sockets?.find(
+      (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
+    );
+    expect(clearedSocket?.variantAnchors.bent).toBeUndefined();
+    expect(clearedSocket).toMatchObject({ x: 300, y: 345 });
   });
 
   it("computes no anchors for variant-less characters", () => {
@@ -193,6 +207,38 @@ describe("parent variant child anchors", () => {
 });
 
 describe("CharacterRig V1", () => {
+  it("uses character.angles as the canonical angle list when present", () => {
+    const character: CharacterPreset = {
+      ...makeRigCharacter(),
+      angles: ["front"],
+      parts: [
+        ...makeRigCharacter().parts,
+        makePart("arm", "side-arm-media", {
+          id: "side-arm",
+          slotId: "slot:right-arm",
+          angleIds: ["sideL"],
+        }),
+      ],
+      rig: {
+        ...buildDefaultRig(makeRigCharacter()),
+        activeAngle: "sideL",
+        angles: {
+          sideL: {
+            angleId: "sideL",
+            bones: [],
+            slotBindings: [],
+            drawOrder: [],
+            slotRelations: [],
+            hostConstraints: [],
+            reaches: [],
+          },
+        },
+      },
+    };
+
+    expect(availableCharacterAngles(character)).toEqual(["front"]);
+  });
+
   it("builds an FK leg hierarchy where parent rotation affects the child bone", () => {
     const character = makeRigCharacter();
     const baseRig = buildDefaultRig(character);
@@ -211,6 +257,183 @@ describe("CharacterRig V1", () => {
     expect(foot?.parentId).toBe("bone:slot:left-leg");
     expect(world.get("bone:slot:left-foot")?.rotation).toBeCloseTo(90);
     expect(world.get("bone:slot:left-foot")?.x).not.toBe(foot?.x);
+  });
+
+  it("supports optional upper/lower arm and leg chains with canonical sockets", () => {
+    const character: CharacterPreset = {
+      ...createBlankCharacter("Split limbs"),
+      id: "split-limbs",
+      parts: [
+        makePart("body", "body-media", {
+          id: "body",
+          slotId: "role:body",
+          x: 100,
+          y: 120,
+          width: 200,
+          height: 300,
+          zIndex: 1,
+        }),
+        makePart("upperArm", "upper-arm-media", {
+          id: "upper-arm",
+          slotId: "slot:right-upperArm",
+          side: "right",
+          x: 285,
+          y: 190,
+          width: 42,
+          height: 120,
+          zIndex: 2,
+          pivot: { x: 300, y: 205 },
+        }),
+        makePart("lowerArm", "lower-arm-media", {
+          id: "lower-arm",
+          slotId: "slot:right-lowerArm",
+          side: "right",
+          x: 300,
+          y: 295,
+          width: 38,
+          height: 110,
+          zIndex: 3,
+          pivot: { x: 315, y: 305 },
+        }),
+        makePart("hand", "hand-media", {
+          id: "hand",
+          slotId: "slot:right-hand",
+          side: "right",
+          x: 304,
+          y: 392,
+          width: 42,
+          height: 42,
+          zIndex: 4,
+          pivot: { x: 320, y: 405 },
+        }),
+        makePart("upperLeg", "upper-leg-media", {
+          id: "upper-leg",
+          slotId: "slot:right-upperLeg",
+          side: "right",
+          x: 225,
+          y: 400,
+          width: 48,
+          height: 130,
+          zIndex: 1,
+          pivot: { x: 245, y: 410 },
+        }),
+        makePart("lowerLeg", "lower-leg-media", {
+          id: "lower-leg",
+          slotId: "slot:right-lowerLeg",
+          side: "right",
+          x: 230,
+          y: 520,
+          width: 44,
+          height: 120,
+          zIndex: 1,
+          pivot: { x: 250, y: 530 },
+        }),
+        makePart("foot", "foot-media", {
+          id: "foot",
+          slotId: "slot:right-foot",
+          side: "right",
+          x: 238,
+          y: 630,
+          width: 78,
+          height: 34,
+          zIndex: 2,
+          pivot: { x: 255, y: 642 },
+        }),
+      ],
+    };
+
+    const rig = buildDefaultRig(character);
+    expect(rig.bones.find((bone) => bone.id === "bone:slot:right-lowerArm")?.parentId).toBe(
+      "bone:slot:right-upperArm",
+    );
+    expect(rig.bones.find((bone) => bone.id === "bone:slot:right-hand")?.parentId).toBe(
+      "bone:slot:right-lowerArm",
+    );
+    expect(rig.bones.find((bone) => bone.id === "bone:slot:right-lowerLeg")?.parentId).toBe(
+      "bone:slot:right-upperLeg",
+    );
+    expect(rig.bones.find((bone) => bone.id === "bone:slot:right-foot")?.parentId).toBe(
+      "bone:slot:right-lowerLeg",
+    );
+    expect(
+      rig.sockets?.find(
+        (socket) =>
+          socket.slotId === "slot:right-lowerArm" && socket.childSlotId === "slot:right-hand",
+      ),
+    ).toMatchObject({ name: "Wrist", x: 320, y: 405 });
+    expect(
+      rig.sockets?.find(
+        (socket) =>
+          socket.slotId === "slot:right-upperLeg" && socket.childSlotId === "slot:right-lowerLeg",
+      ),
+    ).toMatchObject({ name: "Knee", x: 250, y: 530 });
+  });
+
+  it("infers same-side limb parents from slot ids when explicit side metadata is missing", () => {
+    const character: CharacterPreset = {
+      ...createBlankCharacter("Inferred sides"),
+      id: "inferred-sides",
+      parts: [
+        makePart("body", "body-media", {
+          id: "body",
+          slotId: "slot:torso",
+          x: 100,
+          y: 120,
+          width: 200,
+          height: 300,
+          zIndex: 1,
+        }),
+        makePart("arm", "left-arm-media", {
+          id: "left-arm",
+          slotId: "slot:arm-left",
+          slotName: "Left arm",
+          x: 80,
+          y: 210,
+          width: 50,
+          height: 160,
+          zIndex: 2,
+        }),
+        makePart("arm", "right-arm-media", {
+          id: "right-arm",
+          slotId: "slot:arm-right",
+          slotName: "Right arm",
+          x: 270,
+          y: 210,
+          width: 50,
+          height: 160,
+          zIndex: 2,
+        }),
+        makePart("hand", "left-hand-media", {
+          id: "left-hand",
+          slotId: "slot:hand-left",
+          slotName: "Left hand",
+          x: 74,
+          y: 360,
+          width: 42,
+          height: 42,
+          zIndex: 3,
+        }),
+        makePart("hand", "right-hand-media", {
+          id: "right-hand",
+          slotId: "slot:hand-right",
+          slotName: "Right hand",
+          x: 284,
+          y: 360,
+          width: 42,
+          height: 42,
+          zIndex: 3,
+        }),
+      ],
+    };
+
+    const rig = buildDefaultRig(character);
+    const leftHand = rig.bones.find((bone) => bone.id === "bone:slot:hand-left");
+    const rightHand = rig.bones.find((bone) => bone.id === "bone:slot:hand-right");
+
+    expect(leftHand?.side).toBe("left");
+    expect(rightHand?.side).toBe("right");
+    expect(leftHand?.parentId).toBe("bone:slot:arm-left");
+    expect(rightHand?.parentId).toBe("bone:slot:arm-right");
   });
 
   it("rejects invalid bone graphs before AI rigger suggestions can be applied", () => {
@@ -256,7 +479,10 @@ describe("CharacterRig V1", () => {
   });
 
   it("normalizes angle rigs as independent concrete skeletons", () => {
-    const character = { ...makeRigCharacter(), angles: ["front", "sideL"] as CharacterPreset["angles"] };
+    const character = {
+      ...makeRigCharacter(),
+      angles: ["front", "sideL"] as CharacterPreset["angles"],
+    };
     const base = buildDefaultRig(character);
     const front = base.angles?.front;
     expect(front).toBeTruthy();
@@ -343,7 +569,12 @@ describe("CharacterRig V1", () => {
   it("rebuild preserves a manually chosen host (drag boundary) but keeps inferred defaults", () => {
     const character = makeRigCharacter();
     // Manually constrain the body to stay inside the head (not an inferred default).
-    const rig = setSlotHostConstraint(buildDefaultRig(character), "role:body", "role:head", "insideHostBounds");
+    const rig = setSlotHostConstraint(
+      buildDefaultRig(character),
+      "role:body",
+      "role:head",
+      "insideHostBounds",
+    );
     const authored: CharacterPreset = { ...character, rig };
 
     const rebuilt = rebuildRigPreservingConstraints(authored);
@@ -406,13 +637,14 @@ describe("CharacterRig V1", () => {
       mode: "insideHostMask",
       reachPolicy: "scaleToFit",
     });
-    expect(base.hostConstraints.find((constraint) => constraint.slotId === "slot:left-iris"))
-      .toMatchObject({
-        hostSlotId: "slot:left-eye",
-        hostBoneId: "bone:slot:left-eye",
-        mode: "insideHostMask",
-        reachPolicy: "scaleToFit",
-      });
+    expect(
+      base.hostConstraints.find((constraint) => constraint.slotId === "slot:left-iris"),
+    ).toMatchObject({
+      hostSlotId: "slot:left-eye",
+      hostBoneId: "bone:slot:left-eye",
+      mode: "insideHostMask",
+      reachPolicy: "scaleToFit",
+    });
 
     const cleared = setSlotHostConstraint(base, "slot:left-eye", undefined);
     expect(

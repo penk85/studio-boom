@@ -109,6 +109,49 @@ describe("slotVariantKeys", () => {
     };
     expect(slotVariantKeys(withPackage, "slot:right-arm")).toEqual(["straight", "bent", "raised"]);
   });
+
+  it("filters part and package keys to the active angle when provided", () => {
+    const character: CharacterPreset = {
+      ...makeVariantArmCharacter(),
+      angles: ["front", "3qR"],
+      parts: [
+        makePart("body", "front-neutral-media", {
+          id: "front-neutral",
+          slotId: "role:body",
+          pose: "neutral",
+          angleIds: ["front"],
+        }),
+        makePart("body", "front-turned-media", {
+          id: "front-turned",
+          slotId: "role:body",
+          pose: "turned",
+          angleIds: ["front"],
+        }),
+        makePart("body", "3qr-neutral-media", {
+          id: "3qr-neutral",
+          slotId: "role:body",
+          pose: "neutral",
+          angleIds: ["3qR"],
+        }),
+      ],
+      variantPackages: [
+        {
+          id: "variant:front-body-package",
+          slotId: "role:body",
+          key: "front-package",
+          displayName: "Front package",
+          angleIds: ["front"],
+        },
+      ],
+    };
+
+    expect(slotVariantKeys(character, "role:body", "front")).toEqual([
+      "neutral",
+      "turned",
+      "front-package",
+    ]);
+    expect(slotVariantKeys(character, "role:body", "3qR")).toEqual(["neutral"]);
+  });
 });
 
 describe("findVariantKeyNearMisses", () => {
@@ -271,10 +314,14 @@ describe("variant socket writes", () => {
     const character = withWristSocket(makeVariantArmCharacter());
     // The bone owns the joint: nothing lands in variantPackages, no shell objects.
     expect(character.variantPackages).toBeUndefined();
-    expect(character.rig?.sockets).toHaveLength(1);
-    expect(character.rig?.sockets?.[0]).toMatchObject({
+    const wristSocket = character.rig?.sockets?.find(
+      (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
+    );
+    expect(wristSocket).toMatchObject({
       slotId: "slot:right-arm",
       childSlotId: "slot:right-hand",
+      x: 300,
+      y: 345,
       variantAnchors: { bent: { x: 352, y: 248 } },
     });
     expect(anchorSourceForChild(character, "slot:right-hand", "bent")).toBe("socket");
@@ -289,8 +336,10 @@ describe("variant socket writes", () => {
       x: 360,
       y: 240,
     });
-    expect(character.rig?.sockets).toHaveLength(1);
-    expect(character.rig?.sockets?.[0].variantAnchors.bent).toMatchObject({ x: 360, y: 240 });
+    const wristSocket = character.rig?.sockets?.find(
+      (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
+    );
+    expect(wristSocket?.variantAnchors.bent).toMatchObject({ x: 360, y: 240 });
   });
 
   it("places a socket from a desired canvas anchor point", () => {
@@ -336,8 +385,10 @@ describe("migrateLegacyVariantSockets", () => {
     const migrated = migrateLegacyVariantSockets(character);
     // Strictly-empty shell after stripping (auto displayName, no artwork/metadata) is pruned.
     expect(migrated.variantPackages).toBeUndefined();
-    expect(migrated.rig?.sockets).toHaveLength(1);
-    expect(migrated.rig?.sockets?.[0].variantAnchors.bent).toMatchObject({ x: 352, y: 248 });
+    const wristSocket = migrated.rig?.sockets?.find(
+      (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
+    );
+    expect(wristSocket?.variantAnchors.bent).toMatchObject({ x: 352, y: 248 });
     expect(anchorSourceForChild(migrated, "slot:right-hand", "bent")).toBe("socket");
     // Idempotent: a second run is a no-op (nothing legacy left to migrate).
     expect(migrateLegacyVariantSockets(migrated)).toBe(migrated);
@@ -357,7 +408,11 @@ describe("migrateLegacyVariantSockets", () => {
     expect(migrated.variantPackages).toHaveLength(1);
     expect(migrated.variantPackages?.[0].aiMetadata).toBeDefined();
     expect(migrated.variantPackages?.[0].rig).toBeUndefined();
-    expect(migrated.rig?.sockets).toHaveLength(1);
+    expect(
+      migrated.rig?.sockets?.find(
+        (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
+      )?.variantAnchors.bent,
+    ).toMatchObject({ x: 352, y: 248 });
   });
 
   it("scopes legacy sockets by the package's angleIds", () => {
@@ -367,8 +422,16 @@ describe("migrateLegacyVariantSockets", () => {
       variantPackages: [{ ...bentArmSocketPackage, angleIds: ["front"] }],
     };
     const migrated = migrateLegacyVariantSockets(character);
-    expect(migrated.rig?.angles?.front?.sockets).toHaveLength(1);
-    expect(migrated.rig?.angles?.sideL?.sockets ?? []).toHaveLength(0);
+    expect(
+      migrated.rig?.angles?.front?.sockets?.find(
+        (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
+      )?.variantAnchors.bent,
+    ).toMatchObject({ x: 352, y: 248 });
+    expect(
+      migrated.rig?.angles?.sideL?.sockets?.find(
+        (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
+      )?.variantAnchors.bent,
+    ).toBeUndefined();
   });
 });
 
@@ -383,8 +446,11 @@ describe("renameVariantKeyEverywhere", () => {
       ],
     };
     const renamed = renameVariantKeyEverywhere(character, "slot:right-arm", "bent", "raised");
-    expect(renamed.rig?.sockets?.[0].variantAnchors.raised).toMatchObject({ x: 352, y: 248 });
-    expect(renamed.rig?.sockets?.[0].variantAnchors.bent).toBeUndefined();
+    const wristSocket = renamed.rig?.sockets?.find(
+      (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
+    );
+    expect(wristSocket?.variantAnchors.raised).toMatchObject({ x: 352, y: 248 });
+    expect(wristSocket?.variantAnchors.bent).toBeUndefined();
     expect(renamed.posePresets?.[0].poses["slot:right-arm"]).toBe("raised");
     expect(renamed.posePresets?.[1].poses["slot:right-arm"]).toBe("straight");
     // Identical or empty renames are no-ops.

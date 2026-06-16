@@ -292,12 +292,15 @@ export interface AngleRigJson extends StudioBoomJsonArtifactBase {
   slotRelations?: AngleSlotRelationJson[];
   hostConstraints?: AngleHostConstraintJson[];
   reaches?: AngleReachJson[];
-  /** Bone-owned joints: per-variant anchor overrides for attached children (per angle). */
+  /** Angle-local joints: base socket anchors plus optional per-parent-variant overrides. */
   sockets?: Array<{
     id: ID;
     slotId: ID;
     childSlotId: ID;
     name?: string;
+    x: number;
+    y: number;
+    rotation?: number;
     variantAnchors: Record<string, { x: number; y: number; rotation?: number }>;
   }>;
   drawOrder: ID[];
@@ -416,6 +419,137 @@ export interface CharacterRigContextAiOutJson extends StudioBoomJsonArtifactBase
   };
 }
 
+export interface MotionPromptCharacterJson {
+  id: ID;
+  name: string;
+  description?: string;
+  defaultAngle: CharacterAngle;
+  angles: CharacterAngle[];
+  semanticBones: SemanticBoneJson[];
+  semanticSlots: SemanticSlotJson[];
+}
+
+export interface MotionPromptBoneJson {
+  id: ID;
+  semanticBoneId?: ID;
+  name: string;
+  role: PartRole | "root" | "custom";
+  side?: CharacterPart["side"];
+  parentId: ID | null;
+  /** Local rest offset from the parent bone, in canvas pixels. */
+  x: number;
+  y: number;
+  /** Local rest rotation relative to the parent bone, degrees. */
+  rotation: number;
+  depth?: number;
+  /** Authored/fallback length from the source rig, when present. */
+  length?: number;
+  /** Canvas-space rest pivot after parent transforms are resolved. */
+  pivot: { x: number; y: number };
+  /** Canvas-space rest direction, degrees. Prefer this over placeholder local rotations. */
+  restAngle: number;
+  /** Motion-facing segment length in pixels, derived from child pivots when possible. */
+  segmentLength: number;
+  segmentVector?: { x: number; y: number };
+  segmentChildId?: ID;
+  lengthSource: "childPivot" | "authoredLength" | "slotBounds" | "zero";
+  jointRange?: { min: number; max: number; source: "slotRotReach" };
+}
+
+export interface MotionPromptSlotVariantJson {
+  id: ID;
+  name: string;
+  displayName?: string;
+  variant?: CharacterSlotVariant;
+  pose?: string;
+  viseme?: MouthViseme;
+  eyeState?: EyeState;
+  aiMetadata?: CharacterVariantAiMetadata;
+  angleIds?: CharacterAngle[];
+}
+
+export interface MotionPromptSlotJson {
+  id: ID;
+  semanticSlotId?: ID;
+  name: string;
+  role: PartRole;
+  side?: CharacterPart["side"];
+  bounds?: CharacterPartBounds;
+  drawOrderIndex?: number;
+  nearFar?: "near" | "far" | "center";
+  binding?: {
+    boneId: ID;
+    defaultVariant?: ID;
+    visible?: boolean;
+    depth: number;
+  };
+  motionLimits?: MotionPromptReachJson;
+  contact?: {
+    canPlant: boolean;
+    groundY?: number;
+    footLockAvailable: boolean;
+    hint: string;
+  };
+  variants: MotionPromptSlotVariantJson[];
+}
+
+export interface MotionPromptReachJson {
+  slotId: ID;
+  reachBounds?: { minX: number; maxX: number; minY: number; maxY: number };
+  rotReach?: { min: number; max: number };
+}
+
+export interface MotionPromptAngleJson {
+  angleId: CharacterAngle;
+  canvas: { width: number; height: number };
+  facing: {
+    forwardAxis: "+x" | "-x" | "camera";
+    screenVector: { x: number; y: number };
+    hint: string;
+  };
+  ground: {
+    y: number;
+    source: "slotBounds" | "bonePivots" | "canvasBottom";
+    plantedSlotIds: ID[];
+    footLockAvailable: boolean;
+    hint: string;
+  };
+  cadenceHints: {
+    characterHeightPx: number;
+    suggestedStepDurationSec: number;
+    stepsPerCycle: number;
+    stridePxRange: { min: number; max: number };
+  };
+  depthOrdering: {
+    animationSupported: boolean;
+    nearToFarSlotIds: ID[];
+    hint: string;
+  };
+  boneLocks?: Array<{
+    parentBoneId: ID;
+    childBoneId: ID;
+    childSlotId?: ID;
+    policy: "fkInheritsParent";
+    ikAvailable: boolean;
+    hint: string;
+  }>;
+  bones: MotionPromptBoneJson[];
+  slots: MotionPromptSlotJson[];
+  slotRelations?: AngleSlotRelationJson[];
+  hostConstraints?: AngleHostConstraintJson[];
+  reaches?: MotionPromptReachJson[];
+  sockets?: Array<{
+    id: ID;
+    slotId: ID;
+    childSlotId: ID;
+    name?: string;
+    x: number;
+    y: number;
+    rotation?: number;
+    variantKeys: string[];
+  }>;
+}
+
 /** The native control surface advertised to the AI — what it can author motion from. */
 export interface MotionControlSurfaceJson {
   /** Per-keyframe transform fields on a transform track (name, unit, meaning). */
@@ -433,8 +567,8 @@ export interface MotionControlSurfaceJson {
 export interface MotionRequestAiOutJson extends StudioBoomJsonArtifactBase {
   kind: typeof MOTION_REQUEST_AI_OUT_KIND;
   request: string;
-  character: CharacterJson;
-  activeAngle: AngleRigJson;
+  character: MotionPromptCharacterJson;
+  activeAngle: MotionPromptAngleJson;
   instructions: string[];
   /** Native controls the AI authors movement from (single source of truth, see MOTION_TRANSFORM_FIELD_NAMES). */
   controls: MotionControlSurfaceJson;

@@ -57,8 +57,59 @@ export function localAlphaBounds(part: CharacterPart): LocalAlphaRect {
   };
 }
 
+export function localAuthoredBounds(part: CharacterPart): LocalAlphaRect | undefined {
+  const bounds = part.bounds;
+  if (!bounds || bounds.width <= 0 || bounds.height <= 0) return undefined;
+  return {
+    x: bounds.x - part.x,
+    y: bounds.y - part.y,
+    width: Math.max(1, bounds.width),
+    height: Math.max(1, bounds.height),
+  };
+}
+
+export function localEditorArtBounds(part: CharacterPart): LocalAlphaRect {
+  return localAuthoredBounds(part) ?? localAlphaBounds(part);
+}
+
 export function localRegistrationBounds(part: CharacterPart): LocalAlphaRect {
   return { x: 0, y: 0, width: part.width, height: part.height };
+}
+
+export function localRectCanvasBounds(part: CharacterPart, bounds: LocalAlphaRect): LocalAlphaRect {
+  const corners = [
+    { x: bounds.x, y: bounds.y },
+    { x: bounds.x + bounds.width, y: bounds.y },
+    { x: bounds.x, y: bounds.y + bounds.height },
+    { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
+  ].map((point) => partLocalPointToCanvas(part, point));
+  const minX = Math.min(...corners.map((point) => point.x));
+  const minY = Math.min(...corners.map((point) => point.y));
+  const maxX = Math.max(...corners.map((point) => point.x));
+  const maxY = Math.max(...corners.map((point) => point.y));
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(1, maxX - minX),
+    height: Math.max(1, maxY - minY),
+  };
+}
+
+export function partLocalPointToCanvas(
+  part: CharacterPart,
+  point: { x: number; y: number },
+): { x: number; y: number } {
+  const pivot = pivotForPart(part);
+  const pivotLocal = { x: pivot.x - part.x, y: pivot.y - part.y };
+  const radians = (part.rotation * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  const relX = point.x - pivotLocal.x;
+  const relY = point.y - pivotLocal.y;
+  return {
+    x: pivot.x + relX * cos - relY * sin,
+    y: pivot.y + relX * sin + relY * cos,
+  };
 }
 
 export function editorHitBounds(
@@ -67,14 +118,14 @@ export function editorHitBounds(
   boundsMode: "art" | "frame" = "art",
 ): LocalAlphaRect {
   if (boundsMode === "frame") return localRegistrationBounds(part);
-  return paddedAlphaBounds(part, viewportScale, { paddingPx: 8, minSizePx: 28 });
+  return paddedBounds(localEditorArtBounds(part), viewportScale, { paddingPx: 8, minSizePx: 28 });
 }
 
 export function editorSelectionBounds(
   part: CharacterPart,
   boundsMode: "art" | "frame" = "art",
 ): LocalAlphaRect {
-  return boundsMode === "frame" ? localRegistrationBounds(part) : localAlphaBounds(part);
+  return boundsMode === "frame" ? localRegistrationBounds(part) : localEditorArtBounds(part);
 }
 
 export function editorControlBounds(
@@ -83,22 +134,21 @@ export function editorControlBounds(
   boundsMode: "art" | "frame" = "art",
 ): LocalAlphaRect {
   if (boundsMode === "frame") return localRegistrationBounds(part);
-  return paddedAlphaBounds(part, viewportScale, { paddingPx: 12, minSizePx: 44 });
+  return paddedBounds(localEditorArtBounds(part), viewportScale, { paddingPx: 12, minSizePx: 44 });
 }
 
-function paddedAlphaBounds(
-  part: CharacterPart,
+function paddedBounds(
+  bounds: LocalAlphaRect,
   viewportScale: number,
   options: { paddingPx: number; minSizePx: number },
 ): LocalAlphaRect {
-  const alpha = localAlphaBounds(part);
   const px = 1 / Math.max(0.0001, viewportScale);
   const padding = options.paddingPx * px;
   const minSize = options.minSizePx * px;
-  const width = Math.max(alpha.width + padding * 2, minSize);
-  const height = Math.max(alpha.height + padding * 2, minSize);
-  const centerX = alpha.x + alpha.width / 2;
-  const centerY = alpha.y + alpha.height / 2;
+  const width = Math.max(bounds.width + padding * 2, minSize);
+  const height = Math.max(bounds.height + padding * 2, minSize);
+  const centerX = bounds.x + bounds.width / 2;
+  const centerY = bounds.y + bounds.height / 2;
   return {
     x: centerX - width / 2,
     y: centerY - height / 2,

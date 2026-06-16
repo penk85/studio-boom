@@ -2,7 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   anchorPartForVariant,
   claimSharedPartsForAngles,
+  findCharacterSlot,
   listCharacterSlots,
+  normalizeCharacterSlots,
   pickActivePart,
   pickActivePartForSlot,
   pivotAlignedPartOffset,
@@ -11,6 +13,9 @@ import {
   getPartSlotId,
   defaultSlotIdForRole,
   inferHumanParentPartId,
+  removePartFromAngle,
+  withUpsertedCharacterSlot,
+  withUpdatedCharacterSlot,
   withInferredHumanParentIds,
 } from "../character-utils";
 import { pivotForPart } from "../alpha-bounds";
@@ -169,6 +174,61 @@ describe("inferHumanParentPartId", () => {
     expect(next.parts.find((part) => part.id === "left-eye")?.parentId).toBe("head");
     expect(next.parts.find((part) => part.id === "hand")?.parentId).toBe("custom-parent");
   });
+
+  it("does not infer a parent from artwork scoped to a different angle", () => {
+    const frontBody = makePart({
+      id: "front-body",
+      role: "body",
+      slotId: "role:body",
+      angleIds: ["front"],
+    });
+    const frontArm = makePart({
+      id: "front-arm",
+      role: "arm",
+      side: "right",
+      slotId: "slot:right-arm",
+      angleIds: ["front"],
+    });
+    const threeQuarterHand = makePart({
+      id: "3qr-hand",
+      role: "hand",
+      side: "right",
+      slotId: "slot:right-hand",
+      angleIds: ["3qR"],
+    });
+
+    expect(inferHumanParentPartId([frontBody, frontArm, threeQuarterHand], threeQuarterHand)).toBe(
+      undefined,
+    );
+  });
+
+  it("infers a parent from matching angle-scoped artwork", () => {
+    const frontArm = makePart({
+      id: "front-arm",
+      role: "arm",
+      side: "right",
+      slotId: "slot:right-arm",
+      angleIds: ["front"],
+    });
+    const threeQuarterArm = makePart({
+      id: "3qr-arm",
+      role: "arm",
+      side: "right",
+      slotId: "slot:right-arm",
+      angleIds: ["3qR"],
+    });
+    const threeQuarterHand = makePart({
+      id: "3qr-hand",
+      role: "hand",
+      side: "right",
+      slotId: "slot:right-hand",
+      angleIds: ["3qR"],
+    });
+
+    expect(
+      inferHumanParentPartId([frontArm, threeQuarterArm, threeQuarterHand], threeQuarterHand),
+    ).toBe("3qr-arm");
+  });
 });
 
 // ─── normalizePartRole ────────────────────────────────────────────────────────
@@ -323,6 +383,178 @@ describe("listCharacterSlots", () => {
     expect(slots[0].role).toBe("body");
     expect(slots[1].role).toBe("head");
   });
+
+  it("uses first-class slot records as the naming source of truth", () => {
+    const part = makePart({
+      role: "hand",
+      side: "left",
+      slotId: "slot:left-hand",
+      slotName: "Old part label",
+    });
+    const character = {
+      id: "character",
+      name: "Character",
+      canvasWidth: 600,
+      canvasHeight: 900,
+      slots: [{ id: "slot:left-hand", name: "Near hand", role: "hand", side: "left" }],
+      parts: [part],
+      manifest: {},
+      parallax: { onCamera: true, onClip: true, intensity: 0.15 },
+      createdAt: 1,
+      updatedAt: 1,
+    } as CharacterPreset;
+
+    const normalized = normalizeCharacterSlots(character);
+    const slot = findCharacterSlot(normalized, "slot:left-hand");
+
+    expect(slot?.name).toBe("Near hand");
+    expect(normalized.parts[0].slotName).toBe("Near hand");
+  });
+
+  it("can list empty planned slots from the character body map", () => {
+    const character = {
+      id: "character",
+      name: "Character",
+      canvasWidth: 600,
+      canvasHeight: 900,
+      slots: [{ id: "slot:right-hand", name: "Right hand", role: "hand", side: "right" }],
+      parts: [],
+      manifest: {},
+      parallax: { onCamera: true, onClip: true, intensity: 0.15 },
+      createdAt: 1,
+      updatedAt: 1,
+    } as CharacterPreset;
+
+    expect(listCharacterSlots(character, { includeEmpty: true })).toMatchObject([
+      { id: "slot:right-hand", name: "Right hand", parts: [] },
+    ]);
+    expect(listCharacterSlots(character, { includeEmpty: false })).toEqual([]);
+  });
+
+  it("upserts slot records without rewriting artwork ids", () => {
+    const part = makePart({ role: "body", slotId: "slot:torso", slotName: "Torso" });
+    const character = {
+      id: "character",
+      name: "Character",
+      canvasWidth: 600,
+      canvasHeight: 900,
+      parts: [part],
+      manifest: {},
+      parallax: { onCamera: true, onClip: true, intensity: 0.15 },
+      createdAt: 1,
+      updatedAt: 1,
+    } as CharacterPreset;
+
+    const next = withUpsertedCharacterSlot(character, {
+      id: "slot:torso",
+      name: "Body core",
+      role: "body",
+    });
+
+    expect(next.parts[0].id).toBe(part.id);
+    expect(next.parts[0].slotId).toBe("slot:torso");
+    expect(next.parts[0].slotName).toBe("Body core");
+    expect(next.slots?.find((slot) => slot.id === "slot:torso")?.name).toBe("Body core");
+  });
+
+  it("updates slot role and side across every artwork variant without changing the slot id", () => {
+    const relaxed = makePart({
+      id: "relaxed",
+      role: "arm",
+      side: "right",
+      slotId: "slot:right-arm",
+      slotName: "Right arm",
+      motionBehavior: "rotate",
+      variant: { key: "relaxed", kind: "pose" },
+    });
+    const bent = makePart({
+      id: "bent",
+      role: "arm",
+      side: "right",
+      slotId: "slot:right-arm",
+      slotName: "Right arm",
+      motionBehavior: "rotate",
+      variant: { key: "bent", kind: "pose" },
+    });
+    const character = {
+      id: "character",
+      name: "Character",
+      canvasWidth: 600,
+      canvasHeight: 900,
+      parts: [relaxed, bent],
+      slots: [{ id: "slot:right-arm", name: "Right arm", role: "arm", side: "right" }],
+      manifest: {},
+      parallax: { onCamera: true, onClip: true, intensity: 0.15 },
+      createdAt: 1,
+      updatedAt: 1,
+    } as CharacterPreset;
+
+    const next = withUpdatedCharacterSlot(character, "slot:right-arm", {
+      name: "Right forearm",
+      role: "lowerArm",
+      side: "left",
+    });
+
+    expect(next.slots?.find((slot) => slot.id === "slot:right-arm")).toMatchObject({
+      name: "Right forearm",
+      role: "lowerArm",
+      side: "left",
+    });
+    expect(next.parts.map((part) => part.slotId)).toEqual(["slot:right-arm", "slot:right-arm"]);
+    expect(next.parts.map((part) => part.role)).toEqual(["lowerArm", "lowerArm"]);
+    expect(next.parts.map((part) => part.side)).toEqual(["left", "left"]);
+    expect(next.parts.map((part) => part.slotName)).toEqual(["Right forearm", "Right forearm"]);
+    expect(next.parts.map((part) => part.motionBehavior)).toEqual(["rotate", "rotate"]);
+  });
+
+  it("can clear slot side metadata", () => {
+    const part = makePart({
+      role: "accessory",
+      side: "front",
+      slotId: "slot:badge",
+      slotName: "Badge",
+    });
+    const character = {
+      id: "character",
+      name: "Character",
+      canvasWidth: 600,
+      canvasHeight: 900,
+      parts: [part],
+      slots: [{ id: "slot:badge", name: "Badge", role: "accessory", side: "front" }],
+      manifest: {},
+      parallax: { onCamera: true, onClip: true, intensity: 0.15 },
+      createdAt: 1,
+      updatedAt: 1,
+    } as CharacterPreset;
+
+    const next = withUpdatedCharacterSlot(character, "slot:badge", { side: undefined });
+
+    expect(next.slots?.find((slot) => slot.id === "slot:badge")?.side).toBeUndefined();
+    expect(next.parts[0].side).toBeUndefined();
+  });
+
+  it("creates planned slot records before artwork exists", () => {
+    const character = {
+      id: "character",
+      name: "Character",
+      canvasWidth: 600,
+      canvasHeight: 900,
+      parts: [],
+      slots: [],
+      manifest: {},
+      parallax: { onCamera: true, onClip: true, intensity: 0.15 },
+      createdAt: 1,
+      updatedAt: 1,
+    } as CharacterPreset;
+
+    const next = withUpdatedCharacterSlot(character, "slot:tail", {
+      name: "Tail",
+      role: "custom",
+    });
+
+    expect(next.slots).toMatchObject([{ id: "slot:tail", name: "Tail", role: "custom" }]);
+    expect(next.parts).toEqual([]);
+  });
 });
 
 // ─── pickActivePart ───────────────────────────────────────────────────────────
@@ -448,5 +680,116 @@ describe("claimSharedPartsForAngles", () => {
     expect(claimed.parts.find((part) => part.id === "side-arm")?.angleIds).toEqual(["sideL"]);
     // Nothing implicitly shared → same reference (no-op).
     expect(claimSharedPartsForAngles(claimed, ["front"])).toBe(claimed);
+  });
+});
+
+describe("removePartFromAngle", () => {
+  const baseCharacter = (parts: CharacterPart[]): CharacterPreset =>
+    ({
+      id: "character",
+      name: "Character",
+      canvasWidth: 600,
+      canvasHeight: 900,
+      angles: ["front", "3qR"],
+      parts,
+      manifest: {},
+      parallax: { onCamera: true, onClip: true, intensity: 0.15 },
+      createdAt: 1,
+      updatedAt: 1,
+    }) as CharacterPreset;
+
+  it("removes only the active angle from explicitly shared artwork", () => {
+    const shared = makePart({
+      id: "shared-prop",
+      role: "accessory",
+      slotId: "role:accessory",
+      angleIds: ["front", "3qR"],
+    });
+    const { character, removedEverywhere } = removePartFromAngle(
+      baseCharacter([shared]),
+      "shared-prop",
+      "front",
+    );
+
+    expect(removedEverywhere).toBe(false);
+    expect(character.parts.find((part) => part.id === "shared-prop")?.angleIds).toEqual(["3qR"]);
+  });
+
+  it("claims implicit shared artwork for the remaining angles instead of deleting it everywhere", () => {
+    const implicitShared = makePart({
+      id: "legacy-prop",
+      role: "accessory",
+      slotId: "role:accessory",
+    });
+    const { character, removedEverywhere } = removePartFromAngle(
+      baseCharacter([implicitShared]),
+      "legacy-prop",
+      "front",
+    );
+
+    expect(removedEverywhere).toBe(false);
+    expect(character.parts.find((part) => part.id === "legacy-prop")?.angleIds).toEqual(["3qR"]);
+  });
+
+  it("removing active-angle artwork preserves the shared slot record and other-angle art", () => {
+    const frontHand = makePart({
+      id: "front-hand",
+      role: "hand",
+      side: "right",
+      slotId: "slot:right-hand",
+      slotName: "Right hand",
+      angleIds: ["front"],
+    });
+    const threeQuarterHand = makePart({
+      id: "3qr-hand",
+      role: "hand",
+      side: "right",
+      slotId: "slot:right-hand",
+      slotName: "Right hand",
+      angleIds: ["3qR"],
+    });
+    const character = baseCharacter([frontHand, threeQuarterHand]);
+    character.slots = [{ id: "slot:right-hand", name: "Right hand", role: "hand", side: "right" }];
+
+    const { character: next, removedEverywhere } = removePartFromAngle(
+      character,
+      "3qr-hand",
+      "3qR",
+    );
+
+    expect(removedEverywhere).toBe(true);
+    expect(next.slots?.find((slot) => slot.id === "slot:right-hand")).toMatchObject({
+      name: "Right hand",
+      role: "hand",
+    });
+    expect(next.parts.map((part) => part.id)).toEqual(["front-hand"]);
+    expect(next.parts[0].angleIds).toEqual(["front"]);
+  });
+
+  it("deletes single-angle artwork and clears stale child parent ids", () => {
+    const parent = makePart({
+      id: "front-arm",
+      role: "arm",
+      side: "right",
+      slotId: "slot:right-arm",
+      angleIds: ["front"],
+    });
+    const child = makePart({
+      id: "front-hand",
+      role: "hand",
+      side: "right",
+      slotId: "slot:right-hand",
+      angleIds: ["front"],
+      parentId: "front-arm",
+    });
+    const { character, removedEverywhere } = removePartFromAngle(
+      baseCharacter([parent, child]),
+      "front-arm",
+      "front",
+    );
+
+    expect(removedEverywhere).toBe(true);
+    expect(character.parts.some((part) => part.id === "front-arm")).toBe(false);
+    expect(character.parts.find((part) => part.id === "front-hand")?.parentId).toBeUndefined();
   });
 });

@@ -10,6 +10,7 @@ import {
   buildCharacterRigContextAiOut,
   buildMotionControlSurface,
   buildMotionRequestAiOut,
+  buildMotionRequestPrompt,
 } from "../ai-context";
 import { motionJsonToPreset } from "../../presets/motion-json";
 import {
@@ -19,11 +20,7 @@ import {
   validateMotionJson,
   validateMotionJsonForAngle,
 } from "../validate";
-import {
-  MOTION_EASE_NAMES,
-  MOTION_TRANSFORM_FIELD_NAMES,
-  type MotionJson,
-} from "../schema";
+import { MOTION_EASE_NAMES, MOTION_TRANSFORM_FIELD_NAMES, type MotionJson } from "../schema";
 
 function makeCharacter(): CharacterPreset {
   return {
@@ -103,6 +100,47 @@ function makeCharacter(): CharacterPreset {
   };
 }
 
+function makeLimbCharacter(): CharacterPreset {
+  return {
+    ...createBlankCharacter("Rigged Walker"),
+    id: "rigged-walker",
+    parts: [
+      makePart("body", "body-media", {
+        id: "body",
+        slotId: "slot:torso",
+        slotName: "Torso",
+        x: 320,
+        y: 360,
+        width: 240,
+        height: 360,
+        zIndex: 10,
+      }),
+      makePart("arm", "right-arm-media", {
+        id: "right-arm",
+        slotId: "slot:arm-right",
+        slotName: "Right arm",
+        side: "right",
+        x: 540,
+        y: 440,
+        width: 70,
+        height: 210,
+        zIndex: 12,
+      }),
+      makePart("hand", "right-hand-media", {
+        id: "right-hand",
+        slotId: "slot:hand-right",
+        slotName: "Right hand",
+        side: "right",
+        x: 548,
+        y: 630,
+        width: 70,
+        height: 70,
+        zIndex: 13,
+      }),
+    ],
+  };
+}
+
 function makeMotion(): MotionPreset {
   return {
     id: "hand-clap",
@@ -167,6 +205,25 @@ describe("character JSON architecture", () => {
     expect(validateAngleRigJson(angleRig).ok).toBe(true);
   });
 
+  it("exports planned slot records without creating angle rig slots before artwork exists", () => {
+    const character = {
+      ...makeCharacter(),
+      slots: [
+        { id: "slot:tail", name: "Tail", role: "custom" as const, aiHint: "Optional tail slot." },
+      ],
+    };
+
+    const characterJson = characterJsonFromPreset(character);
+    const angleRig = angleRigJsonFromPreset(character, "front");
+
+    expect(characterJson.semanticSlots.find((slot) => slot.id === "slot:tail")).toMatchObject({
+      name: "Tail",
+      role: "custom",
+      aiHint: "Optional tail slot.",
+    });
+    expect(angleRig.slots.some((slot) => slot.id === "slot:tail")).toBe(false);
+  });
+
   it("exports available angles and filters angle rig variants by part angle tags", () => {
     const character: CharacterPreset = {
       ...createBlankCharacter("Turner"),
@@ -223,7 +280,9 @@ describe("character JSON architecture", () => {
       sideRig.slots.find((slot) => slot.id === "slot:torso")?.variants.map((variant) => variant.id),
     ).toEqual(["body-side"]);
     expect(
-      sideRig.slots.find((slot) => slot.id === "slot:rightHand")?.variants.map((variant) => variant.id),
+      sideRig.slots
+        .find((slot) => slot.id === "slot:rightHand")
+        ?.variants.map((variant) => variant.id),
     ).toEqual(["openPalm"]);
   });
 
@@ -351,8 +410,7 @@ describe("character JSON architecture", () => {
             zOrder: ["right-upper-arm-explaining", "right-forearm-explaining"],
           },
           aiMetadata: {
-            plainDescription:
-              "The right arm is raised with the elbow bent, useful for explaining.",
+            plainDescription: "The right arm is raised with the elbow bent, useful for explaining.",
             tags: ["arm", "right", "bent", "explaining"],
             bodyPart: "arm",
             side: "right",
@@ -381,6 +439,27 @@ describe("character JSON architecture", () => {
       aiMetadata: { tags: ["arm", "right", "bent", "explaining"] },
     });
     expect(validateAngleRigJson(angleRig).ok).toBe(true);
+
+    const motionRequest = buildMotionRequestAiOut({
+      character: characterJsonFromPreset(character),
+      activeAngle: angleRig,
+      request: "Have her explain something",
+    });
+    const promptArmVariant = motionRequest.activeAngle.slots
+      .find((slot) => slot.id === "slot:rightArm")
+      ?.variants.find((variant) => variant.id === "variant:explaining-arm") as
+      | Record<string, unknown>
+      | undefined;
+
+    expect(promptArmVariant).toMatchObject({
+      id: "variant:explaining-arm",
+      displayName: "Bent elbow / explaining",
+      aiMetadata: { tags: ["arm", "right", "bent", "explaining"] },
+    });
+    expect(promptArmVariant).not.toHaveProperty("mediaId");
+    expect(promptArmVariant).not.toHaveProperty("artwork");
+    expect(promptArmVariant).not.toHaveProperty("rig");
+    expect(promptArmVariant).not.toHaveProperty("slotCompatibility");
   });
 
   it("validates angle rig references before generated HTML is touched", () => {
@@ -450,7 +529,10 @@ describe("character JSON architecture", () => {
   });
 
   it("fails clearly when a motion is scoped to another angle", () => {
-    const angleRig = angleRigJsonFromPreset(makeCharacter(), "sideL");
+    const angleRig = angleRigJsonFromPreset(
+      { ...makeCharacter(), angles: ["front", "sideL"] },
+      "sideL",
+    );
     const motion = {
       ...motionJsonFromPreset(makeMotion()),
       angleIds: ["front" as const],
@@ -464,7 +546,7 @@ describe("character JSON architecture", () => {
     );
   });
 
-  it("exports AI context and motion request JSON with obvious directions", () => {
+  it("exports AI context and compact motion request data with obvious directions", () => {
     const character = makeCharacter();
     const characterJson = characterJsonFromPreset(character);
     const angleRig = angleRigJsonFromPreset(character, "front");
@@ -483,6 +565,10 @@ describe("character JSON architecture", () => {
     expect(motionRequest.kind).toBe("studioBoom.ai.motionRequest.v1");
     expect(motionRequest.suggestedFilename).toBe("forward-walk.motion-request.ai-out.json");
     expect(motionRequest.instructions.join("\n")).toContain("semanticBone");
+    expect(motionRequest.character).not.toHaveProperty("kind");
+    expect(motionRequest.character).not.toHaveProperty("schemaVersion");
+    expect(motionRequest.activeAngle).not.toHaveProperty("bindings");
+    expect(motionRequest.activeAngle).not.toHaveProperty("drawOrder");
     expect(motionJson.suggestedFilename).toBe("hand-clap.motion.json");
   });
 
@@ -615,6 +701,90 @@ describe("character JSON architecture", () => {
     expect(result.preset).toBeUndefined();
     expect(result.errors.join("\n")).toContain('Variant "laserHand" is not defined');
   });
+
+  it("rejects child bone translations when an ancestor bone is already animated", () => {
+    const angleRig = angleRigJsonFromPreset(makeLimbCharacter(), "front");
+    const motion: MotionJson = {
+      kind: "studioBoom.motion.v1",
+      schemaVersion: 1,
+      suggestedFilename: "bad-fk.motion.json",
+      id: "motion:bad-fk",
+      name: "Bad FK",
+      category: "gesture",
+      duration: 1,
+      loop: false,
+      targetSpace: "parentRelative",
+      tracks: [
+        {
+          id: "track:arm",
+          target: { kind: "semanticBone", id: "bone:slot:arm-right" },
+          channel: "transform",
+          keyframes: [
+            { t: 0, rotation: 0 },
+            { t: 1, rotation: 20 },
+          ],
+        },
+        {
+          id: "track:hand",
+          target: { kind: "semanticBone", id: "bone:slot:hand-right" },
+          channel: "transform",
+          keyframes: [
+            { t: 0, dx: 0 },
+            { t: 1, dx: 18 },
+          ],
+        },
+      ],
+    };
+
+    const validation = validateMotionJsonForAngle(motion, angleRig);
+
+    expect(validation.ok).toBe(false);
+    expect(validation.errors.map((issue) => issue.message).join("\n")).toContain(
+      'Child bone "bone:slot:hand-right" has dx/dy while ancestor "bone:slot:arm-right" is also animated',
+    );
+  });
+
+  it("rejects limb socket translations under an animated body", () => {
+    const angleRig = angleRigJsonFromPreset(makeLimbCharacter(), "front");
+    const motion: MotionJson = {
+      kind: "studioBoom.motion.v1",
+      schemaVersion: 1,
+      suggestedFilename: "sliding-shoulder.motion.json",
+      id: "motion:sliding-shoulder",
+      name: "Sliding Shoulder",
+      category: "full-body",
+      duration: 1,
+      loop: true,
+      targetSpace: "parentRelative",
+      tracks: [
+        {
+          id: "track:torso",
+          target: { kind: "semanticBone", id: "bone:slot:torso" },
+          channel: "transform",
+          keyframes: [
+            { t: 0, dy: 0 },
+            { t: 1, dy: -8 },
+          ],
+        },
+        {
+          id: "track:right-arm",
+          target: { kind: "semanticBone", id: "bone:slot:arm-right" },
+          channel: "transform",
+          keyframes: [
+            { t: 0, dx: 12, rotation: 20 },
+            { t: 1, dx: -12, rotation: -20 },
+          ],
+        },
+      ],
+    };
+
+    const validation = validateMotionJsonForAngle(motion, angleRig);
+
+    expect(validation.ok).toBe(false);
+    expect(validation.errors.map((issue) => issue.message).join("\n")).toContain(
+      'Child bone "bone:slot:arm-right" has dx/dy while ancestor "bone:slot:torso" is also animated',
+    );
+  });
 });
 
 describe("native motion control surface (3D + easing)", () => {
@@ -739,5 +909,153 @@ describe("native motion control surface (3D + easing)", () => {
     );
     const exampleKeyframes = motionRequest.exampleMotion.tracks.flatMap((track) => track.keyframes);
     expect(exampleKeyframes.some((keyframe) => keyframe.rotationY !== undefined)).toBe(true);
+  });
+
+  it("adds compact locomotion metrics to the motion request package", () => {
+    const character: CharacterPreset = {
+      ...createBlankCharacter("Walker"),
+      id: "walker",
+      angles: ["3qR"],
+      canvasWidth: 900,
+      canvasHeight: 1200,
+      parts: [
+        makePart("body", "body-media", {
+          id: "body",
+          slotId: "slot:torso",
+          slotName: "Torso",
+          x: 360,
+          y: 300,
+          width: 190,
+          height: 360,
+          pivot: { x: 455, y: 460 },
+          zIndex: 10,
+        }),
+        makePart("leg", "right-leg-media", {
+          id: "right-leg",
+          slotId: "slot:rightLeg",
+          slotName: "Right leg",
+          side: "right",
+          x: 470,
+          y: 610,
+          width: 80,
+          height: 250,
+          pivot: { x: 500, y: 630 },
+          zIndex: 14,
+          depth: 1,
+        }),
+        makePart("foot", "right-foot-media", {
+          id: "right-foot",
+          slotId: "slot:rightFoot",
+          slotName: "Right foot",
+          side: "right",
+          x: 500,
+          y: 840,
+          width: 110,
+          height: 45,
+          pivot: { x: 520, y: 850 },
+          bounds: { type: "rect", x: 0, y: 0, width: 110, height: 45 },
+          zIndex: 16,
+          depth: 1,
+        }),
+        makePart("leg", "left-leg-media", {
+          id: "left-leg",
+          slotId: "slot:leftLeg",
+          slotName: "Left leg",
+          side: "left",
+          x: 390,
+          y: 615,
+          width: 80,
+          height: 250,
+          pivot: { x: 420, y: 635 },
+          zIndex: 8,
+          depth: -1,
+        }),
+        makePart("foot", "left-foot-media", {
+          id: "left-foot",
+          slotId: "slot:leftFoot",
+          slotName: "Left foot",
+          side: "left",
+          x: 390,
+          y: 850,
+          width: 110,
+          height: 45,
+          pivot: { x: 420, y: 860 },
+          bounds: { type: "rect", x: 0, y: 0, width: 110, height: 45 },
+          zIndex: 9,
+          depth: -1,
+        }),
+      ],
+    };
+
+    const motionRequest = buildMotionRequestAiOut({
+      character: characterJsonFromPreset(character),
+      activeAngle: angleRigJsonFromPreset(character, "3qR"),
+      request: "Walk forward",
+    });
+
+    expect(motionRequest.activeAngle.facing).toMatchObject({
+      forwardAxis: "+x",
+      screenVector: { x: 1, y: 0 },
+    });
+    expect(motionRequest.activeAngle.ground).toMatchObject({
+      footLockAvailable: false,
+      source: "slotBounds",
+    });
+    expect(motionRequest.activeAngle.ground.plantedSlotIds).toEqual(
+      expect.arrayContaining(["slot:rightFoot", "slot:leftFoot"]),
+    );
+    expect(motionRequest.activeAngle.depthOrdering.animationSupported).toBe(false);
+    expect(motionRequest.activeAngle.cadenceHints.stridePxRange.max).toBeGreaterThan(
+      motionRequest.activeAngle.cadenceHints.stridePxRange.min,
+    );
+    expect(
+      motionRequest.activeAngle.slots.find((slot) => slot.id === "slot:rightFoot"),
+    ).toMatchObject({
+      contact: { canPlant: true, footLockAvailable: false },
+      nearFar: "far",
+    });
+    expect(
+      motionRequest.activeAngle.slots.find((slot) => slot.id === "slot:leftFoot"),
+    ).toMatchObject({
+      nearFar: "near",
+    });
+    expect(
+      motionRequest.activeAngle.bones.find((bone) => bone.id === "bone:slot:rightLeg"),
+    ).toMatchObject({
+      pivot: { x: 500, y: 630 },
+      segmentChildId: "bone:slot:rightFoot",
+      lengthSource: "childPivot",
+    });
+    expect(
+      motionRequest.activeAngle.bones.find((bone) => bone.id === "bone:slot:rightLeg")
+        ?.segmentLength ?? 0,
+    ).toBeGreaterThan(200);
+    expect(motionRequest.activeAngle.boneLocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          parentBoneId: "bone:slot:leftLeg",
+          childBoneId: "bone:slot:leftFoot",
+          policy: "fkInheritsParent",
+          ikAvailable: false,
+        }),
+      ]),
+    );
+  });
+
+  it("formats the copied motion prompt as plain key-value text, not a JSON blob", () => {
+    const character = makeCharacter();
+    const prompt = buildMotionRequestPrompt({
+      character: characterJsonFromPreset(character),
+      activeAngle: angleRigJsonFromPreset(character, "front"),
+      request: "Wave hello",
+    });
+
+    expect(prompt).toContain("Studio Boom motion prompt");
+    expect(prompt).toContain("request: Wave hello");
+    expect(prompt).toContain("active_angle: front");
+    expect(prompt).toContain("controls.transform_fields");
+    expect(prompt).toContain("active_angle.bone_locks");
+    expect(prompt).toContain("active_angle.bones");
+    expect(prompt.trim().startsWith("{")).toBe(false);
   });
 });

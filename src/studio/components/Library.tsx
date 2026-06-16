@@ -2,13 +2,7 @@
 import { useLiveQuery } from "dexie-react-hooks";
 import { db, deleteMediaIfUnused, importMediaFile, mediaIdsForCharacter, uid } from "../db";
 import { useStudio } from "../store";
-import type {
-  CharacterPart,
-  CharacterPreset,
-  CompositionClip,
-  MediaAsset,
-  TextClip,
-} from "../types";
+import type { CharacterPreset, CompositionClip, MediaAsset, TextClip } from "../types";
 import { deriveEditorClips, isCharacterCompositionClip } from "../types";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMediaUrl } from "../hooks/useMediaUrl";
@@ -19,15 +13,22 @@ import {
 import { buildCompositionPreviewProject } from "../hyperframes/composition-preview-project";
 import {
   createBlankCharacter,
-  listCharacterSlots,
-  pickActivePartForSlot,
   roleEnabledByManifest,
+  variantKeyForPart,
 } from "../character/character-utils";
-import { thumbnailBoundsForParts } from "./character-thumbnail-bounds";
+import {
+  thumbnailBoundsForFrames,
+  type CharacterThumbnailFrame,
+} from "./character-thumbnail-bounds";
 import { ensureStarterCharacterSeeded } from "../character/starter";
 import { defaultPoseForCharacter } from "../character/pose-presets";
 import { ensureMotionPresetsSeeded } from "../presets/seed";
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
+import {
+  buildCharacterRuntime,
+  resolveRuntimeSlotPart,
+  runtimePartPlacement,
+} from "../character/runtime";
 
 const TABS = [
   { id: "media", label: "Media" },
@@ -362,30 +363,33 @@ function CharactersTab() {
 function CharacterThumbnail({ character }: { character: CharacterPreset }) {
   const boxWidth = 72;
   const boxHeight = 88;
-  const slots = useMemo(
-    () =>
-      listCharacterSlots(character.parts).filter((slot) =>
-        roleEnabledByManifest(slot.role, character.manifest),
-      ),
-    [character.parts, character.manifest],
-  );
-  const previewParts = useMemo(
-    () =>
-      slots
-        .map((slot) =>
-          pickActivePartForSlot(slot, {
-            pose: slot.role === "head" || slot.role === "body" ? "front" : undefined,
-            viseme: slot.role === "mouth" ? "rest" : undefined,
-            eyeState: slot.role === "eye" ? "open" : undefined,
-          }),
-        )
-        .filter((part): part is CharacterPart => part != null && part.visible !== false)
-        .sort((a, b) => a.zIndex - b.zIndex),
-    [slots],
-  );
+  const previewFrames = useMemo(() => {
+    const runtime = buildCharacterRuntime(character);
+    return runtime.slots
+      .filter((slot) => roleEnabledByManifest(slot.role, character.manifest))
+      .map((slot): CharacterThumbnailFrame | null => {
+        const defaultKey =
+          slot.role === "mouth" ? "rest" : slot.role === "eye" ? "open" : undefined;
+        const part = resolveRuntimeSlotPart(slot, runtime, defaultKey);
+        if (!part || part.visible === false) return null;
+        const placement = runtimePartPlacement(slot, part, runtime, {
+          poseKey: defaultKey ?? variantKeyForPart(part),
+        });
+        return {
+          part,
+          x: placement.x,
+          y: placement.y,
+          rotation: placement.rotation,
+          scaleX: placement.scaleX,
+          scaleY: placement.scaleY,
+        };
+      })
+      .filter((frame): frame is CharacterThumbnailFrame => frame != null)
+      .sort((a, b) => a.part.zIndex - b.part.zIndex);
+  }, [character]);
   const bounds = useMemo(
-    () => thumbnailBoundsForParts(previewParts, character),
-    [character, previewParts],
+    () => thumbnailBoundsForFrames(previewFrames, character),
+    [character, previewFrames],
   );
   const scale = Math.min(boxWidth / bounds.width, boxHeight / bounds.height);
   const safeScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
@@ -397,7 +401,7 @@ function CharacterThumbnail({ character }: { character: CharacterPreset }) {
       className="relative flex h-[88px] w-[72px] shrink-0 items-center justify-center overflow-hidden rounded-md border border-border/60 bg-transparent"
       aria-label={`${character.name} preview`}
     >
-      {previewParts.length === 0 && <CharacterThumbnailFallback />}
+      {previewFrames.length === 0 && <CharacterThumbnailFallback />}
       <div
         className="absolute left-0 top-0 origin-top-left"
         style={{
@@ -406,8 +410,8 @@ function CharacterThumbnail({ character }: { character: CharacterPreset }) {
           transform: `matrix(${safeScale}, 0, 0, ${safeScale}, ${offsetX}, ${offsetY})`,
         }}
       >
-        {previewParts.map((part) => (
-          <CharacterThumbnailPart key={part.id} part={part} />
+        {previewFrames.map((frame) => (
+          <CharacterThumbnailPart key={frame.part.id} frame={frame} />
         ))}
       </div>
     </div>
@@ -431,7 +435,8 @@ function CharacterThumbnailFallback() {
   );
 }
 
-function CharacterThumbnailPart({ part }: { part: CharacterPart }) {
+function CharacterThumbnailPart({ frame }: { frame: CharacterThumbnailFrame }) {
+  const { part } = frame;
   const url = useMediaUrl(part.mediaId);
   if (!url) return null;
   return (
@@ -441,12 +446,12 @@ function CharacterThumbnailPart({ part }: { part: CharacterPart }) {
       draggable={false}
       className="absolute object-contain"
       style={{
-        left: part.x,
-        top: part.y,
+        left: frame.x,
+        top: frame.y,
         width: part.width,
         height: part.height,
         zIndex: part.zIndex,
-        transform: `rotate(${part.rotation}deg)`,
+        transform: `rotate(${frame.rotation}deg) scale(${frame.scaleX}, ${frame.scaleY})`,
         transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
         pointerEvents: "none",
       }}

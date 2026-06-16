@@ -13,6 +13,7 @@ import {
   type JsonValidationIssue,
   type JsonValidationResult,
   type MotionJson,
+  type MotionJsonTrack,
   type MotionTargetJson,
   type ResolvedMotionTarget,
   type StudioBoomJsonKind,
@@ -257,10 +258,7 @@ export function validateAngleRigJson(value: unknown): JsonValidationResult {
     } else if (parentType !== "role") {
       issues.error(`${path}.parentRef.type`, `Unknown parentRef type "${parentType}".`);
     }
-    if (
-      typeof relation.clipSlotId === "string" &&
-      !slotIds.has(relation.clipSlotId)
-    ) {
+    if (typeof relation.clipSlotId === "string" && !slotIds.has(relation.clipSlotId)) {
       issues.error(`${path}.clipSlotId`, `Missing clip slot "${relation.clipSlotId}".`);
     }
   }
@@ -287,6 +285,9 @@ export function validateAngleRigJson(value: unknown): JsonValidationResult {
     const childSlotId = requiredString(socket, "childSlotId", `${path}.childSlotId`, issues);
     if (childSlotId && !slotIds.has(childSlotId))
       issues.error(`${path}.childSlotId`, `Missing slot "${childSlotId}".`);
+    finiteNumber(socket.x, `${path}.x`, issues);
+    finiteNumber(socket.y, `${path}.y`, issues);
+    if (socket.rotation !== undefined) finiteNumber(socket.rotation, `${path}.rotation`, issues);
     if (!isRecord(socket.variantAnchors)) {
       issues.error(`${path}.variantAnchors`, "Expected variantAnchors record.");
     } else {
@@ -309,7 +310,8 @@ function validateOptionalArtwork(
     issues.error(path, "Expected artwork object.");
     return;
   }
-  if (value.partIds !== undefined) validateUniqueStringArray(value.partIds, `${path}.partIds`, issues);
+  if (value.partIds !== undefined)
+    validateUniqueStringArray(value.partIds, `${path}.partIds`, issues);
   if (value.layers !== undefined && !Array.isArray(value.layers)) {
     issues.error(`${path}.layers`, "Expected layers array.");
   }
@@ -366,7 +368,10 @@ function validateOptionalVariantRigPackage(
       boneIds.size > 0 &&
       !boneIds.has(control.targetBoneId)
     ) {
-      issues.error(`${controlPath}.targetBoneId`, `Missing variant bone "${control.targetBoneId}".`);
+      issues.error(
+        `${controlPath}.targetBoneId`,
+        `Missing variant bone "${control.targetBoneId}".`,
+      );
     }
     validateOptionalNumberPair(control.range, `${controlPath}.range`, issues);
   }
@@ -376,7 +381,11 @@ function validateOptionalVariantRigPackage(
     if (value.clipping.maskPartIds !== undefined)
       validateUniqueStringArray(value.clipping.maskPartIds, `${path}.clipping.maskPartIds`, issues);
     if (value.clipping.coverPartIds !== undefined)
-      validateUniqueStringArray(value.clipping.coverPartIds, `${path}.clipping.coverPartIds`, issues);
+      validateUniqueStringArray(
+        value.clipping.coverPartIds,
+        `${path}.clipping.coverPartIds`,
+        issues,
+      );
     if (value.clipping.rules !== undefined)
       validateUniqueStringArray(value.clipping.rules, `${path}.clipping.rules`, issues);
   }
@@ -388,7 +397,11 @@ function validateOptionalVariantRigPackage(
     for (const [index, socket] of optionalArray(value.sockets.outputs).entries()) {
       const socketPath = `${path}.sockets.outputs[${index}]`;
       validateSocketLike(socket, socketPath, issues);
-      if (isRecord(socket) && socket.childSlotId !== undefined && typeof socket.childSlotId !== "string")
+      if (
+        isRecord(socket) &&
+        socket.childSlotId !== undefined &&
+        typeof socket.childSlotId !== "string"
+      )
         issues.error(`${socketPath}.childSlotId`, "Expected string.");
     }
   }
@@ -413,11 +426,7 @@ function validateOptionalAiMetadata(
     validateUniqueStringArray(value.lessIdealFor, `${path}.lessIdealFor`, issues);
 }
 
-function validateSocketLike(
-  value: unknown,
-  path: string,
-  issues: ReturnType<typeof makeIssues>,
-) {
+function validateSocketLike(value: unknown, path: string, issues: ReturnType<typeof makeIssues>) {
   if (!isRecord(value)) {
     issues.error(path, "Expected point object.");
     return;
@@ -533,6 +542,7 @@ export function validateMotionJsonForAngle(
     issues.error("$.angleIds", `Motion is not available for angle "${angleRig.angleId}".`);
     return issues.result();
   }
+  const transformBoneTracks: Array<{ index: number; boneId: string; track: MotionJsonTrack }> = [];
   for (const [index, track] of motion.tracks.entries()) {
     if (!isRecord(track)) continue;
     if (!angleIdsInclude(track.angleIds, angleRig.angleId)) continue;
@@ -559,8 +569,93 @@ export function validateMotionJsonForAngle(
         }
       }
     }
+    if (track.channel === "transform" && resolved.target.kind === "angleBone") {
+      transformBoneTracks.push({
+        index,
+        boneId: resolved.target.id,
+        track: track as MotionJsonTrack,
+      });
+    }
   }
+  validateMotionBoneLocks(transformBoneTracks, angleRig, issues);
   return issues.result();
+}
+
+function validateMotionBoneLocks(
+  transformBoneTracks: Array<{ index: number; boneId: string; track: MotionJsonTrack }>,
+  angleRig: AngleRigJson,
+  issues: ReturnType<typeof makeIssues>,
+) {
+  if (transformBoneTracks.length === 0) return;
+  const boneById = new Map(angleRig.bones.map((bone) => [bone.id, bone]));
+  const tracksByBone = new Map<string, Array<{ index: number; track: MotionJsonTrack }>>();
+  for (const info of transformBoneTracks) {
+    tracksByBone.set(info.boneId, [...(tracksByBone.get(info.boneId) ?? []), info]);
+  }
+  for (const info of transformBoneTracks) {
+    const bone = boneById.get(info.boneId);
+    if (!bone?.parentId) continue;
+    const ancestors = ancestorBoneIds(info.boneId, boneById);
+    const animatedAncestor = ancestors.find((ancestorId) => tracksByBone.has(ancestorId));
+    const translates = trackHasNonZeroFields(info.track, ["dx", "dy"]);
+    if (animatedAncestor && translates) {
+      issues.error(
+        `$.tracks[${info.index}]`,
+        `Child bone "${info.boneId}" has dx/dy while ancestor "${animatedAncestor}" is also animated. Child bones inherit ancestor movement; animate the parent/ancestor for placement and keep the child transform local unless IK is added.`,
+      );
+      continue;
+    }
+    if (translates) {
+      issues.warn(
+        `$.tracks[${info.index}]`,
+        `Bone "${info.boneId}" is attached to parent "${bone.parentId}" and has dx/dy. Translation moves the authored joint socket; prefer rotating this bone or moving an ancestor.`,
+      );
+    }
+    if (
+      animatedAncestor &&
+      trackHasNonZeroFields(info.track, [
+        "rotation",
+        "rotationX",
+        "rotationY",
+        "scale",
+        "scaleX",
+        "scaleY",
+        "skewX",
+        "skewY",
+      ])
+    ) {
+      issues.warn(
+        `$.tracks[${info.index}]`,
+        `Child bone "${info.boneId}" is animated while ancestor "${animatedAncestor}" is also animated. This is relative local articulation; keep it small so the FK attachment reads as locked.`,
+      );
+    }
+  }
+}
+
+function ancestorBoneIds(
+  boneId: string,
+  boneById: Map<string, AngleRigJson["bones"][number]>,
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  let current = boneById.get(boneId);
+  while (current?.parentId && !seen.has(current.parentId)) {
+    seen.add(current.parentId);
+    out.push(current.parentId);
+    current = boneById.get(current.parentId);
+  }
+  return out;
+}
+
+function trackHasNonZeroFields(track: MotionJsonTrack, fields: readonly string[]): boolean {
+  return optionalArray(track.keyframes).some(
+    (keyframe) =>
+      isRecord(keyframe) &&
+      fields.some((field) => {
+        const value = keyframe[field];
+        return typeof value === "number" && Number.isFinite(value) && Math.abs(value) > 0.0001;
+      }),
+  );
 }
 
 export function resolveMotionTarget(

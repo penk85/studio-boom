@@ -20,39 +20,43 @@ import { db, getMediaUrl, uid } from "../db";
 import { useStudio } from "../store";
 import { buildCharacterCompositionHtml, characterAssetIds } from "../character/composition";
 import {
-  anchorPartForVariant,
-  listCharacterSlots,
-  partsAvailableForAngle,
-  pivotAlignedPartOffset,
   pickActivePartForSlot,
-  roleEnabledByManifest,
   variantKeyForPart,
   variantLabelForPart,
 } from "../character/character-utils";
 import { localAlphaBounds } from "../character/alpha-bounds";
 import { faceTurnMotionForPart } from "../character/face-turn";
 import { defaultPoseForCharacter } from "../character/pose-presets";
+import { resolveSlotBinding } from "../character/rig";
 import {
-  computeBoneWorldTransforms,
-  normalizeCharacterRig,
-  representativePart,
-  resolveSlotBinding,
-  type ResolvedSlotBinding,
-} from "../character/rig";
-import {
-  buildMotionConstraintContext,
   effectiveReachForSlot,
+  motionDeltaMovesJoint,
   parentSlotIdForBone,
+  resolveFkJointDelta,
   resolveMotionDelta,
+  type MotionConstraintContext,
 } from "../character/motion-constraints";
+import {
+  buildCharacterRuntime,
+  runtimePartPlacement,
+  type CharacterRuntime,
+  type RuntimePartPlacement,
+  type RuntimeCharacterSlot,
+} from "../character/runtime";
 import {
   angleRigJsonFromPreset,
   characterJsonFromPreset,
   motionJsonFilename,
 } from "../character-json/normalize";
-import { buildMotionRequestAiOut } from "../character-json/ai-context";
+import { buildMotionRequestPrompt } from "../character-json/ai-context";
 import { expandKeyposesWithAnticipation } from "./apply";
 import { motionJsonToPreset, parseJsonArtifact, validateMotionJsonForAngle } from "./motion-json";
+import { AiAddonPromptPanel, GeneratedEditorShell } from "../ai/generated-editor";
+import { buildJsonRepairPrompt } from "../ai/external-ai";
+import {
+  useAiGeneratedArtifactAddon,
+  type AiGeneratedFeatureAdapter,
+} from "../ai/generated-artifact";
 import {
   type DrillPick,
   exceedsDragThreshold,
@@ -100,7 +104,8 @@ const ROLE_GROUPS: { title: string; roles: PartRole[] }[] = [
   { title: "Other", roles: ["hair", "accessory", "static", "custom"] },
 ];
 
-type CharacterSlot = ReturnType<typeof listCharacterSlots>[number];
+type CharacterSlot = RuntimeCharacterSlot;
+type RuntimeRig = CharacterRuntime["rig"];
 
 interface RecorderPartState {
   slotId: string;
@@ -126,29 +131,7 @@ interface SelectPopover {
   slots: CharacterSlot[];
 }
 
-interface StatusMessage {
-  kind: "idle" | "success" | "error";
-  message: string;
-}
-
-interface RecorderEditPreviewTarget {
-  slotId: string;
-  part: CharacterPart;
-  override: RecorderPartState;
-  poseKey?: string;
-  faceTurnX: number;
-  faceTurnY: number;
-}
-
-interface RecorderPartPlacement {
-  x: number;
-  y: number;
-  containerX: number;
-  containerY: number;
-  offsetX: number;
-  offsetY: number;
-  transformTarget: "slot" | "bone";
-}
+type RecorderPartPlacement = RuntimePartPlacement;
 
 export function MotionPresetRecorder({
   character,
@@ -163,24 +146,11 @@ export function MotionPresetRecorder({
   onSaved?: (preset: MotionPreset) => void;
   copyOnSave?: boolean;
 }) {
-  const rig = useMemo(() => normalizeCharacterRig(character), [character]);
-  const slots = useMemo(
-    () =>
-      listCharacterSlots(partsAvailableForAngle(character.parts, rig.activeAngle)).filter((slot) =>
-        roleEnabledByManifest(slot.role, character.manifest),
-      ),
-    [character.parts, character.manifest, rig.activeAngle],
-  );
-  // The same constraint boundary the compiled timeline clamps through — editing is WYSIWYG.
-  const constraintCtx = useMemo(
-    () =>
-      buildMotionConstraintContext({
-        reaches: rig.reaches,
-        variantPackages: character.variantPackages,
-        parts: character.parts,
-      }),
-    [rig.reaches, character.variantPackages, character.parts],
-  );
+  const runtime = useMemo(() => buildCharacterRuntime(character), [character]);
+  const rig = runtime.rig;
+  const slots = runtime.slots;
+  // The same resolved runtime boundary the compiled timeline clamps through — editing is WYSIWYG.
+  const constraintCtx = runtime.constraintContext;
   const usesGeneratedMouth = !!character.mouthRig && character.mouthStyle === "rig";
   const generatedMouthPart = useMemo(
     () => (usesGeneratedMouth ? generatedMouthPreviewPart(character) : null),
@@ -219,11 +189,7 @@ export function MotionPresetRecorder({
   const [playbackPreset, setPlaybackPreset] = useState<MotionPreset | null>(null);
   const [selectPopover, setSelectPopover] = useState<SelectPopover | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [aiOpen, setAiOpen] = useState(false);
-  const [aiRequest, setAiRequest] = useState("Create a forward walk cycle.");
-  const [aiPaste, setAiPaste] = useState("");
-  const [aiStatus, setAiStatus] = useState<StatusMessage>({ kind: "idle", message: "" });
-  const wrapRef = useRef<HTMLDivElement>(null);
+  const wrapRef = useRef<HTMLElement>(null);
   const planeRef = useRef<HTMLDivElement>(null);
   const lastPickRef = useRef<DrillPick | null>(null);
   const basePoses = useMemo(() => defaultPoseForCharacter(character), [character]);
@@ -247,6 +213,87 @@ export function MotionPresetRecorder({
     },
     [basePoses, generatedMouthPart, rig, usesGeneratedMouth],
   );
+  const motionAiAdapter = useMemo<AiGeneratedFeatureAdapter<MotionJson>>(
+    () => ({
+      featureName: "Studio Boom motion editor",
+      artifactLabel: "movement JSON",
+      buildPrompt: (request) =>
+        buildMotionRequestPrompt({
+          character: characterJson,
+          activeAngle: activeAngleRig,
+          request,
+        }),
+      parseArtifact: (source) => {
+        const parsed = parseJsonArtifact(source);
+        if (parsed.error) return { ok: false, errors: [`Invalid JSON: ${parsed.error}`] };
+
+        const motion = motionFromPastedJson(parsed.value);
+        if (!motion) {
+          return {
+            ok: false,
+            errors: ['Paste kind "studioBoom.ai.motionSuggestion.v1" or "studioBoom.motion.v1".'],
+          };
+        }
+
+        const validation = validateMotionJsonForAngle(motion, activeAngleRig);
+        const warnings = validation.warnings.map((issue) => `${issue.path}: ${issue.message}`);
+        if (!validation.ok) {
+          return {
+            ok: false,
+            errors: validation.errors.map((issue) => `${issue.path}: ${issue.message}`),
+            warnings,
+          };
+        }
+
+        return { ok: true, artifact: motion, warnings };
+      },
+      loadArtifact: (motion) => {
+        const converted = motionJsonToPreset(motion, activeAngleRig, { id: uid() });
+        if (!converted.preset) {
+          return {
+            ok: false,
+            errors: converted.errors,
+            warnings: converted.warnings,
+          };
+        }
+
+        setName(converted.preset.name);
+        setCategory(converted.preset.category);
+        setDuration(converted.preset.duration);
+        setKeyposes(cloneKeyposes(converted.preset.keyposes ?? []));
+        setAllowOutOfBounds(converted.preset.allowOutOfBounds ?? []);
+        setDraftDirty(false);
+        setTime(0);
+        setPreviewPlaying(false);
+
+        return {
+          ok: true,
+          message: `Loaded "${converted.preset.name}" into the editor. Preview, tweak, then save.`,
+          warnings: converted.warnings,
+          summary: {
+            title: converted.preset.name,
+            detail: "Loaded into the motion editor.",
+            items: [
+              `Category: ${editorTitle(converted.preset.category)}`,
+              `Duration: ${converted.preset.duration.toFixed(2)}s`,
+              `Keyposes: ${converted.preset.keyposes?.length ?? 0}`,
+            ],
+          },
+        };
+      },
+      buildRepairPrompt: ({ errors, source }) =>
+        buildJsonRepairPrompt({
+          featureName: "Studio Boom motion editor",
+          artifactLabel: "movement JSON",
+          errors,
+          source,
+        }),
+    }),
+    [activeAngleRig, characterJson],
+  );
+  const aiAddon = useAiGeneratedArtifactAddon(motionAiAdapter, {
+    initialRequest: "Create a forward walk cycle.",
+  });
 
   useEffect(() => {
     if (!selectedSlotId && slots.length > 0) setSelectedSlotId(slots[0].id);
@@ -317,11 +364,34 @@ export function MotionPresetRecorder({
         opacity: ov.opacity ?? 1,
       });
     }
-    setOverrides((prev) => (recorderOverrideMapsEqual(prev, next) ? prev : next));
+    const constrained = constrainRecorderOverrides({
+      character,
+      rig,
+      slots,
+      overrides: next,
+      activePartForSlot,
+      basePoses,
+      constraintCtx,
+      allowOutOfBounds,
+      faceTurnX: interp.faceTurnX,
+      faceTurnY: interp.faceTurnY,
+    });
+    setOverrides((prev) => (recorderOverrideMapsEqual(prev, constrained) ? prev : constrained));
     setFaceTurnX((prev) => (Object.is(prev, interp.faceTurnX) ? prev : interp.faceTurnX));
     setFaceTurnY((prev) => (Object.is(prev, interp.faceTurnY) ? prev : interp.faceTurnY));
     setDraftDirty(false);
-  }, [activePartForSlot, time, keyposesForSampling, usesGeneratedMouth, slots, rig]);
+  }, [
+    activePartForSlot,
+    allowOutOfBounds,
+    basePoses,
+    character,
+    constraintCtx,
+    keyposesForSampling,
+    rig,
+    slots,
+    time,
+    usesGeneratedMouth,
+  ]);
 
   const displayScale = previewMode === "export" ? 1 : fitScale;
   const selectedSlot = slots.find((slot) => slot.id === selectedSlotId) ?? null;
@@ -416,6 +486,26 @@ export function MotionPresetRecorder({
     ].sort((a, b) => a.t - b.t);
   }, [currentRecordedParts, draftDirty, faceTurnX, faceTurnY, keyposes, sortedKeyposes, time]);
 
+  const editPreviewPreset = useMemo(() => {
+    const currentParts = currentRecordedParts();
+    if (currentParts.length === 0 && faceTurnX === 0 && faceTurnY === 0) return null;
+    return recorderPreviewPreset({
+      name,
+      category,
+      duration,
+      keyposes: [
+        {
+          t: 0,
+          parts: currentParts,
+          faceTurnX: faceTurnX === 0 ? undefined : faceTurnX,
+          faceTurnY: faceTurnY === 0 ? undefined : faceTurnY,
+          ease: "linear",
+        },
+      ],
+      allowOutOfBounds,
+    });
+  }, [allowOutOfBounds, category, currentRecordedParts, duration, faceTurnX, faceTurnY, name]);
+
   const commitRecorderPreviewToHtml = useCallback(() => {
     const playbackKeyposes = keyposesForPlayback();
     const preset =
@@ -437,25 +527,6 @@ export function MotionPresetRecorder({
     setPlaybackPreset(null);
   }, []);
 
-  const editPreviewTargets = useMemo<RecorderEditPreviewTarget[]>(() => {
-    if (previewPlaying) return [];
-    return slots
-      .map((slot) => {
-        const override = overrides.get(slot.id);
-        const part = activePartForSlot(slot, override?.poseSwap);
-        if (!part) return null;
-        return {
-          slotId: slot.id,
-          part,
-          override: override ?? defaultOverride(slot.id, part),
-          poseKey: override?.poseSwap ?? basePoses[slot.id],
-          faceTurnX,
-          faceTurnY,
-        };
-      })
-      .filter((target): target is RecorderEditPreviewTarget => !!target);
-  }, [activePartForSlot, basePoses, faceTurnX, faceTurnY, overrides, previewPlaying, slots]);
-
   const updateOverride = (slotId: string, patch: Partial<RecorderPartState>) => {
     stopCompiledPreview();
     setDraftDirty(true);
@@ -469,11 +540,14 @@ export function MotionPresetRecorder({
         slot?.role === "mouth" && usesGeneratedMouth && "poseSwap" in patch
           ? { ...patch, poseSwap: undefined }
           : patch;
-      const merged = { ...base, ...normalizedPatch };
+      const targetMeta =
+        slot && curPart ? recorderMotionTargetForSlot(slot, curPart, rig, base) : {};
+      const merged = { ...base, ...targetMeta, ...normalizedPatch };
       const hostClamped =
         slot && curPart
           ? clampRecorderOverrideToHost({
               character,
+              runtime,
               rig,
               slots,
               overrides: next,
@@ -485,36 +559,20 @@ export function MotionPresetRecorder({
               faceTurnY,
             })
           : merged;
-      // Tone the edit down to the same effective reach the compiled timeline enforces
-      // (slot rotReach / active-variant rotation limits), honoring the escape hatch.
-      let resolved = hostClamped;
-      if (slot) {
-        const activeVariants: Record<string, string> = { ...basePoses };
-        for (const [id, override] of next) {
-          if (override.poseSwap) activeVariants[id] = override.poseSwap;
-        }
-        if (merged.poseSwap) activeVariants[slotId] = merged.poseSwap;
-        const limited = resolveMotionDelta({
-          ctx: constraintCtx,
-          slotId: slot.id,
-          role: slot.role,
-          activeVariants,
-          dx: hostClamped.dx,
-          dy: hostClamped.dy,
-          rotation: hostClamped.rotation,
-          unclampedLayers: new Set(allowOutOfBounds),
-        });
-        if (limited.clamped) {
-          resolved = {
-            ...hostClamped,
-            dx: round(limited.dx, 1),
-            dy: round(limited.dy, 1),
-            rotation: round(limited.rotation, 1),
-          };
-        }
-      }
-      next.set(slotId, resolved);
-      return next;
+      next.set(slotId, hostClamped);
+      return constrainRecorderOverrides({
+        character,
+        rig,
+        runtime,
+        slots,
+        overrides: next,
+        activePartForSlot,
+        basePoses,
+        constraintCtx,
+        allowOutOfBounds,
+        faceTurnX,
+        faceTurnY,
+      });
     });
   };
 
@@ -559,7 +617,7 @@ export function MotionPresetRecorder({
           character.canvasWidth,
           faceTurnY,
           character.canvasHeight,
-          recorderPartPlacement(slot, part, rig),
+          recorderPartPlacement(slot, part, runtime),
         );
         return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
       })
@@ -585,7 +643,7 @@ export function MotionPresetRecorder({
       return;
     }
     const candidateIds = candidates.map((slot) => slot.id);
-    const subjectId = resolveDragSubject(candidateIds, selectedSlotId);
+    const subjectId = resolveDragSubject(candidateIds, selectedSlotId) ?? selectedSlotId;
     const startX = e.clientX;
     const startY = e.clientY;
     const ox = subjectId ? (overrides.get(subjectId)?.dx ?? 0) : 0;
@@ -677,81 +735,11 @@ export function MotionPresetRecorder({
     onClose();
   };
 
-  const copyAiPromptPackage = async () => {
-    const text = JSON.stringify(
-      buildMotionRequestAiOut({
-        character: characterJson,
-        activeAngle: activeAngleRig,
-        request: aiRequest,
-      }),
-      null,
-      2,
-    );
-    try {
-      await navigator.clipboard.writeText(text);
-      setAiStatus({
-        kind: "success",
-        message: "Copied AI prompt package. Paste it into your AI chat.",
-      });
-    } catch {
-      setAiPaste(text);
-      setAiStatus({
-        kind: "error",
-        message: "Clipboard access failed. The prompt package was placed below for manual copy.",
-      });
-    }
-  };
-
-  const loadAiSuggestion = () => {
-    const parsed = parseJsonArtifact(aiPaste);
-    if (parsed.error) {
-      setAiStatus({ kind: "error", message: `Invalid JSON: ${parsed.error}` });
-      return;
-    }
-    const motion = motionFromPastedJson(parsed.value);
-    if (!motion) {
-      setAiStatus({
-        kind: "error",
-        message: 'Paste kind "studioBoom.ai.motionSuggestion.v1" or "studioBoom.motion.v1".',
-      });
-      return;
-    }
-    const validation = validateMotionJsonForAngle(motion, activeAngleRig);
-    if (!validation.ok) {
-      setAiStatus({
-        kind: "error",
-        message: validation.errors.map((issue) => `${issue.path}: ${issue.message}`).join("\n"),
-      });
-      return;
-    }
-    const converted = motionJsonToPreset(motion, activeAngleRig, { id: uid() });
-    if (!converted.preset) {
-      setAiStatus({ kind: "error", message: converted.errors.join("\n") });
-      return;
-    }
-    setName(converted.preset.name);
-    setCategory(converted.preset.category);
-    setDuration(converted.preset.duration);
-    setKeyposes(cloneKeyposes(converted.preset.keyposes ?? []));
-    setDraftDirty(false);
-    setTime(0);
-    setPreviewPlaying(false);
-    const warningText = converted.warnings.length
-      ? `\nWarnings:\n${converted.warnings.join("\n")}`
-      : "";
-    setAiStatus({
-      kind: "success",
-      message: `Loaded "${converted.preset.name}" into the editor. Preview, tweak, then save.${warningText}`,
-    });
-  };
-
   return (
-    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-background/90 p-6">
-      <div className="flex w-full max-w-7xl flex-col overflow-hidden rounded-lg border border-border bg-panel">
-        <header className="flex items-center gap-3 border-b border-border bg-panel-2 px-4 py-2">
-          <span className="text-sm font-semibold">
-            {initialPreset ? `Edit ${editorTitle(category)}` : `Create ${editorTitle(category)}`}
-          </span>
+    <GeneratedEditorShell
+      title={initialPreset ? `Edit ${editorTitle(category)}` : `Create ${editorTitle(category)}`}
+      headerControls={
+        <>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -781,353 +769,366 @@ export function MotionPresetRecorder({
             />
             s
           </label>
-          <div className="ml-auto flex items-center gap-2">
-            <div className="flex overflow-hidden rounded border border-border text-[10px]">
-              <button
-                onClick={() => setPreviewMode("fit")}
-                className={`flex items-center gap-1 px-2 py-1 ${
-                  previewMode === "fit" ? "bg-primary/25 text-foreground" : "text-muted-foreground"
-                }`}
-              >
-                <Minimize2 size={12} />
-                Editor zoom
-              </button>
-              <button
-                onClick={() => setPreviewMode("export")}
-                className={`flex items-center gap-1 border-l border-border px-2 py-1 ${
-                  previewMode === "export"
-                    ? "bg-primary/25 text-foreground"
-                    : "text-muted-foreground"
-                }`}
-              >
-                <Maximize2 size={12} />
-                Export size
-              </button>
-            </div>
-            {import.meta.env.DEV && (
-              <button
-                onClick={() => setShowAnchorDebug((prev) => !prev)}
-                className={`rounded border border-border px-2 py-1 text-[10px] ${
-                  showAnchorDebug ? "bg-primary/25 text-foreground" : "text-muted-foreground"
-                }`}
-                title="Show bone pivots, variant anchors, and each anchor's resolution path"
-              >
-                Anchors
-              </button>
-            )}
+        </>
+      }
+      actions={
+        <>
+          <div className="flex overflow-hidden rounded border border-border text-[10px]">
             <button
-              onClick={onClose}
-              className="rounded border border-border px-2 py-1 text-xs hover:bg-panel"
+              onClick={() => setPreviewMode("fit")}
+              className={`flex items-center gap-1 px-2 py-1 ${
+                previewMode === "fit" ? "bg-primary/25 text-foreground" : "text-muted-foreground"
+              }`}
             >
-              Cancel
+              <Minimize2 size={12} />
+              Editor zoom
             </button>
             <button
-              onClick={save}
-              className="rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-90"
+              onClick={() => setPreviewMode("export")}
+              className={`flex items-center gap-1 border-l border-border px-2 py-1 ${
+                previewMode === "export" ? "bg-primary/25 text-foreground" : "text-muted-foreground"
+              }`}
             >
-              {initialPreset?.builtin || copyOnSave
-                ? "Save custom movement"
-                : initialPreset
-                  ? "Update movement"
-                  : "Save movement"}
+              <Maximize2 size={12} />
+              Export size
             </button>
           </div>
-        </header>
-
-        <div className="flex min-h-0 flex-1">
-          <aside className="w-44 shrink-0 overflow-auto border-r border-border bg-panel p-2 text-xs">
-            <PartList
-              slots={slots}
-              selectedSlotId={selectedSlotId}
-              overrides={overrides}
-              activePartForSlot={activePartForSlot}
-              isLocked={isSlotLocked}
-              onToggleLocked={toggleSlotLocked}
-              onSelect={setSelectedSlotId}
-              onToggleHidden={(slotId) => {
-                const slot = slots.find((item) => item.id === slotId);
-                const part = slot
-                  ? activePartForSlot(slot, overrides.get(slotId)?.poseSwap)
-                  : undefined;
-                const current = overrides.get(slotId) ?? defaultOverride(slotId, part);
-                updateOverride(slotId, { opacity: current.opacity <= 0.01 ? 1 : 0 });
-              }}
-            />
-          </aside>
-
-          <main
-            ref={wrapRef}
-            className="relative flex min-w-0 flex-1 items-center justify-center overflow-auto bg-stage-bg p-4"
-            onPointerDown={() => setSelectPopover(null)}
+          {import.meta.env.DEV && (
+            <button
+              onClick={() => setShowAnchorDebug((prev) => !prev)}
+              className={`rounded border border-border px-2 py-1 text-[10px] ${
+                showAnchorDebug ? "bg-primary/25 text-foreground" : "text-muted-foreground"
+              }`}
+              title="Show bone pivots, variant anchors, and each anchor's resolution path"
+            >
+              Anchors
+            </button>
+          )}
+          <button
+            onClick={onClose}
+            className="rounded border border-border px-2 py-1 text-xs hover:bg-panel"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={save}
+            className="rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-90"
+          >
+            {initialPreset?.builtin || copyOnSave
+              ? "Save custom movement"
+              : initialPreset
+                ? "Update movement"
+                : "Save movement"}
+          </button>
+        </>
+      }
+      leftPanel={
+        <PartList
+          slots={slots}
+          selectedSlotId={selectedSlotId}
+          overrides={overrides}
+          activePartForSlot={activePartForSlot}
+          isLocked={isSlotLocked}
+          onToggleLocked={toggleSlotLocked}
+          onSelect={setSelectedSlotId}
+          onToggleHidden={(slotId) => {
+            const slot = slots.find((item) => item.id === slotId);
+            const part = slot
+              ? activePartForSlot(slot, overrides.get(slotId)?.poseSwap)
+              : undefined;
+            const current = overrides.get(slotId) ?? defaultOverride(slotId, part);
+            updateOverride(slotId, { opacity: current.opacity <= 0.01 ? 1 : 0 });
+          }}
+        />
+      }
+      previewRef={wrapRef}
+      onPreviewPointerDown={() => setSelectPopover(null)}
+      previewPane={
+        <>
+          <div
+            className="relative shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] outline outline-1 outline-border"
+            style={{
+              width: character.canvasWidth * displayScale,
+              height: character.canvasHeight * displayScale,
+              background: "oklch(0.12 0.015 270)",
+            }}
           >
             <div
-              className="relative shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] outline outline-1 outline-border"
+              ref={planeRef}
+              onPointerDown={handlePlanePointerDown}
+              className="absolute left-0 top-0 origin-top-left"
               style={{
-                width: character.canvasWidth * displayScale,
-                height: character.canvasHeight * displayScale,
-                background: "oklch(0.12 0.015 270)",
+                width: character.canvasWidth,
+                height: character.canvasHeight,
+                transform: `scale(${displayScale})`,
               }}
             >
-              <div
-                ref={planeRef}
-                onPointerDown={handlePlanePointerDown}
-                className="absolute left-0 top-0 origin-top-left"
-                style={{
-                  width: character.canvasWidth,
-                  height: character.canvasHeight,
-                  transform: `scale(${displayScale})`,
-                }}
-              >
-                <RecorderHyperFramesPreview
-                  character={character}
-                  basePoses={basePoses}
-                  preset={previewPlaying ? playbackPreset : null}
-                  time={time}
-                  editTargets={editPreviewTargets}
+              <RecorderHyperFramesPreview
+                character={character}
+                basePoses={basePoses}
+                preset={previewPlaying ? playbackPreset : editPreviewPreset}
+                time={time}
+              />
+              {selectedPart && selectedOverride && (
+                <SelectionHandles
+                  part={selectedPart}
+                  override={selectedOverride}
+                  placement={recorderPartPlacement(selectedSlot, selectedPart, runtime)}
+                  scale={displayScale}
+                  faceTurnX={faceTurnX}
+                  faceTurnY={faceTurnY}
+                  canvasWidth={character.canvasWidth}
+                  canvasHeight={character.canvasHeight}
+                  planeRef={planeRef}
+                  onChange={(patch) => updateOverride(selectedOverride.slotId, patch)}
                 />
-                {selectedPart && selectedOverride && (
-                  <SelectionHandles
-                    part={selectedPart}
-                    override={selectedOverride}
-                    placement={recorderPartPlacement(selectedSlot, selectedPart, rig)}
-                    scale={displayScale}
-                    faceTurnX={faceTurnX}
-                    faceTurnY={faceTurnY}
-                    canvasWidth={character.canvasWidth}
-                    canvasHeight={character.canvasHeight}
-                    planeRef={planeRef}
-                    onChange={(patch) => updateOverride(selectedOverride.slotId, patch)}
-                  />
-                )}
-                {import.meta.env.DEV && showAnchorDebug && (
-                  <AnchorDebugOverlay rig={rig} overrides={overrides} />
-                )}
-              </div>
+              )}
+              {import.meta.env.DEV && showAnchorDebug && (
+                <AnchorDebugOverlay runtime={runtime} overrides={overrides} />
+              )}
             </div>
-            {selectPopover && (
-              <div
-                className="fixed z-[60] min-w-36 rounded border border-border bg-panel p-1 text-xs shadow-xl"
-                style={{ left: selectPopover.x + 8, top: selectPopover.y + 8 }}
-              >
-                {selectPopover.slots.map((slot) => (
-                  <button
-                    key={slot.id}
-                    onClick={() => {
-                      setSelectedSlotId(slot.id);
-                      setSelectPopover(null);
-                    }}
-                    className="block w-full rounded px-2 py-1 text-left hover:bg-primary/20"
-                  >
-                    {slot.name ?? activePartForSlot(slot)?.name ?? slot.role}
-                  </button>
-                ))}
-              </div>
-            )}
-          </main>
-
-          <aside className="w-72 shrink-0 overflow-auto border-l border-border bg-panel p-3 text-xs">
-            <AiMotionEditorPanel
-              open={aiOpen}
-              request={aiRequest}
-              paste={aiPaste}
-              status={aiStatus}
-              onOpenChange={setAiOpen}
-              onRequestChange={setAiRequest}
-              onPasteChange={setAiPaste}
-              onCopyPrompt={copyAiPromptPackage}
-              onLoadSuggestion={loadAiSuggestion}
-            />
-
-            <PropertiesPanel
-              slot={selectedSlot}
-              part={selectedPart}
-              override={selectedOverride}
-              usesGeneratedMouth={usesGeneratedMouth}
-              advancedOpen={advancedOpen}
-              rotationLimit={selectedRotationLimit}
-              allowOutOfBounds={selectedAllowsOutOfBounds}
-              onAllowOutOfBoundsChange={setSelectedAllowOutOfBounds}
-              onAdvancedOpenChange={setAdvancedOpen}
-              onChange={(patch) => selectedSlotId && updateOverride(selectedSlotId, patch)}
-              onResetAll={() => selectedSlotId && clearOverride(selectedSlotId)}
-            />
-
-            <div className="mt-4 rounded border border-border bg-panel-2 p-3">
-              <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-                Face Turn
-              </div>
-              <PropertyRow
-                label="Turn X"
-                value={faceTurnX}
-                min={-1}
-                max={1}
-                step={0.01}
-                rest={0}
-                onChange={(value) => {
-                  stopCompiledPreview();
-                  setDraftDirty(true);
-                  setFaceTurnX(value);
-                }}
-              />
-              <PropertyRow
-                label="Turn Y"
-                value={faceTurnY}
-                min={-1}
-                max={1}
-                step={0.01}
-                rest={0}
-                onChange={(value) => {
-                  stopCompiledPreview();
-                  setDraftDirty(true);
-                  setFaceTurnY(value);
-                }}
-              />
+          </div>
+          {selectPopover && (
+            <div
+              className="fixed z-[60] min-w-36 rounded border border-border bg-panel p-1 text-xs shadow-xl"
+              style={{ left: selectPopover.x + 8, top: selectPopover.y + 8 }}
+            >
+              {selectPopover.slots.map((slot) => (
+                <button
+                  key={slot.id}
+                  onClick={() => {
+                    setSelectedSlotId(slot.id);
+                    setSelectPopover(null);
+                  }}
+                  className="block w-full rounded px-2 py-1 text-left hover:bg-primary/20"
+                >
+                  {slot.name ?? activePartForSlot(slot)?.name ?? slot.role}
+                </button>
+              ))}
             </div>
+          )}
+        </>
+      }
+      inspectorPanel={
+        <>
+          <AiAddonPromptPanel
+            open={aiAddon.open}
+            title="AI Movement"
+            intro={
+              <>
+                Optional AI add-on. Copy one prompt package, use it in your AI chat, then paste the
+                returned movement JSON here to preview before saving.
+              </>
+            }
+            requestLabel="Describe movement"
+            request={aiAddon.request}
+            pasteLabel="Paste returned movement JSON"
+            paste={aiAddon.paste}
+            pastePlaceholder={`Paste ${motionJsonFilename("AI movement")} or *.motion-suggestion.ai-in.json`}
+            status={aiAddon.status}
+            promptText={aiAddon.promptText}
+            promptOpen={aiAddon.promptOpen}
+            repairPrompt={aiAddon.repairPrompt}
+            summary={aiAddon.summary}
+            onOpenChange={aiAddon.setOpen}
+            onRequestChange={aiAddon.setRequest}
+            onPasteChange={aiAddon.setPaste}
+            onCopyPrompt={aiAddon.copyPrompt}
+            onShowPrompt={aiAddon.showPrompt}
+            onPromptOpenChange={aiAddon.setPromptOpen}
+            onCopyRepairPrompt={aiAddon.copyRepairPrompt}
+            onLoadSuggestion={aiAddon.loadSuggestion}
+          />
 
-            <div className="mt-4 border-t border-border pt-3">
-              <div className="mb-1 flex items-center justify-between">
-                <span className="font-semibold uppercase tracking-wider text-muted-foreground">
-                  Time
-                </span>
-                <span className="text-[10px] text-muted-foreground">
-                  {time.toFixed(2)}s / {duration.toFixed(2)}s
-                </span>
-              </div>
-              <input
-                type="range"
-                min={0}
-                max={duration}
-                step={0.05}
-                value={time}
-                onChange={(e) => setTime(Number(e.target.value))}
-                className="w-full"
-              />
-              <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (previewPlaying) stopCompiledPreview();
-                    else commitRecorderPreviewToHtml();
-                  }}
-                  className="flex items-center justify-center gap-1 rounded border border-border bg-panel-2 px-2 py-1 text-xs hover:bg-panel"
-                >
-                  {previewPlaying ? <Pause size={12} /> : <Play size={12} />}
-                  {previewPlaying ? "Pause preview" : "Play preview"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTime(0);
-                    commitRecorderPreviewToHtml();
-                  }}
-                  className="flex items-center justify-center rounded border border-border bg-panel-2 px-2 py-1 hover:bg-panel"
-                  title="Restart preview"
-                >
-                  <SkipBack size={12} />
-                </button>
-              </div>
+          <PropertiesPanel
+            slot={selectedSlot}
+            part={selectedPart}
+            override={selectedOverride}
+            usesGeneratedMouth={usesGeneratedMouth}
+            advancedOpen={advancedOpen}
+            rotationLimit={selectedRotationLimit}
+            allowOutOfBounds={selectedAllowsOutOfBounds}
+            onAllowOutOfBoundsChange={setSelectedAllowOutOfBounds}
+            onAdvancedOpenChange={setAdvancedOpen}
+            onChange={(patch) => selectedSlotId && updateOverride(selectedSlotId, patch)}
+            onResetAll={() => selectedSlotId && clearOverride(selectedSlotId)}
+          />
+
+          <div className="mt-4 rounded border border-border bg-panel-2 p-3">
+            <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
+              Face Turn
+            </div>
+            <PropertyRow
+              label="Turn X"
+              value={faceTurnX}
+              min={-1}
+              max={1}
+              step={0.01}
+              rest={0}
+              onChange={(value) => {
+                stopCompiledPreview();
+                setDraftDirty(true);
+                setFaceTurnX(value);
+              }}
+            />
+            <PropertyRow
+              label="Turn Y"
+              value={faceTurnY}
+              min={-1}
+              max={1}
+              step={0.01}
+              rest={0}
+              onChange={(value) => {
+                stopCompiledPreview();
+                setDraftDirty(true);
+                setFaceTurnY(value);
+              }}
+            />
+          </div>
+
+          <div className="mt-4 border-t border-border pt-3">
+            <div className="mb-1 flex items-center justify-between">
+              <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+                Time
+              </span>
+              <span className="text-[10px] text-muted-foreground">
+                {time.toFixed(2)}s / {duration.toFixed(2)}s
+              </span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={duration}
+              step={0.05}
+              value={time}
+              onChange={(e) => setTime(Number(e.target.value))}
+              className="w-full"
+            />
+            <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
               <button
-                onClick={captureKeypose}
-                className="mt-2 w-full rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
+                type="button"
+                onClick={() => {
+                  if (previewPlaying) stopCompiledPreview();
+                  else commitRecorderPreviewToHtml();
+                }}
+                className="flex items-center justify-center gap-1 rounded border border-border bg-panel-2 px-2 py-1 text-xs hover:bg-panel"
               >
-                Capture pose at {time.toFixed(2)}s
+                {previewPlaying ? <Pause size={12} /> : <Play size={12} />}
+                {previewPlaying ? "Pause preview" : "Play preview"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setTime(0);
+                  commitRecorderPreviewToHtml();
+                }}
+                className="flex items-center justify-center rounded border border-border bg-panel-2 px-2 py-1 hover:bg-panel"
+                title="Restart preview"
+              >
+                <SkipBack size={12} />
               </button>
             </div>
+            <button
+              onClick={captureKeypose}
+              className="mt-2 w-full rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
+            >
+              Capture pose at {time.toFixed(2)}s
+            </button>
+          </div>
 
-            <div className="mt-4">
-              <div className="mb-1 font-semibold uppercase tracking-wider text-muted-foreground">
-                Captured poses
+          <div className="mt-4">
+            <div className="mb-1 font-semibold uppercase tracking-wider text-muted-foreground">
+              Captured poses
+            </div>
+            {keyposes.length === 0 && (
+              <div className="rounded border border-dashed border-border p-2 text-center text-[10px] text-muted-foreground">
+                No poses yet.
               </div>
-              {keyposes.length === 0 && (
-                <div className="rounded border border-dashed border-border p-2 text-center text-[10px] text-muted-foreground">
-                  No poses yet.
-                </div>
-              )}
-              <ul className="space-y-1">
-                {keyposes.map((k) => (
-                  <li
-                    key={k.t}
-                    className={`rounded border border-border p-2 ${
-                      Math.abs(k.t - time) < 0.05 ? "bg-primary/20" : "bg-panel-2"
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <button onClick={() => setTime(k.t)} className="flex-1 text-left">
-                        {k.t.toFixed(2)}s · {k.parts.length} parts
-                      </button>
-                      <button
-                        onClick={() => removeKeypose(k.t)}
-                        className="text-[10px] text-destructive"
-                      >
-                        Remove
-                      </button>
-                    </div>
-                    <select
-                      value={k.ease ?? "easeInOut"}
-                      onChange={(e) => updateKeypose(k.t, { ease: e.target.value })}
-                      className="mt-2 w-full rounded border border-border bg-input px-1 py-0.5 text-[10px]"
+            )}
+            <ul className="space-y-1">
+              {keyposes.map((k) => (
+                <li
+                  key={k.t}
+                  className={`rounded border border-border p-2 ${
+                    Math.abs(k.t - time) < 0.05 ? "bg-primary/20" : "bg-panel-2"
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setTime(k.t)} className="flex-1 text-left">
+                      {k.t.toFixed(2)}s · {k.parts.length} parts
+                    </button>
+                    <button
+                      onClick={() => removeKeypose(k.t)}
+                      className="text-[10px] text-destructive"
                     >
-                      {EASE_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                    <details className="mt-2">
-                      <summary className="cursor-pointer text-[10px] text-muted-foreground">
-                        Anticipation
-                      </summary>
-                      <label className="mt-2 flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          checked={!!k.anticipation}
-                          onChange={(e) =>
+                      Remove
+                    </button>
+                  </div>
+                  <select
+                    value={k.ease ?? "easeInOut"}
+                    onChange={(e) => updateKeypose(k.t, { ease: e.target.value })}
+                    className="mt-2 w-full rounded border border-border bg-input px-1 py-0.5 text-[10px]"
+                  >
+                    {EASE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-[10px] text-muted-foreground">
+                      Anticipation
+                    </summary>
+                    <label className="mt-2 flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={!!k.anticipation}
+                        onChange={(e) =>
+                          updateKeypose(k.t, {
+                            anticipation: e.target.checked
+                              ? { amount: 0.25, duration: 0.12 }
+                              : undefined,
+                          })
+                        }
+                      />
+                      Enabled
+                    </label>
+                    {k.anticipation && (
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        <NumberInput
+                          label="Amount"
+                          value={k.anticipation.amount}
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          onChange={(value) =>
                             updateKeypose(k.t, {
-                              anticipation: e.target.checked
-                                ? { amount: 0.25, duration: 0.12 }
-                                : undefined,
+                              anticipation: { ...k.anticipation!, amount: value },
                             })
                           }
                         />
-                        Enabled
-                      </label>
-                      {k.anticipation && (
-                        <div className="mt-2 grid grid-cols-2 gap-2">
-                          <NumberInput
-                            label="Amount"
-                            value={k.anticipation.amount}
-                            min={0}
-                            max={1}
-                            step={0.05}
-                            onChange={(value) =>
-                              updateKeypose(k.t, {
-                                anticipation: { ...k.anticipation!, amount: value },
-                              })
-                            }
-                          />
-                          <NumberInput
-                            label="Duration"
-                            value={k.anticipation.duration}
-                            min={0}
-                            max={duration}
-                            step={0.01}
-                            onChange={(value) =>
-                              updateKeypose(k.t, {
-                                anticipation: { ...k.anticipation!, duration: value },
-                              })
-                            }
-                          />
-                        </div>
-                      )}
-                    </details>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </aside>
-        </div>
-      </div>
-    </div>
+                        <NumberInput
+                          label="Duration"
+                          value={k.anticipation.duration}
+                          min={0}
+                          max={duration}
+                          step={0.01}
+                          onChange={(value) =>
+                            updateKeypose(k.t, {
+                              anticipation: { ...k.anticipation!, duration: value },
+                            })
+                          }
+                        />
+                      </div>
+                    )}
+                  </details>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </>
+      }
+    />
   );
 }
 
@@ -1220,101 +1221,6 @@ function PartList({
           </section>
         );
       })}
-    </div>
-  );
-}
-
-function AiMotionEditorPanel({
-  open,
-  request,
-  paste,
-  status,
-  onOpenChange,
-  onRequestChange,
-  onPasteChange,
-  onCopyPrompt,
-  onLoadSuggestion,
-}: {
-  open: boolean;
-  request: string;
-  paste: string;
-  status: StatusMessage;
-  onOpenChange: (open: boolean) => void;
-  onRequestChange: (value: string) => void;
-  onPasteChange: (value: string) => void;
-  onCopyPrompt: () => void;
-  onLoadSuggestion: () => void;
-}) {
-  return (
-    <div className="mb-3 rounded border border-border bg-panel-2 p-3">
-      <button
-        type="button"
-        onClick={() => onOpenChange(!open)}
-        className="flex w-full items-center justify-between text-left"
-      >
-        <span className="font-semibold uppercase tracking-wider text-muted-foreground">
-          AI Movement
-        </span>
-        <span className="text-[10px] text-muted-foreground">{open ? "Hide" : "Show"}</span>
-      </button>
-      {open && (
-        <div className="mt-2 space-y-2">
-          <div className="rounded border border-border bg-panel p-2 text-[10px] text-muted-foreground">
-            Copy one prompt package. It includes the movement request, character JSON, active angle
-            rig, and return schema, so you do not need a separate character file. Paste the returned
-            movement JSON here to preview before saving.
-          </div>
-          <label className="block">
-            <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
-              Describe movement
-            </span>
-            <textarea
-              value={request}
-              onChange={(e) => onRequestChange(e.target.value)}
-              rows={3}
-              className="w-full resize-y rounded border border-border bg-input px-2 py-1"
-            />
-          </label>
-          <button
-            type="button"
-            onClick={onCopyPrompt}
-            className="w-full rounded bg-primary/30 px-2 py-1 text-foreground hover:bg-primary/50"
-          >
-            Copy AI prompt package
-          </button>
-          <label className="block">
-            <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
-              Paste returned movement JSON
-            </span>
-            <textarea
-              value={paste}
-              onChange={(e) => onPasteChange(e.target.value)}
-              rows={5}
-              spellCheck={false}
-              placeholder={`Paste ${motionJsonFilename("AI movement")} or *.motion-suggestion.ai-in.json`}
-              className="w-full resize-y rounded border border-border bg-input px-2 py-1 font-mono text-[10px]"
-            />
-          </label>
-          <button
-            type="button"
-            onClick={onLoadSuggestion}
-            className="w-full rounded border border-border bg-panel px-2 py-1 hover:bg-panel-2"
-          >
-            Load into preview
-          </button>
-          {status.message && (
-            <div
-              className={`whitespace-pre-wrap rounded border px-2 py-1 text-[10px] ${
-                status.kind === "error"
-                  ? "border-destructive/40 bg-destructive/10 text-destructive"
-                  : "border-primary/30 bg-primary/10 text-foreground"
-              }`}
-            >
-              {status.message}
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -1579,13 +1485,11 @@ function RecorderHyperFramesPreview({
   basePoses,
   preset,
   time,
-  editTargets,
 }: {
   character: CharacterPreset;
   basePoses: Record<string, string>;
   preset: MotionPreset | null;
   time: number;
-  editTargets: RecorderEditPreviewTarget[];
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const compositionId = "recorder_character_preview";
@@ -1636,22 +1540,7 @@ function RecorderHyperFramesPreview({
   useEffect(() => {
     if (!html) return;
     if (preset) seekRecorderPreview(iframeRef.current, compositionId, time);
-    else
-      applyRecorderEditPose(
-        iframeRef.current,
-        editTargets,
-        character.canvasWidth,
-        character.canvasHeight,
-      );
-  }, [
-    character.canvasHeight,
-    character.canvasWidth,
-    compositionId,
-    editTargets,
-    html,
-    preset,
-    time,
-  ]);
+  }, [compositionId, html, preset, time]);
 
   return (
     <>
@@ -1665,13 +1554,6 @@ function RecorderHyperFramesPreview({
           className="pointer-events-none absolute inset-0 block h-full w-full border-0 bg-transparent"
           onLoad={() => {
             if (preset) seekRecorderPreview(iframeRef.current, compositionId, time);
-            else
-              applyRecorderEditPose(
-                iframeRef.current,
-                editTargets,
-                character.canvasWidth,
-                character.canvasHeight,
-              );
           }}
         />
       ) : (
@@ -1738,210 +1620,6 @@ function seekRecorderPreview(
   timeline.seek(Math.max(0, time), false);
 }
 
-function applyRecorderEditPose(
-  iframe: HTMLIFrameElement | null,
-  targets: RecorderEditPreviewTarget[],
-  canvasWidth: number,
-  canvasHeight: number,
-): void {
-  const doc = iframe?.contentDocument;
-  if (!doc) return;
-
-  for (const el of Array.from(
-    doc.querySelectorAll<HTMLElement>('[data-character-slot="true"], [data-character-bone="true"]'),
-  )) {
-    el.dataset.recorderBaseTransform ??= el.style.transform || "";
-    el.dataset.recorderBaseTransformOrigin ??= el.style.transformOrigin || "";
-    el.dataset.recorderBaseOpacity ??= el.style.opacity || "";
-    el.style.translate = "";
-    el.style.rotate = "";
-    el.style.scale = "";
-    el.style.transform = el.dataset.recorderBaseTransform;
-    el.style.transformOrigin = el.dataset.recorderBaseTransformOrigin;
-    el.style.opacity = el.dataset.recorderBaseOpacity;
-    if (el.dataset.recorderBaseLeft !== undefined) el.style.left = el.dataset.recorderBaseLeft;
-    if (el.dataset.recorderBaseTop !== undefined) el.style.top = el.dataset.recorderBaseTop;
-  }
-
-  for (const partEl of Array.from(
-    doc.querySelectorAll<HTMLElement>('[data-character-part="true"]'),
-  )) {
-    partEl.dataset.recorderBaseOpacity ??= partEl.style.opacity || "";
-    partEl.style.opacity = partEl.dataset.recorderBaseOpacity;
-  }
-
-  for (const target of targets) {
-    const slotEl = doc.querySelector<HTMLElement>(
-      `[data-character-slot-id="${cssAttrValue(target.slotId)}"]`,
-    );
-    if (!slotEl) continue;
-    const transformTarget = recorderTransformElementForSlot(doc, slotEl);
-    const transformEl = transformTarget.element;
-    const ov = target.override;
-    const turn = faceTurnMotionForPart(
-      target.part,
-      target.faceTurnX,
-      canvasWidth,
-      target.faceTurnY,
-      canvasHeight,
-    );
-    const scaleX = ov.scale * ov.scaleX * turn.scaleX;
-    const scaleY = ov.scale * ov.scaleY * turn.scaleY;
-
-    const poseKey = ov.poseSwap ?? target.poseKey;
-    applyRecorderVariantPreview(slotEl, poseKey);
-    applyRecorderBoneAnchors(doc, slotEl, poseKey);
-
-    transformEl.style.translate = `${round(ov.dx + turn.dx, 3)}px ${round(ov.dy + turn.dy, 3)}px`;
-    transformEl.style.rotate = `${round(ov.rotation + turn.rotation, 3)}deg`;
-    transformEl.style.scale = `${round(scaleX, 4)} ${round(scaleY, 4)}`;
-    transformEl.style.transform = `${transformEl.dataset.recorderBaseTransform ?? ""} skew(${round(
-      ov.skewX + turn.skewX,
-      3,
-    )}deg, ${round(ov.skewY + turn.skewY, 3)}deg)`;
-    transformEl.style.transformOrigin =
-      transformTarget.kind === "bone"
-        ? "0px 0px"
-        : recorderSlotTransformOrigin(slotEl, poseKey, ov);
-    transformEl.style.opacity = String(ov.opacity);
-  }
-}
-
-function recorderTransformElementForSlot(
-  doc: Document,
-  slotEl: HTMLElement,
-): { element: HTMLElement; kind: "slot" | "bone" } {
-  const boneId = slotEl.getAttribute("data-character-bound-bone-id");
-  if (!boneId) return { element: slotEl, kind: "slot" };
-  const boneEl = doc.querySelector<HTMLElement>(
-    `[data-character-bone-id="${cssAttrValue(boneId)}"]`,
-  );
-  if (!boneEl) return { element: slotEl, kind: "slot" };
-  const hasChildBone = !!doc.querySelector(
-    `[data-character-parent-bone-id="${cssAttrValue(boneId)}"]`,
-  );
-  return hasChildBone ? { element: boneEl, kind: "bone" } : { element: slotEl, kind: "slot" };
-}
-
-function applyRecorderVariantPreview(slotEl: HTMLElement, poseSwap: string | undefined): void {
-  const partEls = recorderPartElementsForSlot(slotEl);
-  if (!poseSwap) {
-    for (const partEl of partEls) {
-      partEl.style.opacity = partEl.dataset.recorderBaseOpacity ?? partEl.style.opacity;
-    }
-    return;
-  }
-  for (const partEl of partEls) {
-    const keys = [
-      partEl.getAttribute("data-character-part-id"),
-      partEl.getAttribute("data-character-variant"),
-      partEl.getAttribute("data-character-pose"),
-      partEl.getAttribute("data-character-viseme"),
-      partEl.getAttribute("data-character-eye-state"),
-    ];
-    partEl.style.opacity = keys.includes(poseSwap) ? "1" : "0";
-  }
-}
-
-function recorderSlotTransformOrigin(
-  slotEl: HTMLElement,
-  poseSwap: string | undefined,
-  override: RecorderPartState,
-): string {
-  const partEl = recorderActivePartElementForSlot(slotEl, poseSwap);
-  if (!partEl) return `${override.originX * 100}% ${override.originY * 100}%`;
-  const left = parseCssPx(partEl.style.left);
-  const top = parseCssPx(partEl.style.top);
-  const width = parseCssPx(partEl.style.width);
-  const height = parseCssPx(partEl.style.height);
-  if (![left, top, width, height].every(Number.isFinite)) {
-    return `${override.originX * 100}% ${override.originY * 100}%`;
-  }
-  return `${round(left + override.originX * width, 3)}px ${round(
-    top + override.originY * height,
-    3,
-  )}px`;
-}
-
-function recorderActivePartElementForSlot(
-  slotEl: HTMLElement,
-  poseSwap: string | undefined,
-): HTMLElement | undefined {
-  const partEls = recorderPartElementsForSlot(slotEl);
-  if (poseSwap) {
-    const matched = partEls.find((partEl) =>
-      [
-        partEl.getAttribute("data-character-part-id"),
-        partEl.getAttribute("data-character-variant"),
-        partEl.getAttribute("data-character-pose"),
-        partEl.getAttribute("data-character-viseme"),
-        partEl.getAttribute("data-character-eye-state"),
-      ].includes(poseSwap),
-    );
-    if (matched) return matched;
-  }
-  return partEls.find((partEl) => (partEl.style.opacity || "1") !== "0") ?? partEls[0];
-}
-
-function recorderPartElementsForSlot(slotEl: HTMLElement): HTMLElement[] {
-  const slotId = slotEl.getAttribute("data-character-slot-id");
-  return Array.from(slotEl.querySelectorAll<HTMLElement>('[data-character-part="true"]')).filter(
-    (partEl) => !slotId || partEl.getAttribute("data-character-slot-id") === slotId,
-  );
-}
-
-function parseCssPx(value: string): number {
-  return Number.parseFloat(value || "0");
-}
-
-/**
- * Re-anchor child bones whose rest position depends on this slot's active variant (a bent arm
- * carries the hand). Reads the `data-character-variant-anchors` JSON the composition baked onto
- * the real iframe bone elements — no parallel React copy of the rig.
- */
-function applyRecorderBoneAnchors(
-  doc: Document,
-  slotEl: HTMLElement,
-  poseSwap: string | undefined,
-): void {
-  const boneId = slotEl.getAttribute("data-character-bound-bone-id");
-  if (!boneId) return;
-  const childBones = Array.from(
-    doc.querySelectorAll<HTMLElement>(
-      `[data-character-parent-bone-id="${cssAttrValue(boneId)}"][data-character-variant-anchors]`,
-    ),
-  );
-  for (const boneEl of childBones) {
-    let parsed: {
-      base?: { left?: number; top?: number; rotation?: number };
-      anchors?: Record<string, { left?: number; top?: number; rotation?: number }>;
-    };
-    try {
-      parsed = JSON.parse(boneEl.getAttribute("data-character-variant-anchors") ?? "");
-    } catch {
-      continue;
-    }
-    boneEl.dataset.recorderBaseLeft ??= boneEl.style.left || "";
-    boneEl.dataset.recorderBaseTop ??= boneEl.style.top || "";
-    boneEl.dataset.recorderBaseAnchorTransform ??= boneEl.style.transform || "";
-    const anchor = poseSwap ? (parsed.anchors?.[poseSwap] ?? parsed.base) : undefined;
-    if (anchor && Number.isFinite(anchor.left) && Number.isFinite(anchor.top)) {
-      boneEl.style.left = `${anchor.left}px`;
-      boneEl.style.top = `${anchor.top}px`;
-      if (Number.isFinite(anchor.rotation))
-        boneEl.style.transform = `rotate(${anchor.rotation}deg)`;
-    } else {
-      boneEl.style.left = boneEl.dataset.recorderBaseLeft;
-      boneEl.style.top = boneEl.dataset.recorderBaseTop;
-      boneEl.style.transform = boneEl.dataset.recorderBaseAnchorTransform;
-    }
-  }
-}
-
-function cssAttrValue(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
 /**
  * Dev-only editor chrome: marks every bone pivot, and for bones with parent-variant anchors the
  * currently resolved anchor with its resolution path — socket (green), paired art (blue), or
@@ -1949,13 +1627,14 @@ function cssAttrValue(value: string): string {
  * the recorder plane; never enters composition HTML or export.
  */
 function AnchorDebugOverlay({
-  rig,
+  runtime,
   overrides,
 }: {
-  rig: ReturnType<typeof normalizeCharacterRig>;
+  runtime: CharacterRuntime;
   overrides: Map<string, RecorderPartState>;
 }) {
-  const world = computeBoneWorldTransforms(rig);
+  const rig = runtime.rig;
+  const world = runtime.worldByBone;
   const markers: Array<{ key: string; x: number; y: number; color: string; label?: string }> = [];
   for (const bone of rig.bones) {
     const at = world.get(bone.id);
@@ -2166,9 +1845,9 @@ function SelectionHandles({
         top: placement.y + override.dy + turn.dy,
         width: part.width,
         height: part.height,
-        transform: `rotate(${part.rotation + override.rotation + turn.rotation}deg) scale(${
-          override.scale * override.scaleX * turn.scaleX
-        }, ${override.scale * override.scaleY * turn.scaleY}) skew(${
+        transform: `rotate(${placement.rotation + override.rotation + turn.rotation}deg) scale(${
+          placement.scaleX * override.scale * override.scaleX * turn.scaleX
+        }, ${placement.scaleY * override.scale * override.scaleY * turn.scaleY}) skew(${
           override.skewX + turn.skewX
         }deg, ${override.skewY + turn.skewY}deg)`,
         transformOrigin: `${pivotLocal.x}px ${pivotLocal.y}px`,
@@ -2533,7 +2212,7 @@ function sampleKeyposesAtTime(
 function slotForRecordedOverride(
   override: RecordedPartOverride,
   slots: CharacterSlot[],
-  rig: ReturnType<typeof normalizeCharacterRig>,
+  rig: RuntimeRig,
 ): CharacterSlot | undefined {
   if (override.slotId) return slots.find((slot) => slot.id === override.slotId);
   if (override.target === "bone" && override.boneId) {
@@ -2545,8 +2224,153 @@ function slotForRecordedOverride(
   return slots.find((slot) => slot.role === override.partRole);
 }
 
+function constrainRecorderOverrides({
+  character,
+  rig,
+  runtime,
+  slots,
+  overrides,
+  activePartForSlot,
+  basePoses,
+  constraintCtx,
+  allowOutOfBounds,
+  faceTurnX,
+  faceTurnY,
+}: {
+  character: CharacterPreset;
+  rig: RuntimeRig;
+  runtime: CharacterRuntime;
+  slots: CharacterSlot[];
+  overrides: Map<string, RecorderPartState>;
+  activePartForSlot: (slot: CharacterSlot, poseSwap?: string) => CharacterPart | undefined;
+  basePoses: Record<string, string>;
+  constraintCtx: MotionConstraintContext;
+  allowOutOfBounds: string[];
+  faceTurnX: number;
+  faceTurnY: number;
+}): Map<string, RecorderPartState> {
+  const out = new Map<string, RecorderPartState>();
+  const activeVariants = activeVariantsForRecorderOverrides(basePoses, overrides);
+  const unclampedLayers = new Set(allowOutOfBounds);
+  const animatedBoneIds = animatedBoneIdsForRecorderOverrides({
+    rig,
+    slots,
+    overrides,
+    activePartForSlot,
+  });
+
+  for (const [slotId, override] of overrides) {
+    const slot = slots.find((candidate) => candidate.id === slotId);
+    const part = slot ? activePartForSlot(slot, override.poseSwap) : undefined;
+    if (!slot || !part) {
+      out.set(slotId, override);
+      continue;
+    }
+    const withTarget = { ...override, ...recorderMotionTargetForSlot(slot, part, rig, override) };
+    const hostClamped = clampRecorderOverrideToHost({
+      character,
+      runtime,
+      rig,
+      slots,
+      overrides,
+      activePartForSlot,
+      slot,
+      part,
+      override: withTarget,
+      faceTurnX,
+      faceTurnY,
+    });
+    const fkLocked = resolveFkJointDelta({
+      ctx: constraintCtx,
+      boneId: hostClamped.boneId,
+      slotId: slot.id,
+      role: slot.role,
+      dx: hostClamped.dx,
+      dy: hostClamped.dy,
+      animatedBoneIds,
+      unclampedLayers,
+    });
+    const fkClamped = fkLocked.clamped
+      ? { ...hostClamped, dx: round(fkLocked.dx, 1), dy: round(fkLocked.dy, 1) }
+      : hostClamped;
+    const limited = resolveMotionDelta({
+      ctx: constraintCtx,
+      slotId: slot.id,
+      boneId: fkClamped.boneId,
+      role: slot.role,
+      activeVariants,
+      dx: fkClamped.dx,
+      dy: fkClamped.dy,
+      rotation: fkClamped.rotation,
+      unclampedLayers,
+    });
+    out.set(
+      slotId,
+      limited.clamped
+        ? {
+            ...fkClamped,
+            dx: round(limited.dx, 1),
+            dy: round(limited.dy, 1),
+            rotation: round(limited.rotation, 1),
+          }
+        : fkClamped,
+    );
+  }
+  return out;
+}
+
+function activeVariantsForRecorderOverrides(
+  basePoses: Record<string, string>,
+  overrides: Map<string, RecorderPartState>,
+): Record<string, string> {
+  const activeVariants: Record<string, string> = { ...basePoses };
+  for (const [slotId, override] of overrides) {
+    if (override.poseSwap) activeVariants[slotId] = override.poseSwap;
+  }
+  return activeVariants;
+}
+
+function animatedBoneIdsForRecorderOverrides({
+  rig,
+  slots,
+  overrides,
+  activePartForSlot,
+}: {
+  rig: RuntimeRig;
+  slots: CharacterSlot[];
+  overrides: Map<string, RecorderPartState>;
+  activePartForSlot: (slot: CharacterSlot, poseSwap?: string) => CharacterPart | undefined;
+}): Set<string> {
+  const out = new Set<string>();
+  for (const [slotId, override] of overrides) {
+    const slot = slots.find((candidate) => candidate.id === slotId);
+    const part = slot ? activePartForSlot(slot, override.poseSwap) : undefined;
+    if (!slot || !part || !motionDeltaMovesJoint(override)) continue;
+    const target = recorderMotionTargetForSlot(slot, part, rig, override);
+    if (target.target === "bone" && target.boneId) out.add(target.boneId);
+  }
+  return out;
+}
+
+function recorderMotionTargetForSlot(
+  slot: CharacterSlot,
+  part: CharacterPart,
+  rig: RuntimeRig,
+  override?: RecorderPartState,
+): Pick<RecorderPartState, "target" | "boneId"> {
+  if (override?.target === "bone" && override.boneId) {
+    return { target: "bone", boneId: override.boneId };
+  }
+  const binding = resolveSlotBinding(rig, slot.id);
+  if (binding && boneHasChild(rig, binding.effectiveBoneId)) {
+    return { target: "bone", boneId: binding.effectiveBoneId };
+  }
+  return { target: "slot", boneId: undefined };
+}
+
 function clampRecorderOverrideToHost({
   character,
+  runtime,
   rig,
   slots,
   overrides,
@@ -2558,7 +2382,8 @@ function clampRecorderOverrideToHost({
   faceTurnY,
 }: {
   character: CharacterPreset;
-  rig: ReturnType<typeof normalizeCharacterRig>;
+  runtime: CharacterRuntime;
+  rig: RuntimeRig;
   slots: CharacterSlot[];
   overrides: Map<string, RecorderPartState>;
   activePartForSlot: (slot: CharacterSlot, poseSwap?: string) => CharacterPart | undefined;
@@ -2590,7 +2415,7 @@ function clampRecorderOverrideToHost({
     character.canvasWidth,
     faceTurnY,
     character.canvasHeight,
-    recorderPartPlacement(hostSlot, hostPart, rig),
+    recorderPartPlacement(hostSlot, hostPart, runtime),
   );
   const subjectBounds = transformedBounds(
     part,
@@ -2599,7 +2424,7 @@ function clampRecorderOverrideToHost({
     character.canvasWidth,
     faceTurnY,
     character.canvasHeight,
-    recorderPartPlacement(slot, part, rig),
+    recorderPartPlacement(slot, part, runtime),
   );
   let dx = override.dx;
   let dy = override.dy;
@@ -2765,62 +2590,12 @@ function variantLabel(role: PartRole, value: string) {
 function recorderPartPlacement(
   slot: CharacterSlot,
   part: CharacterPart,
-  rig: ReturnType<typeof normalizeCharacterRig>,
+  runtime: CharacterRuntime,
 ): RecorderPartPlacement {
-  const binding = resolveSlotBinding(rig, slot.id);
-  const basePart = recorderContainerBasePart(slot, rig, variantKeyForPart(part)) ?? part;
-  const boneWorld = binding
-    ? computeBoneWorldTransforms(rig).get(binding.effectiveBoneId)
-    : undefined;
-  const containerX = binding && boneWorld ? boneWorld.x + binding.x : basePart.x;
-  const containerY = binding && boneWorld ? boneWorld.y + binding.y : basePart.y;
-  const offset = recorderPartOffset(slot, part, basePart, binding);
-  return {
-    x: containerX + offset.x,
-    y: containerY + offset.y,
-    containerX,
-    containerY,
-    offsetX: offset.x,
-    offsetY: offset.y,
-    transformTarget: binding && boneHasChild(rig, binding.effectiveBoneId) ? "bone" : "slot",
-  };
+  return runtimePartPlacement(slot, part, runtime, { poseKey: variantKeyForPart(part) });
 }
 
-function recorderContainerBasePart(
-  slot: CharacterSlot,
-  rig: ReturnType<typeof normalizeCharacterRig>,
-  poseKey?: string,
-): CharacterPart | undefined {
-  const bindingPartId = resolveSlotBinding(rig, slot.id)?.effectivePartId;
-  if (bindingPartId) {
-    const bound = slot.parts.find((part) => part.id === bindingPartId && part.visible);
-    if (!poseKey && bound) return bound;
-  }
-  return pickActivePartForSlot(slot, {
-    pose: poseKey,
-    viseme: slot.role === "mouth" ? (poseKey ?? "rest") : undefined,
-    eyeState: slot.role === "eye" ? (poseKey ?? "open") : undefined,
-  });
-}
-
-function recorderPartOffset(
-  slot: CharacterSlot,
-  part: CharacterPart,
-  basePart: CharacterPart,
-  binding: ResolvedSlotBinding | undefined,
-): { x: number; y: number } {
-  if (!binding || slot.role === "eye" || slot.role === "mouth") {
-    return { x: part.x - basePart.x, y: part.y - basePart.y };
-  }
-  const referencePart = representativePart(slot) ?? basePart;
-  return pivotAlignedPartOffset(
-    referencePart,
-    anchorPartForVariant(slot.parts, variantKeyForPart(part)) ?? part,
-    part,
-  );
-}
-
-function boneHasChild(rig: ReturnType<typeof normalizeCharacterRig>, boneId: string): boolean {
+function boneHasChild(rig: RuntimeRig, boneId: string): boolean {
   return rig.bones.some((bone) => bone.parentId === boneId);
 }
 
@@ -2840,13 +2615,57 @@ function transformedBounds(
   const baseY = placement?.y ?? part.y;
   const pivotLocalX = ov.originX * part.width;
   const pivotLocalY = ov.originY * part.height;
-  const scaleX = ov.scale * ov.scaleX * turn.scaleX;
-  const scaleY = ov.scale * ov.scaleY * turn.scaleY;
-  const left = baseX + ov.dx + turn.dx + pivotLocalX + (alphaRect.x - pivotLocalX) * scaleX;
-  const top = baseY + ov.dy + turn.dy + pivotLocalY + (alphaRect.y - pivotLocalY) * scaleY;
-  const width = alphaRect.width * scaleX;
-  const height = alphaRect.height * scaleY;
-  return { left, top, right: left + width, bottom: top + height };
+  const scaleX = (placement?.scaleX ?? 1) * ov.scale * ov.scaleX * turn.scaleX;
+  const scaleY = (placement?.scaleY ?? 1) * ov.scale * ov.scaleY * turn.scaleY;
+  const rotation = (placement?.rotation ?? part.rotation) + ov.rotation + turn.rotation;
+  const skewX = ov.skewX + turn.skewX;
+  const skewY = ov.skewY + turn.skewY;
+  const origin = {
+    x: baseX + ov.dx + turn.dx + pivotLocalX,
+    y: baseY + ov.dy + turn.dy + pivotLocalY,
+  };
+  const corners = [
+    { x: alphaRect.x, y: alphaRect.y },
+    { x: alphaRect.x + alphaRect.width, y: alphaRect.y },
+    { x: alphaRect.x, y: alphaRect.y + alphaRect.height },
+    { x: alphaRect.x + alphaRect.width, y: alphaRect.y + alphaRect.height },
+  ].map((point) =>
+    transformRecorderLocalPoint(point, { x: pivotLocalX, y: pivotLocalY }, origin, {
+      rotation,
+      scaleX,
+      scaleY,
+      skewX,
+      skewY,
+    }),
+  );
+  const left = Math.min(...corners.map((point) => point.x));
+  const top = Math.min(...corners.map((point) => point.y));
+  const right = Math.max(...corners.map((point) => point.x));
+  const bottom = Math.max(...corners.map((point) => point.y));
+  return { left, top, right, bottom };
+}
+
+function transformRecorderLocalPoint(
+  point: { x: number; y: number },
+  pivot: { x: number; y: number },
+  origin: { x: number; y: number },
+  transform: { rotation: number; scaleX: number; scaleY: number; skewX: number; skewY: number },
+): { x: number; y: number } {
+  const scaled = {
+    x: (point.x - pivot.x) * transform.scaleX,
+    y: (point.y - pivot.y) * transform.scaleY,
+  };
+  const skewed = {
+    x: scaled.x + Math.tan((transform.skewX * Math.PI) / 180) * scaled.y,
+    y: Math.tan((transform.skewY * Math.PI) / 180) * scaled.x + scaled.y,
+  };
+  const radians = (transform.rotation * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  return {
+    x: origin.x + skewed.x * cos - skewed.y * sin,
+    y: origin.y + skewed.x * sin + skewed.y * cos,
+  };
 }
 
 function recordedTargetKey(part: RecordedPartOverride) {

@@ -5,7 +5,9 @@ import {
   buildMotionConstraintContext,
   childAnchorForVariant,
   effectiveReachForSlot,
+  motionDeltaMovesJoint,
   parentSlotIdForBone,
+  resolveFkJointDelta,
   resolveMotionDelta,
 } from "../motion-constraints";
 
@@ -152,6 +154,114 @@ describe("motion-constraints boundary", () => {
       "slot:right-hand": "fist",
     });
     expect(source).toBe("variantRotationLimits");
+  });
+
+  it("locks FK child translation when an ancestor bone is already animated", () => {
+    const ctx = buildMotionConstraintContext({
+      reaches: [],
+      bones: [
+        { id: "bone:body", role: "body", name: "Body", x: 0, y: 0, rotation: 0, depth: 0 },
+        {
+          id: "bone:arm",
+          role: "arm",
+          name: "Arm",
+          parentId: "bone:body",
+          x: 10,
+          y: 20,
+          rotation: 0,
+          depth: 0,
+        },
+        {
+          id: "bone:hand",
+          role: "hand",
+          name: "Hand",
+          parentId: "bone:arm",
+          x: 5,
+          y: 40,
+          rotation: 0,
+          depth: 0,
+        },
+      ],
+    });
+
+    const locked = resolveFkJointDelta({
+      ctx,
+      boneId: "bone:hand",
+      slotId: "slot:hand",
+      role: "hand",
+      dx: 18,
+      dy: -4,
+      animatedBoneIds: new Set(["bone:body"]),
+    });
+    expect(locked).toMatchObject({ dx: 0, dy: 0, clamped: true, ancestorBoneId: "bone:body" });
+
+    const allowed = resolveFkJointDelta({
+      ctx,
+      boneId: "bone:hand",
+      slotId: "slot:hand",
+      role: "hand",
+      dx: 18,
+      dy: -4,
+      animatedBoneIds: new Set(["bone:body"]),
+      unclampedLayers: new Set(["bone:hand"]),
+    });
+    expect(allowed).toMatchObject({ dx: 18, dy: -4, clamped: false });
+  });
+
+  it("does not FK-lock contained face feature drift", () => {
+    const ctx = buildMotionConstraintContext({
+      reaches: [],
+      bones: [
+        { id: "bone:head", role: "head", name: "Head", x: 0, y: 0, rotation: 0, depth: 0 },
+        {
+          id: "bone:eye",
+          role: "eye",
+          name: "Eye",
+          parentId: "bone:head",
+          x: 10,
+          y: 20,
+          rotation: 0,
+          depth: 0,
+        },
+        {
+          id: "bone:iris",
+          role: "iris",
+          name: "Iris",
+          parentId: "bone:eye",
+          x: 4,
+          y: 6,
+          rotation: 0,
+          depth: 0,
+        },
+      ],
+    });
+
+    const resolved = resolveFkJointDelta({
+      ctx,
+      boneId: "bone:iris",
+      slotId: "slot:iris",
+      role: "iris",
+      dx: 5,
+      dy: 2,
+      animatedBoneIds: new Set(["bone:head"]),
+    });
+
+    expect(resolved).toMatchObject({ dx: 5, dy: 2, clamped: false });
+  });
+
+  it("detects joint-moving transform deltas", () => {
+    expect(
+      motionDeltaMovesJoint({
+        dx: 0,
+        dy: 0,
+        rotation: 0,
+        scale: 1,
+        scaleX: 1,
+        scaleY: 1,
+      }),
+    ).toBe(false);
+    expect(motionDeltaMovesJoint({ dx: 0, dy: 0, rotation: 12 })).toBe(true);
+    expect(motionDeltaMovesJoint({ dx: 0, dy: 0, rotation: 0, scaleX: 1.1 })).toBe(true);
   });
 
   it("resolves child anchors per parent variant with base fallback", () => {

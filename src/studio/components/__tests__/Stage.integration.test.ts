@@ -92,7 +92,7 @@ describe("Stage HyperFrames Studio integration", () => {
     const previewSource = readFileSync(previewPath, "utf8");
     const pluginSource = readFileSync(renderPluginPath, "utf8");
 
-    expect(source).toContain("resolvePreviewHtml(project)");
+    expect(source).toContain("resolvePreviewHtml(current)");
     expect(source).toContain("HyperFrames preview failed");
     expect(previewSource).toContain("buildHyperframesProjectFiles(project)");
     expect(previewSource).toContain('fetch("/api/hyperframes/preview-bundle"');

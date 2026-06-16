@@ -7,8 +7,27 @@ export interface CharacterThumbnailBounds {
   height: number;
 }
 
+export interface CharacterThumbnailFrame {
+  part: CharacterPart;
+  x: number;
+  y: number;
+  rotation: number;
+  scaleX: number;
+  scaleY: number;
+}
+
 export function thumbnailBoundsForParts(
   parts: CharacterPart[],
+  character: CharacterPreset,
+): CharacterThumbnailBounds {
+  return thumbnailBoundsForFrames(
+    parts.map((part) => frameForPart(part)),
+    character,
+  );
+}
+
+export function thumbnailBoundsForFrames(
+  frames: CharacterThumbnailFrame[],
   character: CharacterPreset,
 ): CharacterThumbnailBounds {
   let minX = Number.POSITIVE_INFINITY;
@@ -16,9 +35,10 @@ export function thumbnailBoundsForParts(
   let maxX = Number.NEGATIVE_INFINITY;
   let maxY = Number.NEGATIVE_INFINITY;
 
-  for (const part of parts) {
+  for (const frame of frames) {
+    const { part } = frame;
     if (part.visible === false || part.width <= 0 || part.height <= 0) continue;
-    const bounds = rotatedBoundsForPart(part);
+    const bounds = transformedBoundsForFrame(frame);
     minX = Math.min(minX, bounds.x);
     minY = Math.min(minY, bounds.y);
     maxX = Math.max(maxX, bounds.x + bounds.width);
@@ -47,13 +67,37 @@ export function thumbnailBoundsForParts(
   };
 }
 
-function rotatedBoundsForPart(part: CharacterPart): CharacterThumbnailBounds {
-  const rect = visibleRectForPart(part);
-  const rotation = Number.isFinite(part.rotation) ? part.rotation : 0;
-  if (Math.abs(rotation % 360) < 0.001) return rect;
+export function frameForPart(part: CharacterPart): CharacterThumbnailFrame {
+  return {
+    part,
+    x: part.x,
+    y: part.y,
+    rotation: part.rotation,
+    scaleX: 1,
+    scaleY: 1,
+  };
+}
 
-  const originX = part.x + part.anchorX * part.width;
-  const originY = part.y + part.anchorY * part.height;
+function transformedBoundsForFrame(frame: CharacterThumbnailFrame): CharacterThumbnailBounds {
+  const { part } = frame;
+  const rect = visibleLocalRectForPart(part);
+  const rotation = Number.isFinite(frame.rotation) ? frame.rotation : 0;
+  const scaleX = finiteNonZero(frame.scaleX, 1);
+  const scaleY = finiteNonZero(frame.scaleY, 1);
+  if (
+    Math.abs(rotation % 360) < 0.001 &&
+    Math.abs(scaleX - 1) < 0.001 &&
+    Math.abs(scaleY - 1) < 0.001
+  ) {
+    return { x: frame.x + rect.x, y: frame.y + rect.y, width: rect.width, height: rect.height };
+  }
+
+  const originX = frame.x + part.anchorX * part.width;
+  const originY = frame.y + part.anchorY * part.height;
+  const pivotLocal = {
+    x: part.anchorX * part.width,
+    y: part.anchorY * part.height,
+  };
   const radians = (rotation * Math.PI) / 180;
   const sin = Math.sin(radians);
   const cos = Math.cos(radians);
@@ -63,8 +107,8 @@ function rotatedBoundsForPart(part: CharacterPart): CharacterThumbnailBounds {
     [rect.x + rect.width, rect.y + rect.height],
     [rect.x, rect.y + rect.height],
   ].map(([x, y]) => {
-    const dx = x - originX;
-    const dy = y - originY;
+    const dx = (x - pivotLocal.x) * scaleX;
+    const dy = (y - pivotLocal.y) * scaleY;
     return {
       x: originX + dx * cos - dy * sin,
       y: originY + dx * sin + dy * cos,
@@ -80,7 +124,7 @@ function rotatedBoundsForPart(part: CharacterPart): CharacterThumbnailBounds {
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
-function visibleRectForPart(part: CharacterPart): CharacterThumbnailBounds {
+function visibleLocalRectForPart(part: CharacterPart): CharacterThumbnailBounds {
   const alpha = part.alphaBounds;
   if (
     !alpha ||
@@ -89,16 +133,20 @@ function visibleRectForPart(part: CharacterPart): CharacterThumbnailBounds {
     alpha.width <= 0 ||
     alpha.height <= 0
   ) {
-    return { x: part.x, y: part.y, width: part.width, height: part.height };
+    return { x: 0, y: 0, width: part.width, height: part.height };
   }
 
   const containScale = Math.min(part.width / alpha.sourceWidth, part.height / alpha.sourceHeight);
   const renderedWidth = alpha.sourceWidth * containScale;
   const renderedHeight = alpha.sourceHeight * containScale;
   return {
-    x: part.x + (part.width - renderedWidth) / 2 + alpha.x * containScale,
-    y: part.y + (part.height - renderedHeight) / 2 + alpha.y * containScale,
+    x: (part.width - renderedWidth) / 2 + alpha.x * containScale,
+    y: (part.height - renderedHeight) / 2 + alpha.y * containScale,
     width: alpha.width * containScale,
     height: alpha.height * containScale,
   };
+}
+
+function finiteNonZero(value: number, fallback: number) {
+  return Number.isFinite(value) && Math.abs(value) > 0.0001 ? value : fallback;
 }

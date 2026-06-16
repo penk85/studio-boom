@@ -9,6 +9,7 @@ import type {
   CharacterRig,
   CharacterSlotBinding,
   CharacterSlotRelation,
+  CharacterSocketAnchor,
   CharacterSlotSocket,
   ID,
   PartRole,
@@ -16,6 +17,7 @@ import type {
 import {
   anchorPartForVariant,
   getPartSlotId,
+  inferPartSide,
   listCharacterSlots,
   partMatchesVariant,
   partsAvailableForAngle,
@@ -54,6 +56,91 @@ export interface BoneWorldTransform {
 type SlotLike = ReturnType<typeof listCharacterSlots>[number];
 
 const ROOT_BONE_ID = "bone:root";
+
+type SocketAnchorInput = Partial<CharacterSocketAnchor> | undefined;
+
+function socketPairKey(parentSlotId: ID, childSlotId: ID): string {
+  return `${parentSlotId}::${childSlotId}`;
+}
+
+function normalizeSocketAnchor(
+  anchor: SocketAnchorInput,
+  fallback: CharacterSocketAnchor = { x: 0, y: 0 },
+): CharacterSocketAnchor {
+  const rotation =
+    anchor?.rotation !== undefined && Number.isFinite(anchor.rotation)
+      ? { rotation: Math.round(anchor.rotation * 10) / 10 }
+      : fallback.rotation !== undefined && Number.isFinite(fallback.rotation)
+        ? { rotation: Math.round(fallback.rotation * 10) / 10 }
+        : {};
+  return {
+    x: Math.round(finiteNumber(anchor?.x, fallback.x)),
+    y: Math.round(finiteNumber(anchor?.y, fallback.y)),
+    ...rotation,
+  };
+}
+
+function normalizeVariantAnchors(
+  anchors: CharacterSlotSocket["variantAnchors"] | undefined,
+): CharacterSlotSocket["variantAnchors"] {
+  const out: CharacterSlotSocket["variantAnchors"] = {};
+  for (const [key, anchor] of Object.entries(anchors ?? {})) {
+    const trimmed = key.trim();
+    if (!trimmed) continue;
+    if (!Number.isFinite(anchor?.x) || !Number.isFinite(anchor?.y)) continue;
+    out[trimmed] = normalizeSocketAnchor(anchor);
+  }
+  return out;
+}
+
+function socketLabelForSlots(parent: SlotLike | undefined, child: SlotLike): string {
+  const childSide = child.parts.find((part) => part.side === "left" || part.side === "right")?.side;
+  if (parent?.role === "body" && (child.role === "arm" || child.role === "upperArm"))
+    return childSide === "left"
+      ? "Left shoulder"
+      : childSide === "right"
+        ? "Right shoulder"
+        : "Shoulder";
+  if (parent?.role === "body" && (child.role === "leg" || child.role === "upperLeg"))
+    return childSide === "left" ? "Left hip" : childSide === "right" ? "Right hip" : "Hip";
+  if ((parent?.role === "arm" || parent?.role === "upperArm") && child.role === "lowerArm")
+    return "Elbow";
+  if (
+    (parent?.role === "arm" || parent?.role === "lowerArm" || parent?.role === "upperArm") &&
+    child.role === "hand"
+  )
+    return "Wrist";
+  if ((parent?.role === "leg" || parent?.role === "upperLeg") && child.role === "lowerLeg")
+    return "Knee";
+  if (
+    (parent?.role === "leg" || parent?.role === "lowerLeg" || parent?.role === "upperLeg") &&
+    child.role === "foot"
+  )
+    return "Ankle";
+  if (
+    parent?.role === "head" &&
+    ["eye", "iris", "eyebrow", "nose", "mouth", "hair"].includes(child.role)
+  )
+    return `${child.name ?? roleLabel(child.role)} socket`;
+  return `${child.name ?? roleLabel(child.role)} socket`;
+}
+
+function socketForPair(
+  sockets: CharacterSlotSocket[] | undefined,
+  parentSlotId: ID,
+  childSlotId: ID,
+): CharacterSlotSocket | undefined {
+  return (sockets ?? []).find(
+    (entry) => entry.slotId === parentSlotId && entry.childSlotId === childSlotId,
+  );
+}
+
+function socketForChild(
+  sockets: CharacterSlotSocket[] | undefined,
+  childSlotId: ID,
+): CharacterSlotSocket | undefined {
+  return (sockets ?? []).find((entry) => entry.childSlotId === childSlotId);
+}
 
 export function normalizeCharacterRig(character: CharacterPreset): CharacterRig {
   const inferred = buildDefaultRig(character);
@@ -121,8 +208,9 @@ export function buildDefaultRig(
  * kept for any slot the user never configured.
  */
 export function rebuildRigPreservingConstraints(character: CharacterPreset): CharacterRig {
-  const rebuilt = buildDefaultRig(character);
   const prev = character.rig;
+  const prevAngle = prev && isCharacterAngle(prev.activeAngle) ? prev.activeAngle : undefined;
+  const rebuilt = buildDefaultRig(character, prevAngle);
   if (!prev) return rebuilt;
 
   // Per-angle authored records — with a fallback to the top-level mirror for legacy saves that
@@ -183,14 +271,44 @@ function buildDefaultAngleRig(
   character: CharacterPreset,
   angle: CharacterAngle,
 ): CharacterAngleRig {
-  const slots = listCharacterSlots(partsAvailableForAngle(character.parts, angle));
+  const slots = listCharacterSlots(character, { angle, includeEmpty: false });
   const reps = new Map(slots.map((slot) => [slot.id, representativePart(slot)] as const));
   const slotIdByRoleSide = new Map<string, string>();
   const slotIdByPartId = new Map<string, string>();
+  const sideBySlotId = new Map<string, CharacterPart["side"] | undefined>();
   for (const slot of slots) {
     const part = reps.get(slot.id);
-    slotIdByRoleSide.set(roleSideKey(slot.role, part?.side), slot.id);
+    const side = part ? inferSideForSlot(slot, part) : undefined;
+    sideBySlotId.set(slot.id, side);
+    slotIdByRoleSide.set(roleSideKey(slot.role, side), slot.id);
+    if (!slotIdByRoleSide.has(roleSideKey(slot.role))) {
+      slotIdByRoleSide.set(roleSideKey(slot.role), slot.id);
+    }
     for (const slotPart of slot.parts) slotIdByPartId.set(slotPart.id, slot.id);
+  }
+  const slotIdSet = new Set(slots.map((slot) => slot.id));
+  const slotById = new Map(slots.map((slot) => [slot.id, slot]));
+  const sourceAngleRig =
+    character.rig?.angles?.[angle] ??
+    (angle === character.rig?.activeAngle && character.rig
+      ? rigViewToAngleRig(character.rig, angle)
+      : undefined);
+  const storedSockets = normalizeSockets(sourceAngleRig?.sockets ?? [], slotIdSet);
+  const authoredParentByChild = new Map<string, string>();
+  for (const relation of sourceAngleRig?.slotRelations ?? []) {
+    const parentSlotId = parentSlotIdForRelationRef(
+      relation,
+      slotIdByRoleSide,
+      sourceAngleRig?.slotBindings,
+    );
+    if (parentSlotId && parentSlotId !== relation.childSlotId && slotIdSet.has(parentSlotId)) {
+      authoredParentByChild.set(relation.childSlotId, parentSlotId);
+    }
+  }
+  for (const socket of storedSockets) {
+    if (!authoredParentByChild.has(socket.childSlotId)) {
+      authoredParentByChild.set(socket.childSlotId, socket.slotId);
+    }
   }
 
   const root: CharacterBone = {
@@ -205,29 +323,62 @@ function buildDefaultAngleRig(
   };
   const boneBySlot = new Map<string, CharacterBone>();
   const parentSlotIdBySlot = new Map<string, string>();
+  const sockets: CharacterSlotSocket[] = [];
   for (const slot of slots) {
     const part = reps.get(slot.id);
     if (!part) continue;
-    const inferredParentSlotId = parentSlotIdFor(slot, part, slotIdByRoleSide, slotIdByPartId);
-    const parentSlotId = inferredParentSlotId === slot.id ? undefined : inferredParentSlotId;
+    const side = sideBySlotId.get(slot.id);
+    const inferredParentSlotId = parentSlotIdFor(
+      slot,
+      part,
+      slotIdByRoleSide,
+      slotIdByPartId,
+      side,
+    );
+    const authoredParentSlotId = authoredParentByChild.get(slot.id);
+    const parentSlotId =
+      authoredParentSlotId && authoredParentSlotId !== slot.id
+        ? authoredParentSlotId
+        : inferredParentSlotId === slot.id
+          ? undefined
+          : inferredParentSlotId;
     if (parentSlotId) parentSlotIdBySlot.set(slot.id, parentSlotId);
     const parentBoneId = parentSlotId ? `bone:${parentSlotId}` : ROOT_BONE_ID;
     const pivot = pivotForPart(part);
+    const parentSlot = parentSlotId ? slotById.get(parentSlotId) : undefined;
     const parentPart = parentSlotId ? reps.get(parentSlotId) : undefined;
     const parentPivot = parentPart ? pivotForPart(parentPart) : { x: 0, y: 0 };
-    const x = Math.round(pivot.x - parentPivot.x);
-    const y = Math.round(pivot.y - parentPivot.y);
+    const existingSocket = parentSlotId
+      ? socketForPair(storedSockets, parentSlotId, slot.id)
+      : undefined;
+    const socketAnchor = parentSlotId
+      ? normalizeSocketAnchor(existingSocket, { x: pivot.x, y: pivot.y })
+      : { x: Math.round(pivot.x), y: Math.round(pivot.y) };
+    if (parentSlotId) {
+      sockets.push({
+        id: existingSocket?.id || `socket:${parentSlotId}:${slot.id}`,
+        slotId: parentSlotId,
+        childSlotId: slot.id,
+        name: existingSocket?.name ?? socketLabelForSlots(parentSlot, slot),
+        x: socketAnchor.x,
+        y: socketAnchor.y,
+        ...(socketAnchor.rotation !== undefined ? { rotation: socketAnchor.rotation } : {}),
+        variantAnchors: normalizeVariantAnchors(existingSocket?.variantAnchors),
+      });
+    }
+    const x = parentSlotId ? Math.round(socketAnchor.x - parentPivot.x) : Math.round(pivot.x);
+    const y = parentSlotId ? Math.round(socketAnchor.y - parentPivot.y) : Math.round(pivot.y);
     const length = Math.round(Math.hypot(part.width, part.height) * 0.5);
     boneBySlot.set(slot.id, {
       id: `bone:${slot.id}`,
       semanticBoneId: `bone:${slot.id}`,
       name: slot.name ?? roleLabel(slot.role),
       role: slot.role,
-      side: part.side,
+      side,
       parentId: parentBoneId,
       x,
       y,
-      rotation: 0,
+      rotation: parentSlotId ? (socketAnchor.rotation ?? 0) : 0,
       length,
       depth: part.depth,
     });
@@ -259,23 +410,26 @@ function buildDefaultAngleRig(
         Math.min(...a.parts.map((p) => p.zIndex)) - Math.min(...b.parts.map((p) => p.zIndex)),
     )
     .map((slot) => slot.id);
-  const slotRelations = inferSlotRelations(slots, slotIdByRoleSide, slotIdByPartId);
-  const hostConstraints = inferHostConstraints(slots, slotIdByRoleSide);
-
-  // Authored joints for THIS angle only (the single source of truth for socket anchors —
-  // a front-view wrist never applies to the side-view skeleton). Builds read them from the
-  // saved rig so anchors resolve in every normalize/rebuild path; filtered to surviving slots.
-  const slotIdSet = new Set(slots.map((slot) => slot.id));
-  const authoredSockets = (
-    character.rig?.angles?.[angle]?.sockets ??
-    (angle === character.rig?.activeAngle ? character.rig?.sockets : undefined) ??
-    []
-  ).filter((socket) => slotIdSet.has(socket.slotId) && slotIdSet.has(socket.childSlotId));
+  const inferredSlotRelations = inferSlotRelations(
+    slots,
+    slotIdByRoleSide,
+    slotIdByPartId,
+    sideBySlotId,
+  );
+  const boneIds = new Set([
+    ROOT_BONE_ID,
+    ...Array.from(boneBySlot.values()).map((bone) => bone.id),
+  ]);
+  const slotRelations = normalizeSlotRelations(
+    mergeSlotRelations(inferredSlotRelations, sourceAngleRig?.slotRelations),
+    slotIdSet,
+    boneIds,
+  );
+  const hostConstraints = inferHostConstraints(slots, slotIdByRoleSide, sideBySlotId);
 
   // Per-parent-variant child anchors: when the parent slot swaps to variant K (bent arm), the
   // child bone (hand) re-anchors to K's authored joint or to child art paired with K. Derived
   // data — recomputed on every build, never carried forward from saved rigs.
-  const slotById = new Map(slots.map((slot) => [slot.id, slot]));
   const relationsByChild = new Map<string, CharacterSlotRelation[]>();
   for (const relation of slotRelations) {
     relationsByChild.set(relation.childSlotId, [
@@ -294,9 +448,7 @@ function buildDefaultAngleRig(
       childBone: bone,
       parentSlot,
       parentPivot: pivotForPart(parentPart),
-      socket: authoredSockets.find(
-        (candidate) => candidate.slotId === parentSlot.id && candidate.childSlotId === slot.id,
-      ),
+      socket: socketForPair(sockets, parentSlot.id, slot.id),
       relations: relationsByChild.get(slot.id) ?? [],
     });
     if (anchors) bone.parentVariantAnchors = anchors;
@@ -310,7 +462,7 @@ function buildDefaultAngleRig(
     slotRelations,
     hostConstraints,
     reaches: [],
-    sockets: authoredSockets,
+    sockets,
   };
 }
 
@@ -415,18 +567,22 @@ export function slotRestPivot(
   angle?: CharacterAngle,
 ): { x: number; y: number } | undefined {
   const resolvedAngle = angle ?? normalizeCharacterRig(character).activeAngle;
-  const slots = listCharacterSlots(partsAvailableForAngle(character.parts, resolvedAngle));
+  const slots = listCharacterSlots(character, { angle: resolvedAngle, includeEmpty: false });
   const slot = slots.find((candidate) => candidate.id === slotId);
   const part = slot ? representativePart(slot) : undefined;
   return part ? pivotForPart(part) : undefined;
 }
 
 export function availableCharacterAngles(character: CharacterPreset): CharacterAngle[] {
+  const explicitAngles = (character.angles ?? []).filter(isCharacterAngle);
+  if (explicitAngles.length > 0) {
+    return CHARACTER_ANGLES.filter((angle) => explicitAngles.includes(angle));
+  }
+
   const seen = new Set<CharacterAngle>();
   const add = (value: unknown) => {
     if (isCharacterAngle(value)) seen.add(value);
   };
-  for (const angle of character.angles ?? []) add(angle);
   for (const angle of Object.keys(character.rig?.angles ?? {})) add(angle);
   add(character.rig?.activeAngle);
   for (const part of character.parts) {
@@ -460,13 +616,37 @@ function normalizeAngleRig(
   if (!source) return inferred;
   const bonesById = new Map(inferred.bones.map((bone) => [bone.id, bone]));
   for (const bone of source.bones ?? []) {
+    const inferredBone = bonesById.get(bone.id);
+    if (!inferredBone) {
+      bonesById.set(bone.id, {
+        ...bone,
+        x: finiteNumber(bone.x, 0),
+        y: finiteNumber(bone.y, 0),
+        rotation: finiteNumber(bone.rotation, 0),
+        parentVariantAnchors: undefined,
+      });
+      continue;
+    }
+    const socketDriven = !!inferredBone.parentId && inferredBone.parentId !== ROOT_BONE_ID;
     bonesById.set(bone.id, {
-      ...bone,
-      x: finiteNumber(bone.x, 0),
-      y: finiteNumber(bone.y, 0),
-      rotation: finiteNumber(bone.rotation, 0),
+      ...inferredBone,
+      name: bone.name || inferredBone.name,
+      semanticBoneId: bone.semanticBoneId || inferredBone.semanticBoneId,
+      role: bone.role ?? inferredBone.role,
+      side: bone.side ?? inferredBone.side,
+      // Attached bones resolve their rest x/y from sockets. Top-level bones may still carry
+      // manually authored rig-only offsets until root sockets/controls exist.
+      x: socketDriven ? inferredBone.x : finiteNumber(bone.x, inferredBone.x),
+      y: socketDriven ? inferredBone.y : finiteNumber(bone.y, inferredBone.y),
+      parentId: inferredBone.parentId,
+      rotation: finiteNumber(bone.rotation, inferredBone.rotation),
+      length:
+        bone.length !== undefined
+          ? positiveNumber(bone.length, inferredBone.length ?? 0)
+          : inferredBone.length,
+      depth: finiteNumber(bone.depth, inferredBone.depth ?? 0),
       // Derived from the current parts/variant sockets; a saved rig may carry stale anchors.
-      parentVariantAnchors: bonesById.get(bone.id)?.parentVariantAnchors,
+      parentVariantAnchors: inferredBone.parentVariantAnchors,
     });
   }
   if (!bonesById.has(ROOT_BONE_ID)) bonesById.set(ROOT_BONE_ID, inferred.bones[0]);
@@ -498,7 +678,7 @@ function normalizeAngleRig(
       Array.from(bindingSlots),
     ),
     slotRelations: normalizeSlotRelations(
-      source.slotRelations ?? inferred.slotRelations,
+      mergeSlotRelations(inferred.slotRelations, source.slotRelations),
       bindingSlots,
       boneIds,
     ),
@@ -508,7 +688,7 @@ function normalizeAngleRig(
       boneIds,
     ),
     reaches: normalizeReaches(source.reaches ?? inferred.reaches, bindingSlots),
-    sockets: normalizeSockets(source.sockets ?? inferred.sockets ?? [], bindingSlots),
+    sockets: normalizeSockets(inferred.sockets ?? [], bindingSlots),
   };
 }
 
@@ -908,6 +1088,52 @@ export function moveSlotBinding(
   }));
 }
 
+function slotIdForBone(angleRig: CharacterAngleRig, boneId: string): string | undefined {
+  return angleRig.slotBindings.find((binding) => binding.boneId === boneId)?.slotId;
+}
+
+function socketAnchorFromLocal(
+  local: { x: number; y: number },
+  parentWorld: BoneWorldTransform | undefined,
+): { x: number; y: number } {
+  if (!parentWorld) return { x: Math.round(local.x), y: Math.round(local.y) };
+  const rotated = rotatePoint(local, parentWorld.rotation);
+  return {
+    x: Math.round(parentWorld.x + rotated.x),
+    y: Math.round(parentWorld.y + rotated.y),
+  };
+}
+
+function localAnchorFromSocket(
+  anchor: CharacterSocketAnchor,
+  parentWorld: BoneWorldTransform | undefined,
+): { x: number; y: number } {
+  if (!parentWorld) return { x: anchor.x, y: anchor.y };
+  const rel = { x: anchor.x - parentWorld.x, y: anchor.y - parentWorld.y };
+  return rotatePoint(rel, -parentWorld.rotation);
+}
+
+function moveSocketBaseForBone(
+  angleRig: CharacterAngleRig,
+  boneId: string,
+  dx: number,
+  dy: number,
+): CharacterSlotSocket[] | undefined {
+  const slotId = slotIdForBone(angleRig, boneId);
+  if (!slotId) return angleRig.sockets;
+  const socket = socketForChild(angleRig.sockets, slotId);
+  if (!socket) return angleRig.sockets;
+  return (angleRig.sockets ?? []).map((entry) =>
+    entry === socket
+      ? {
+          ...entry,
+          x: Math.round(entry.x + dx),
+          y: Math.round(entry.y + dy),
+        }
+      : entry,
+  );
+}
+
 export function moveBone(
   rig: CharacterRig,
   boneId: string,
@@ -921,6 +1147,7 @@ export function moveBone(
       if (bone.id !== boneId) return bone;
       return { ...bone, x: bone.x + dx, y: bone.y + dy };
     }),
+    sockets: moveSocketBaseForBone(angleRig, boneId, dx, dy),
   }));
 }
 
@@ -986,9 +1213,49 @@ export function setBoneTransform(
   patch: Partial<Pick<CharacterBone, "x" | "y" | "rotation" | "depth">>,
   angle: CharacterAngle = rig.activeAngle,
 ): CharacterRig {
+  const angleRig = angleRigView(rig, angle);
+  const childSlotId = slotIdForBone(angleRig, boneId);
+  const existingSocket = childSlotId ? socketForChild(angleRig.sockets, childSlotId) : undefined;
+  const parentWorld = existingSocket
+    ? computeBoneWorldTransforms(rig, angle).get(
+        angleRig.slotBindings.find((binding) => binding.slotId === existingSocket.slotId)?.boneId ??
+          "",
+      )
+    : undefined;
+  const socketAnchor =
+    existingSocket &&
+    (patch.x !== undefined || patch.y !== undefined || patch.rotation !== undefined)
+      ? {
+          ...existingSocket,
+          ...(patch.x !== undefined || patch.y !== undefined
+            ? socketAnchorFromLocal(
+                {
+                  x: patch.x ?? angleRig.bones.find((bone) => bone.id === boneId)?.x ?? 0,
+                  y: patch.y ?? angleRig.bones.find((bone) => bone.id === boneId)?.y ?? 0,
+                },
+                parentWorld,
+              )
+            : {}),
+          ...(patch.rotation !== undefined ? { rotation: patch.rotation } : {}),
+        }
+      : undefined;
   return withUpdatedAngleRig(rig, angle, (angleRig) => ({
     ...angleRig,
     bones: angleRig.bones.map((bone) => (bone.id === boneId ? { ...bone, ...patch } : bone)),
+    sockets: socketAnchor
+      ? (angleRig.sockets ?? []).map((socket) =>
+          socket.id === existingSocket?.id
+            ? {
+                ...socket,
+                x: Math.round(socketAnchor.x),
+                y: Math.round(socketAnchor.y),
+                ...(socketAnchor.rotation !== undefined
+                  ? { rotation: Math.round(socketAnchor.rotation * 10) / 10 }
+                  : {}),
+              }
+            : socket,
+        )
+      : angleRig.sockets,
   }));
 }
 
@@ -1075,6 +1342,185 @@ export function setSlotHostConstraint(
   });
 }
 
+export function parentSlotIdForSlot(
+  rig: CharacterRig,
+  childSlotId: ID,
+  angle: CharacterAngle = rig.activeAngle,
+): ID | undefined {
+  const angleRig = angleRigView(rig, angle);
+  const socketParent = socketForChild(angleRig.sockets, childSlotId)?.slotId;
+  if (socketParent) return socketParent;
+  const slotByBone = new Map(
+    angleRig.slotBindings.map((binding) => [binding.boneId, binding.slotId]),
+  );
+  const boneBySlot = new Map(
+    angleRig.slotBindings.map((binding) => [binding.slotId, binding.boneId]),
+  );
+  for (const relation of angleRig.slotRelations ?? []) {
+    if (relation.childSlotId !== childSlotId) continue;
+    if (relation.parentRef.type === "slot" || relation.parentRef.type === "semanticSlot")
+      return relation.parentRef.id;
+    if (relation.parentRef.type === "bone") return slotByBone.get(relation.parentRef.id);
+    if (relation.parentRef.type === "role") {
+      const parentBone = angleRig.bones.find(
+        (bone) =>
+          bone.role === relation.parentRef.role &&
+          (!relation.parentRef.side || bone.side === relation.parentRef.side),
+      );
+      if (parentBone) return slotByBone.get(parentBone.id);
+    }
+  }
+  const boneId = boneBySlot.get(childSlotId);
+  const bone = boneId ? angleRig.bones.find((candidate) => candidate.id === boneId) : undefined;
+  return bone?.parentId ? slotByBone.get(bone.parentId) : undefined;
+}
+
+export function upsertSlotSocketBase(
+  rig: CharacterRig,
+  args: {
+    parentSlotId: ID;
+    childSlotId: ID;
+    x: number;
+    y: number;
+    rotation?: number;
+    name?: string;
+  },
+  angle: CharacterAngle = rig.activeAngle,
+): CharacterRig {
+  const parentWorld = computeBoneWorldTransforms(rig, angle).get(
+    angleRigView(rig, angle).slotBindings.find((binding) => binding.slotId === args.parentSlotId)
+      ?.boneId ?? "",
+  );
+  const local = localAnchorFromSocket(normalizeSocketAnchor(args), parentWorld);
+  return withUpdatedAngleRig(rig, angle, (angleRig) => {
+    const existing = socketForPair(angleRig.sockets, args.parentSlotId, args.childSlotId);
+    const anchor = normalizeSocketAnchor(args, existing);
+    const sockets = [
+      ...(angleRig.sockets ?? []).filter(
+        (entry) =>
+          !(entry.slotId === args.parentSlotId && entry.childSlotId === args.childSlotId) &&
+          entry.childSlotId !== args.childSlotId,
+      ),
+      {
+        id: existing?.id || `socket:${args.parentSlotId}:${args.childSlotId}`,
+        slotId: args.parentSlotId,
+        childSlotId: args.childSlotId,
+        name: args.name ?? existing?.name,
+        x: anchor.x,
+        y: anchor.y,
+        ...(anchor.rotation !== undefined ? { rotation: anchor.rotation } : {}),
+        variantAnchors: normalizeVariantAnchors(existing?.variantAnchors),
+      },
+    ];
+    const parentBoneId = angleRig.slotBindings.find(
+      (binding) => binding.slotId === args.parentSlotId,
+    )?.boneId;
+    const childBoneId = angleRig.slotBindings.find(
+      (binding) => binding.slotId === args.childSlotId,
+    )?.boneId;
+    return {
+      ...angleRig,
+      sockets,
+      bones: angleRig.bones.map((bone) =>
+        bone.id === childBoneId
+          ? {
+              ...bone,
+              parentId: parentBoneId ?? ROOT_BONE_ID,
+              x: Math.round(local.x),
+              y: Math.round(local.y),
+              rotation: anchor.rotation ?? bone.rotation,
+            }
+          : bone,
+      ),
+    };
+  });
+}
+
+export function setSlotParentSocket(
+  rig: CharacterRig,
+  args: {
+    childSlotId: ID;
+    parentSlotId?: ID;
+    x?: number;
+    y?: number;
+    rotation?: number;
+    name?: string;
+  },
+  angle: CharacterAngle = rig.activeAngle,
+): CharacterRig {
+  const angleRig = angleRigView(rig, angle);
+  const childBoneId = angleRig.slotBindings.find(
+    (binding) => binding.slotId === args.childSlotId,
+  )?.boneId;
+  const childBone = childBoneId
+    ? angleRig.bones.find((candidate) => candidate.id === childBoneId)
+    : undefined;
+  const childWorld = childBoneId
+    ? computeBoneWorldTransforms(rig, angle).get(childBoneId)
+    : undefined;
+  const existingSocket = socketForChild(angleRig.sockets, args.childSlotId);
+  const anchor = normalizeSocketAnchor(args, {
+    x: existingSocket?.x ?? childWorld?.x ?? childBone?.x ?? 0,
+    y: existingSocket?.y ?? childWorld?.y ?? childBone?.y ?? 0,
+    rotation: args.rotation ?? existingSocket?.rotation ?? childBone?.rotation,
+  });
+  const withoutChild = (relations: CharacterSlotRelation[]) =>
+    relations.filter((relation) => relation.childSlotId !== args.childSlotId);
+
+  if (!args.parentSlotId) {
+    return withUpdatedAngleRig(rig, angle, (current) => ({
+      ...current,
+      sockets: (current.sockets ?? []).filter((socket) => socket.childSlotId !== args.childSlotId),
+      slotRelations: withoutChild(current.slotRelations ?? []),
+      bones: current.bones.map((bone) =>
+        bone.id === childBoneId
+          ? {
+              ...bone,
+              parentId: ROOT_BONE_ID,
+              x: Math.round(childWorld?.x ?? bone.x),
+              y: Math.round(childWorld?.y ?? bone.y),
+            }
+          : bone,
+      ),
+    }));
+  }
+
+  const withSocket = upsertSlotSocketBase(
+    rig,
+    {
+      parentSlotId: args.parentSlotId,
+      childSlotId: args.childSlotId,
+      x: anchor.x,
+      y: anchor.y,
+      rotation: anchor.rotation,
+      name: args.name,
+    },
+    angle,
+  );
+  return withUpdatedAngleRig(withSocket, angle, (current) => {
+    const childBoneNow = current.bones.find((bone) => bone.id === childBoneId);
+    return {
+      ...current,
+      slotRelations: [
+        ...withoutChild(current.slotRelations ?? []),
+        {
+          id: `relation:${args.childSlotId}`,
+          childSlotId: args.childSlotId,
+          parentRef: { type: "slot", id: args.parentSlotId! },
+          relationType: relationTypeForSlot(
+            (childBoneNow?.role as PartRole | undefined) ?? "custom",
+          ),
+          transformMode: "inheritParent",
+          visibilityMode: "withParentSlot",
+          renderMode: "sibling",
+          clipMode: "none",
+          characterViewIds: [angle],
+        },
+      ],
+    };
+  });
+}
+
 /**
  * Author (or move) the joint anchoring `childSlotId` under the parent slot's `variantKey`, for
  * one angle. Canvas px. Omitted rotation preserves any previously authored rotation for that key.
@@ -1091,6 +1537,13 @@ export function upsertSlotSocketAnchor(
   },
   angle: CharacterAngle = rig.activeAngle,
 ): CharacterRig {
+  const angleRig = angleRigView(rig, angle);
+  const childBoneId = angleRig.slotBindings.find(
+    (binding) => binding.slotId === args.childSlotId,
+  )?.boneId;
+  const childWorld = childBoneId
+    ? computeBoneWorldTransforms(rig, angle).get(childBoneId)
+    : undefined;
   return withUpdatedAngleRig(rig, angle, (angleRig) => {
     const sockets = angleRig.sockets ?? [];
     const existing = sockets.find(
@@ -1111,6 +1564,9 @@ export function upsertSlotSocketAnchor(
           id: `socket:${args.parentSlotId}:${args.childSlotId}`,
           slotId: args.parentSlotId,
           childSlotId: args.childSlotId,
+          x: Math.round(childWorld?.x ?? args.x),
+          y: Math.round(childWorld?.y ?? args.y),
+          ...(childWorld?.rotation !== undefined ? { rotation: childWorld.rotation } : {}),
           variantAnchors: { [args.variantKey]: anchor },
         };
     return {
@@ -1126,7 +1582,7 @@ export function upsertSlotSocketAnchor(
   });
 }
 
-/** Remove the authored joint anchor for one parent variant; drops the joint when empty. */
+/** Remove the authored joint anchor for one parent variant; the base rest socket stays intact. */
 export function clearSlotSocketAnchor(
   rig: CharacterRig,
   args: { parentSlotId: ID; childSlotId: ID; variantKey: string },
@@ -1140,12 +1596,11 @@ export function clearSlotSocketAnchor(
     if (!existing || !(args.variantKey in existing.variantAnchors)) return angleRig;
     const variantAnchors = { ...existing.variantAnchors };
     delete variantAnchors[args.variantKey];
-    const others = sockets.filter((entry) => entry !== existing);
     return {
       ...angleRig,
-      sockets: Object.keys(variantAnchors).length
-        ? [...others, { ...existing, variantAnchors }]
-        : others,
+      sockets: sockets.map((entry) =>
+        entry === existing ? { ...existing, variantAnchors } : entry,
+      ),
     };
   });
 }
@@ -1251,11 +1706,14 @@ export function moveSlotParts(
   slotId: string,
   dx: number,
   dy: number,
+  angle?: CharacterAngle,
 ): CharacterPart[] {
-  const slotParts = character.parts.filter((part) => getPartSlotId(part) === slotId);
+  const scopedParts = angle ? partsAvailableForAngle(character.parts, angle) : character.parts;
+  const slotParts = scopedParts.filter((part) => getPartSlotId(part) === slotId);
   if (slotParts.length === 0) return character.parts;
+  const targetIds = new Set(slotParts.map((part) => part.id));
   return character.parts.map((part) => {
-    if (getPartSlotId(part) !== slotId) return part;
+    if (!targetIds.has(part.id)) return part;
     const pivot = pivotForPart(part);
     return {
       ...part,
@@ -1271,8 +1729,10 @@ export function movePartAndDescendants(
   partId: string,
   dx: number,
   dy: number,
+  angle?: CharacterAngle,
 ): CharacterPart[] {
-  const targetIds = descendantPartIds(parts, partId);
+  const scopedParts = angle ? partsAvailableForAngle(parts, angle) : parts;
+  const targetIds = descendantPartIds(scopedParts, partId);
   targetIds.add(partId);
   return parts.map((part) => {
     if (!targetIds.has(part.id)) return part;
@@ -1305,11 +1765,12 @@ function parentSlotIdFor(
   part: CharacterPart,
   slotIdByRoleSide: Map<string, string>,
   slotIdByPartId: Map<string, string>,
+  side?: CharacterPart["side"],
 ): string | undefined {
   if (part.parentId) {
     return slotIdByPartId.get(part.parentId);
   }
-  const sameSide = part.side === "left" || part.side === "right" ? part.side : undefined;
+  const sameSide = side === "left" || side === "right" ? side : undefined;
   switch (slot.role) {
     case "head":
       return slotIdByRoleSide.get(roleSideKey("body"));
@@ -1327,18 +1788,44 @@ function parentSlotIdFor(
     case "hair":
       return slotIdByRoleSide.get(roleSideKey("head")) ?? slotIdByRoleSide.get(roleSideKey("body"));
     case "arm":
+    case "upperArm":
       return slotIdByRoleSide.get(roleSideKey("body"));
+    case "lowerArm":
+      return (
+        slotIdByRoleSide.get(roleSideKey("upperArm", sameSide)) ??
+        slotIdByRoleSide.get(roleSideKey("upperArm")) ??
+        slotIdByRoleSide.get(roleSideKey("arm", sameSide)) ??
+        slotIdByRoleSide.get(roleSideKey("arm")) ??
+        slotIdByRoleSide.get(roleSideKey("body"))
+      );
     case "hand":
       return (
+        slotIdByRoleSide.get(roleSideKey("lowerArm", sameSide)) ??
+        slotIdByRoleSide.get(roleSideKey("lowerArm")) ??
         slotIdByRoleSide.get(roleSideKey("arm", sameSide)) ??
-        slotIdByRoleSide.get(roleSideKey("arm"))
+        slotIdByRoleSide.get(roleSideKey("arm")) ??
+        slotIdByRoleSide.get(roleSideKey("upperArm", sameSide)) ??
+        slotIdByRoleSide.get(roleSideKey("upperArm"))
       );
     case "leg":
+    case "upperLeg":
       return slotIdByRoleSide.get(roleSideKey("body"));
+    case "lowerLeg":
+      return (
+        slotIdByRoleSide.get(roleSideKey("upperLeg", sameSide)) ??
+        slotIdByRoleSide.get(roleSideKey("upperLeg")) ??
+        slotIdByRoleSide.get(roleSideKey("leg", sameSide)) ??
+        slotIdByRoleSide.get(roleSideKey("leg")) ??
+        slotIdByRoleSide.get(roleSideKey("body"))
+      );
     case "foot":
       return (
+        slotIdByRoleSide.get(roleSideKey("lowerLeg", sameSide)) ??
+        slotIdByRoleSide.get(roleSideKey("lowerLeg")) ??
         slotIdByRoleSide.get(roleSideKey("leg", sameSide)) ??
-        slotIdByRoleSide.get(roleSideKey("leg"))
+        slotIdByRoleSide.get(roleSideKey("leg")) ??
+        slotIdByRoleSide.get(roleSideKey("upperLeg", sameSide)) ??
+        slotIdByRoleSide.get(roleSideKey("upperLeg"))
       );
     case "accessory":
       return slotIdByRoleSide.get(roleSideKey("head")) ?? slotIdByRoleSide.get(roleSideKey("body"));
@@ -1347,16 +1834,32 @@ function parentSlotIdFor(
   }
 }
 
-function inferHostConstraints(slots: SlotLike[], slotIdByRoleSide: Map<string, string>) {
+function parentSlotIdForRelationRef(
+  relation: Pick<CharacterSlotRelation, "parentRef" | "childSlotId">,
+  slotIdByRoleSide: Map<string, string>,
+  bindings: CharacterSlotBinding[] | undefined,
+): string | undefined {
+  const ref = relation.parentRef;
+  if (!ref) return undefined;
+  if (ref.type === "slot" || ref.type === "semanticSlot") return ref.id;
+  if (ref.type === "role") return slotIdByRoleSide.get(roleSideKey(ref.role, ref.side));
+  if (ref.type === "bone") return bindings?.find((binding) => binding.boneId === ref.id)?.slotId;
+  return undefined;
+}
+
+function inferHostConstraints(
+  slots: SlotLike[],
+  slotIdByRoleSide: Map<string, string>,
+  sideBySlotId: Map<string, CharacterPart["side"] | undefined>,
+) {
   const headSlotId = slotIdByRoleSide.get(roleSideKey("head"));
   if (!headSlotId) return [];
   const constrainedRoles = new Set<PartRole>(["eye", "iris", "eyebrow", "nose", "mouth"]);
   return slots
     .filter((slot) => constrainedRoles.has(slot.role) && slot.id !== headSlotId)
     .map((slot): CharacterHostConstraint => {
-      const sameSide = slot.parts.find(
-        (part) => part.side === "left" || part.side === "right",
-      )?.side;
+      const side = sideBySlotId.get(slot.id);
+      const sameSide = side === "left" || side === "right" ? side : undefined;
       const hostSlotId =
         slot.role === "iris"
           ? (slotIdByRoleSide.get(roleSideKey("eye", sameSide)) ??
@@ -1378,11 +1881,18 @@ function inferSlotRelations(
   slots: SlotLike[],
   slotIdByRoleSide: Map<string, string>,
   slotIdByPartId: Map<string, string>,
+  sideBySlotId: Map<string, CharacterPart["side"] | undefined>,
 ): CharacterSlotRelation[] {
   return slots.flatMap((slot): CharacterSlotRelation[] => {
     const part = representativePart(slot);
     if (!part) return [];
-    const parentSlotId = parentSlotIdFor(slot, part, slotIdByRoleSide, slotIdByPartId);
+    const parentSlotId = parentSlotIdFor(
+      slot,
+      part,
+      slotIdByRoleSide,
+      slotIdByPartId,
+      sideBySlotId.get(slot.id),
+    );
     if (!parentSlotId || parentSlotId === slot.id) return [];
     const isIris = slot.role === "iris";
     return [
@@ -1435,8 +1945,9 @@ function normalizeDrawOrder(drawOrder: string[], slotIds: string[]): string[] {
 }
 
 /**
- * Keep one joint record per (parent slot, child slot) pair — latest wins — dropping records
- * whose owner or child slot no longer exists and records with no authored anchors left.
+ * Keep one socket record per (parent slot, child slot) pair — latest wins — dropping records
+ * whose owner or child slot no longer exists. Sockets are canonical even without variant
+ * overrides, because their base anchor is the rest joint.
  */
 function normalizeSockets(
   sockets: CharacterSlotSocket[],
@@ -1446,10 +1957,14 @@ function normalizeSockets(
   for (const entry of sockets) {
     if (!entry?.slotId || !entry.childSlotId) continue;
     if (!slotIds.has(entry.slotId) || !slotIds.has(entry.childSlotId)) continue;
-    if (!entry.variantAnchors || Object.keys(entry.variantAnchors).length === 0) continue;
+    const anchor = normalizeSocketAnchor(entry);
     out.set(`${entry.slotId}::${entry.childSlotId}`, {
       ...entry,
       id: entry.id || `socket:${entry.slotId}:${entry.childSlotId}`,
+      x: anchor.x,
+      y: anchor.y,
+      ...(anchor.rotation !== undefined ? { rotation: anchor.rotation } : {}),
+      variantAnchors: normalizeVariantAnchors(entry.variantAnchors),
     });
   }
   return Array.from(out.values());
@@ -1463,6 +1978,18 @@ function normalizeReaches(reaches: CharacterReach[], slotIds: Set<string>): Char
     out.set(entry.slotId, { ...entry, id: entry.id || `reach:${entry.slotId}` });
   }
   return Array.from(out.values());
+}
+
+function mergeSlotRelations(
+  inferred: CharacterSlotRelation[],
+  authored: CharacterSlotRelation[] | undefined,
+): CharacterSlotRelation[] {
+  if (!authored?.length) return inferred;
+  const authoredChildren = new Set(authored.map((relation) => relation.childSlotId));
+  return [
+    ...inferred.filter((relation) => !authoredChildren.has(relation.childSlotId)),
+    ...authored,
+  ];
 }
 
 function normalizeSlotRelations(
@@ -1585,6 +2112,17 @@ function rotatePoint(point: { x: number; y: number }, degrees: number): { x: num
 
 function roleSideKey(role: PartRole, side?: CharacterPart["side"]) {
   return `${role}:${side ?? "center"}`;
+}
+
+function inferSideForSlot(slot: SlotLike, part: CharacterPart): CharacterPart["side"] | undefined {
+  return (
+    inferPartSide(part) ??
+    inferPartSide({
+      ...part,
+      slotId: slot.id,
+      slotName: slot.name,
+    })
+  );
 }
 
 function finiteNumber(value: number | undefined, fallback: number) {
