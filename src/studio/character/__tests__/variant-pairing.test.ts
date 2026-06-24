@@ -15,12 +15,12 @@ import {
   isUnkeyedVariantPart,
   migrateLegacyVariantSockets,
   normalizeVariantKey,
-  removeVariantSocket,
+  removeVariantPin,
+  resetVariantPinToArtwork,
   renameVariantKeyEverywhere,
-  setVariantAnchorRotation,
+  setVariantPinRotation,
   slotVariantKeys,
-  upsertVariantSocket,
-  upsertVariantSocketAtPoint,
+  upsertVariantPinAtPoint,
   variantPreviewDeltas,
 } from "../variant-pairing";
 import { normalizeCharacterRig } from "../rig";
@@ -49,19 +49,25 @@ const bentArmSocketPackage = {
   },
 };
 
-/** Author the bent-arm wrist joint on the rig (the post-refactor authoring path). */
+/** Author the bent-arm wrist pin on the active parent artwork. */
 function withWristSocket(
   character: CharacterPreset,
   opts: { x?: number; y?: number; rotation?: number } = {},
 ): CharacterPreset {
-  return upsertVariantSocket(character, {
+  const placed = upsertVariantPinAtPoint(character, {
     parentSlotId: "slot:right-arm",
     variantKey: "bent",
     childSlotId: "slot:right-hand",
-    x: opts.x ?? 352,
-    y: opts.y ?? 248,
-    ...(opts.rotation !== undefined ? { rotation: opts.rotation } : {}),
+    anchorPoint: { x: opts.x ?? 352, y: opts.y ?? 248 },
   });
+  return opts.rotation === undefined
+    ? placed
+    : setVariantPinRotation(placed, {
+        parentSlotId: "slot:right-arm",
+        variantKey: "bent",
+        childSlotId: "slot:right-hand",
+        rotation: opts.rotation,
+      });
 }
 
 describe("variantKeySourceForPart", () => {
@@ -250,28 +256,26 @@ describe("variantPreviewDeltas", () => {
     const shift = variantPreviewDeltas(makeVariantArmCharacter(), {
       "slot:right-hand": "bent",
     });
-    // pivot(straight)(300,345) − pivot(bent)(370,230) = (−70, 115).
-    expect(shift.parts.get("hand-bent")).toEqual({ dx: -70, dy: 115, rotation: 0 });
+    // Runtime placement already aligns every variant registration to the slot bone.
+    expect(shift.parts.get("hand-bent")).toBeUndefined();
     // The representative and other slots keep their authored spots.
     expect(shift.parts.get("hand-straight")).toBeUndefined();
     expect(shift.parts.get("arm-straight")).toBeUndefined();
   });
 
   it("composes own-slot alignment with the parent's bone re-anchor", () => {
-    // Arm bent + hand bent: alignment (−70,115) + paired-art bone shift (70,−115) cancel —
-    // the bent hand displays exactly where it was drawn (on the bent wrist).
+    // Arm bent moves the hand bone to the bent-arm pin; the selected hand follows that bone.
     const shift = variantPreviewDeltas(makeVariantArmCharacter(), {
       "slot:right-arm": "bent",
       "slot:right-hand": "bent",
     });
-    expect(shift.parts.get("hand-bent")).toEqual({ dx: 0, dy: 0, rotation: 0 });
-    // With a pinned socket instead, the displayed bent hand's pivot lands ON the socket:
-    // anchor shift (52,−97) + alignment (−70,115) → pivot (370,230) + (−18,18) = (352,248).
+    expect(shift.parts.get("hand-bent")).toEqual({ dx: 70, dy: -115, rotation: 0 });
+    // With an authored pin, the displayed hand lands on that exact joint.
     const socketShift = variantPreviewDeltas(withWristSocket(makeVariantArmCharacter()), {
       "slot:right-arm": "bent",
       "slot:right-hand": "bent",
     });
-    expect(socketShift.parts.get("hand-bent")).toEqual({ dx: -18, dy: 18, rotation: 0 });
+    expect(socketShift.parts.get("hand-bent")).toEqual({ dx: 52, dy: -97, rotation: 0 });
   });
 
   it("never aligns face slots (eyes and mouths keep authored placement)", () => {
@@ -309,69 +313,68 @@ describe("variantPreviewDeltas", () => {
   });
 });
 
-describe("variant socket writes", () => {
-  it("authors a per-angle joint on the rig — no packages are created or touched", () => {
+describe("variant pin writes", () => {
+  it("authors the pin on the active parent variant without creating packages", () => {
     const character = withWristSocket(makeVariantArmCharacter());
-    // The bone owns the joint: nothing lands in variantPackages, no shell objects.
     expect(character.variantPackages).toBeUndefined();
-    const wristSocket = character.rig?.sockets?.find(
-      (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
-    );
-    expect(wristSocket).toMatchObject({
-      slotId: "slot:right-arm",
-      childSlotId: "slot:right-hand",
-      x: 300,
-      y: 345,
-      variantAnchors: { bent: { x: 352, y: 248 } },
+    const bentArm = character.parts.find((part) => part.id === "arm-bent");
+    expect(bentArm?.pins?.["wrist:right"]).toMatchObject({ x: 72, y: 88 });
+    expect(anchorSourceForChild(character, "slot:right-hand", "bent")).toBe("pin");
+    expect(anchorEntryForChild(character, "slot:right-hand", "bent")).toMatchObject({
+      x: 62,
+      y: 78,
+      source: "pin",
     });
-    expect(anchorSourceForChild(character, "slot:right-hand", "bent")).toBe("socket");
-    // Socket (352,248) − arm pivot (290,170) = anchor (62,78).
-    const rig = normalizeCharacterRig(character);
-    const hand = rig.bones.find((bone) => bone.id === "bone:slot:right-hand");
-    expect(hand?.parentVariantAnchors?.bent).toEqual({ x: 62, y: 78, source: "socket" });
   });
 
-  it("updates an existing joint in place (idempotent per parent/child pair)", () => {
+  it("updates an existing pin in place", () => {
     const character = withWristSocket(withWristSocket(makeVariantArmCharacter()), {
       x: 360,
       y: 240,
     });
-    const wristSocket = character.rig?.sockets?.find(
-      (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
-    );
-    expect(wristSocket?.variantAnchors.bent).toMatchObject({ x: 360, y: 240 });
+    expect(
+      character.parts.find((part) => part.id === "arm-bent")?.pins?.["wrist:right"],
+    ).toMatchObject({ x: 80, y: 80 });
   });
 
-  it("places a socket from a desired canvas anchor point", () => {
-    const character = upsertVariantSocketAtPoint(makeVariantArmCharacter(), {
+  it("places a pin from a desired canvas anchor point", () => {
+    const character = upsertVariantPinAtPoint(makeVariantArmCharacter(), {
       parentSlotId: "slot:right-arm",
       variantKey: "bent",
       childSlotId: "slot:right-hand",
       // Want the hand bone to land at canvas (370, 230) — the bent wrist.
       anchorPoint: { x: 370, y: 230 },
     });
-    const rig = normalizeCharacterRig(character);
-    const hand = rig.bones.find((bone) => bone.id === "bone:slot:right-hand");
-    // Arm bone world position = arm pivot (290, 170); anchor local = (80, 60).
-    expect(hand?.parentVariantAnchors?.bent).toMatchObject({ x: 80, y: 60, source: "socket" });
+    expect(anchorEntryForChild(character, "slot:right-hand", "bent")).toMatchObject({
+      x: 80,
+      y: 60,
+      source: "pin",
+    });
   });
 
-  it("removes a socket and prunes empty shell packages", () => {
-    const withSocket = upsertVariantSocket(makeVariantArmCharacter(), {
-      parentSlotId: "slot:right-arm",
-      variantKey: "bent",
-      childSlotId: "slot:right-hand",
-      x: 352,
-      y: 248,
-    });
-    const cleared = removeVariantSocket(withSocket, {
+  it("removes a pin and leaves the required contract visibly unresolved", () => {
+    const withSocket = withWristSocket(makeVariantArmCharacter());
+    const cleared = removeVariantPin(withSocket, {
       parentSlotId: "slot:right-arm",
       variantKey: "bent",
       childSlotId: "slot:right-hand",
     });
     expect(cleared.variantPackages).toBeUndefined();
-    // Anchor falls back to the paired bent-hand art.
-    expect(anchorSourceForChild(cleared, "slot:right-hand", "bent")).toBe("pairedArt");
+    expect(anchorSourceForChild(cleared, "slot:right-hand", "bent")).toBe("fallback");
+  });
+
+  it("resets a bad persisted pin from the child artwork pivot", () => {
+    const placed = withWristSocket(makeVariantArmCharacter(), { x: 500, y: 500 });
+    const repaired = resetVariantPinToArtwork(placed, {
+      parentSlotId: "slot:right-arm",
+      variantKey: "bent",
+      childSlotId: "slot:right-hand",
+    });
+    expect(anchorEntryForChild(repaired, "slot:right-hand", "bent")).toMatchObject({
+      x: 80,
+      y: 60,
+      source: "pin",
+    });
   });
 });
 
@@ -389,7 +392,7 @@ describe("migrateLegacyVariantSockets", () => {
       (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
     );
     expect(wristSocket?.variantAnchors.bent).toMatchObject({ x: 352, y: 248 });
-    expect(anchorSourceForChild(migrated, "slot:right-hand", "bent")).toBe("socket");
+    expect(anchorSourceForChild(migrated, "slot:right-hand", "bent")).toBe("pin");
     // Idempotent: a second run is a no-op (nothing legacy left to migrate).
     expect(migrateLegacyVariantSockets(migrated)).toBe(migrated);
   });
@@ -436,8 +439,9 @@ describe("migrateLegacyVariantSockets", () => {
 });
 
 describe("renameVariantKeyEverywhere", () => {
-  it("rewrites joint anchors, pose presets, and leaves other keys untouched", () => {
+  it("rewrites variant references while stable part-local pins remain on the artwork", () => {
     const base = withWristSocket(makeVariantArmCharacter());
+    const wristPin = base.parts.find((part) => part.id === "arm-bent")?.pins?.["wrist:right"];
     const character: CharacterPreset = {
       ...base,
       posePresets: [
@@ -446,11 +450,10 @@ describe("renameVariantKeyEverywhere", () => {
       ],
     };
     const renamed = renameVariantKeyEverywhere(character, "slot:right-arm", "bent", "raised");
-    const wristSocket = renamed.rig?.sockets?.find(
-      (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
+    expect(renamed.parts.find((part) => part.id === "arm-bent")?.pins?.["wrist:right"]).toEqual(
+      wristPin,
     );
-    expect(wristSocket?.variantAnchors.raised).toMatchObject({ x: 352, y: 248 });
-    expect(wristSocket?.variantAnchors.bent).toBeUndefined();
+    expect(renamed.rig?.sockets ?? []).toHaveLength(0);
     expect(renamed.posePresets?.[0].poses["slot:right-arm"]).toBe("raised");
     expect(renamed.posePresets?.[1].poses["slot:right-arm"]).toBe("straight");
     // Identical or empty renames are no-ops.
@@ -460,18 +463,17 @@ describe("renameVariantKeyEverywhere", () => {
 
 describe("buildRigHealthReport", () => {
   it("lists every parent variant key per child with its resolution source", () => {
-    const withSocket = upsertVariantSocket(makeVariantArmCharacter(), {
+    const withSocket = upsertVariantPinAtPoint(makeVariantArmCharacter(), {
       parentSlotId: "slot:right-arm",
       variantKey: "straight",
       childSlotId: "slot:right-hand",
-      x: 300,
-      y: 350,
+      anchorPoint: { x: 300, y: 350 },
     });
     const report = buildRigHealthReport(withSocket);
     const handRows = report.anchorRows.filter((row) => row.childSlotId === "slot:right-hand");
     expect(handRows.map((row) => [row.variantKey, row.source])).toEqual([
-      ["straight", "socket"],
-      ["bent", "pairedArt"],
+      ["straight", "pin"],
+      ["bent", "pin"],
     ]);
     expect(report.warnings.filter((entry) => entry.severity === "warning")).toEqual([]);
   });
@@ -524,52 +526,45 @@ describe("buildRigHealthReport", () => {
 
 describe("anchor rotation", () => {
   function withRotatedSocket(rotation: number): CharacterPreset {
-    return upsertVariantSocket(makeVariantArmCharacter(), {
-      parentSlotId: "slot:right-arm",
-      variantKey: "bent",
-      childSlotId: "slot:right-hand",
-      x: 352,
-      y: 248,
-      rotation,
-    });
+    return withWristSocket(makeVariantArmCharacter(), { rotation });
   }
 
-  it("carries socket rotation into the rig anchor", () => {
+  it("carries pin rotation into the resolved child rest transform", () => {
     const character = withRotatedSocket(-35);
-    const rig = normalizeCharacterRig(character);
-    const hand = rig.bones.find((bone) => bone.id === "bone:slot:right-hand");
-    expect(hand?.parentVariantAnchors?.bent).toEqual({
+    expect(anchorEntryForChild(character, "slot:right-hand", "bent")).toEqual({
       x: 62,
       y: 78,
       rotation: -35,
-      source: "socket",
+      source: "pin",
     });
   });
 
-  it("preserves rotation when the socket position is re-pinned", () => {
-    const moved = upsertVariantSocketAtPoint(withRotatedSocket(-35), {
+  it("preserves rotation when the pin position is moved", () => {
+    const moved = upsertVariantPinAtPoint(withRotatedSocket(-35), {
       parentSlotId: "slot:right-arm",
       variantKey: "bent",
       childSlotId: "slot:right-hand",
       anchorPoint: { x: 370, y: 230 },
     });
     const entry = anchorEntryForChild(moved, "slot:right-hand", "bent");
-    expect(entry).toMatchObject({ x: 80, y: 60, rotation: -35, source: "socket" });
+    expect(entry).toMatchObject({ x: 80, y: 60, rotation: -35, source: "pin" });
   });
 
-  it("setVariantAnchorRotation creates a socket at the resolved anchor when none exists", () => {
-    const character = setVariantAnchorRotation(makeVariantArmCharacter(), {
-      parentSlotId: "slot:right-arm",
-      variantKey: "bent",
-      childSlotId: "slot:right-hand",
-      rotation: -20,
-    });
-    // Paired-art anchor was (80, 60); the socket pins that same position plus the angle.
+  it("setVariantPinRotation updates an existing variant pin", () => {
+    const character = setVariantPinRotation(
+      withWristSocket(makeVariantArmCharacter(), { x: 370, y: 230 }),
+      {
+        parentSlotId: "slot:right-arm",
+        variantKey: "bent",
+        childSlotId: "slot:right-hand",
+        rotation: -20,
+      },
+    );
     expect(anchorEntryForChild(character, "slot:right-hand", "bent")).toMatchObject({
       x: 80,
       y: 60,
       rotation: -20,
-      source: "socket",
+      source: "pin",
     });
   });
 
@@ -582,19 +577,17 @@ describe("anchor rotation", () => {
     expect(straightShift?.rotation).toBeCloseTo(90);
     expect(straightShift?.dx).toBeCloseTo(352 - 300);
     expect(straightShift?.dy).toBeCloseTo(248 - 345);
-    // The bent hand's pivot (370, 230) sits at offset (70, −115) in the bone frame; rotated 90°
-    // → (115, 70) → pivot lands at (467, 318).
     const bentShift = shift.parts.get("hand-bent");
     expect(bentShift?.rotation).toBeCloseTo(90);
-    expect(bentShift?.dx).toBeCloseTo(467 - 370);
-    expect(bentShift?.dy).toBeCloseTo(318 - 230);
+    expect(bentShift?.dx).toBeCloseTo(52);
+    expect(bentShift?.dy).toBeCloseTo(-97);
     expect(shift.bones.get("bone:slot:right-hand")?.rotation).toBeCloseTo(90);
   });
 
-  it("paired-art anchors carry no rotation (the art expresses its own angle)", () => {
-    const rig = normalizeCharacterRig(makeVariantArmCharacter());
-    const hand = rig.bones.find((bone) => bone.id === "bone:slot:right-hand");
-    expect(hand?.parentVariantAnchors?.bent.rotation).toBeUndefined();
+  it("migrated paired artwork pins carry a neutral child rotation", () => {
+    expect(
+      anchorEntryForChild(makeVariantArmCharacter(), "slot:right-hand", "bent")?.rotation,
+    ).toBe(0);
   });
 });
 

@@ -158,10 +158,42 @@ export function validateAngleRigJson(value: unknown): JsonValidationResult {
           validateOptionalArtwork(variant.artwork, `${variantPath}.artwork`, issues);
           validateOptionalVariantRigPackage(variant.rig, `${variantPath}.rig`, issues);
           validateOptionalAiMetadata(variant.aiMetadata, `${variantPath}.aiMetadata`, issues);
+          if (variant.registration !== undefined) {
+            validatePinTransform(variant.registration, `${variantPath}.registration`, issues);
+          }
+          if (variant.pins !== undefined && !isRecord(variant.pins)) {
+            issues.error(`${variantPath}.pins`, "Expected pin record.");
+          } else if (isRecord(variant.pins)) {
+            for (const [pinName, pin] of Object.entries(variant.pins)) {
+              validatePinTransform(pin, `${variantPath}.pins["${pinName}"]`, issues);
+            }
+          }
         });
       }
       if (id) variantsBySlot.set(id, variants);
     });
+  }
+
+  for (const [index, bone] of optionalArray(value.bones).entries()) {
+    if (!isRecord(bone) || bone.restSource === undefined) continue;
+    const path = `$.bones[${index}].restSource`;
+    if (!isRecord(bone.restSource)) {
+      issues.error(path, "Expected restSource object.");
+      continue;
+    }
+    const parentSlotId = requiredString(
+      bone.restSource,
+      "parentSlotId",
+      `${path}.parentSlotId`,
+      issues,
+    );
+    if (parentSlotId && !slotIds.has(parentSlotId)) {
+      issues.error(`${path}.parentSlotId`, `Missing parent slot "${parentSlotId}".`);
+    }
+    requiredString(bone.restSource, "pinName", `${path}.pinName`, issues);
+    if (bone.restSource.offset !== undefined) {
+      validateSocketLike(bone.restSource.offset, `${path}.offset`, issues);
+    }
   }
 
   if (!Array.isArray(value.bindings)) {
@@ -273,28 +305,22 @@ export function validateAngleRigJson(value: unknown): JsonValidationResult {
     if (slotId && !slotIds.has(slotId)) issues.error(`${path}.slotId`, `Missing slot "${slotId}".`);
   }
 
-  for (const [index, socket] of optionalArray(value.sockets).entries()) {
-    const path = `$.sockets[${index}]`;
-    if (!isRecord(socket)) {
-      issues.error(path, "Expected socket object.");
+  for (const [index, contract] of optionalArray(value.pinContracts).entries()) {
+    const path = `$.pinContracts[${index}]`;
+    if (!isRecord(contract)) {
+      issues.error(path, "Expected pin contract object.");
       continue;
     }
-    requiredString(socket, "id", `${path}.id`, issues);
-    const slotId = requiredString(socket, "slotId", `${path}.slotId`, issues);
-    if (slotId && !slotIds.has(slotId)) issues.error(`${path}.slotId`, `Missing slot "${slotId}".`);
-    const childSlotId = requiredString(socket, "childSlotId", `${path}.childSlotId`, issues);
+    const slotId = requiredString(contract, "parentSlotId", `${path}.parentSlotId`, issues);
+    if (slotId && !slotIds.has(slotId))
+      issues.error(`${path}.parentSlotId`, `Missing slot "${slotId}".`);
+    const childBoneId = requiredString(contract, "childBoneId", `${path}.childBoneId`, issues);
+    if (childBoneId && !boneIds.has(childBoneId))
+      issues.error(`${path}.childBoneId`, `Missing bone "${childBoneId}".`);
+    const childSlotId = typeof contract.childSlotId === "string" ? contract.childSlotId : undefined;
     if (childSlotId && !slotIds.has(childSlotId))
       issues.error(`${path}.childSlotId`, `Missing slot "${childSlotId}".`);
-    finiteNumber(socket.x, `${path}.x`, issues);
-    finiteNumber(socket.y, `${path}.y`, issues);
-    if (socket.rotation !== undefined) finiteNumber(socket.rotation, `${path}.rotation`, issues);
-    if (!isRecord(socket.variantAnchors)) {
-      issues.error(`${path}.variantAnchors`, "Expected variantAnchors record.");
-    } else {
-      for (const [key, anchor] of Object.entries(socket.variantAnchors)) {
-        validateSocketLike(anchor, `${path}.variantAnchors["${key}"]`, issues);
-      }
-    }
+    requiredString(contract, "pinName", `${path}.pinName`, issues);
   }
 
   return issues.result();
@@ -434,6 +460,13 @@ function validateSocketLike(value: unknown, path: string, issues: ReturnType<typ
   finiteNumber(value.x, `${path}.x`, issues);
   finiteNumber(value.y, `${path}.y`, issues);
   if (value.rotation !== undefined) finiteNumber(value.rotation, `${path}.rotation`, issues);
+}
+
+function validatePinTransform(value: unknown, path: string, issues: ReturnType<typeof makeIssues>) {
+  validateSocketLike(value, path, issues);
+  if (isRecord(value) && value.space !== "part-local-pixels") {
+    issues.error(`${path}.space`, 'Expected "part-local-pixels".');
+  }
 }
 
 function validateOptionalNumberPair(

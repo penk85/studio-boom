@@ -10,6 +10,7 @@ import {
   type ID,
   type CharacterPart,
   type CharacterPreset,
+  type CharacterRig,
   type CharacterSlot,
   type FallbackMouthAnchor,
   type MouthViseme,
@@ -18,6 +19,7 @@ import {
 } from "../types";
 import { legacyVisemeToStandard } from "../lipsync/viseme-schema";
 import { alphaCenterForPart, pivotForPart } from "./alpha-bounds";
+import { normalizePartRegistration } from "./registration";
 import { inferPartSide, isSidedSlotRole } from "./side-utils";
 
 export { inferPartSide } from "./side-utils";
@@ -100,122 +102,31 @@ export function defaultSlotIdForRole(
 }
 
 export function getPartSlotId(part: CharacterPart): ID {
-  if (part.slotId && !isGenericSidedSlot(part)) return part.slotId;
-  return defaultSlotIdForRole(part.role, part.id, inferPartSide(part));
-}
-
-export function inferHumanParentPartId(
-  parts: CharacterPart[],
-  part: CharacterPart,
-): ID | undefined {
-  if (part.parentId) return part.parentId;
-  const inferredPartSide = inferPartSide(part);
-  const sameSide =
-    inferredPartSide === "left" || inferredPartSide === "right" ? inferredPartSide : undefined;
-  const candidates = parts
-    .filter((candidate) => candidate.id !== part.id && partsShareAnyAngle(candidate, part))
-    .slice()
-    .sort((a, b) => Number(b.visible) - Number(a.visible) || b.zIndex - a.zIndex);
-  const candidateSide = (candidate: CharacterPart) => inferPartSide(candidate);
-  const pick = (role: PartRole, side?: CharacterPart["side"]) =>
-    candidates.find(
-      (candidate) =>
-        candidate.role === role &&
-        (!side || candidateSide(candidate) === side) &&
-        getPartSlotId(candidate) !== getPartSlotId(part),
-    )?.id;
-  const pickAny = (role: PartRole) =>
-    candidates.find(
-      (candidate) => candidate.role === role && getPartSlotId(candidate) !== getPartSlotId(part),
-    )?.id;
-
-  switch (part.role) {
-    case "head":
-      return pickAny("body");
-    case "eye":
-    case "eyebrow":
-    case "nose":
-    case "mouth":
-    case "hair":
-      return pickAny("head") ?? pickAny("body");
-    case "iris":
-      return (
-        (sameSide ? pick("eye", sameSide) : undefined) ??
-        pickAny("eye") ??
-        pickAny("head") ??
-        pickAny("body")
-      );
-    case "arm":
-    case "upperArm":
-    case "upperLeg":
-    case "leg":
-      return pickAny("body");
-    case "lowerArm":
-      return (
-        (sameSide ? pick("upperArm", sameSide) : undefined) ??
-        pickAny("upperArm") ??
-        (sameSide ? pick("arm", sameSide) : undefined) ??
-        pickAny("arm") ??
-        pickAny("body")
-      );
-    case "hand":
-      return (
-        (sameSide ? pick("lowerArm", sameSide) : undefined) ??
-        pickAny("lowerArm") ??
-        (sameSide ? pick("arm", sameSide) : undefined) ??
-        pickAny("arm") ??
-        (sameSide ? pick("upperArm", sameSide) : undefined) ??
-        pickAny("upperArm") ??
-        pickAny("body")
-      );
-    case "lowerLeg":
-      return (
-        (sameSide ? pick("upperLeg", sameSide) : undefined) ??
-        pickAny("upperLeg") ??
-        (sameSide ? pick("leg", sameSide) : undefined) ??
-        pickAny("leg") ??
-        pickAny("body")
-      );
-    case "foot":
-      return (
-        (sameSide ? pick("lowerLeg", sameSide) : undefined) ??
-        pickAny("lowerLeg") ??
-        (sameSide ? pick("leg", sameSide) : undefined) ??
-        pickAny("leg") ??
-        (sameSide ? pick("upperLeg", sameSide) : undefined) ??
-        pickAny("upperLeg") ??
-        pickAny("body")
-      );
-    case "accessory":
-      return pickAny("head") ?? pickAny("body");
-    default:
-      return undefined;
-  }
-}
-
-export function withInferredHumanParentIds(character: CharacterPreset): CharacterPreset {
-  let changed = false;
-  const parts = character.parts.map((part) => {
-    if (part.parentId) return part;
-    const parentId = inferHumanParentPartId(character.parts, part);
-    if (!parentId) return part;
-    changed = true;
-    return { ...part, parentId };
-  });
-  return changed ? { ...character, parts } : character;
+  return normalizedStandardSlotId(
+    part.slotId,
+    part.slotName ?? part.name,
+    part.role,
+    inferPartSide(part),
+    part.id,
+  );
 }
 
 export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
   const restMouth = c.parts.find(
     (p) => normalizePartRole(p.role as string) === "mouth" && legacyVisemeToStandard(p.viseme),
   );
+  const slotIdRemap = new Map<ID, ID>();
   const parts = c.parts.map((part) => {
     const role = normalizePartRole(part.role as string);
     const side = inferPartSide({ ...part, role }) ?? part.side;
-    const slotId =
-      part.slotId && !isGenericSidedSlot({ ...part, role })
-        ? part.slotId
-        : defaultSlotIdForRole(role, role === "custom" ? part.id : undefined, side);
+    const slotId = normalizedStandardSlotId(
+      part.slotId,
+      part.slotName ?? part.name,
+      role,
+      side,
+      part.id,
+    );
+    if (part.slotId && part.slotId !== slotId) slotIdRemap.set(part.slotId, slotId);
     const viseme = legacyVisemeToStandard(part.viseme) ?? part.viseme;
     const withNormalizedIds = { ...part, role, side, slotId, viseme };
     const alphaPivot = alphaCenterForPart(withNormalizedIds);
@@ -223,7 +134,7 @@ export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
       x: Math.round(alphaPivot.x),
       y: Math.round(alphaPivot.y),
     };
-    return {
+    return normalizePartRegistration({
       ...part,
       role,
       side,
@@ -246,9 +157,13 @@ export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
                   restMouth.morph.commandCount === part.morph.commandCount),
             }
           : part.morph,
-    };
+    });
   });
-  const slots = normalizeSlotRecords(parts, c.slots);
+  const slotRecords = c.slots?.map((slot) => ({
+    ...slot,
+    id: slotIdRemap.get(slot.id) ?? slot.id,
+  }));
+  const slots = normalizeSlotRecords(parts, slotRecords);
   const slotNames = new Map(slots.map((slot) => [slot.id, slot.name]));
   return {
     ...c,
@@ -256,10 +171,87 @@ export function normalizeCharacterSlots(c: CharacterPreset): CharacterPreset {
     manifest: normalizePartManifest(c.manifest),
     fallbackMouth: c.fallbackMouth ?? defaultFallbackMouthAnchor(c.canvasWidth, c.canvasHeight),
     slots,
+    rig: remapCharacterRigSlotIds(c.rig, slotIdRemap),
     parts: parts.map((part) => ({
       ...part,
       slotName: slotNames.get(part.slotId) ?? slotLabelForRoleSide(part.role, part.side),
+      // The bone graph and part-local pins are the attachment authority. Clearing this legacy
+      // artwork field prevents one stale variant from silently re-parenting the whole slot.
+      parentId: undefined,
     })),
+  };
+}
+
+function remapCharacterRigSlotIds(
+  rig: CharacterRig | undefined,
+  slotIds: ReadonlyMap<ID, ID>,
+): CharacterRig | undefined {
+  if (!rig || slotIds.size === 0) return rig;
+  const slotId = (id: ID) => slotIds.get(id) ?? id;
+  const boneIds = new Map(
+    Array.from(slotIds, ([from, to]) => [`bone:${from}`, `bone:${to}`] as const),
+  );
+  const boneId = (id: ID | undefined) => (id ? (boneIds.get(id) ?? id) : undefined);
+  const remapAngle = <
+    T extends {
+      bones: CharacterRig["bones"];
+      slotBindings: CharacterRig["slotBindings"];
+      drawOrder: CharacterRig["drawOrder"];
+      slotRelations: CharacterRig["slotRelations"];
+      hostConstraints: CharacterRig["hostConstraints"];
+      reaches: CharacterRig["reaches"];
+      sockets?: CharacterRig["sockets"];
+    },
+  >(
+    angle: T,
+  ): T => ({
+    ...angle,
+    bones: angle.bones.map((bone) => ({
+      ...bone,
+      id: boneId(bone.id) ?? bone.id,
+      parentId: boneId(bone.parentId),
+      restSource: bone.restSource
+        ? { ...bone.restSource, slotId: slotId(bone.restSource.slotId) }
+        : undefined,
+    })),
+    slotBindings: angle.slotBindings.map((binding) => ({
+      ...binding,
+      slotId: slotId(binding.slotId),
+      boneId: boneId(binding.boneId) ?? binding.boneId,
+    })),
+    drawOrder: angle.drawOrder.map(slotId),
+    slotRelations: angle.slotRelations.map((relation) => ({
+      ...relation,
+      childSlotId: slotId(relation.childSlotId),
+      parentRef:
+        relation.parentRef.type === "slot" || relation.parentRef.type === "semanticSlot"
+          ? { ...relation.parentRef, id: slotId(relation.parentRef.id) }
+          : relation.parentRef.type === "bone"
+            ? { ...relation.parentRef, id: boneId(relation.parentRef.id) ?? relation.parentRef.id }
+            : relation.parentRef,
+    })),
+    hostConstraints: angle.hostConstraints.map((constraint) => ({
+      ...constraint,
+      slotId: slotId(constraint.slotId),
+      hostSlotId: slotId(constraint.hostSlotId),
+      hostBoneId: boneId(constraint.hostBoneId),
+    })),
+    reaches: angle.reaches.map((reach) => ({ ...reach, slotId: slotId(reach.slotId) })),
+    sockets: angle.sockets?.map((socket) => ({
+      ...socket,
+      slotId: slotId(socket.slotId),
+      childSlotId: slotId(socket.childSlotId),
+    })),
+  });
+  const remapped = remapAngle(rig);
+  return {
+    ...remapped,
+    angles: Object.fromEntries(
+      Object.entries(rig.angles ?? {}).map(([angle, value]) => [
+        angle,
+        value ? remapAngle(value) : value,
+      ]),
+    ),
   };
 }
 
@@ -462,13 +454,6 @@ export function partAvailableForAngle(part: CharacterPart, angle: CharacterAngle
 
 export function partAngleMembership(part: CharacterPart): CharacterAngle[] | undefined {
   return normalizeAngleIds(part.angleIds) ?? (part.angleId ? [part.angleId] : undefined);
-}
-
-export function partsShareAnyAngle(a: CharacterPart, b: CharacterPart): boolean {
-  const aAngles = partAngleMembership(a);
-  const bAngles = partAngleMembership(b);
-  if (!aAngles?.length || !bAngles?.length) return true;
-  return aAngles.some((angle) => bAngles.includes(angle));
 }
 
 export function partsAvailableForAngle(
@@ -712,7 +697,7 @@ export function makePart(
     x: Math.round(defaultPivot.x),
     y: Math.round(defaultPivot.y),
   };
-  return {
+  return normalizePartRegistration({
     id,
     slotId:
       opts.slotId ?? defaultSlotIdForRole(role, role === "custom" ? id : undefined, opts.side),
@@ -750,7 +735,7 @@ export function makePart(
     zIndex: opts.zIndex ?? 0,
     depth: opts.depth ?? 0,
     visible: opts.visible ?? true,
-  };
+  });
 }
 
 export function roleLabel(role: PartRole): string {
@@ -802,6 +787,32 @@ function isGenericSidedSlot(part: Pick<CharacterPart, "role" | "slotId" | "side"
   return (
     (isSidedSlotRole(part.role) && (part.side === "left" || part.side === "right")) ||
     (part.role === "hair" && (part.side === "front" || part.side === "back"))
+  );
+}
+
+function normalizedStandardSlotId(
+  slotId: ID | undefined,
+  _name: string | undefined,
+  role: PartRole,
+  side: CharacterPart["side"],
+  partId?: ID,
+): ID {
+  const canonical = defaultSlotIdForRole(role, role === "custom" ? partId : undefined, side);
+  if (!slotId || isGenericSidedSlot({ role, slotId, side })) return canonical;
+  if (role === "custom" || slotId.startsWith("custom:") || slotId === canonical) return slotId;
+
+  // Older canvas-drop imports derived standard slot IDs from filenames and labels. Repair only
+  // those recognizable generated IDs, preserving deliberately named non-custom slots.
+  const generated = `slot:${slotSlug(slotLabelForRoleSide(role, side))}`;
+  return slotId === generated ? canonical : slotId;
+}
+
+function slotSlug(value: string): string {
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "") || "part"
   );
 }
 
@@ -1051,13 +1062,15 @@ export function withUpdatedCharacterSlot(
 
   const role = patch.role ?? current?.role ?? representative?.role ?? "custom";
   const side = "side" in patch ? patch.side : (current?.side ?? representative?.side);
+  const roleOrSideChanged = patch.role !== undefined || "side" in patch;
+  const nextSlotId =
+    roleOrSideChanged && role !== "custom" ? defaultSlotIdForRole(role, undefined, side) : slotId;
   const name =
     patch.name?.trim() ||
-    current?.name ||
-    representative?.slotName ||
+    (!roleOrSideChanged ? current?.name || representative?.slotName : undefined) ||
     slotLabelForRoleSide(role, side);
   const slot: CharacterSlot = {
-    id: slotId,
+    id: nextSlotId,
     name,
     role,
     side,
@@ -1067,10 +1080,16 @@ export function withUpdatedCharacterSlot(
     color: "color" in patch ? patch.color : current?.color,
     aiHint: "aiHint" in patch ? patch.aiHint : current?.aiHint,
   };
-  const withSlot = withUpsertedCharacterSlot(character, slot);
-  return {
-    ...withSlot,
-    parts: withSlot.parts.map((part) => {
+  const base: CharacterPreset = {
+    ...character,
+    slots:
+      character.slots?.filter(
+        (candidate) => candidate.id !== slotId && candidate.id !== nextSlotId,
+      ) ?? [],
+  };
+  const withParts: CharacterPreset = {
+    ...base,
+    parts: base.parts.map((part) => {
       if (getPartSlotId(part) !== slotId) return part;
       const previousDefault = defaultMotionBehaviorForRole(part.role, part.viseme);
       const shouldResetMotion =
@@ -1078,6 +1097,7 @@ export function withUpdatedCharacterSlot(
         (part.motionBehavior === undefined || part.motionBehavior === previousDefault);
       return {
         ...part,
+        slotId: nextSlotId,
         role,
         side,
         slotName: name,
@@ -1088,6 +1108,12 @@ export function withUpdatedCharacterSlot(
           : part.motionBehavior,
       };
     }),
+  };
+  const withSlot = withUpsertedCharacterSlot(withParts, slot);
+  const slotIdRemap = nextSlotId === slotId ? new Map<ID, ID>() : new Map([[slotId, nextSlotId]]);
+  return {
+    ...withSlot,
+    rig: remapCharacterRigSlotIds(withSlot.rig, slotIdRemap),
   };
 }
 

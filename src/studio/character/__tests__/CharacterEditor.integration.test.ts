@@ -31,7 +31,7 @@ describe("CharacterEditor source integration", () => {
     expect(source).toContain("const modeBanner");
     // All four armed modes feed the banner.
     expect(source).toContain("if (anchorDrag)");
-    expect(source).toContain("if (socketPlacement)");
+    expect(source).toContain("if (pinPlacement)");
     expect(source).toContain("if (rangeEdit)");
     expect(source).toContain('if (mode === "pivot")');
     // Esc backs out; toasts auto-dismiss; destructive toasts offer Undo.
@@ -81,21 +81,51 @@ describe("CharacterEditor source integration", () => {
     expect(source).toContain("const host = unionHostClampBounds(hostParts, constraint.mode)");
   });
 
-  it("supports both skeleton calibration and moving artwork with socket/joint drags", () => {
+  it("uses the shared reach clamp for editor drag boundaries", () => {
+    const source = readFileSync(editorPath, "utf8");
+
+    expect(source).toContain("function clampSlotDragDelta");
+    expect(source).toContain("const reachLimited = clampMotionDeltaToReach(reach, dx, dy, 0)");
+    expect(source).toContain("return { dx: nextDx, dy: nextDy, clamped }");
+  });
+
+  it("supports both skeleton calibration and moving artwork with pin-driven joint drags", () => {
     const source = readFileSync(editorPath, "utf8");
 
     expect(source).toContain('useState<BoneDragMode>("calibrate")');
-    expect(source).toContain("pinRigSlotPlacements(doc, rigSnapshot, movedRig, slotIds)");
+    expect(source).toContain("moveCharacterBoneRest(snapshot, boneId, dx, dy");
+    expect(source).toContain("keepArtwork");
     expect(source).toContain("Calibrate");
     expect(source).toContain("Move art");
-    expect(source).toContain("Calibrate mode moves only the skeleton/socket");
-    expect(source).toContain(
-      "moveSlotSetFromSnapshot(d.parts, snapshot, slotIds, appliedDx, appliedDy)",
-    );
-    expect(source).toContain(
-      "for (const slotId of slotIds) applyLiveSlotBinding(latestRig, slotId)",
-    );
+    expect(source).toContain("Drag bones onto the artwork while images stay pinned");
+    expect(source).toContain("syncLiveCharacterPreset(latest)");
+    expect(source).toContain("setCharacterBoneRestTransform");
     expect(source).not.toContain("const shouldMoveArt = false");
     expect(source).not.toContain("Bones drive the skeleton only; artwork stays put");
+    expect(source).not.toContain("applyLiveBoneTransform");
+    expect(source).not.toContain("applyLiveSlotBinding");
+  });
+
+  it("keeps rig captions quiet and derives upload occupancy from semantic slots", () => {
+    const source = readFileSync(editorPath, "utf8");
+
+    expect(source).toContain("group-hover:opacity-100");
+    expect(source).toContain("setShowAnchors(false)");
+    expect(source).toContain("showAnchors && !focusEditing");
+    expect(source).toContain("matchesSlotDefinition(part, slot)");
+    expect(source).toContain("defaultSlotIdForDefinition(slot)");
+    expect(source).toContain("defaultSlotIdForRole(role, undefined, side)");
+    expect(source).toContain("semanticSlotChanged");
+    expect(source).toContain("slotLabelForRoleSide(nextRole, nextSide)");
+    expect(source).toContain('aria-label="Artwork assigned"');
+  });
+
+  it("offers a full-frame fit action for the active angle", () => {
+    const source = readFileSync(editorPath, "utf8");
+
+    expect(source).toContain("fitActiveAngleToCanvas");
+    expect(source).toContain("fitPartsToCanvasFrame");
+    expect(source).toContain("unionFrameBounds(scopedParts)");
+    expect(source).toContain("Fit active angle to canvas");
   });
 });

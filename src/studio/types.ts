@@ -209,6 +209,24 @@ export interface CharacterPartAlphaBounds {
   threshold?: number;
 }
 
+export interface CharacterPartRegistration {
+  /** Registration point in source-art pixels, measured from the part's top-left corner. */
+  x: number;
+  y: number;
+  /** Artwork rest rotation relative to the bound bone. */
+  rotation: number;
+  space: "part-local-pixels";
+}
+
+export interface CharacterPartPin {
+  /** Output point in source-art pixels, measured from the part's top-left corner. */
+  x: number;
+  y: number;
+  /** Child-bone rest rotation relative to the artwork orientation. */
+  rotation: number;
+  space: "part-local-pixels";
+}
+
 export interface SvgMorphMetadata {
   /** First path from the uploaded SVG, saved for future path interpolation. */
   primaryPath?: string;
@@ -264,7 +282,20 @@ export interface CharacterPart {
   anchorY: number; // 0..1 within the part (used as transform origin)
   /** Absolute canvas pivot. Mirrors anchorX/Y and is easier for users to drag. */
   pivot?: { x: number; y: number };
-  /** Parent part id for future motion inheritance. */
+  /**
+   * Incoming artwork anchor. This local point is placed on the slot's bound bone.
+   * Normalization backfills it from the legacy pivot/anchor fields.
+   */
+  registration?: CharacterPartRegistration;
+  /**
+   * Named outgoing anchors for child bones. Pins are variant-specific because they live on
+   * artwork parts; switching an arm drawing therefore switches its wrist position atomically.
+   */
+  pins?: Record<string, CharacterPartPin>;
+  /**
+   * @deprecated Artwork does not own hierarchy. Attach slots through the angle rig's
+   * slotRelations and sockets instead.
+   */
   parentId?: ID;
   /** Soft motion bounds for future animation and preview tests. */
   bounds?: CharacterPartBounds;
@@ -347,6 +378,14 @@ export interface CharacterSlot {
   color?: string;
   /** Optional short hint exported to AI-facing character schemas. */
   aiHint?: string;
+  /** Per-property animation ownership. Omitted properties use role-based defaults. */
+  ownership?: {
+    variant?: "motion" | "expression" | "lipsync";
+    translation?: "motion" | "expression" | "lipsync";
+    rotation?: "motion" | "expression" | "lipsync";
+    scale?: "motion" | "expression" | "lipsync";
+    visibility?: "motion" | "expression" | "lipsync";
+  };
 }
 
 export interface CharacterAngleTransformOverride {
@@ -371,6 +410,16 @@ export interface CharacterBone {
   x: number;
   y: number;
   rotation: number;
+  /**
+   * Canonical attachment source for a non-root bone. The referenced parent-slot part supplies
+   * the named pin after active artwork has been selected. Bone parentId remains the only runtime
+   * hierarchy; this record only derives the bone's local rest transform.
+   */
+  restSource?: {
+    slotId: ID;
+    pinName: string;
+    offset?: { x: number; y: number; rotation: number };
+  };
   length?: number;
   /** Parallax depth override for content driven by this bone. */
   depth?: number;
@@ -388,6 +437,14 @@ export interface CharacterBone {
     string,
     { x: number; y: number; rotation?: number; source?: "socket" | "pairedArt" }
   >;
+  /** Deterministic secondary motion. Runtime playback consumes baked/fixed-step samples only. */
+  spring?: {
+    enabled: boolean;
+    stiffness: number;
+    damping: number;
+    gravity: number;
+    method: "baked" | "fixed_step";
+  };
 }
 
 export interface CharacterSlotBinding {
@@ -465,7 +522,7 @@ export interface CharacterAngleRig {
  * A layer's movement limits relative to its attach-to parent. The layer is carried by its parent
  * (FK), and `reach`/`rotReach` cap how far it may additionally drift/twist on its own. Both are
  * authored in the parent's frame so they ride along with the parent. Used as guides for generated
- * motion; manual posing may exceed them.
+ * motion and as editor drag guards; explicit motion overrides may opt out.
  */
 export interface CharacterReach {
   id: ID;
@@ -515,7 +572,11 @@ export interface CharacterSlotRelation {
 }
 
 export interface CharacterRig {
-  version: 1;
+  version: 2;
+  /** Set after registration/pin migration; missing required pins are errors after this point. */
+  pinSchemaInitialized?: true;
+  /** One-way repair revision for persisted part-local pin geometry. */
+  pinSchemaRevision?: 2;
   activeAngle: CharacterAngle;
   /**
    * Independent concrete rigs by angle. Top-level bones/bindings remain as the
@@ -679,7 +740,7 @@ export interface MotionKeyframe {
 export interface MotionTrack {
   /** Optional angle availability. Undefined means this track is angle-agnostic. */
   angleIds?: CharacterAngle[];
-  /** Rig V1 target. Defaults to "slot" for older part/slot tracks. */
+  /** Rig target. Defaults to "slot" for older part/slot tracks. */
   target?: "slot" | "bone" | "camera";
   /** Exact bone target when `target` is "bone". */
   boneId?: ID;
@@ -703,7 +764,7 @@ export type MotionCategory =
 /** Recorded pose snapshot used by the Motion Preset Recorder.
  *  Each part override stores a *delta* relative to that part's rest pose. */
 export interface RecordedPartOverride {
-  /** Rig V1 target. Defaults to "slot" for older part/slot overrides. */
+  /** Rig target. Defaults to "slot" for older part/slot overrides. */
   target?: "slot" | "bone";
   /** Exact bone target when `target` is "bone". */
   boneId?: ID;

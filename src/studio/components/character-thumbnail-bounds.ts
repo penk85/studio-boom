@@ -1,4 +1,12 @@
 import type { CharacterPart, CharacterPreset } from "../types";
+import {
+  boundsForPoints,
+  composeMatrices,
+  matrixAroundPoint,
+  transformRect,
+  translationMatrix,
+  type AffineMatrix,
+} from "../character/geometry";
 
 export interface CharacterThumbnailBounds {
   x: number;
@@ -14,6 +22,7 @@ export interface CharacterThumbnailFrame {
   rotation: number;
   scaleX: number;
   scaleY: number;
+  drawOrder?: number;
 }
 
 export function thumbnailBoundsForParts(
@@ -75,53 +84,40 @@ export function frameForPart(part: CharacterPart): CharacterThumbnailFrame {
     rotation: part.rotation,
     scaleX: 1,
     scaleY: 1,
+    drawOrder: part.zIndex,
   };
 }
 
 function transformedBoundsForFrame(frame: CharacterThumbnailFrame): CharacterThumbnailBounds {
-  const { part } = frame;
-  const rect = visibleLocalRectForPart(part);
-  const rotation = Number.isFinite(frame.rotation) ? frame.rotation : 0;
-  const scaleX = finiteNonZero(frame.scaleX, 1);
-  const scaleY = finiteNonZero(frame.scaleY, 1);
-  if (
-    Math.abs(rotation % 360) < 0.001 &&
-    Math.abs(scaleX - 1) < 0.001 &&
-    Math.abs(scaleY - 1) < 0.001
-  ) {
-    return { x: frame.x + rect.x, y: frame.y + rect.y, width: rect.width, height: rect.height };
-  }
+  const bounds = boundsForPoints(
+    transformRect(thumbnailFrameMatrix(frame), visibleLocalRectForPart(frame.part)),
+  );
+  return {
+    x: bounds.left,
+    y: bounds.top,
+    width: bounds.right - bounds.left,
+    height: bounds.bottom - bounds.top,
+  };
+}
 
-  const originX = frame.x + part.anchorX * part.width;
-  const originY = frame.y + part.anchorY * part.height;
+export function thumbnailFrameMatrix(frame: CharacterThumbnailFrame): AffineMatrix {
+  const { part } = frame;
   const pivotLocal = {
     x: part.anchorX * part.width,
     y: part.anchorY * part.height,
   };
-  const radians = (rotation * Math.PI) / 180;
-  const sin = Math.sin(radians);
-  const cos = Math.cos(radians);
-  const corners = [
-    [rect.x, rect.y],
-    [rect.x + rect.width, rect.y],
-    [rect.x + rect.width, rect.y + rect.height],
-    [rect.x, rect.y + rect.height],
-  ].map(([x, y]) => {
-    const dx = (x - pivotLocal.x) * scaleX;
-    const dy = (y - pivotLocal.y) * scaleY;
-    return {
-      x: originX + dx * cos - dy * sin,
-      y: originY + dx * sin + dy * cos,
-    };
-  });
-
-  const xs = corners.map((point) => point.x);
-  const ys = corners.map((point) => point.y);
-  const minX = Math.min(...xs);
-  const minY = Math.min(...ys);
-  const maxX = Math.max(...xs);
-  const maxY = Math.max(...ys);
-  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  return composeMatrices(
+    translationMatrix(frame.x + pivotLocal.x, frame.y + pivotLocal.y),
+    matrixAroundPoint(
+      { x: 0, y: 0 },
+      {
+        rotation: Number.isFinite(frame.rotation) ? frame.rotation : 0,
+        scaleX: finiteNonZero(frame.scaleX, 1),
+        scaleY: finiteNonZero(frame.scaleY, 1),
+      },
+    ),
+    translationMatrix(-pivotLocal.x, -pivotLocal.y),
+  );
 }
 
 function visibleLocalRectForPart(part: CharacterPart): CharacterThumbnailBounds {

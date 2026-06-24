@@ -1,7 +1,6 @@
 // MotionPresetRecorder — visual pose-and-capture flow for reusable motion presets.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Crosshair,
   Eye,
   EyeOff,
   Lock,
@@ -18,38 +17,51 @@ import {
 } from "lucide-react";
 import { db, getMediaUrl, uid } from "../db";
 import { useStudio } from "../store";
-import { buildCharacterCompositionHtml, characterAssetIds } from "../character/composition";
 import {
-  pickActivePartForSlot,
-  variantKeyForPart,
-  variantLabelForPart,
-} from "../character/character-utils";
+  buildCharacterCompositionHtml,
+  buildCharacterGsapScript,
+  characterAssetIds,
+} from "../character/composition";
+import { variantKeyForPart, variantLabelForPart } from "../character/character-utils";
 import { localAlphaBounds } from "../character/alpha-bounds";
 import { faceTurnMotionForPart } from "../character/face-turn";
 import { defaultPoseForCharacter } from "../character/pose-presets";
-import { resolveSlotBinding } from "../character/rig";
 import {
   effectiveReachForSlot,
   motionDeltaMovesJoint,
-  parentSlotIdForBone,
   resolveFkJointDelta,
   resolveMotionDelta,
   type MotionConstraintContext,
 } from "../character/motion-constraints";
 import {
   buildCharacterRuntime,
+  resolveRuntimeSlotPart,
+  runtimeBoneWorldTransforms,
   runtimePartPlacement,
   type CharacterRuntime,
   type RuntimePartPlacement,
   type RuntimeCharacterSlot,
 } from "../character/runtime";
 import {
+  canvasDeltaToMotionDelta,
+  recordedOverrideTarget,
+  runtimeMotionTargetForSlot,
+  slotIdForRecordedOverride,
+} from "../character/motion-targets";
+import {
+  resolveRuntimePosePartFrame,
+  runtimePartFrameContains,
+  type PartFrameTransform,
+  type RuntimePartFrame,
+} from "../character/part-frame";
+import {
   angleRigJsonFromPreset,
   characterJsonFromPreset,
   motionJsonFilename,
 } from "../character-json/normalize";
 import { buildMotionRequestPrompt } from "../character-json/ai-context";
-import { expandKeyposesWithAnticipation } from "./apply";
+import { sampleKeyposesAtTime } from "./keypose-sampling";
+import { sampleMotionEase } from "./easing";
 import { motionJsonToPreset, parseJsonArtifact, validateMotionJsonForAngle } from "./motion-json";
 import { AiAddonPromptPanel, GeneratedEditorShell } from "../ai/generated-editor";
 import { buildJsonRepairPrompt } from "../ai/external-ai";
@@ -63,6 +75,7 @@ import {
   resolveDragSubject,
   resolveDrillSelection,
 } from "../interaction/select-drag";
+import { startWindowPointerDrag } from "../interaction/pointer-drag";
 import type {
   CharacterPart,
   CharacterPreset,
@@ -165,7 +178,7 @@ export function MotionPresetRecorder({
   const [duration, setDuration] = useState(initialPreset?.duration ?? 1);
   const [time, setTime] = useState(0);
   const [keyposes, setKeyposes] = useState<RecordedKeypose[]>(() =>
-    initialKeyposesForPreset(initialPreset, slots),
+    initialKeyposesForPreset(initialPreset, runtime),
   );
   const [overrides, setOverrides] = useState<Map<string, RecorderPartState>>(new Map());
   const [draftDirty, setDraftDirty] = useState(false);
@@ -187,6 +200,7 @@ export function MotionPresetRecorder({
   const [showAnchorDebug, setShowAnchorDebug] = useState(false);
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [playbackPreset, setPlaybackPreset] = useState<MotionPreset | null>(null);
+  const [previewCompileRevision, setPreviewCompileRevision] = useState(0);
   const [selectPopover, setSelectPopover] = useState<SelectPopover | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const wrapRef = useRef<HTMLElement>(null);
@@ -200,18 +214,9 @@ export function MotionPresetRecorder({
       if (usesGeneratedMouth && slot.role === "mouth" && generatedMouthPart)
         return generatedMouthPart;
       const poseKey = poseSwap ?? basePoses[slot.id];
-      const bindingPartId = resolveSlotBinding(rig, slot.id)?.effectivePartId;
-      const boundPart = bindingPartId
-        ? slot.parts.find((part) => part.id === bindingPartId && part.visible)
-        : undefined;
-      if (!poseKey && boundPart) return boundPart;
-      return pickActivePartForSlot(slot, {
-        pose: poseKey,
-        viseme: slot.role === "mouth" ? (poseKey ?? "rest") : undefined,
-        eyeState: slot.role === "eye" ? (poseKey ?? "open") : undefined,
-      });
+      return resolveRuntimeSlotPart(slot, runtime, poseKey);
     },
-    [basePoses, generatedMouthPart, rig, usesGeneratedMouth],
+    [basePoses, generatedMouthPart, runtime, usesGeneratedMouth],
   );
   const motionAiAdapter = useMemo<AiGeneratedFeatureAdapter<MotionJson>>(
     () => ({
@@ -335,14 +340,15 @@ export function MotionPresetRecorder({
     setTime((current) => Math.min(current, Math.max(0.1, duration)));
   }, [duration]);
 
-  const keyposesForSampling =
-    previewPlaying && playbackPreset?.keyposes ? playbackPreset.keyposes : keyposes;
+  const keyposesForSampling = keyposes;
 
   useEffect(() => {
+    if (previewPlaying) return;
     const interp = sampleKeyposesAtTime(keyposesForSampling, time);
     const next = new Map<string, RecorderPartState>();
     for (const ov of interp.parts.values()) {
-      const slot = slotForRecordedOverride(ov, slots, rig);
+      const slotId = slotIdForRecordedOverride(runtime, ov);
+      const slot = slotId ? runtime.slotById.get(slotId) : undefined;
       if (!slot) continue;
       const poseSwap = usesGeneratedMouth && slot.role === "mouth" ? undefined : ov.poseSwap;
       const part = activePartForSlot(slot, poseSwap);
@@ -367,6 +373,7 @@ export function MotionPresetRecorder({
     const constrained = constrainRecorderOverrides({
       character,
       rig,
+      runtime,
       slots,
       overrides: next,
       activePartForSlot,
@@ -388,9 +395,11 @@ export function MotionPresetRecorder({
     constraintCtx,
     keyposesForSampling,
     rig,
+    runtime,
     slots,
     time,
     usesGeneratedMouth,
+    previewPlaying,
   ]);
 
   const displayScale = previewMode === "export" ? 1 : fitScale;
@@ -409,6 +418,10 @@ export function MotionPresetRecorder({
     }
     return map;
   }, [basePoses, overrides]);
+  const poseWorldByBone = useMemo(
+    () => runtimeBoneWorldTransforms(runtime, activeVariantsBySlot),
+    [activeVariantsBySlot, runtime],
+  );
   const selectedRotationLimit = useMemo(() => {
     if (!selectedSlot) return null;
     const { reach, source } = effectiveReachForSlot(
@@ -441,10 +454,10 @@ export function MotionPresetRecorder({
       const activePart = slot ? activePartForSlot(slot, poseSwap) : undefined;
       const normalizedOverride = { ...ov, poseSwap };
       if (!slot || !isDirtyOverride(normalizedOverride, activePart)) continue;
-      const part: RecordedPartOverride =
-        ov.target === "bone" && ov.boneId
-          ? { target: "bone", partRole: slot.role, boneId: ov.boneId }
-          : { target: "slot", partRole: slot.role, slotId: slot.id };
+      const part: RecordedPartOverride = recordedOverrideTarget(
+        runtimeMotionTargetForSlot(runtime, slot.id),
+        slot.role,
+      );
       if (poseSwap) part.poseSwap = poseSwap;
       if (ov.dx !== 0) part.dx = ov.dx;
       if (ov.dy !== 0) part.dy = ov.dy;
@@ -460,7 +473,7 @@ export function MotionPresetRecorder({
       parts.push(part);
     }
     return parts;
-  }, [activePartForSlot, overrides, slots, usesGeneratedMouth]);
+  }, [activePartForSlot, overrides, runtime, slots, usesGeneratedMouth]);
 
   const sortedKeyposes = useMemo(
     () => cloneKeyposes(keyposes).sort((a, b) => a.t - b.t),
@@ -486,6 +499,21 @@ export function MotionPresetRecorder({
     ].sort((a, b) => a.t - b.t);
   }, [currentRecordedParts, draftDirty, faceTurnX, faceTurnY, keyposes, sortedKeyposes, time]);
 
+  // Stable preset: committed keyposes only, no live overrides or face-turn.
+  // Controls srcDoc (DOM structure) — only rebuilds the iframe on keypose commits.
+  const stablePreviewPreset = useMemo(() => {
+    if (sortedKeyposes.length === 0) return null;
+    return recorderPreviewPreset({
+      name,
+      category,
+      duration,
+      keyposes: sortedKeyposes,
+      allowOutOfBounds,
+    });
+  }, [allowOutOfBounds, category, duration, name, sortedKeyposes]);
+
+  // Edit preset: current overrides + face-turn at t=0.
+  // Used for GSAP script injection — changes every drag frame but never reloads the DOM.
   const editPreviewPreset = useMemo(() => {
     const currentParts = currentRecordedParts();
     if (currentParts.length === 0 && faceTurnX === 0 && faceTurnY === 0) return null;
@@ -519,6 +547,8 @@ export function MotionPresetRecorder({
           })
         : null;
     setPlaybackPreset(preset);
+    setPreviewCompileRevision((revision) => revision + 1);
+    setTime(0);
     setPreviewPlaying(true);
   }, [allowOutOfBounds, category, duration, keyposesForPlayback, name]);
 
@@ -540,26 +570,9 @@ export function MotionPresetRecorder({
         slot?.role === "mouth" && usesGeneratedMouth && "poseSwap" in patch
           ? { ...patch, poseSwap: undefined }
           : patch;
-      const targetMeta =
-        slot && curPart ? recorderMotionTargetForSlot(slot, curPart, rig, base) : {};
+      const targetMeta = slot ? recorderMotionTargetForSlot(slot, runtime) : {};
       const merged = { ...base, ...targetMeta, ...normalizedPatch };
-      const hostClamped =
-        slot && curPart
-          ? clampRecorderOverrideToHost({
-              character,
-              runtime,
-              rig,
-              slots,
-              overrides: next,
-              activePartForSlot,
-              slot,
-              part: curPart,
-              override: merged,
-              faceTurnX,
-              faceTurnY,
-            })
-          : merged;
-      next.set(slotId, hostClamped);
+      next.set(slotId, merged);
       return constrainRecorderOverrides({
         character,
         rig,
@@ -610,22 +623,36 @@ export function MotionPresetRecorder({
       .filter((slot) => {
         const part = activePartForSlot(slot, overrides.get(slot.id)?.poseSwap);
         if (!part?.visible || part.locked || lockedSlotIds.has(slot.id)) return false;
-        const bounds = transformedBounds(
+        const frame = recorderPartFrame(
+          slot,
           part,
-          overrides.get(slot.id),
+          overrides.get(slot.id) ?? defaultOverride(slot.id, part),
+          runtime,
+          overrides,
+          activePartForSlot,
           faceTurnX,
-          character.canvasWidth,
           faceTurnY,
+          character.canvasWidth,
           character.canvasHeight,
-          recorderPartPlacement(slot, part, runtime),
+          activeVariantsBySlot,
+          poseWorldByBone,
         );
-        return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
+        return runtimePartFrameContains(frame, { x, y });
       })
-      .sort(
-        (a, b) =>
-          (activePartForSlot(b, overrides.get(b.id)?.poseSwap)?.zIndex ?? 0) -
-          (activePartForSlot(a, overrides.get(a.id)?.poseSwap)?.zIndex ?? 0),
-      );
+      .sort((a, b) => {
+        const aPart = activePartForSlot(a, overrides.get(a.id)?.poseSwap);
+        const bPart = activePartForSlot(b, overrides.get(b.id)?.poseSwap);
+        return (
+          (bPart
+            ? recorderPartPlacement(b, bPart, runtime, activeVariantsBySlot, poseWorldByBone)
+                .drawOrder
+            : 0) -
+          (aPart
+            ? recorderPartPlacement(a, aPart, runtime, activeVariantsBySlot, poseWorldByBone)
+                .drawOrder
+            : 0)
+        );
+      });
   };
 
   // Figma-style canvas select/drag (shared model — see select-drag.ts), centralized on the
@@ -648,6 +675,7 @@ export function MotionPresetRecorder({
     const startY = e.clientY;
     const ox = subjectId ? (overrides.get(subjectId)?.dx ?? 0) : 0;
     const oy = subjectId ? (overrides.get(subjectId)?.dy ?? 0) : 0;
+    const subjectTarget = subjectId ? runtimeMotionTargetForSlot(runtime, subjectId) : undefined;
     let dragging = false;
 
     const move = (ev: PointerEvent) => {
@@ -659,14 +687,19 @@ export function MotionPresetRecorder({
         if (subjectId !== selectedSlotId) setSelectedSlotId(subjectId);
         setSelectPopover(null);
       }
+      const canvasDelta = {
+        x: (ev.clientX - startX) / displayScale,
+        y: (ev.clientY - startY) / displayScale,
+      };
+      const delta = subjectTarget
+        ? canvasDeltaToMotionDelta(runtime, subjectTarget, canvasDelta, poseWorldByBone)
+        : canvasDelta;
       updateOverride(subjectId, {
-        dx: Math.round(ox + (ev.clientX - startX) / displayScale),
-        dy: Math.round(oy + (ev.clientY - startY) / displayScale),
+        dx: Math.round(ox + delta.x),
+        dy: Math.round(oy + delta.y),
       });
     };
     const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
       if (dragging) return;
       const { id, nextPick } = resolveDrillSelection(candidateIds, lastPickRef.current, {
         x: startX,
@@ -678,8 +711,7 @@ export function MotionPresetRecorder({
         setSelectPopover(null);
       }
     };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    startWindowPointerDrag({ onMove: move, onEnd: up });
   };
 
   const captureKeypose = () => {
@@ -866,19 +898,32 @@ export function MotionPresetRecorder({
               <RecorderHyperFramesPreview
                 character={character}
                 basePoses={basePoses}
-                preset={previewPlaying ? playbackPreset : editPreviewPreset}
+                preset={previewPlaying ? playbackPreset : stablePreviewPreset}
+                editPreset={previewPlaying ? null : editPreviewPreset}
+                compileRevision={previewCompileRevision}
                 time={time}
               />
-              {selectedPart && selectedOverride && (
+              {!previewPlaying && selectedSlot && selectedPart && selectedOverride && (
                 <SelectionHandles
-                  part={selectedPart}
+                  slot={selectedSlot}
                   override={selectedOverride}
-                  placement={recorderPartPlacement(selectedSlot, selectedPart, runtime)}
+                  frame={recorderPartFrame(
+                    selectedSlot,
+                    selectedPart,
+                    selectedOverride,
+                    runtime,
+                    overrides,
+                    activePartForSlot,
+                    faceTurnX,
+                    faceTurnY,
+                    character.canvasWidth,
+                    character.canvasHeight,
+                    activeVariantsBySlot,
+                    poseWorldByBone,
+                  )}
+                  runtime={runtime}
+                  worldByBone={poseWorldByBone}
                   scale={displayScale}
-                  faceTurnX={faceTurnX}
-                  faceTurnY={faceTurnY}
-                  canvasWidth={character.canvasWidth}
-                  canvasHeight={character.canvasHeight}
                   planeRef={planeRef}
                   onChange={(patch) => updateOverride(selectedOverride.slotId, patch)}
                 />
@@ -1019,7 +1064,6 @@ export function MotionPresetRecorder({
               <button
                 type="button"
                 onClick={() => {
-                  setTime(0);
                   commitRecorderPreviewToHtml();
                 }}
                 className="flex items-center justify-center rounded border border-border bg-panel-2 px-2 py-1 hover:bg-panel"
@@ -1399,24 +1443,6 @@ function PropertiesPanel({
             onChange={(value) => onChange({ skewY: value })}
           />
           <PropertyRow
-            label="Pivot X"
-            value={override.originX}
-            min={-0.5}
-            max={1.5}
-            step={0.01}
-            rest={part.anchorX}
-            onChange={(value) => onChange({ originX: value })}
-          />
-          <PropertyRow
-            label="Pivot Y"
-            value={override.originY}
-            min={-0.5}
-            max={1.5}
-            step={0.01}
-            rest={part.anchorY}
-            onChange={(value) => onChange({ originY: value })}
-          />
-          <PropertyRow
             label="Opacity"
             value={override.opacity}
             min={0}
@@ -1480,19 +1506,89 @@ function PropertyRow({
   );
 }
 
+// Extract the GSAP timeline setup script from a compiled composition HTML string.
+// The character timeline script is the inline <script> block that registers
+// window.__timelines[compositionId]. Using it directly guarantees the same
+// GSAP vars (effectiveBaseRotation, boneCarriesChildren, face-turn, etc.) as
+// the fully compiled animation — the single truth for both overlay and preview.
+// Inject the edit-preset GSAP script into the existing iframe without touching srcDoc.
+// Kills the old timeline, injects the new script (which creates the paused timeline
+// with the correct overrides), then seeks to `time`. No DOM reload = no flash.
+// editScript is the raw IIFE text from buildCharacterGsapScript — no HTML parsing needed.
+function applyEditScriptToIframe(
+  iframe: HTMLIFrameElement | null,
+  compositionId: string,
+  time: number,
+  editScript: string | null,
+  attempts = 0,
+  isCancelled: () => boolean = () => false,
+): void {
+  if (isCancelled()) return;
+  type TimelineEntry = {
+    seek?: (t: number, suppressEvents?: boolean) => unknown;
+    pause?: () => unknown;
+    kill?: () => void;
+  };
+  type RWin = Window & { __timelines?: Record<string, TimelineEntry> };
+  let win: RWin | null | undefined;
+  let timeline: TimelineEntry | undefined;
+  try {
+    win = iframe?.contentWindow as RWin;
+    timeline = win?.__timelines?.[compositionId];
+  } catch {
+    win = null;
+    timeline = undefined;
+  }
+  if (!timeline) {
+    if (iframe && attempts < 30) {
+      window.setTimeout(
+        () =>
+          applyEditScriptToIframe(
+            iframe,
+            compositionId,
+            time,
+            editScript,
+            attempts + 1,
+            isCancelled,
+          ),
+        40,
+      );
+    }
+    return;
+  }
+  if (editScript) {
+    // Kill old timeline so GSAP releases element control before we rebuild.
+    timeline.kill?.();
+    const el = iframe!.contentDocument!.createElement("script");
+    el.textContent = editScript;
+    iframe!.contentDocument!.body.appendChild(el);
+    // Re-read the freshly registered timeline.
+    timeline = win?.__timelines?.[compositionId];
+  }
+  timeline?.pause?.();
+  timeline?.seek?.(Math.max(0, time), false);
+}
+
 function RecorderHyperFramesPreview({
   character,
   basePoses,
   preset,
+  editPreset,
+  compileRevision,
   time,
 }: {
   character: CharacterPreset;
   basePoses: Record<string, string>;
   preset: MotionPreset | null;
+  editPreset: MotionPreset | null;
+  compileRevision: number;
   time: number;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const compositionId = "recorder_character_preview";
+
+  // Stable HTML: DOM structure + committed motion. Controls srcDoc.
+  // Only changes when the character, base poses, or committed keyposes change.
   const sourceHtml = useMemo(() => {
     const motionPresets = preset ? new Map([[preset.id, preset]]) : new Map<string, MotionPreset>();
     return buildCharacterCompositionHtml({
@@ -1522,7 +1618,46 @@ function RecorderHyperFramesPreview({
       motionPresets,
     });
   }, [basePoses, character, compositionId, preset]);
+
+  // Edit GSAP script: current override state (single t=0 keypose + face-turn).
+  // Built on every drag frame and injected into the live iframe — DOM never reloads.
+  // Uses buildCharacterGsapScript (not buildCharacterCompositionHtml) so no HTML
+  // serialization or DOMParser extraction is needed.
+  const editGsapScript = useMemo(() => {
+    if (!editPreset) return null;
+    const motionPresets = new Map([[editPreset.id, editPreset]]);
+    return buildCharacterGsapScript({
+      compositionId,
+      clipId: "recorder-character-preview-clip",
+      width: character.canvasWidth,
+      height: character.canvasHeight,
+      duration: Math.max(0.1, editPreset.duration),
+      character,
+      meta: {
+        characterId: character.id,
+        poses: basePoses,
+        autoBlink: false,
+        motions: [
+          {
+            id: "recorder-draft-motion",
+            presetId: editPreset.id,
+            offset: 0,
+            intensity: 1,
+            loop: false,
+            duration: editPreset.duration,
+          },
+        ],
+      },
+      motionPresets,
+    });
+  }, [basePoses, character, compositionId, editPreset]);
+
   const [html, setHtml] = useState<string | null>(null);
+  const htmlKey = useMemo(() => (html ? recorderHtmlKey(html) : "pending"), [html]);
+  const iframeKey = useMemo(
+    () => `${htmlKey}:compile-${compileRevision}`,
+    [compileRevision, htmlKey],
+  );
 
   useEffect(() => {
     let alive = true;
@@ -1537,15 +1672,29 @@ function RecorderHyperFramesPreview({
     };
   }, [character, sourceHtml]);
 
+  // Inject the edit GSAP script whenever the override state changes.
+  // When html changes (srcDoc reload), retry until the timeline is ready.
   useEffect(() => {
     if (!html) return;
-    if (preset) seekRecorderPreview(iframeRef.current, compositionId, time);
-  }, [compositionId, html, preset, time]);
+    let alive = true;
+    applyEditScriptToIframe(
+      iframeRef.current,
+      compositionId,
+      time,
+      editGsapScript,
+      0,
+      () => !alive,
+    );
+    return () => {
+      alive = false;
+    };
+  }, [compositionId, editGsapScript, html, time]);
 
   return (
     <>
       {html ? (
         <iframe
+          key={iframeKey}
           ref={iframeRef}
           title="Recorder HyperFrames character preview"
           sandbox="allow-scripts allow-same-origin"
@@ -1553,7 +1702,7 @@ function RecorderHyperFramesPreview({
           srcDoc={html}
           className="pointer-events-none absolute inset-0 block h-full w-full border-0 bg-transparent"
           onLoad={() => {
-            if (preset) seekRecorderPreview(iframeRef.current, compositionId, time);
+            applyEditScriptToIframe(iframeRef.current, compositionId, time, editGsapScript);
           }}
         />
       ) : (
@@ -1581,50 +1730,18 @@ async function resolveRecorderPreviewAssetRefs(
   return resolved;
 }
 
-function seekRecorderPreview(
-  iframe: HTMLIFrameElement | null,
-  compositionId: string,
-  time: number,
-  attempts = 0,
-): void {
-  let timeline:
-    | {
-        seek?: (time: number, suppressEvents?: boolean) => unknown;
-        pause?: () => unknown;
-      }
-    | undefined;
-  try {
-    const win = iframe?.contentWindow as
-      | (Window & {
-          __timelines?: Record<
-            string,
-            {
-              seek?: (time: number, suppressEvents?: boolean) => unknown;
-              pause?: () => unknown;
-            }
-          >;
-        })
-      | null
-      | undefined;
-    timeline = win?.__timelines?.[compositionId];
-  } catch {
-    timeline = undefined;
+function recorderHtmlKey(html: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < html.length; i += 1) {
+    hash ^= html.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
   }
-  if (!timeline?.seek) {
-    if (iframe && attempts < 30) {
-      window.setTimeout(() => seekRecorderPreview(iframe, compositionId, time, attempts + 1), 40);
-    }
-    return;
-  }
-  timeline.pause?.();
-  timeline.seek(Math.max(0, time), false);
+  return `${html.length}:${hash >>> 0}`;
 }
 
 /**
- * Dev-only editor chrome: marks every bone pivot, and for bones with parent-variant anchors the
- * currently resolved anchor with its resolution path — socket (green), paired art (blue), or
- * representative fallback (amber) — plus the parent slot's active variant key. Renders only in
- * the recorder plane; never enters composition HTML or export.
+ * Dev-only editor chrome: marks every resolved bone pivot and labels pin-driven joints with the
+ * active parent variant. Renders only in the recorder plane; never enters composition HTML.
  */
 function AnchorDebugOverlay({
   runtime,
@@ -1633,28 +1750,33 @@ function AnchorDebugOverlay({
   runtime: CharacterRuntime;
   overrides: Map<string, RecorderPartState>;
 }) {
-  const rig = runtime.rig;
-  const world = runtime.worldByBone;
+  const activeVariants = Object.fromEntries(
+    Array.from(overrides.entries()).flatMap(([slotId, state]) =>
+      state.poseSwap ? [[slotId, state.poseSwap]] : [],
+    ),
+  );
+  const world = runtimeBoneWorldTransforms(runtime, activeVariants);
   const markers: Array<{ key: string; x: number; y: number; color: string; label?: string }> = [];
-  for (const bone of rig.bones) {
+  for (const bone of runtime.angleRig.bones) {
     const at = world.get(bone.id);
     if (!at) continue;
     markers.push({ key: `pivot:${bone.id}`, x: at.x, y: at.y, color: "rgba(255,255,255,0.6)" });
-    if (!bone.parentVariantAnchors || !bone.parentId) continue;
-    const parentSlotId = parentSlotIdForBone(rig, bone.id);
-    const parentAt = world.get(bone.parentId);
-    if (!parentSlotId || !parentAt) continue;
+    if (!bone.restSource || !bone.parentId) continue;
+    const parentSlotId = bone.restSource.slotId;
     const activeKey = overrides.get(parentSlotId)?.poseSwap;
-    const anchor = activeKey ? bone.parentVariantAnchors[activeKey] : undefined;
-    const source = anchor?.source ?? (activeKey ? "fallback" : "base");
-    const local = anchor ?? { x: bone.x, y: bone.y };
-    const color = source === "socket" ? "#4ade80" : source === "pairedArt" ? "#38bdf8" : "#fbbf24";
+    const parentSlot = runtime.slotById.get(parentSlotId);
+    const parentPart = parentSlot
+      ? resolveRuntimeSlotPart(parentSlot, runtime, activeKey)
+      : undefined;
+    const resolved = !!parentPart?.pins?.[bone.restSource.pinName];
     markers.push({
       key: `anchor:${bone.id}`,
-      x: parentAt.x + local.x,
-      y: parentAt.y + local.y,
-      color,
-      label: `${bone.name} ← ${parentSlotId}${activeKey ? ` : ${activeKey}` : ""} (${source})`,
+      x: at.x,
+      y: at.y,
+      color: resolved ? "#4ade80" : "#fbbf24",
+      label:
+        `${bone.name} ← ${parentSlotId}${activeKey ? ` : ${activeKey}` : ""} ` +
+        `(${resolved ? bone.restSource.pinName : "missing pin"})`,
     });
   }
   return (
@@ -1717,33 +1839,45 @@ function recorderPreviewPreset({
 }
 
 function SelectionHandles({
-  part,
+  slot,
   override,
-  placement,
+  frame,
+  runtime,
+  worldByBone,
   scale,
-  faceTurnX,
-  faceTurnY,
-  canvasWidth,
-  canvasHeight,
   planeRef,
   onChange,
 }: {
-  part: CharacterPart;
+  slot: CharacterSlot;
   override: RecorderPartState;
-  placement: RecorderPartPlacement;
+  frame: RuntimePartFrame;
+  runtime: CharacterRuntime;
+  worldByBone: CharacterRuntime["worldByBone"];
   scale: number;
-  faceTurnX: number;
-  faceTurnY: number;
-  canvasWidth: number;
-  canvasHeight: number;
   planeRef: React.RefObject<HTMLDivElement | null>;
   onChange: (patch: Partial<RecorderPartState>) => void;
 }) {
-  const alphaRect = localAlphaBounds(part);
-  const turn = faceTurnMotionForPart(part, faceTurnX, canvasWidth, faceTurnY, canvasHeight);
+  const target = runtimeMotionTargetForSlot(runtime, slot.id);
   const handleSize = 24 / Math.max(0.0001, scale);
   const gap = 18 / Math.max(0.0001, scale);
-  const pivotLocal = { x: override.originX * part.width, y: override.originY * part.height };
+  const topEdge = {
+    x: frame.quad[1].x - frame.quad[0].x,
+    y: frame.quad[1].y - frame.quad[0].y,
+  };
+  const topLength = Math.max(0.0001, Math.hypot(topEdge.x, topEdge.y));
+  const outward = { x: topEdge.y / topLength, y: -topEdge.x / topLength };
+  const movePosition = {
+    x: frame.quad[0].x + outward.x * gap,
+    y: frame.quad[0].y + outward.y * gap,
+  };
+  const rotatePosition = {
+    x: (frame.quad[0].x + frame.quad[1].x) / 2 + outward.x * gap,
+    y: (frame.quad[0].y + frame.quad[1].y) / 2 + outward.y * gap,
+  };
+  const scalePosition = {
+    x: frame.quad[2].x - outward.x * gap,
+    y: frame.quad[2].y - outward.y * gap,
+  };
 
   const startMove = (e: React.PointerEvent) => {
     e.stopPropagation();
@@ -1753,17 +1887,21 @@ function SelectionHandles({
     const ox = override.dx;
     const oy = override.dy;
     const move = (ev: PointerEvent) => {
+      const delta = canvasDeltaToMotionDelta(
+        runtime,
+        target,
+        {
+          x: (ev.clientX - sx) / scale,
+          y: (ev.clientY - sy) / scale,
+        },
+        worldByBone,
+      );
       onChange({
-        dx: Math.round(ox + (ev.clientX - sx) / scale),
-        dy: Math.round(oy + (ev.clientY - sy) / scale),
+        dx: Math.round(ox + delta.x),
+        dy: Math.round(oy + delta.y),
       });
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    startWindowPointerDrag({ onMove: move });
   };
 
   const startRotate = (e: React.PointerEvent) => {
@@ -1771,20 +1909,15 @@ function SelectionHandles({
     if (e.button !== 0) return;
     const rect = planeRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const pivotX = rect.left + (placement.x + override.dx + turn.dx + pivotLocal.x) * scale;
-    const pivotY = rect.top + (placement.y + override.dy + turn.dy + pivotLocal.y) * scale;
+    const pivotX = rect.left + frame.pivot.x * scale;
+    const pivotY = rect.top + frame.pivot.y * scale;
     const startAngle = Math.atan2(e.clientY - pivotY, e.clientX - pivotX) * (180 / Math.PI);
     const startRot = override.rotation;
     const move = (ev: PointerEvent) => {
       const angle = Math.atan2(ev.clientY - pivotY, ev.clientX - pivotX) * (180 / Math.PI);
       onChange({ rotation: round(startRot + angle - startAngle, 1) });
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    startWindowPointerDrag({ onMove: move });
   };
 
   const startScale = (e: React.PointerEvent) => {
@@ -1792,8 +1925,8 @@ function SelectionHandles({
     if (e.button !== 0) return;
     const rect = planeRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const pivotX = rect.left + (placement.x + override.dx + turn.dx + pivotLocal.x) * scale;
-    const pivotY = rect.top + (placement.y + override.dy + turn.dy + pivotLocal.y) * scale;
+    const pivotX = rect.left + frame.pivot.x * scale;
+    const pivotY = rect.top + frame.pivot.y * scale;
     const startDist = Math.hypot(e.clientX - pivotX, e.clientY - pivotY);
     const startScaleValue = override.scale;
     const move = (ev: PointerEvent) => {
@@ -1801,75 +1934,27 @@ function SelectionHandles({
       if (startDist < 1) return;
       onChange({ scale: round(Math.max(0.1, startScaleValue * (dist / startDist)), 2) });
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  };
-
-  const startPivot = (e: React.PointerEvent) => {
-    e.stopPropagation();
-    if (e.button !== 0) return;
-    const rect = planeRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const move = (ev: PointerEvent) => {
-      const canvasX = (ev.clientX - rect.left) / scale;
-      const canvasY = (ev.clientY - rect.top) / scale;
-      onChange({
-        originX: round(
-          (canvasX - placement.x - override.dx - turn.dx) / Math.max(1, part.width),
-          3,
-        ),
-        originY: round(
-          (canvasY - placement.y - override.dy - turn.dy) / Math.max(1, part.height),
-          3,
-        ),
-      });
-    };
-    move(e.nativeEvent);
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    startWindowPointerDrag({ onMove: move });
   };
 
   return (
-    <div
-      className="pointer-events-none absolute"
-      style={{
-        left: placement.x + override.dx + turn.dx,
-        top: placement.y + override.dy + turn.dy,
-        width: part.width,
-        height: part.height,
-        transform: `rotate(${placement.rotation + override.rotation + turn.rotation}deg) scale(${
-          placement.scaleX * override.scale * override.scaleX * turn.scaleX
-        }, ${placement.scaleY * override.scale * override.scaleY * turn.scaleY}) skew(${
-          override.skewX + turn.skewX
-        }deg, ${override.skewY + turn.skewY}deg)`,
-        transformOrigin: `${pivotLocal.x}px ${pivotLocal.y}px`,
-        zIndex: 9999,
-      }}
-    >
-      <div
-        className="absolute border border-primary"
-        style={{
-          left: alphaRect.x,
-          top: alphaRect.y,
-          width: alphaRect.width,
-          height: alphaRect.height,
-        }}
-      />
+    <div className="pointer-events-none absolute inset-0" style={{ zIndex: 9999 }}>
+      <svg className="absolute inset-0 h-full w-full overflow-visible" aria-hidden="true">
+        <polygon
+          points={frame.quad.map((point) => `${point.x},${point.y}`).join(" ")}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1 / Math.max(0.0001, scale)}
+          className="text-primary"
+        />
+      </svg>
       <button
         type="button"
         onPointerDown={startMove}
         className="pointer-events-auto absolute flex items-center justify-center rounded border border-background bg-panel text-foreground shadow"
         style={{
-          left: alphaRect.x - gap,
-          top: alphaRect.y - gap,
+          left: movePosition.x,
+          top: movePosition.y,
           width: handleSize,
           height: handleSize,
           transform: "translate(-50%, -50%)",
@@ -1883,8 +1968,8 @@ function SelectionHandles({
         onPointerDown={startRotate}
         className="pointer-events-auto absolute flex items-center justify-center rounded-full border border-background bg-primary text-primary-foreground shadow"
         style={{
-          left: alphaRect.x + alphaRect.width / 2,
-          top: alphaRect.y - gap,
+          left: rotatePosition.x,
+          top: rotatePosition.y,
           width: handleSize,
           height: handleSize,
           transform: "translate(-50%, -50%)",
@@ -1898,8 +1983,8 @@ function SelectionHandles({
         onPointerDown={startScale}
         className="pointer-events-auto absolute flex items-center justify-center rounded border border-background bg-accent text-accent-foreground shadow"
         style={{
-          left: alphaRect.x + alphaRect.width + gap,
-          top: alphaRect.y + alphaRect.height + gap,
+          left: scalePosition.x,
+          top: scalePosition.y,
           width: handleSize,
           height: handleSize,
           transform: "translate(-50%, -50%)",
@@ -1908,26 +1993,11 @@ function SelectionHandles({
       >
         <Scaling size={Math.max(12, handleSize * 0.55)} />
       </button>
-      <button
-        type="button"
-        onPointerDown={startPivot}
-        className="pointer-events-auto absolute flex items-center justify-center rounded-full border border-background bg-panel text-foreground shadow"
-        style={{
-          left: alphaRect.x - gap,
-          top: alphaRect.y + alphaRect.height + gap,
-          width: handleSize,
-          height: handleSize,
-          transform: "translate(-50%, -50%)",
-        }}
-        title="Set pivot"
-      >
-        <Crosshair size={Math.max(12, handleSize * 0.55)} />
-      </button>
       <div
         className="absolute rounded-full border border-primary bg-background/80"
         style={{
-          left: pivotLocal.x,
-          top: pivotLocal.y,
+          left: frame.pivot.x,
+          top: frame.pivot.y,
           width: Math.max(8, handleSize * 0.4),
           height: Math.max(8, handleSize * 0.4),
           transform: "translate(-50%, -50%)",
@@ -2000,11 +2070,11 @@ const MOTION_VALUE_DEFAULTS: Record<MotionValueKey, number> = {
 
 function initialKeyposesForPreset(
   preset: MotionPreset | undefined,
-  slots: CharacterSlot[],
+  runtime: CharacterRuntime,
 ): RecordedKeypose[] {
   if (!preset) return [];
   if (preset.keyposes?.length) return cloneKeyposes(preset.keyposes);
-  return keyposesFromTracks(preset, slots);
+  return keyposesFromTracks(preset, runtime);
 }
 
 function customPresetName(name: string) {
@@ -2037,7 +2107,7 @@ function cloneKeyposes(keyposes: RecordedKeypose[]): RecordedKeypose[] {
   }));
 }
 
-function keyposesFromTracks(preset: MotionPreset, slots: CharacterSlot[]): RecordedKeypose[] {
+function keyposesFromTracks(preset: MotionPreset, runtime: CharacterRuntime): RecordedKeypose[] {
   const tracks = preset.tracks ?? [];
   if (tracks.length === 0) return [];
   const duration = Math.max(0.1, preset.duration);
@@ -2063,7 +2133,7 @@ function keyposesFromTracks(preset: MotionPreset, slots: CharacterSlot[]): Recor
           };
           continue;
         }
-        for (const slot of slotsForTrack(track, slots)) {
+        for (const slot of slotsForTrack(track, runtime)) {
           parts.push(recordedOverrideFromMotionTrack(track, slot, sample, keys));
         }
       }
@@ -2075,9 +2145,14 @@ function keyposesFromTracks(preset: MotionPreset, slots: CharacterSlot[]): Recor
     });
 }
 
-function slotsForTrack(track: MotionTrack, slots: CharacterSlot[]) {
-  if (track.slotId) return slots.filter((slot) => slot.id === track.slotId);
-  return slots.filter((slot) => slot.role === track.partRole);
+function slotsForTrack(track: MotionTrack, runtime: CharacterRuntime) {
+  if (track.slotId) return runtime.slots.filter((slot) => slot.id === track.slotId);
+  if (track.target === "bone" && track.boneId) {
+    return runtime.slots.filter(
+      (slot) => runtime.bindingBySlot.get(slot.id)?.effectiveBoneId === track.boneId,
+    );
+  }
+  return runtime.slots.filter((slot) => slot.role === track.partRole);
 }
 
 function usedMotionValueKeys(track: MotionTrack): MotionValueKey[] {
@@ -2092,7 +2167,15 @@ function recordedOverrideFromMotionTrack(
   sample: Partial<Record<MotionValueKey, number>>,
   keys: MotionValueKey[],
 ): RecordedPartOverride {
-  const out: RecordedPartOverride = { partRole: slot.role, slotId: slot.id };
+  const out: RecordedPartOverride =
+    track.target === "bone" && track.boneId
+      ? {
+          target: "bone",
+          boneId: track.boneId,
+          slotId: slot.id,
+          partRole: slot.role,
+        }
+      : { target: "slot", partRole: slot.role, slotId: slot.id };
   if (track.poseSwap) out.poseSwap = track.poseSwap;
   const writable = out as RecordedPartOverride & Partial<Record<MotionValueKey, number>>;
   for (const key of keys) {
@@ -2119,7 +2202,7 @@ function sampleMotionTrack(
     }
   }
   const span = Math.max(0.0001, b.t - a.t);
-  const u = easeValue(b.ease ?? a.ease, Math.max(0, Math.min(1, (tNorm - a.t) / span)));
+  const u = sampleMotionEase(b.ease ?? a.ease, Math.max(0, Math.min(1, (tNorm - a.t) / span)));
   const out: Partial<Record<MotionValueKey, number>> = {};
   for (const key of MOTION_VALUE_KEYS) {
     const av = a[key];
@@ -2141,87 +2224,6 @@ function sampleSingleMotionKeyframe(
     if (keyframe[key] !== undefined) out[key] = value;
   }
   return out;
-}
-
-function sampleKeyposesAtTime(
-  keyposes: RecordedKeypose[],
-  t: number,
-): { parts: Map<string, RecordedPartOverride>; faceTurnX: number; faceTurnY: number } {
-  const out = new Map<string, RecordedPartOverride>();
-  if (keyposes.length === 0) return { parts: out, faceTurnX: 0, faceTurnY: 0 };
-  const sorted = expandKeyposesWithAnticipation(keyposes);
-  let a = sorted[0];
-  let b = sorted[sorted.length - 1];
-  for (let i = 0; i < sorted.length - 1; i++) {
-    if (sorted[i + 1].t >= t) {
-      a = sorted[i];
-      b = sorted[i + 1];
-      break;
-    }
-  }
-  const span = Math.max(0.0001, b.t - a.t);
-  const raw = Math.max(0, Math.min(1, (t - a.t) / span));
-  const u = easeValue(b.ease ?? a.ease, raw);
-  const lerp = (av?: number, bv?: number, def = 0) => {
-    if (av === undefined && bv === undefined) return def;
-    if (av === undefined) return (bv as number) * u + def * (1 - u);
-    if (bv === undefined) return av * (1 - u) + def * u;
-    return av + (bv - av) * u;
-  };
-  const targets = new Set<string>();
-  for (const p of a.parts) targets.add(recordedTargetKey(p));
-  for (const p of b.parts) targets.add(recordedTargetKey(p));
-  for (const target of targets) {
-    const pa = a.parts.find((p) => recordedTargetKey(p) === target);
-    const pb = b.parts.find((p) => recordedTargetKey(p) === target);
-    const src = pa ?? pb;
-    if (!src) continue;
-    out.set(target, {
-      partRole: src.partRole,
-      slotId: src.slotId,
-      dx: lerp(pa?.dx, pb?.dx, 0),
-      dy: lerp(pa?.dy, pb?.dy, 0),
-      scale: lerp(pa?.scale, pb?.scale, 1),
-      scaleX: lerp(pa?.scaleX, pb?.scaleX, 1),
-      scaleY: lerp(pa?.scaleY, pb?.scaleY, 1),
-      skewX: lerp(pa?.skewX, pb?.skewX, 0),
-      skewY: lerp(pa?.skewY, pb?.skewY, 0),
-      rotation: lerp(pa?.rotation, pb?.rotation, 0),
-      originX:
-        pa?.originX === undefined && pb?.originX === undefined
-          ? undefined
-          : lerp(pa?.originX, pb?.originX, 0.5),
-      originY:
-        pa?.originY === undefined && pb?.originY === undefined
-          ? undefined
-          : lerp(pa?.originY, pb?.originY, 0.5),
-      opacity:
-        pa?.opacity === undefined && pb?.opacity === undefined
-          ? undefined
-          : lerp(pa?.opacity, pb?.opacity, 1),
-      poseSwap: (u >= 0.5 ? pb?.poseSwap : pa?.poseSwap) ?? pa?.poseSwap ?? pb?.poseSwap,
-    });
-  }
-  return {
-    parts: out,
-    faceTurnX: lerp(a.faceTurnX, b.faceTurnX, 0),
-    faceTurnY: lerp(a.faceTurnY, b.faceTurnY, 0),
-  };
-}
-
-function slotForRecordedOverride(
-  override: RecordedPartOverride,
-  slots: CharacterSlot[],
-  rig: RuntimeRig,
-): CharacterSlot | undefined {
-  if (override.slotId) return slots.find((slot) => slot.id === override.slotId);
-  if (override.target === "bone" && override.boneId) {
-    const binding = rig.slotBindings
-      .map((candidate) => resolveSlotBinding(rig, candidate.slotId))
-      .find((candidate) => candidate?.effectiveBoneId === override.boneId);
-    if (binding) return slots.find((slot) => slot.id === binding.slotId);
-  }
-  return slots.find((slot) => slot.role === override.partRole);
 }
 
 function constrainRecorderOverrides({
@@ -2253,7 +2255,7 @@ function constrainRecorderOverrides({
   const activeVariants = activeVariantsForRecorderOverrides(basePoses, overrides);
   const unclampedLayers = new Set(allowOutOfBounds);
   const animatedBoneIds = animatedBoneIdsForRecorderOverrides({
-    rig,
+    runtime,
     slots,
     overrides,
     activePartForSlot,
@@ -2266,7 +2268,7 @@ function constrainRecorderOverrides({
       out.set(slotId, override);
       continue;
     }
-    const withTarget = { ...override, ...recorderMotionTargetForSlot(slot, part, rig, override) };
+    const withTarget = { ...override, ...recorderMotionTargetForSlot(slot, runtime) };
     const hostClamped = clampRecorderOverrideToHost({
       character,
       runtime,
@@ -2277,6 +2279,7 @@ function constrainRecorderOverrides({
       slot,
       part,
       override: withTarget,
+      activeVariants,
       faceTurnX,
       faceTurnY,
     });
@@ -2331,12 +2334,12 @@ function activeVariantsForRecorderOverrides(
 }
 
 function animatedBoneIdsForRecorderOverrides({
-  rig,
+  runtime,
   slots,
   overrides,
   activePartForSlot,
 }: {
-  rig: RuntimeRig;
+  runtime: CharacterRuntime;
   slots: CharacterSlot[];
   overrides: Map<string, RecorderPartState>;
   activePartForSlot: (slot: CharacterSlot, poseSwap?: string) => CharacterPart | undefined;
@@ -2346,7 +2349,7 @@ function animatedBoneIdsForRecorderOverrides({
     const slot = slots.find((candidate) => candidate.id === slotId);
     const part = slot ? activePartForSlot(slot, override.poseSwap) : undefined;
     if (!slot || !part || !motionDeltaMovesJoint(override)) continue;
-    const target = recorderMotionTargetForSlot(slot, part, rig, override);
+    const target = recorderMotionTargetForSlot(slot, runtime);
     if (target.target === "bone" && target.boneId) out.add(target.boneId);
   }
   return out;
@@ -2354,18 +2357,12 @@ function animatedBoneIdsForRecorderOverrides({
 
 function recorderMotionTargetForSlot(
   slot: CharacterSlot,
-  part: CharacterPart,
-  rig: RuntimeRig,
-  override?: RecorderPartState,
+  runtime: CharacterRuntime,
 ): Pick<RecorderPartState, "target" | "boneId"> {
-  if (override?.target === "bone" && override.boneId) {
-    return { target: "bone", boneId: override.boneId };
-  }
-  const binding = resolveSlotBinding(rig, slot.id);
-  if (binding && boneHasChild(rig, binding.effectiveBoneId)) {
-    return { target: "bone", boneId: binding.effectiveBoneId };
-  }
-  return { target: "slot", boneId: undefined };
+  const target = runtimeMotionTargetForSlot(runtime, slot.id);
+  return target.kind === "bone"
+    ? { target: "bone", boneId: target.boneId }
+    : { target: "slot", boneId: target.boneId };
 }
 
 function clampRecorderOverrideToHost({
@@ -2378,6 +2375,7 @@ function clampRecorderOverrideToHost({
   slot,
   part,
   override,
+  activeVariants,
   faceTurnX,
   faceTurnY,
 }: {
@@ -2390,6 +2388,7 @@ function clampRecorderOverrideToHost({
   slot: CharacterSlot;
   part: CharacterPart;
   override: RecorderPartState;
+  activeVariants: ReadonlyMap<string, string> | Readonly<Record<string, string>>;
   faceTurnX: number;
   faceTurnY: number;
 }): RecorderPartState {
@@ -2408,46 +2407,71 @@ function clampRecorderOverrideToHost({
   const hostPart = hostSlot ? activePartForSlot(hostSlot, hostOverride?.poseSwap) : undefined;
   if (!hostSlot || !hostPart) return override;
 
-  const hostBounds = transformedBounds(
+  const worldByBone = runtimeBoneWorldTransforms(runtime, activeVariants);
+  const hostBounds = recorderPartFrame(
+    hostSlot,
     hostPart,
     hostOverride ?? defaultOverride(hostSlot.id, hostPart),
+    runtime,
+    overrides,
+    activePartForSlot,
     faceTurnX,
-    character.canvasWidth,
     faceTurnY,
+    character.canvasWidth,
     character.canvasHeight,
-    recorderPartPlacement(hostSlot, hostPart, runtime),
-  );
-  const subjectBounds = transformedBounds(
+    activeVariants,
+    worldByBone,
+    recorderPartPlacement(hostSlot, hostPart, runtime, activeVariants, worldByBone),
+  ).bounds;
+  const subjectBounds = recorderPartFrame(
+    slot,
     part,
     override,
+    runtime,
+    overrides,
+    activePartForSlot,
     faceTurnX,
-    character.canvasWidth,
     faceTurnY,
+    character.canvasWidth,
     character.canvasHeight,
-    recorderPartPlacement(slot, part, runtime),
-  );
-  let dx = override.dx;
-  let dy = override.dy;
+    activeVariants,
+    worldByBone,
+    recorderPartPlacement(slot, part, runtime, activeVariants, worldByBone),
+  ).bounds;
+  let canvasDx = 0;
+  let canvasDy = 0;
 
   if (subjectBounds.right - subjectBounds.left > hostBounds.right - hostBounds.left) {
     const subjectCenter = (subjectBounds.left + subjectBounds.right) / 2;
     const hostCenter = (hostBounds.left + hostBounds.right) / 2;
-    dx += hostCenter - subjectCenter;
+    canvasDx += hostCenter - subjectCenter;
   } else {
-    if (subjectBounds.left < hostBounds.left) dx += hostBounds.left - subjectBounds.left;
-    if (subjectBounds.right > hostBounds.right) dx -= subjectBounds.right - hostBounds.right;
+    if (subjectBounds.left < hostBounds.left) canvasDx += hostBounds.left - subjectBounds.left;
+    if (subjectBounds.right > hostBounds.right) canvasDx -= subjectBounds.right - hostBounds.right;
   }
 
   if (subjectBounds.bottom - subjectBounds.top > hostBounds.bottom - hostBounds.top) {
     const subjectCenter = (subjectBounds.top + subjectBounds.bottom) / 2;
     const hostCenter = (hostBounds.top + hostBounds.bottom) / 2;
-    dy += hostCenter - subjectCenter;
+    canvasDy += hostCenter - subjectCenter;
   } else {
-    if (subjectBounds.top < hostBounds.top) dy += hostBounds.top - subjectBounds.top;
-    if (subjectBounds.bottom > hostBounds.bottom) dy -= subjectBounds.bottom - hostBounds.bottom;
+    if (subjectBounds.top < hostBounds.top) canvasDy += hostBounds.top - subjectBounds.top;
+    if (subjectBounds.bottom > hostBounds.bottom)
+      canvasDy -= subjectBounds.bottom - hostBounds.bottom;
   }
 
-  return { ...override, dx: Math.round(dx), dy: Math.round(dy) };
+  if (canvasDx === 0 && canvasDy === 0) return override;
+  const correction = canvasDeltaToMotionDelta(
+    runtime,
+    runtimeMotionTargetForSlot(runtime, slot.id),
+    { x: canvasDx, y: canvasDy },
+    worldByBone,
+  );
+  return {
+    ...override,
+    dx: Math.round(override.dx + correction.x),
+    dy: Math.round(override.dy + correction.y),
+  };
 }
 
 function defaultOverride(slotId: string, part?: CharacterPart): RecorderPartState {
@@ -2591,87 +2615,102 @@ function recorderPartPlacement(
   slot: CharacterSlot,
   part: CharacterPart,
   runtime: CharacterRuntime,
+  activeVariants?: ReadonlyMap<string, string> | Readonly<Record<string, string>>,
+  worldByBone?: CharacterRuntime["worldByBone"],
 ): RecorderPartPlacement {
-  return runtimePartPlacement(slot, part, runtime, { poseKey: variantKeyForPart(part) });
+  return runtimePartPlacement(slot, part, runtime, {
+    poseKey: variantKeyForPart(part),
+    activeVariants,
+    worldByBone,
+  });
 }
 
-function boneHasChild(rig: RuntimeRig, boneId: string): boolean {
-  return rig.bones.some((bone) => bone.parentId === boneId);
-}
-
-function transformedBounds(
+function recorderPartFrame(
+  slot: CharacterSlot,
   part: CharacterPart,
-  override: RecorderPartState | undefined,
+  override: RecorderPartState,
+  runtime: CharacterRuntime,
+  overrides: ReadonlyMap<string, RecorderPartState>,
+  activePartForSlot: (slot: CharacterSlot, poseSwap?: string) => CharacterPart | undefined,
   faceTurnX: number,
+  faceTurnY: number,
   canvasWidth: number,
-  faceTurnY = 0,
-  canvasHeight = canvasWidth,
-  placement?: RecorderPartPlacement,
-) {
-  const ov = override ?? defaultOverride(part.slotId, part);
-  const turn = faceTurnMotionForPart(part, faceTurnX, canvasWidth, faceTurnY, canvasHeight);
-  const alphaRect = localAlphaBounds(part);
-  const baseX = placement?.x ?? part.x;
-  const baseY = placement?.y ?? part.y;
-  const pivotLocalX = ov.originX * part.width;
-  const pivotLocalY = ov.originY * part.height;
-  const scaleX = (placement?.scaleX ?? 1) * ov.scale * ov.scaleX * turn.scaleX;
-  const scaleY = (placement?.scaleY ?? 1) * ov.scale * ov.scaleY * turn.scaleY;
-  const rotation = (placement?.rotation ?? part.rotation) + ov.rotation + turn.rotation;
-  const skewX = ov.skewX + turn.skewX;
-  const skewY = ov.skewY + turn.skewY;
-  const origin = {
-    x: baseX + ov.dx + turn.dx + pivotLocalX,
-    y: baseY + ov.dy + turn.dy + pivotLocalY,
-  };
-  const corners = [
-    { x: alphaRect.x, y: alphaRect.y },
-    { x: alphaRect.x + alphaRect.width, y: alphaRect.y },
-    { x: alphaRect.x, y: alphaRect.y + alphaRect.height },
-    { x: alphaRect.x + alphaRect.width, y: alphaRect.y + alphaRect.height },
-  ].map((point) =>
-    transformRecorderLocalPoint(point, { x: pivotLocalX, y: pivotLocalY }, origin, {
-      rotation,
-      scaleX,
-      scaleY,
-      skewX,
-      skewY,
-    }),
+  canvasHeight: number,
+  activeVariants: ReadonlyMap<string, string> | Readonly<Record<string, string>>,
+  worldByBone: CharacterRuntime["worldByBone"],
+  placement = recorderPartPlacement(slot, part, runtime, activeVariants, worldByBone),
+): RuntimePartFrame {
+  const target = runtimeMotionTargetForSlot(runtime, slot.id);
+  const transform = recorderFrameTransform(
+    part,
+    override,
+    runtime,
+    target,
+    worldByBone,
+    faceTurnX,
+    faceTurnY,
+    canvasWidth,
+    canvasHeight,
   );
-  const left = Math.min(...corners.map((point) => point.x));
-  const top = Math.min(...corners.map((point) => point.y));
-  const right = Math.max(...corners.map((point) => point.x));
-  const bottom = Math.max(...corners.map((point) => point.y));
-  return { left, top, right, bottom };
+  return resolveRuntimePosePartFrame({
+    slotId: slot.id,
+    resolveTransformForSlot: (ancestorSlotId) => {
+      const ancestorSlot = runtime.slotById.get(ancestorSlotId);
+      if (!ancestorSlot) return undefined;
+      const ancestorOverride = overrides.get(ancestorSlotId);
+      const ancestorPart = activePartForSlot(ancestorSlot, ancestorOverride?.poseSwap);
+      if (!ancestorPart) return undefined;
+      return recorderFrameTransform(
+        ancestorPart,
+        ancestorOverride ?? defaultOverride(ancestorSlotId, ancestorPart),
+        runtime,
+        runtimeMotionTargetForSlot(runtime, ancestorSlotId),
+        worldByBone,
+        faceTurnX,
+        faceTurnY,
+        canvasWidth,
+        canvasHeight,
+      );
+    },
+    part,
+    placement,
+    runtime,
+    target,
+    localBounds: localAlphaBounds(part),
+    transform,
+    worldByBone,
+  });
 }
 
-function transformRecorderLocalPoint(
-  point: { x: number; y: number },
-  pivot: { x: number; y: number },
-  origin: { x: number; y: number },
-  transform: { rotation: number; scaleX: number; scaleY: number; skewX: number; skewY: number },
-): { x: number; y: number } {
-  const scaled = {
-    x: (point.x - pivot.x) * transform.scaleX,
-    y: (point.y - pivot.y) * transform.scaleY,
-  };
-  const skewed = {
-    x: scaled.x + Math.tan((transform.skewX * Math.PI) / 180) * scaled.y,
-    y: Math.tan((transform.skewY * Math.PI) / 180) * scaled.x + scaled.y,
-  };
-  const radians = (transform.rotation * Math.PI) / 180;
-  const cos = Math.cos(radians);
-  const sin = Math.sin(radians);
+function recorderFrameTransform(
+  part: CharacterPart,
+  override: RecorderPartState,
+  runtime: CharacterRuntime,
+  target: ReturnType<typeof runtimeMotionTargetForSlot>,
+  worldByBone: CharacterRuntime["worldByBone"],
+  faceTurnX: number,
+  faceTurnY: number,
+  canvasWidth: number,
+  canvasHeight: number,
+): PartFrameTransform {
+  const turn = faceTurnMotionForPart(part, faceTurnX, canvasWidth, faceTurnY, canvasHeight);
+  const turnDelta = canvasDeltaToMotionDelta(
+    runtime,
+    target,
+    { x: turn.dx, y: turn.dy },
+    worldByBone,
+  );
   return {
-    x: origin.x + skewed.x * cos - skewed.y * sin,
-    y: origin.y + skewed.x * sin + skewed.y * cos,
+    dx: override.dx + turnDelta.x,
+    dy: override.dy + turnDelta.y,
+    rotation: override.rotation + turn.rotation,
+    scaleX: override.scale * override.scaleX * turn.scaleX,
+    scaleY: override.scale * override.scaleY * turn.scaleY,
+    skewX: override.skewX + turn.skewX,
+    skewY: override.skewY + turn.skewY,
+    originX: override.originX,
+    originY: override.originY,
   };
-}
-
-function recordedTargetKey(part: RecordedPartOverride) {
-  if (part.target === "bone" && part.boneId) return `bone:${part.boneId}`;
-  if (part.slotId) return `slot:${part.slotId}`;
-  return `role:${part.partRole}`;
 }
 
 function roleLabel(role: PartRole) {
@@ -2679,42 +2718,6 @@ function roleLabel(role: PartRole) {
     .split("-")
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(" ");
-}
-
-function easeValue(name: string | undefined, x: number) {
-  switch (name) {
-    case "linear":
-      return x;
-    case "easeIn":
-      return x * x;
-    case "easeOut":
-      return 1 - Math.pow(1 - x, 2);
-    case "snappy":
-      return 1 - Math.pow(1 - x, 4);
-    case "overshoot": {
-      const c = 1.70158;
-      return (c + 1) * x * x * x - c * x * x;
-    }
-    case "bounce": {
-      const n1 = 7.5625;
-      const d1 = 2.75;
-      if (x < 1 / d1) return n1 * x * x;
-      if (x < 2 / d1) return n1 * Math.pow(x - 1.5 / d1, 2) + 0.75;
-      if (x < 2.5 / d1) return n1 * Math.pow(x - 2.25 / d1, 2) + 0.9375;
-      return n1 * Math.pow(x - 2.625 / d1, 2) + 0.984375;
-    }
-    case "elastic":
-      return x === 0
-        ? 0
-        : x === 1
-          ? 1
-          : -Math.pow(2, 10 * x - 10) * Math.sin((x * 10 - 10.75) * ((2 * Math.PI) / 3));
-    case "hold":
-      return x < 1 ? 0 : 1;
-    case "easeInOut":
-    default:
-      return x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
-  }
 }
 
 function round(n: number, digits: number) {

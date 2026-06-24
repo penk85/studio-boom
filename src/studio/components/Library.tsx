@@ -17,9 +17,11 @@ import {
   variantKeyForPart,
 } from "../character/character-utils";
 import {
+  thumbnailFrameMatrix,
   thumbnailBoundsForFrames,
   type CharacterThumbnailFrame,
 } from "./character-thumbnail-bounds";
+import { matrixToCss } from "../character/geometry";
 import { ensureStarterCharacterSeeded } from "../character/starter";
 import { defaultPoseForCharacter } from "../character/pose-presets";
 import { ensureMotionPresetsSeeded } from "../presets/seed";
@@ -382,10 +384,11 @@ function CharacterThumbnail({ character }: { character: CharacterPreset }) {
           rotation: placement.rotation,
           scaleX: placement.scaleX,
           scaleY: placement.scaleY,
+          drawOrder: placement.drawOrder,
         };
       })
       .filter((frame): frame is CharacterThumbnailFrame => frame != null)
-      .sort((a, b) => a.part.zIndex - b.part.zIndex);
+      .sort((a, b) => (a.drawOrder ?? a.part.zIndex) - (b.drawOrder ?? b.part.zIndex));
   }, [character]);
   const bounds = useMemo(
     () => thumbnailBoundsForFrames(previewFrames, character),
@@ -446,13 +449,13 @@ function CharacterThumbnailPart({ frame }: { frame: CharacterThumbnailFrame }) {
       draggable={false}
       className="absolute object-contain"
       style={{
-        left: frame.x,
-        top: frame.y,
+        left: 0,
+        top: 0,
         width: part.width,
         height: part.height,
-        zIndex: part.zIndex,
-        transform: `rotate(${frame.rotation}deg) scale(${frame.scaleX}, ${frame.scaleY})`,
-        transformOrigin: `${part.anchorX * 100}% ${part.anchorY * 100}%`,
+        zIndex: frame.drawOrder ?? part.zIndex,
+        transform: matrixToCss(thumbnailFrameMatrix(frame)),
+        transformOrigin: "0 0",
         pointerEvents: "none",
       }}
     />

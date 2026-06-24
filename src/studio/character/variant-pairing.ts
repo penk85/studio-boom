@@ -1,10 +1,4 @@
-import type {
-  CharacterAngle,
-  CharacterPart,
-  CharacterPreset,
-  CharacterSlotSocket,
-  ID,
-} from "../types";
+import type { CharacterAngle, CharacterPart, CharacterPreset, ID } from "../types";
 import {
   anchorPartForVariant,
   getPartSlotId,
@@ -18,20 +12,20 @@ import {
 import {
   ANGLE_LABELS,
   availableCharacterAngles,
-  clearSlotSocketAnchor,
-  computeBoneWorldTransforms,
   normalizeCharacterRig,
   representativePart,
-  slotRestPivot,
   upsertSlotSocketAnchor,
 } from "./rig";
-import { childAnchorForVariant, parentSlotIdForBone } from "./motion-constraints";
+import { parentSlotIdForBone } from "./motion-constraints";
 import { alphaCenterForPart, pivotForPart } from "./alpha-bounds";
+import { rotateVector } from "./geometry";
+import { pinNameForChildSlot, pinTransformInBoneSpace, registrationForPart } from "./registration";
+import { buildCharacterRuntime, runtimeBoneWorldTransforms, runtimePartPlacement } from "./runtime";
 
 /**
- * Parent↔child variant pairing helpers for the Character Editor authoring UX. Pure functions —
- * no React, no DOM. Anchor *resolution* stays in the rig build (`parentVariantAnchors`); this
- * module only inspects keys, writes sockets, and reports — it never re-derives anchors.
+ * Parent↔child variant pairing helpers for the Character Editor authoring UX. Pure functions:
+ * no React and no DOM. The shared runtime resolves part-local pins into the bone graph; this
+ * module authors those pins and reports incomplete contracts.
  */
 
 /** Comparison form for near-miss detection: keys pair by exact match at runtime. */
@@ -115,7 +109,17 @@ export function findVariantKeyNearMisses(character: CharacterPreset): VariantKey
           parentKey,
           childKey: nearAlias,
           childPartId: part.id,
-          severity: bone.parentVariantAnchors?.[parentKey] ? "info" : "warning",
+          severity:
+            bone.restSource &&
+            partsBySlot
+              .get(parentSlotId)
+              ?.some(
+                (parentPart) =>
+                  variantAliasesForPart(parentPart).includes(parentKey) &&
+                  !!parentPart.pins?.[bone.restSource!.pinName],
+              )
+              ? "info"
+              : "warning",
         });
       }
     }
@@ -140,9 +144,6 @@ export interface VariantPreviewShift {
   bones: Map<ID, { dx: number; dy: number; rotation: number }>;
 }
 
-/** Face slots keep authored placement in the composition, so previews must not align them. */
-const FACE_PLACEMENT_ROLES = new Set(["eye", "iris", "mouth"]);
-
 /**
  * Canvas offsets and rotations that re-anchor children while parent slots preview a variant in
  * the editor. Computed as a rigid-transform diff: rebuild the bone world transforms with each
@@ -164,46 +165,10 @@ export function variantPreviewDeltas(
   const bones = new Map<ID, { dx: number; dy: number; rotation: number }>();
   if (Object.keys(variantPreview).length === 0) return { parts, bones };
 
-  const rig = normalizeCharacterRig(character);
-  const restWorld = computeBoneWorldTransforms(rig);
-  let anyAnchorApplied = false;
-  const previewBones = rig.bones.map((bone) => {
-    const parentSlotId = parentSlotIdForBone(rig, bone.id);
-    const previewKey = parentSlotId ? variantPreview[parentSlotId] : undefined;
-    if (!previewKey || !bone.parentVariantAnchors?.[previewKey]) return bone;
-    anyAnchorApplied = true;
-    const anchor = childAnchorForVariant(bone, previewKey);
-    return { ...bone, x: anchor.x, y: anchor.y, rotation: anchor.rotation };
-  });
-
-  // Own-slot pivot alignment for previewed variant groups (one rigid translation per group).
-  const slots = listCharacterSlots(character, { angle: rig.activeAngle, includeEmpty: false });
-  const alignBySlot = new Map<ID, { dx: number; dy: number; partIds: Set<ID> }>();
-  for (const [slotId, previewKey] of Object.entries(variantPreview)) {
-    const slot = slots.find((candidate) => candidate.id === slotId);
-    if (!slot || FACE_PLACEMENT_ROLES.has(slot.role)) continue;
-    const reference = representativePart(slot);
-    const anchorPart = anchorPartForVariant(slot.parts, previewKey);
-    if (!reference || !anchorPart || anchorPart === reference) continue;
-    const referencePivot = pivotForPart(reference);
-    const anchorPivot = pivotForPart(anchorPart);
-    const dx = referencePivot.x - anchorPivot.x;
-    const dy = referencePivot.y - anchorPivot.y;
-    if (dx === 0 && dy === 0) continue;
-    const partIds = new Set(
-      slot.parts
-        .filter((part) => variantAliasesForPart(part).includes(previewKey))
-        .map((part) => part.id),
-    );
-    if (partIds.size) alignBySlot.set(slotId, { dx, dy, partIds });
-  }
-
-  if (!anyAnchorApplied && alignBySlot.size === 0) return { parts, bones };
-  const previewWorld = anyAnchorApplied
-    ? computeBoneWorldTransforms({ ...rig, bones: previewBones })
-    : restWorld;
-
-  for (const bone of rig.bones) {
+  const runtime = buildCharacterRuntime(character);
+  const restWorld = runtime.worldByBone;
+  const previewWorld = runtimeBoneWorldTransforms(runtime, variantPreview);
+  for (const bone of runtime.angleRig.bones) {
     const rest = restWorld.get(bone.id);
     const moved = previewWorld.get(bone.id);
     if (!rest || !moved) continue;
@@ -215,40 +180,24 @@ export function variantPreviewDeltas(
     if (shift.dx === 0 && shift.dy === 0 && shift.rotation === 0) continue;
     bones.set(bone.id, shift);
   }
-  const boneIdBySlot = new Map(rig.slotBindings.map((binding) => [binding.slotId, binding.boneId]));
 
-  for (const part of character.parts) {
-    const slotId = getPartSlotId(part);
-    const align = alignBySlot.get(slotId);
-    const aligned = align?.partIds.has(part.id) ? align : undefined;
-    const boneId = boneIdBySlot.get(slotId);
-    const shift = boneId ? bones.get(boneId) : undefined;
-    if (!aligned && !shift) continue;
-    // The part rides its bone: its pivot sits at a fixed offset in the bone's frame. Express the
-    // new pose as (pivot displacement, rotation about the pivot) — exactly what PartLayer can
-    // render on top of the part's absolute rest transform. Own-slot alignment moves the pivot
-    // onto the joint first, so a re-anchored bone carries the displayed group from there.
-    const pivot = pivotForPart(part);
-    const alignedPivot = { x: pivot.x + (aligned?.dx ?? 0), y: pivot.y + (aligned?.dy ?? 0) };
-    const rest = boneId ? restWorld.get(boneId) : undefined;
-    const moved = boneId ? previewWorld.get(boneId) : undefined;
-    if (!shift || !rest || !moved) {
-      if (aligned) parts.set(part.id, { dx: aligned.dx, dy: aligned.dy, rotation: 0 });
-      continue;
+  for (const slot of runtime.slots) {
+    for (const part of slot.parts) {
+      const rest = runtimePartPlacement(slot, part, runtime);
+      const moved = runtimePartPlacement(slot, part, runtime, {
+        poseKey: variantPreview[slot.id],
+        activeVariants: variantPreview,
+        worldByBone: previewWorld,
+      });
+      const shift = {
+        dx: moved.x - rest.x,
+        dy: moved.y - rest.y,
+        rotation: moved.rotation - rest.rotation,
+      };
+      if (shift.dx !== 0 || shift.dy !== 0 || shift.rotation !== 0) {
+        parts.set(part.id, shift);
+      }
     }
-    const offset = { x: alignedPivot.x - rest.x, y: alignedPivot.y - rest.y };
-    const rad = ((moved.rotation - rest.rotation) * Math.PI) / 180;
-    const cos = Math.cos(rad);
-    const sin = Math.sin(rad);
-    const movedPivot = {
-      x: moved.x + offset.x * cos - offset.y * sin,
-      y: moved.y + offset.x * sin + offset.y * cos,
-    };
-    parts.set(part.id, {
-      dx: movedPivot.x - pivot.x,
-      dy: movedPivot.y - pivot.y,
-      rotation: moved.rotation - rest.rotation,
-    });
   }
   return { parts, bones };
 }
@@ -258,11 +207,21 @@ export function anchorEntryForChild(
   character: CharacterPreset,
   childSlotId: ID,
   parentVariantKey: string,
-): { x: number; y: number; rotation?: number; source?: "socket" | "pairedArt" } | undefined {
-  const rig = normalizeCharacterRig(character);
-  const boneId = rig.slotBindings.find((binding) => binding.slotId === childSlotId)?.boneId;
-  const bone = boneId ? rig.bones.find((candidate) => candidate.id === boneId) : undefined;
-  return bone?.parentVariantAnchors?.[parentVariantKey];
+): { x: number; y: number; rotation?: number; source: "pin" } | undefined {
+  const runtime = buildCharacterRuntime(character);
+  const binding = runtime.bindingBySlot.get(childSlotId);
+  const bone = binding ? runtime.boneById.get(binding.effectiveBoneId) : undefined;
+  const source = bone?.restSource;
+  const parentSlot = source ? runtime.slotById.get(source.slotId) : undefined;
+  const parentPart = parentSlot
+    ? anchorPartForVariant(parentSlot.parts, parentVariantKey)
+    : undefined;
+  const pin = parentPart && source ? parentPart.pins?.[source.pinName] : undefined;
+  if (!parentPart || !pin || !source) return undefined;
+  return {
+    ...pinTransformInBoneSpace(parentPart, pin, source.offset),
+    source: "pin",
+  };
 }
 
 /** How a child slot's anchor currently resolves under a parent variant key. */
@@ -270,40 +229,15 @@ export function anchorSourceForChild(
   character: CharacterPreset,
   childSlotId: ID,
   parentVariantKey: string,
-): "socket" | "pairedArt" | "fallback" {
+): "pin" | "fallback" {
   return anchorEntryForChild(character, childSlotId, parentVariantKey)?.source ?? "fallback";
 }
 
 /**
- * Author (or move) the joint that anchors `childSlotId` while the parent slot shows
- * `variantKey` — written into the ACTIVE ANGLE's rig socket records (the bone owns the joint;
- * a front-view wrist never affects the side-view skeleton). Never touches variant packages.
- */
-export function upsertVariantSocket(
-  character: CharacterPreset,
-  args: {
-    parentSlotId: ID;
-    variantKey: string;
-    childSlotId: ID;
-    x: number;
-    y: number;
-    /** Child bone rest rotation while this variant is active. Omitted = keep the prior value. */
-    rotation?: number;
-  },
-): CharacterPreset {
-  const rig = normalizeCharacterRig(character);
-  return {
-    ...character,
-    rig: upsertSlotSocketAnchor(rig, args, rig.activeAngle),
-  };
-}
-
-/**
  * Pin the joint so the child bone lands at `anchorPoint` (canvas px). Converts the desired
- * canvas anchor into joint coordinates using the same frame the rig build resolves anchors in
- * (`anchor = socket − parentRestPivot`, applied in the parent bone's frame).
+ * canvas point into the active parent artwork's part-local coordinate space.
  */
-export function upsertVariantSocketAtPoint(
+export function upsertVariantPinAtPoint(
   character: CharacterPreset,
   args: {
     parentSlotId: ID;
@@ -312,27 +246,60 @@ export function upsertVariantSocketAtPoint(
     anchorPoint: { x: number; y: number };
   },
 ): CharacterPreset {
-  const rig = normalizeCharacterRig(character);
-  const world = computeBoneWorldTransforms(rig);
-  const parentBoneId = rig.slotBindings.find(
-    (binding) => binding.slotId === args.parentSlotId,
-  )?.boneId;
-  const parentWorld = parentBoneId ? world.get(parentBoneId) : undefined;
-  const parentPivot = slotRestPivot(character, args.parentSlotId);
-  if (!parentWorld || !parentPivot) return character;
-  // The bone's local anchor lives in the parent's frame; un-rotate the canvas offset.
-  const rad = (-parentWorld.rotation * Math.PI) / 180;
-  const rel = { x: args.anchorPoint.x - parentWorld.x, y: args.anchorPoint.y - parentWorld.y };
-  const local = {
-    x: rel.x * Math.cos(rad) - rel.y * Math.sin(rad),
-    y: rel.x * Math.sin(rad) + rel.y * Math.cos(rad),
+  const runtime = buildCharacterRuntime(character);
+  const parentSlot = runtime.slotById.get(args.parentSlotId);
+  const childSlot = runtime.slotById.get(args.childSlotId);
+  const parentPart = parentSlot
+    ? anchorPartForVariant(parentSlot.parts, args.variantKey)
+    : undefined;
+  const parentBinding = runtime.bindingBySlot.get(args.parentSlotId);
+  const parentWorld = parentBinding
+    ? runtime.worldByBone.get(parentBinding.effectiveBoneId)
+    : undefined;
+  const childBinding = runtime.bindingBySlot.get(args.childSlotId);
+  const childBone = childBinding ? runtime.boneById.get(childBinding.effectiveBoneId) : undefined;
+  if (!parentPart || !parentWorld || !childBone || !childSlot) return runtime.character;
+
+  const pinName = childBone.restSource?.pinName ?? pinNameForChildSlot(childSlot);
+  const registration = registrationForPart(parentPart);
+  const partRotation = parentWorld.rotation + registration.rotation;
+  const radians = (-partRotation * Math.PI) / 180;
+  const rel = {
+    x: args.anchorPoint.x - parentWorld.x,
+    y: args.anchorPoint.y - parentWorld.y,
   };
-  return upsertVariantSocket(character, {
+  const local = {
+    x: registration.x + rel.x * Math.cos(radians) - rel.y * Math.sin(radians),
+    y: registration.y + rel.x * Math.sin(radians) + rel.y * Math.cos(radians),
+  };
+  return withPartPinAndBoneSource(runtime.character, {
+    parentPartId: parentPart.id,
     parentSlotId: args.parentSlotId,
-    variantKey: args.variantKey,
-    childSlotId: args.childSlotId,
-    x: parentPivot.x + local.x,
-    y: parentPivot.y + local.y,
+    childBoneId: childBone.id,
+    pinName,
+    pin: {
+      x: local.x,
+      y: local.y,
+      rotation: parentPart.pins?.[pinName]?.rotation ?? childBone.rotation - registration.rotation,
+      space: "part-local-pixels",
+    },
+  });
+}
+
+/** Rebuild one parent-variant output pin from the child artwork's authored canvas pivot. */
+export function resetVariantPinToArtwork(
+  character: CharacterPreset,
+  args: { parentSlotId: ID; variantKey: string; childSlotId: ID },
+): CharacterPreset {
+  const runtime = buildCharacterRuntime(character);
+  const childSlot = runtime.slotById.get(args.childSlotId);
+  if (!childSlot) return runtime.character;
+  const childPart =
+    anchorPartForVariant(childSlot.parts, args.variantKey) ?? representativePart(childSlot);
+  if (!childPart) return runtime.character;
+  return upsertVariantPinAtPoint(runtime.character, {
+    ...args,
+    anchorPoint: pivotForPart(childPart),
   });
 }
 
@@ -341,35 +308,145 @@ export function upsertVariantSocketAtPoint(
  * the currently-resolved anchor position when none exists), so a single child art can sit at a
  * different angle per parent variant — paired art expresses its angle in its own part rotation.
  */
-export function setVariantAnchorRotation(
+export function setVariantPinRotation(
   character: CharacterPreset,
   args: { parentSlotId: ID; variantKey: string; childSlotId: ID; rotation: number },
 ): CharacterPreset {
-  const rig = normalizeCharacterRig(character);
-  const boneId = rig.slotBindings.find((binding) => binding.slotId === args.childSlotId)?.boneId;
-  const bone = boneId ? rig.bones.find((candidate) => candidate.id === boneId) : undefined;
-  const parentPivot = slotRestPivot(character, args.parentSlotId);
-  if (!bone || !parentPivot) return character;
-  const local = bone.parentVariantAnchors?.[args.variantKey] ?? { x: bone.x, y: bone.y };
-  return upsertVariantSocket(character, {
+  const runtime = buildCharacterRuntime(character);
+  const parentSlot = runtime.slotById.get(args.parentSlotId);
+  const childSlot = runtime.slotById.get(args.childSlotId);
+  const parentPart = parentSlot
+    ? anchorPartForVariant(parentSlot.parts, args.variantKey)
+    : undefined;
+  const childBinding = runtime.bindingBySlot.get(args.childSlotId);
+  const childBone = childBinding ? runtime.boneById.get(childBinding.effectiveBoneId) : undefined;
+  if (!parentPart || !childBone || !childSlot) return runtime.character;
+  const pinName = childBone.restSource?.pinName ?? pinNameForChildSlot(childSlot);
+  const registration = registrationForPart(parentPart);
+  const offset = childBone.restSource?.offset;
+  const fallbackPoint = rotateVector(
+    {
+      x: childBone.x - (offset?.x ?? 0),
+      y: childBone.y - (offset?.y ?? 0),
+    },
+    -registration.rotation,
+  );
+  const existing = parentPart.pins?.[pinName] ?? {
+    x: registration.x + fallbackPoint.x,
+    y: registration.y + fallbackPoint.y,
+    rotation: childBone.rotation - registration.rotation - (offset?.rotation ?? 0),
+    space: "part-local-pixels" as const,
+  };
+  return withPartPinAndBoneSource(runtime.character, {
+    parentPartId: parentPart.id,
     parentSlotId: args.parentSlotId,
-    variantKey: args.variantKey,
-    childSlotId: args.childSlotId,
-    x: parentPivot.x + local.x,
-    y: parentPivot.y + local.y,
-    rotation: args.rotation,
+    childBoneId: childBone.id,
+    pinName,
+    pin: {
+      ...existing,
+      rotation: args.rotation - registration.rotation,
+    },
   });
 }
 
-/** Remove the authored joint anchor for `childSlotId` under the parent variant (active angle). */
-export function removeVariantSocket(
+/** Remove the authored output pin for `childSlotId` from the active parent variant. */
+export function removeVariantPin(
   character: CharacterPreset,
   args: { parentSlotId: ID; variantKey: string; childSlotId: ID },
 ): CharacterPreset {
+  const runtime = buildCharacterRuntime(character);
+  const parentSlot = runtime.slotById.get(args.parentSlotId);
+  const parentPart = parentSlot
+    ? anchorPartForVariant(parentSlot.parts, args.variantKey)
+    : undefined;
+  const childBinding = runtime.bindingBySlot.get(args.childSlotId);
+  const childBone = childBinding ? runtime.boneById.get(childBinding.effectiveBoneId) : undefined;
+  const pinName = childBone?.restSource?.pinName;
+  if (!parentPart || !pinName) return runtime.character;
+  return {
+    ...runtime.character,
+    parts: runtime.character.parts.map((part) => {
+      if (part.id !== parentPart.id || !part.pins?.[pinName]) return part;
+      const pins = { ...part.pins };
+      delete pins[pinName];
+      return { ...part, pins: Object.keys(pins).length ? pins : undefined };
+    }),
+    rig: runtime.character.rig
+      ? {
+          ...runtime.character.rig,
+          version: 2,
+          pinSchemaInitialized: true,
+          pinSchemaRevision: 2,
+          sockets: undefined,
+        }
+      : runtime.character.rig,
+  };
+}
+
+function withPartPinAndBoneSource(
+  character: CharacterPreset,
+  args: {
+    parentPartId: ID;
+    parentSlotId: ID;
+    childBoneId: ID;
+    pinName: string;
+    pin: NonNullable<CharacterPart["pins"]>[string];
+  },
+): CharacterPreset {
   const rig = normalizeCharacterRig(character);
+  const angle = rig.activeAngle;
+  const updateBones = (bones: typeof rig.bones) =>
+    bones.map((bone) =>
+      bone.id === args.childBoneId
+        ? {
+            ...bone,
+            restSource: {
+              slotId: args.parentSlotId,
+              pinName: args.pinName,
+              ...(bone.restSource?.offset ? { offset: bone.restSource.offset } : {}),
+            },
+            parentVariantAnchors: undefined,
+          }
+        : bone,
+    );
+  const angleRig = rig.angles?.[angle];
+  const bones = updateBones(angleRig?.bones ?? rig.bones);
   return {
     ...character,
-    rig: clearSlotSocketAnchor(rig, args, rig.activeAngle),
+    parts: character.parts.map((part) =>
+      part.id === args.parentPartId
+        ? {
+            ...part,
+            pins: {
+              ...(part.pins ?? {}),
+              [args.pinName]: args.pin,
+            },
+          }
+        : part,
+    ),
+    rig: {
+      ...rig,
+      version: 2,
+      pinSchemaInitialized: true,
+      pinSchemaRevision: 2,
+      bones,
+      angles: {
+        ...(rig.angles ?? {}),
+        [angle]: {
+          ...(angleRig ?? {
+            angleId: angle,
+            slotBindings: rig.slotBindings,
+            drawOrder: rig.drawOrder,
+            slotRelations: rig.slotRelations,
+            hostConstraints: rig.hostConstraints,
+            reaches: rig.reaches,
+          }),
+          bones,
+          sockets: undefined,
+        },
+      },
+      sockets: undefined,
+    },
   };
 }
 
@@ -457,14 +534,6 @@ export function renameVariantKeyEverywhere(
   if (!oldKey || !newKey || oldKey === newKey) return character;
   const rig = normalizeCharacterRig(character);
 
-  const renameAnchors = (sockets: CharacterSlotSocket[] | undefined) =>
-    (sockets ?? []).map((socket) => {
-      if (socket.slotId !== slotId || !(oldKey in socket.variantAnchors)) return socket;
-      const variantAnchors = { ...socket.variantAnchors };
-      variantAnchors[newKey] = variantAnchors[oldKey];
-      delete variantAnchors[oldKey];
-      return { ...socket, variantAnchors };
-    });
   const renameRelations = (relations: typeof rig.slotRelations) =>
     relations.map((relation) => {
       const parentId =
@@ -488,7 +557,7 @@ export function renameVariantKeyEverywhere(
       angleRig
         ? {
             ...angleRig,
-            sockets: renameAnchors(angleRig.sockets),
+            sockets: undefined,
             slotRelations: renameRelations(angleRig.slotRelations),
           }
         : angleRig,
@@ -506,7 +575,7 @@ export function renameVariantKeyEverywhere(
     rig: {
       ...rig,
       angles,
-      sockets: renameAnchors(rig.sockets),
+      sockets: undefined,
       slotRelations: renameRelations(rig.slotRelations),
     },
     ...(posePresets ? { posePresets } : {}),
@@ -553,7 +622,7 @@ export interface RigHealthAnchorRow {
   childSlotId: ID;
   parentSlotId: ID;
   variantKey: string;
-  source: "socket" | "pairedArt" | "fallback";
+  source: "pin" | "fallback";
   /** Local anchor in the parent bone's frame (bone base x/y for fallback rows). */
   anchor: { x: number; y: number };
 }
@@ -575,9 +644,8 @@ export interface RigHealthReport {
 }
 
 /**
- * The whole-character verification checklist: every child anchor with its resolution path, plus
- * key/pivot problems. Anchor data is read straight from `rig.bones[].parentVariantAnchors` —
- * never re-derived — so the panel can't disagree with the engine.
+ * The whole-character verification checklist: every child pin with its resolution path, plus
+ * key/pivot problems. It reads the same restSource and part pins as the runtime resolver.
  */
 export function buildRigHealthReport(character: CharacterPreset): RigHealthReport {
   const rig = normalizeCharacterRig(character);
@@ -587,39 +655,40 @@ export function buildRigHealthReport(character: CharacterPreset): RigHealthRepor
     character.parts.find((part) => getPartSlotId(part) === slotId)?.slotName ?? slotId;
 
   const anchoredParentSlots = new Set<ID>();
-  for (const bone of rig.bones) {
-    const childSlotId = rig.slotBindings.find((binding) => binding.boneId === bone.id)?.slotId;
-    const parentSlotId = parentSlotIdForBone(rig, bone.id);
-    if (!childSlotId || !parentSlotId) continue;
+  const runtime = buildCharacterRuntime(character);
+  for (const bone of runtime.angleRig.bones) {
+    const childSlotId = runtime.angleRig.slotBindings.find(
+      (binding) => binding.boneId === bone.id,
+    )?.slotId;
+    const parentSlotId = bone.restSource?.slotId;
+    const parentSlot = parentSlotId ? runtime.slotById.get(parentSlotId) : undefined;
+    if (!childSlotId || !parentSlotId || !parentSlot || !bone.restSource) continue;
     const parentKeys = slotVariantKeys(character, parentSlotId, rig.activeAngle);
     if (parentKeys.length <= 1) continue;
     for (const variantKey of parentKeys) {
-      const entry = bone.parentVariantAnchors?.[variantKey];
+      const parentPart = anchorPartForVariant(parentSlot.parts, variantKey);
+      const pin = parentPart?.pins?.[bone.restSource.pinName];
+      const entry =
+        parentPart && pin
+          ? pinTransformInBoneSpace(parentPart, pin, bone.restSource.offset)
+          : undefined;
       anchorRows.push({
         childSlotId,
         parentSlotId,
         variantKey,
-        source: entry?.source ?? "fallback",
+        source: entry ? "pin" : "fallback",
         anchor: entry ?? { x: bone.x, y: bone.y },
       });
       if (entry) anchoredParentSlots.add(parentSlotId);
-    }
-
-    // Mirror the rig build's dev warning: a physically re-anchoring relation gates this child
-    // on a parent variant that has no anchor source.
-    for (const relation of rig.slotRelations) {
-      if (relation.childSlotId !== childSlotId) continue;
-      if (relation.relationType === "containedFeature") continue;
-      for (const gatedKey of relation.activeWhenParentVariant?.keys ?? []) {
-        if (bone.parentVariantAnchors?.[gatedKey]) continue;
+      else {
         warnings.push({
           severity: "warning",
           message:
-            `${slotLabel(childSlotId)} is gated on ${slotLabel(parentSlotId)} "${gatedKey}" ` +
-            "but has no socket or keyed art there — it will keep its rest anchor.",
+            `${slotLabel(parentSlotId)} "${variantKey}" is missing required pin ` +
+            `"${bone.restSource.pinName}" for ${slotLabel(childSlotId)}.`,
           childSlotId,
           parentSlotId,
-          variantKey: gatedKey,
+          variantKey,
         });
       }
     }

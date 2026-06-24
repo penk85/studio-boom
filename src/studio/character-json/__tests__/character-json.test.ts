@@ -191,13 +191,13 @@ describe("character JSON architecture", () => {
     expect(
       angleRig.hostConstraints?.find((constraint) => constraint.slotId === "slot:left-eye"),
     ).toMatchObject({
-      hostSlotId: "slot:head",
+      hostSlotId: "role:head",
       mode: "insideHostMask",
     });
     expect(
       angleRig.slotRelations?.find((relation) => relation.childSlotId === "slot:left-eye"),
     ).toMatchObject({
-      parentRef: { type: "slot", id: "slot:head" },
+      parentRef: { type: "slot", id: "role:head" },
       relationType: "containedFeature",
       renderMode: "sibling",
     });

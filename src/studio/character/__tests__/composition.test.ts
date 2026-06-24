@@ -7,7 +7,7 @@ import { blinkWindowsForClip } from "../eye-state";
 import { createDefaultMouthRig } from "../mouth-libraries";
 import { buildDefaultRig } from "../rig";
 import { buildCharacterRuntime, resolveRuntimeSlotPart, runtimePartPlacement } from "../runtime";
-import { upsertVariantSocket } from "../variant-pairing";
+import { setVariantPinRotation, upsertVariantPinAtPoint } from "../variant-pairing";
 import { makeVariantArmCharacter, withFistVariant } from "./fixtures";
 
 function makeCharacter() {
@@ -159,6 +159,83 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).toContain('tl.eventCallback("onStart"');
     expect(html).not.toMatch(/repeat\s*:\s*-1/);
     expect(html).not.toMatch(/\basync\b/);
+  });
+
+  it("repairs a stale cross-side hand attachment before generating the puppet DOM", () => {
+    const character: CharacterPreset = {
+      ...createBlankCharacter("Cross-side repair"),
+      id: "cross-side-repair",
+      parts: [
+        makePart("body", "body-media", {
+          id: "body",
+          slotId: "role:body",
+          x: 100,
+          y: 120,
+          width: 200,
+          height: 320,
+        }),
+        makePart("arm", "left-arm-media", {
+          id: "left-arm",
+          slotId: "slot:left-arm",
+          side: "left",
+          x: 70,
+          y: 180,
+          width: 60,
+          height: 180,
+        }),
+        makePart("arm", "right-arm-media", {
+          id: "right-arm",
+          slotId: "slot:right-arm",
+          side: "right",
+          x: 270,
+          y: 180,
+          width: 60,
+          height: 180,
+        }),
+        makePart("hand", "right-hand-media", {
+          id: "right-hand",
+          slotId: "slot:right-hand",
+          side: "right",
+          parentId: "left-arm",
+          x: 285,
+          y: 345,
+          width: 40,
+          height: 40,
+        }),
+      ],
+    };
+    const rig = buildDefaultRig(character);
+    const front = rig.angles?.front;
+    if (!front) throw new Error("Expected front rig.");
+    const staleFront = {
+      ...front,
+      bones: front.bones.map((bone) =>
+        bone.id === "bone:slot:right-hand" ? { ...bone, parentId: "bone:slot:left-arm" } : bone,
+      ),
+      sockets: (front.sockets ?? []).map((socket) =>
+        socket.childSlotId === "slot:right-hand" ? { ...socket, slotId: "slot:left-arm" } : socket,
+      ),
+      slotRelations: front.slotRelations.map((relation) =>
+        relation.childSlotId === "slot:right-hand"
+          ? { ...relation, parentRef: { type: "slot" as const, id: "slot:left-arm" } }
+          : relation,
+      ),
+    };
+    const html = build({ autoBlink: false }, new Map(), {
+      ...character,
+      rig: {
+        ...rig,
+        bones: staleFront.bones,
+        sockets: staleFront.sockets,
+        slotRelations: staleFront.slotRelations,
+        angles: { ...rig.angles, front: staleFront },
+      },
+    });
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const handBone = doc.querySelector('[data-character-bone-id="bone:slot:right-hand"]');
+    const parentBone = handBone?.parentElement?.getAttribute("data-character-bone-id");
+
+    expect(parentBone).toBe("bone:slot:right-arm");
   });
 
   it("nests iris slots inside the open eye variant", () => {
@@ -664,7 +741,7 @@ describe("buildCharacterCompositionHtml", () => {
       motionPresets: new Map(),
     });
 
-    expect(html).toContain('data-character-rig-version="1"');
+    expect(html).toContain('data-character-rig-version="2"');
     expect(html).toContain('data-character-angle="3qL"');
     expect(html).toContain('data-character-bone="true"');
     expect(html).toContain('data-character-bone-id="bone:role:head"');
@@ -1772,11 +1849,11 @@ describe("pivot-aligned variant placement", () => {
     // non-representative variant — the hand art used to sit offset from the socket by the
     // difference between its pivot and the representative's pivot.
     const socket = { x: 400, y: 250 };
-    const character = upsertVariantSocket(makeVariantArmCharacter(), {
+    const character = upsertVariantPinAtPoint(makeVariantArmCharacter(), {
       parentSlotId: "slot:right-arm",
       variantKey: "bent",
       childSlotId: "slot:right-hand",
-      ...socket,
+      anchorPoint: socket,
     });
     const html = build(
       { autoBlink: false, poses: { "slot:right-arm": "bent", "slot:right-hand": "bent" } },
@@ -1808,7 +1885,7 @@ describe("pivot-aligned variant placement", () => {
     );
     const art = partPos(html, "hand-bent");
     // pivotAligned offset = pivotLocal(straight)(10,5) − pivotLocal(bent)(10,10) = (0,−5) × 0.5.
-    expect(art).toEqual({ left: 0, top: -2.5 });
+    expect(art).toEqual({ left: 0, top: 0 });
     // Full chain lands the displayed pivot on the straight wrist pivot (300,345) × 0.5.
     const body = elementPos(html, "char-bone-bone-role-body");
     const arm = elementPos(html, "char-bone-bone-slot-right-arm");
@@ -2049,14 +2126,20 @@ describe("variant rotation limits in compiled playback", () => {
 describe("anchor rotation in compiled playback", () => {
   // The wrist joint is authored on the rig (bone-owned, per angle) — the post-refactor path.
   const rotatedSocketCharacter = (): CharacterPreset =>
-    upsertVariantSocket(makeVariantArmCharacter(), {
-      parentSlotId: "slot:right-arm",
-      variantKey: "bent",
-      childSlotId: "slot:right-hand",
-      x: 352,
-      y: 248,
-      rotation: -35,
-    });
+    setVariantPinRotation(
+      upsertVariantPinAtPoint(makeVariantArmCharacter(), {
+        parentSlotId: "slot:right-arm",
+        variantKey: "bent",
+        childSlotId: "slot:right-hand",
+        anchorPoint: { x: 352, y: 248 },
+      }),
+      {
+        parentSlotId: "slot:right-arm",
+        variantKey: "bent",
+        childSlotId: "slot:right-hand",
+        rotation: -35,
+      },
+    );
 
   it("bakes the variant rotation into the initial bone transform for a placed pose", () => {
     const html = build(

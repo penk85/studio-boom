@@ -67,6 +67,7 @@ import {
   defaultCharacterCompositionId,
   type ResolvedSpeech,
 } from "./character/composition";
+import { CharacterPinRigError } from "./character/rig-v2";
 import {
   applyCharacterCommand,
   lintCharacterDocument,
@@ -316,17 +317,28 @@ function rebuildCharacterCompositionInProject(
   const character = characters.get(meta.character.characterId);
   if (!character) return project;
 
-  const html = buildCharacterCompositionHtml({
-    compositionId: meta.compositionId,
-    clipId,
-    duration: clip.duration,
-    width: clip.width || project.hf.width,
-    height: clip.height || project.hf.height,
-    character,
-    meta: meta.character,
-    speeches: resolveSpeechesForBuild(meta.character, mediaAssets),
-    motionPresets,
-  });
+  let html: string;
+  try {
+    html = buildCharacterCompositionHtml({
+      compositionId: meta.compositionId,
+      clipId,
+      duration: clip.duration,
+      width: clip.width || project.hf.width,
+      height: clip.height || project.hf.height,
+      character,
+      meta: meta.character,
+      speeches: resolveSpeechesForBuild(meta.character, mediaAssets),
+      motionPresets,
+    });
+  } catch (error) {
+    if (!(error instanceof CharacterPinRigError)) throw error;
+    console.warn("Skipped character composition rebuild because the rig is incomplete", {
+      clipId,
+      characterId: character.id,
+      issues: error.issues,
+    });
+    return project;
+  }
   let hf: HyperFramesProject = {
     ...project.hf,
     compositionHtml: {

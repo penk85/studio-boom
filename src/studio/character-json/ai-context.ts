@@ -42,7 +42,7 @@ export function buildCharacterRigContextAiOut(
       "Slot variant tracks can swap any slot variant, including hands, clothing, props, eyes, and mouths.",
       "Depth is for parallax. Draw order is for visual stacking. Do not mix them.",
       'Do not create a structural pose tier. Poses are per-slot variant maps and motion channel "variant" tracks.',
-      "Sockets are the angle-local joint data primitive: { slotId: parent slot, childSlotId: child slot, x, y, rotation?, variantAnchors? }. The base x/y is the rest attachment; variantAnchors only override it while a parent variant is active. A front-view socket never affects side or 3/4 rigs.",
+      "The bone graph is the only transform hierarchy. Parts have one incoming registration point and named output pins. A child bone restSource names the direct parent slot and pin; pins never create another parent chain.",
       "Rotation constraints: a slot's rotReach (reaches) limits twist from rest; a variant bone's rotationLimits override it while that variant is active. Motions exceeding these are clamped unless listed in constraints.allowOutOfBounds.",
     ],
     validKinds: {
@@ -110,7 +110,7 @@ export function buildMotionRequestAiOut(args: {
       "Use cadenceHints for walk timing and stride amplitude relative to character height.",
       "Bone hierarchy is locked FK. Child bones inherit parent motion; do not restate inherited parent motion on children.",
       "There is no bidirectional IK yet. For attached hands/feet, animate the arm/leg parent for placement and use the hand/foot only for small local roll, lag, scale, or variant changes.",
-      "Do not put dx/dy on a child bone when any ancestor is also animated; that moves the authored joint socket instead of preserving the attachment.",
+      "Do not put dx/dy on a child bone when any ancestor is also animated; that moves the pin-derived joint instead of preserving the attachment.",
       "Use finite normalized keyframe times from 0 to 1.",
     ],
     controls: buildMotionControlSurface(),
@@ -227,13 +227,15 @@ export function buildMotionRequestPrompt(args: {
         )
       : ["- none"]),
     "",
-    "active_angle.sockets",
-    ...(context.activeAngle.sockets?.length
-      ? context.activeAngle.sockets.map(
-          (socket) =>
-            `- id=${socket.id}; parent_slot=${socket.slotId}; child_slot=${
-              socket.childSlotId
-            }; base=${socket.x},${socket.y}; rotation=${socket.rotation ?? 0}; variant_keys=${listText(socket.variantKeys)}`,
+    "active_angle.pin_contracts",
+    ...(context.activeAngle.pinContracts?.length
+      ? context.activeAngle.pinContracts.map(
+          (contract) =>
+            `- parent_slot=${contract.parentSlotId}; child_bone=${contract.childBoneId}; child_slot=${
+              contract.childSlotId ?? "none"
+            }; pin=${contract.pinName}; supplied_by_variants=${listText(
+              contract.suppliedByVariantIds,
+            )}`,
         )
       : ["- none"]),
     "",
@@ -367,15 +369,13 @@ function motionPromptAngle(angle: AngleRigJson): MotionPromptAngleJson {
     slotRelations: angle.slotRelations?.map((relation) => ({ ...relation })),
     hostConstraints: angle.hostConstraints?.map((constraint) => ({ ...constraint })),
     reaches: Array.from(reachesBySlot.values()),
-    sockets: angle.sockets?.map((socket) => ({
-      id: socket.id,
-      slotId: socket.slotId,
-      childSlotId: socket.childSlotId,
-      name: socket.name,
-      x: socket.x,
-      y: socket.y,
-      rotation: socket.rotation,
-      variantKeys: Object.keys(socket.variantAnchors),
+    pinContracts: angle.pinContracts?.map((contract) => ({
+      ...contract,
+      suppliedByVariantIds:
+        angle.slots
+          .find((slot) => slot.id === contract.parentSlotId)
+          ?.variants.filter((variant) => !!variant.pins?.[contract.pinName])
+          .map((variant) => variant.id) ?? [],
     })),
   };
 }

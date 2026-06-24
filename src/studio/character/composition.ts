@@ -52,9 +52,7 @@ import {
   type ResolvedSlotBinding,
 } from "./rig";
 import {
-  childAnchorForVariant,
   motionDeltaMovesJoint,
-  parentSlotIdForBone,
   resolveFkJointDelta,
   resolveMotionDelta,
   type MotionConstraintContext,
@@ -67,6 +65,9 @@ import {
   type RuntimeCharacterSlot,
   type RuntimePartPlacement,
 } from "./runtime";
+import { runtimeMotionTargetForSlot } from "./motion-targets";
+import { pinTransformInBoneSpace, registrationForPart } from "./registration";
+import { assertCharacterPinRigReadyForAngle } from "./rig-v2";
 
 const VISEMES: MouthViseme[] = ["rest", "A", "E", "O", "U", "MBP", "FV", "L", "WQ", "Smile"];
 const MOTION_SAMPLE_FPS = 12;
@@ -116,6 +117,8 @@ export interface ResolvedSpeech {
 
 interface MotionTarget {
   kind: "slot" | "bone";
+  /** Whether semantic role/slot motion is routed here. Exact bone motion always remains valid. */
+  acceptsSlotMotion: boolean;
   id: string;
   selector: string;
   boneId?: string;
@@ -255,8 +258,10 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
   const scaleX = width / Math.max(1, args.character.canvasWidth);
   const scaleY = height / Math.max(1, args.character.canvasHeight);
   const runtime = buildCharacterRuntime(args.character);
+  const character = runtime.character;
+  assertCharacterPinRigReadyForAngle(character, runtime.angle);
   const characterRig = runtime.rig;
-  const dom = buildPuppetDom(args.character, runtime, args.meta, scaleX, scaleY);
+  const dom = buildPuppetDom(character, runtime, args.meta, scaleX, scaleY);
 
   stage.innerHTML = "";
   stage.insertAdjacentHTML("beforeend", dom.html.join("\n"));
@@ -301,7 +306,6 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
     boneAnchorTimelines: dom.boneAnchorTimelines,
     constraintContext: runtime.constraintContext,
     activeAngle: runtime.angle,
-    parentBoneIds: runtime.parentBoneIds,
   });
 
   const normalized = normalizeNativeHyperframesHtml(
@@ -436,7 +440,17 @@ function buildPuppetDom(
   scaleX: number,
   scaleY: number,
 ): PuppetDom {
-  const rig = runtime.rig;
+  const rig: RuntimeRig = {
+    ...runtime.rig,
+    activeAngle: runtime.angle,
+    bones: runtime.angleRig.bones,
+    slotBindings: runtime.angleRig.slotBindings,
+    drawOrder: runtime.angleRig.drawOrder,
+    slotRelations: runtime.angleRig.slotRelations,
+    hostConstraints: runtime.angleRig.hostConstraints,
+    reaches: runtime.angleRig.reaches,
+    sockets: undefined,
+  };
   const out: PuppetDom = {
     html: [
       `<div data-character-root="true" data-character-id="${esc(
@@ -451,12 +465,17 @@ function buildPuppetDom(
   };
   const slotHtmlByBone = new Map<string, string[]>();
   const slotTargets: MotionTarget[] = [];
-  const boneTargets: MotionTarget[] = [];
 
   const slots = runtime.slots;
-  const hasMouthSlot = slots.some(
-    (slot) => slot.role === "mouth" && slot.parts.some((p) => p.visible),
-  );
+  // True when the slot loop already handles the mouth: either via visible image parts in a
+  // rig-bound slot, or via rig-style SVG generation (buildSlotByRole path for mouthStyle:"rig").
+  // Also counts visible image parts on unbound slots so they suppress the fallback mouth too.
+  const hasMouthSlot =
+    slots.some(
+      (slot) =>
+        slot.role === "mouth" &&
+        (slot.parts.some((p) => p.visible) || character.mouthStyle === "rig"),
+    ) || character.parts.some((part) => part.role === "mouth" && part.visible);
   const appendCapturedSlotToBone = (boneId: string, render: () => void): MotionTarget[] => {
     const beforeHtml = out.html.length;
     const beforeTargets = out.motionTargets.length;
@@ -491,7 +510,7 @@ function buildPuppetDom(
     const binding = runtime.bindingBySlot.get(slot.id);
     if (binding && !binding.visible) continue;
     const boneId = binding?.effectiveBoneId ?? "bone:root";
-    const newTargets = appendCapturedSlotToBone(boneId, () => {
+    appendCapturedSlotToBone(boneId, () => {
       buildSlotByRole(
         out,
         character,
@@ -505,10 +524,6 @@ function buildPuppetDom(
         nestedChildrenByParentSlotId,
       );
     });
-    const directSlotTarget = newTargets.find((target) => target.slotId === slot.id);
-    if (binding && directSlotTarget) {
-      boneTargets.push(boneTargetForSlotTarget(directSlotTarget, binding));
-    }
   }
 
   const generatedMouthBoneId = defaultGeneratedMouthBoneId(rig);
@@ -526,7 +541,12 @@ function buildPuppetDom(
         generatedMouthBoneId,
       );
     });
-  } else if (!hasMouthSlot && !character.mouthRig && character.fallbackMouth) {
+  } else if (
+    !hasMouthSlot &&
+    !character.mouthRig &&
+    character.mouthStyle === "rig" &&
+    character.fallbackMouth
+  ) {
     appendCapturedSlotToBone(generatedMouthBoneId, () => {
       buildFallbackMouthRig(out, character, scaleX, scaleY, generatedMouthBoneId);
     });
@@ -541,7 +561,20 @@ function buildPuppetDom(
     scaleY,
   );
   renderBoneTree(out.html, rig, slotHtmlByBone, scaleX, scaleY, out.boneAnchorTimelines);
-  out.motionTargets.push(...uniqueMotionTargets([...slotTargets, ...boneTargets]));
+  const resolvedTargets = slotTargets.flatMap((target) => {
+    const runtimeTarget = runtimeMotionTargetForSlot(runtime, target.slotId);
+    const slotTarget = { ...target, acceptsSlotMotion: runtimeTarget.kind === "slot" };
+    const binding = runtime.bindingBySlot.get(target.slotId);
+    if (!binding) return [slotTarget];
+    return [
+      slotTarget,
+      {
+        ...boneTargetForSlotTarget(target, binding, runtime),
+        acceptsSlotMotion: runtimeTarget.kind === "bone",
+      },
+    ];
+  });
+  out.motionTargets.push(...uniqueMotionTargets(resolvedTargets));
   // Bone targets whose rest rotation follows the parent variant: hand the motion builder the
   // per-key rotations so its absolute rotation vars track the active variant frame by frame.
   const anchorByBoneId = new Map(out.boneAnchorTimelines.map((entry) => [entry.boneId, entry]));
@@ -575,26 +608,28 @@ function buildBoneAnchorTimelines(
   scaleY: number,
 ): BoneAnchorTimeline[] {
   const out: BoneAnchorTimeline[] = [];
-  for (const bone of rig.bones) {
-    if (!bone.parentVariantAnchors || Object.keys(bone.parentVariantAnchors).length === 0) continue;
-    const parentSlotId = parentSlotIdForBone(rig, bone.id);
+  for (const bone of runtime.angleRig.bones) {
+    const source = bone.restSource;
+    if (!source) continue;
+    const parentSlotId = source.slotId;
     const parentSlot = parentSlotId ? slotById.get(parentSlotId) : undefined;
     if (!parentSlotId || !parentSlot) continue;
+    if (new Set(parentSlot.parts.map((part) => variantKeyForPart(part))).size <= 1) continue;
     const anchors: Record<string, { left: number; top: number; rotation: number }> = {};
-    const scaled = (anchor: { x: number; y: number; rotation?: number }) => ({
+    const scaled = (anchor: { x: number; y: number; rotation: number }) => ({
       left: anchor.x * scaleX,
       top: anchor.y * scaleY,
-      rotation: anchor.rotation ?? bone.rotation,
+      rotation: anchor.rotation,
     });
-    for (const [key, anchor] of Object.entries(bone.parentVariantAnchors)) {
-      anchors[key] = scaled(anchor);
-    }
     for (const part of parentSlot.parts) {
+      const pin = part.pins?.[source.pinName];
+      if (!pin) continue;
       const canonical = variantKeyForPart(part);
-      const anchor = bone.parentVariantAnchors[canonical];
-      if (!anchor) continue;
+      const anchor = pinTransformInBoneSpace(part, pin, source.offset);
+      anchors[canonical] = scaled(anchor);
       for (const alias of variantAliasesForPart(part)) anchors[alias] ??= scaled(anchor);
     }
+    if (Object.keys(anchors).length === 0) continue;
     const base = { left: bone.x * scaleX, top: bone.y * scaleY, rotation: bone.rotation };
     const initialPart = resolveRuntimeSlotPart(parentSlot, runtime, poses[parentSlot.id]);
     const initialKey = initialPart ? variantKeyForPart(initialPart) : undefined;
@@ -672,15 +707,17 @@ function renderBoneTree(
 function boneTargetForSlotTarget(
   target: MotionTarget,
   binding: ResolvedSlotBinding | undefined,
+  runtime: CharacterRuntime,
 ): MotionTarget {
   if (!binding) return target;
+  const bone = runtime.boneById.get(binding.effectiveBoneId);
   return {
     ...target,
     kind: "bone",
     id: boneElementId(binding.effectiveBoneId),
     selector: `#${boneElementId(binding.effectiveBoneId)}`,
     boneId: binding.effectiveBoneId,
-    baseRotation: 0,
+    baseRotation: bone?.rotation ?? 0,
     baseAnchorX: 0,
     baseAnchorY: 0,
     depth: binding.effectiveDepth,
@@ -690,7 +727,10 @@ function boneTargetForSlotTarget(
 function uniqueMotionTargets(targets: MotionTarget[]): MotionTarget[] {
   const out = new Map<string, MotionTarget>();
   for (const target of targets) {
-    if (!out.has(target.selector)) out.set(target.selector, target);
+    const existing = out.get(target.selector);
+    if (!existing || (!existing.acceptsSlotMotion && target.acceptsSlotMotion)) {
+      out.set(target.selector, target);
+    }
   }
   return Array.from(out.values());
 }
@@ -1131,6 +1171,7 @@ function buildGeneratedMouthSlot(
   const targetPart = generatedMouthMotionTargetPart(slotId, placement);
   out.motionTargets.push({
     kind: "slot",
+    acceptsSlotMotion: true,
     id: containerId,
     selector: `#${containerId}`,
     slotId,
@@ -1233,6 +1274,7 @@ function buildFallbackMouthRig(
   const targetPart = generatedMouthMotionTargetPart(slotId, placement);
   out.motionTargets.push({
     kind: "slot",
+    acceptsSlotMotion: true,
     id: containerId,
     selector: `#${containerId}`,
     slotId,
@@ -1318,8 +1360,8 @@ function buildGenericSlot(
       nestedChildrenByParentSlotId,
       runtimePartPlacement(slot, part, runtime, { basePart: activePart }),
     );
-    const offset = referencePart
-      ? pivotAlignedPartOffset(referencePart, anchorPartForVariant(visibleParts, key) ?? part, part)
+    const offset = binding
+      ? pivotAlignedPartOffset(activePart, anchorPartForVariant(visibleParts, key) ?? part, part)
       : undefined;
     out.html.push(
       renderPartElement(id, part, activePart, key === activeKey, scaleX, scaleY, children, offset),
@@ -1380,9 +1422,10 @@ function openSlotContainer(
   rig: RuntimeRig,
 ): string {
   const drawIndex = slotDrawIndex(rig, slot.id, basePart.zIndex);
-  const left = binding ? binding.x : basePart.x;
-  const top = binding ? binding.y : basePart.y;
-  const rotation = binding ? binding.rotation : basePart.rotation;
+  const registration = registrationForPart(basePart);
+  const left = binding ? binding.x - registration.x : basePart.x;
+  const top = binding ? binding.y - registration.y : basePart.y;
+  const rotation = binding ? binding.rotation + registration.rotation : registration.rotation;
   const depth = binding ? binding.effectiveDepth : basePart.depth;
   const host = rig.hostConstraints.find((constraint) => constraint.slotId === slot.id);
   return `<div id="${esc(containerId)}" data-character-slot="true" data-character-slot-id="${esc(
@@ -1404,7 +1447,9 @@ function openSlotContainer(
       width: basePart.width * scaleX,
       height: basePart.height * scaleY,
       "z-index": drawIndex,
-      "transform-origin": `${basePart.anchorX * 100}% ${basePart.anchorY * 100}%`,
+      "transform-origin": `${(registration.x / Math.max(1, basePart.width)) * 100}% ${
+        (registration.y / Math.max(1, basePart.height)) * 100
+      }%`,
       transform: `rotate(${rotation}deg) scale(${binding?.scaleX ?? 1}, ${binding?.scaleY ?? 1})`,
     }),
   )}">`;
@@ -1497,6 +1542,8 @@ function renderPartElement(
   // variant slots pass a pivot-aligned offset so the displayed art's pivot rides the joint.
   offset?: { x: number; y: number },
 ): string {
+  const partRegistration = registrationForPart(part);
+  const baseRegistration = registrationForPart(basePart);
   const attrs = `id="${esc(id)}" data-character-part="true" data-character-part-id="${esc(
     part.id,
   )}" data-character-slot-id="${esc(part.slotId)}" data-character-role="${esc(
@@ -1520,8 +1567,10 @@ function renderPartElement(
       height: part.height * scaleY,
       opacity: visible ? 1 : 0,
       "z-index": part.zIndex - basePart.zIndex,
-      "transform-origin": `${part.anchorX * 100}% ${part.anchorY * 100}%`,
-      transform: `rotate(${part.rotation - basePart.rotation}deg)`,
+      "transform-origin": `${(partRegistration.x / Math.max(1, part.width)) * 100}% ${
+        (partRegistration.y / Math.max(1, part.height)) * 100
+      }%`,
+      transform: `rotate(${partRegistration.rotation - baseRegistration.rotation}deg)`,
     }),
   );
 
@@ -1620,6 +1669,7 @@ function motionTargetFor(
 ): MotionTarget {
   return {
     kind: "slot",
+    acceptsSlotMotion: true,
     id,
     selector: `#${id}`,
     boneId,
@@ -1709,26 +1759,24 @@ function resolveSpeechTimeline(
   return { audioSpeeches: [], combinedVisemes: args.meta.visemes ?? [] };
 }
 
-function appendCharacterTimelineScript(
-  doc: Document,
-  args: {
-    compositionId: string;
-    clipId: string;
-    duration: number;
-    scaleX: number;
-    scaleY: number;
-    meta: CharacterClipMeta;
-    motionPresets: Map<string, MotionPreset>;
-    motionTargets: MotionTarget[];
-    canvasWidth: number;
-    canvasHeight: number;
-    slotTimelines: SlotTimeline[];
-    boneAnchorTimelines: BoneAnchorTimeline[];
-    constraintContext: MotionConstraintContext;
-    activeAngle: RuntimeRig["activeAngle"];
-    parentBoneIds: Set<string>;
-  },
-): void {
+type CharacterTimelineScriptArgs = {
+  compositionId: string;
+  clipId: string;
+  duration: number;
+  scaleX: number;
+  scaleY: number;
+  meta: CharacterClipMeta;
+  motionPresets: Map<string, MotionPreset>;
+  motionTargets: MotionTarget[];
+  canvasWidth: number;
+  canvasHeight: number;
+  slotTimelines: SlotTimeline[];
+  boneAnchorTimelines: BoneAnchorTimeline[];
+  constraintContext: MotionConstraintContext;
+  activeAngle: RuntimeRig["activeAngle"];
+};
+
+function buildCharacterTimelineScriptText(args: CharacterTimelineScriptArgs): string {
   const blinkWindows = blinkWindowsForClip({
     id: args.clipId,
     duration: args.duration,
@@ -1756,7 +1804,6 @@ function appendCharacterTimelineScript(
       blinkWindows,
       args.constraintContext,
       args.activeAngle,
-      args.parentBoneIds,
     ),
   );
   backfillThreeDVars(frames);
@@ -1781,8 +1828,7 @@ function appendCharacterTimelineScript(
     slotEvents,
   };
   const sceneJson = safeJson(scene);
-  const script = doc.createElement("script");
-  script.textContent = `(function(){
+  return `(function(){
   const S = ${sceneJson};
   const tl = gsap.timeline({ paused: true });
   // Anchor the timeline to the full composition duration. The hyperframes runtime
@@ -1852,7 +1898,53 @@ function appendCharacterTimelineScript(
   window.__timelines = window.__timelines || {};
   window.__timelines[${JSON.stringify(args.compositionId)}] = tl;
 })();`;
+}
+
+function appendCharacterTimelineScript(doc: Document, args: CharacterTimelineScriptArgs): void {
+  const script = doc.createElement("script");
+  script.textContent = buildCharacterTimelineScriptText(args);
   doc.body?.appendChild(script);
+}
+
+/**
+ * Builds only the GSAP timeline script for a character composition, without constructing
+ * the full HTML. Used by the motion recorder to inject override states into the live preview
+ * iframe frame-by-frame without a DOM reload.
+ */
+export function buildCharacterGsapScript(args: {
+  compositionId: string;
+  clipId: string;
+  duration: number;
+  character: CharacterPreset;
+  meta: CharacterClipMeta;
+  motionPresets: Map<string, MotionPreset>;
+  width: number;
+  height: number;
+}): string {
+  const duration = positiveNumber(args.duration, 0.1);
+  const width = positiveNumber(args.width, 1);
+  const height = positiveNumber(args.height, 1);
+  const runtime = buildCharacterRuntime(args.character);
+  assertCharacterPinRigReadyForAngle(runtime.character, runtime.angle);
+  const scaleX = width / Math.max(1, args.character.canvasWidth);
+  const scaleY = height / Math.max(1, args.character.canvasHeight);
+  const dom = buildPuppetDom(args.character, runtime, args.meta, scaleX, scaleY);
+  return buildCharacterTimelineScriptText({
+    compositionId: args.compositionId,
+    clipId: args.clipId,
+    duration,
+    scaleX,
+    scaleY,
+    meta: args.meta,
+    motionPresets: args.motionPresets,
+    motionTargets: dom.motionTargets,
+    canvasWidth: args.character.canvasWidth,
+    canvasHeight: args.character.canvasHeight,
+    slotTimelines: dom.slotTimelines,
+    boneAnchorTimelines: dom.boneAnchorTimelines,
+    constraintContext: runtime.constraintContext,
+    activeAngle: runtime.angle,
+  });
 }
 
 function collectTimelineTimes(
@@ -1923,7 +2015,6 @@ function buildMotionFrame(
   blinkWindows: Array<{ start: number; end: number }>,
   constraintCtx: MotionConstraintContext,
   activeAngle: RuntimeRig["activeAngle"],
-  parentBoneIds: Set<string>,
 ) {
   const composed = composeMotionsAt(
     { duration, motions: meta.motions },
@@ -1939,19 +2030,17 @@ function buildMotionFrame(
     composed,
   });
   const targetFrames = motionTargets.map((target) => {
-    // A layer's motion drives exactly one element: the bone group when the bone carries children
-    // (so they follow, pivoting at the joint), otherwise the slot element (anchor pivot). This
-    // avoids the double-application that made layers race ahead of their children.
-    const boneCarriesChildren = !!target.boneId && parentBoneIds.has(target.boneId);
+    // Semantic slot/role motion is routed to exactly one primary element. Exact bone tracks remain
+    // available on the secondary bone channel without inheriting the slot delta.
     const rawDelta =
       target.kind === "bone"
-        ? boneCarriesChildren
+        ? target.acceptsSlotMotion
           ? deltaForBone(composed, target.role, target.slotId, target.boneId)
           : deltaForBoneOnly(composed, target.boneId)
-        : boneCarriesChildren
-          ? emptyDelta()
-          : deltaFor(composed, target.role, target.slotId);
-    return { target, boneCarriesChildren, rawDelta };
+        : target.acceptsSlotMotion
+          ? deltaFor(composed, target.role, target.slotId)
+          : emptyDelta();
+    return { target, rawDelta };
   });
   const animatedBoneIds = new Set(
     targetFrames
@@ -1966,7 +2055,7 @@ function buildMotionFrame(
   return {
     time,
     slotStates,
-    targets: targetFrames.map(({ target, boneCarriesChildren, rawDelta }) => {
+    targets: targetFrames.map(({ target, rawDelta }) => {
       const fkLocked = resolveFkJointDelta({
         ctx: constraintCtx,
         boneId: target.boneId,
@@ -1998,7 +2087,7 @@ function buildMotionFrame(
         : fkDelta;
       const activePart = activePartForMotionTarget(target, composed, slotStates);
       const turn =
-        activePart && shouldApplyFaceTurnToTarget(target, boneCarriesChildren)
+        activePart && shouldApplyFaceTurnToTarget(target)
           ? faceTurnMotionForPart(
               activePart,
               composed.faceTurnX,
@@ -2119,10 +2208,9 @@ function activePartForMotionTarget(
   return partWithTargetDepth(target.basePart, target);
 }
 
-function shouldApplyFaceTurnToTarget(target: MotionTarget, boneCarriesChildren: boolean): boolean {
+function shouldApplyFaceTurnToTarget(target: MotionTarget): boolean {
   if (target.role === "iris") return false;
-  if (target.kind === "slot" && boneCarriesChildren) return false;
-  return true;
+  return target.acceptsSlotMotion;
 }
 
 function partWithTargetDepth(

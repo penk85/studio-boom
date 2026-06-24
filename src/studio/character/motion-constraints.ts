@@ -223,29 +223,13 @@ export function motionDeltaMovesJoint(delta: MotionDeltaLike): boolean {
   );
 }
 
-/**
- * The bone's local rest anchor and rotation while the parent slot shows variant
- * `parentVariantKey` — how a bent-arm variant carries the hand to its new wrist (and angles it).
- * Falls back to the bone's base x/y/rotation.
- */
-export function childAnchorForVariant(
-  bone: Pick<CharacterBone, "x" | "y" | "rotation" | "parentVariantAnchors">,
-  parentVariantKey: string | undefined,
-): { x: number; y: number; rotation: number } {
-  const anchor = parentVariantKey ? bone.parentVariantAnchors?.[parentVariantKey] : undefined;
-  return {
-    x: anchor?.x ?? bone.x,
-    y: anchor?.y ?? bone.y,
-    rotation: anchor?.rotation ?? bone.rotation,
-  };
-}
-
 /** The slot whose variant selection re-anchors this bone: the slot bound to the parent bone. */
 export function parentSlotIdForBone(
   rig: { bones: CharacterBone[]; slotBindings: CharacterSlotBinding[] },
   boneId: string,
 ): string | undefined {
   const bone = rig.bones.find((candidate) => candidate.id === boneId);
+  if (bone?.restSource) return bone.restSource.slotId;
   if (!bone?.parentId) return undefined;
   return rig.slotBindings.find((binding) => binding.boneId === bone.parentId)?.slotId;
 }

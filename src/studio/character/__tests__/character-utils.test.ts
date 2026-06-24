@@ -12,11 +12,9 @@ import {
   normalizePartRole,
   getPartSlotId,
   defaultSlotIdForRole,
-  inferHumanParentPartId,
   removePartFromAngle,
   withUpsertedCharacterSlot,
   withUpdatedCharacterSlot,
-  withInferredHumanParentIds,
 } from "../character-utils";
 import { pivotForPart } from "../alpha-bounds";
 import type { CharacterPart, CharacterPreset, PartManifest } from "../../types";
@@ -96,138 +94,114 @@ describe("getPartSlotId", () => {
     const part = makePart({ role: "eye", slotId: "role:eye", side: "left" });
     expect(getPartSlotId(part)).toBe("slot:left-eye");
   });
+
+  it("repairs filename-derived standard slot ids from canvas-drop imports", () => {
+    expect(
+      getPartSlotId(
+        makePart({
+          role: "body",
+          name: "Body",
+          slotName: "Body",
+          slotId: "slot:body",
+        }),
+      ),
+    ).toBe("role:body");
+    expect(
+      getPartSlotId(
+        makePart({
+          role: "upperArm",
+          side: "right",
+          name: "Right Upper Arm",
+          slotName: "Right Upper Arm",
+          slotId: "slot:right-upper-arm",
+        }),
+      ),
+    ).toBe("slot:right-upperArm");
+  });
 });
 
-// ─── inferHumanParentPartId ───────────────────────────────────────────────────
-
-describe("inferHumanParentPartId", () => {
-  it("attaches human limb parts to their expected same-side parents", () => {
-    const body = makePart({ id: "body", role: "body", slotId: "role:body" });
-    const leftArm = makePart({
-      id: "left-arm",
-      role: "arm",
-      side: "left",
-      slotId: "slot:left-arm",
-    });
-    const rightArm = makePart({
-      id: "right-arm",
-      role: "arm",
-      side: "right",
-      slotId: "slot:right-arm",
-    });
-    const rightHand = makePart({
-      id: "right-hand",
-      role: "hand",
-      side: "right",
-      slotId: "slot:right-hand",
-    });
-    const leftLeg = makePart({
-      id: "left-leg",
-      role: "leg",
-      side: "left",
-      slotId: "slot:left-leg",
-    });
-    const leftFoot = makePart({
-      id: "left-foot",
-      role: "foot",
-      side: "left",
-      slotId: "slot:left-foot",
-    });
-    const parts = [body, leftArm, rightArm, rightHand, leftLeg, leftFoot];
-
-    expect(inferHumanParentPartId(parts, leftArm)).toBe("body");
-    expect(inferHumanParentPartId(parts, rightArm)).toBe("body");
-    expect(inferHumanParentPartId(parts, rightHand)).toBe("right-arm");
-    expect(inferHumanParentPartId(parts, leftLeg)).toBe("body");
-    expect(inferHumanParentPartId(parts, leftFoot)).toBe("left-leg");
-  });
-
-  it("fills missing human parent ids on a character without changing explicit parents", () => {
-    const body = makePart({ id: "body", role: "body", slotId: "role:body" });
-    const head = makePart({ id: "head", role: "head", slotId: "role:head" });
-    const eye = makePart({
-      id: "left-eye",
-      role: "eye",
-      side: "left",
-      slotId: "slot:left-eye",
-    });
-    const hand = makePart({
-      id: "hand",
-      role: "hand",
-      side: "left",
-      slotId: "slot:left-hand",
-      parentId: "custom-parent",
-    });
+describe("legacy artwork hierarchy", () => {
+  it("removes legacy artwork parent ids during canonical slot normalization", () => {
     const character = {
       id: "character",
       name: "Character",
       canvasWidth: 600,
       canvasHeight: 900,
-      parts: [body, head, eye, hand],
+      parts: [
+        makePart({
+          id: "right-hand",
+          role: "hand",
+          side: "right",
+          slotId: "slot:right-hand",
+          parentId: "left-arm",
+        }),
+      ],
       createdAt: 1,
       updatedAt: 1,
     } as CharacterPreset;
 
-    const next = withInferredHumanParentIds(character);
-
-    expect(next.parts.find((part) => part.id === "head")?.parentId).toBe("body");
-    expect(next.parts.find((part) => part.id === "left-eye")?.parentId).toBe("head");
-    expect(next.parts.find((part) => part.id === "hand")?.parentId).toBe("custom-parent");
+    expect(normalizeCharacterSlots(character).parts[0].parentId).toBeUndefined();
   });
 
-  it("does not infer a parent from artwork scoped to a different angle", () => {
-    const frontBody = makePart({
-      id: "front-body",
-      role: "body",
+  it("remaps rig references when generated upload slots become canonical", () => {
+    const character = {
+      id: "character",
+      name: "Character",
+      canvasWidth: 600,
+      canvasHeight: 900,
+      parts: [
+        makePart({
+          id: "body",
+          role: "body",
+          name: "Body",
+          slotName: "Body",
+          slotId: "slot:body",
+        }),
+      ],
+      rig: {
+        version: 2,
+        activeAngle: "front",
+        bones: [
+          { id: "bone:root", name: "Root", role: "root", x: 0, y: 0, rotation: 0 },
+          {
+            id: "bone:slot:body",
+            name: "Body",
+            role: "body",
+            parentId: "bone:root",
+            x: 200,
+            y: 200,
+            rotation: 0,
+          },
+        ],
+        slotBindings: [
+          {
+            slotId: "slot:body",
+            boneId: "bone:slot:body",
+            x: 0,
+            y: 0,
+            rotation: 0,
+            scaleX: 1,
+            scaleY: 1,
+            depth: 0,
+          },
+        ],
+        drawOrder: ["slot:body"],
+        slotRelations: [],
+        hostConstraints: [],
+        reaches: [],
+      },
+      createdAt: 1,
+      updatedAt: 1,
+    } as CharacterPreset;
+
+    const normalized = normalizeCharacterSlots(character);
+    expect(normalized.parts[0].slotId).toBe("role:body");
+    expect(normalized.rig?.slotBindings[0]).toMatchObject({
       slotId: "role:body",
-      angleIds: ["front"],
+      boneId: "bone:role:body",
     });
-    const frontArm = makePart({
-      id: "front-arm",
-      role: "arm",
-      side: "right",
-      slotId: "slot:right-arm",
-      angleIds: ["front"],
-    });
-    const threeQuarterHand = makePart({
-      id: "3qr-hand",
-      role: "hand",
-      side: "right",
-      slotId: "slot:right-hand",
-      angleIds: ["3qR"],
-    });
-
-    expect(inferHumanParentPartId([frontBody, frontArm, threeQuarterHand], threeQuarterHand)).toBe(
-      undefined,
-    );
-  });
-
-  it("infers a parent from matching angle-scoped artwork", () => {
-    const frontArm = makePart({
-      id: "front-arm",
-      role: "arm",
-      side: "right",
-      slotId: "slot:right-arm",
-      angleIds: ["front"],
-    });
-    const threeQuarterArm = makePart({
-      id: "3qr-arm",
-      role: "arm",
-      side: "right",
-      slotId: "slot:right-arm",
-      angleIds: ["3qR"],
-    });
-    const threeQuarterHand = makePart({
-      id: "3qr-hand",
-      role: "hand",
-      side: "right",
-      slotId: "slot:right-hand",
-      angleIds: ["3qR"],
-    });
-
-    expect(
-      inferHumanParentPartId([frontArm, threeQuarterArm, threeQuarterHand], threeQuarterHand),
-    ).toBe("3qr-arm");
+    expect(normalized.rig?.bones[1].id).toBe("bone:role:body");
+    expect(normalized.rig?.drawOrder).toEqual(["role:body"]);
   });
 });
 
@@ -457,7 +431,7 @@ describe("listCharacterSlots", () => {
     expect(next.slots?.find((slot) => slot.id === "slot:torso")?.name).toBe("Body core");
   });
 
-  it("updates slot role and side across every artwork variant without changing the slot id", () => {
+  it("updates slot role and side across every artwork variant and moves to the canonical slot", () => {
     const relaxed = makePart({
       id: "relaxed",
       role: "arm",
@@ -495,12 +469,16 @@ describe("listCharacterSlots", () => {
       side: "left",
     });
 
-    expect(next.slots?.find((slot) => slot.id === "slot:right-arm")).toMatchObject({
+    expect(next.slots?.some((slot) => slot.id === "slot:right-arm")).toBe(false);
+    expect(next.slots?.find((slot) => slot.id === "slot:left-lowerArm")).toMatchObject({
       name: "Right forearm",
       role: "lowerArm",
       side: "left",
     });
-    expect(next.parts.map((part) => part.slotId)).toEqual(["slot:right-arm", "slot:right-arm"]);
+    expect(next.parts.map((part) => part.slotId)).toEqual([
+      "slot:left-lowerArm",
+      "slot:left-lowerArm",
+    ]);
     expect(next.parts.map((part) => part.role)).toEqual(["lowerArm", "lowerArm"]);
     expect(next.parts.map((part) => part.side)).toEqual(["left", "left"]);
     expect(next.parts.map((part) => part.slotName)).toEqual(["Right forearm", "Right forearm"]);

@@ -8,14 +8,7 @@ import type {
   CharacterSlotBinding,
 } from "../types";
 import { pivotForPart } from "./alpha-bounds";
-import {
-  anchorPartForVariant,
-  listCharacterSlots,
-  partMatchesVariant,
-  pivotAlignedPartOffset,
-  roleEnabledByManifest,
-  variantKeyForPart,
-} from "./character-utils";
+import { listCharacterSlots, partMatchesVariant, roleEnabledByManifest } from "./character-utils";
 import {
   availableCharacterAngles,
   computeBoneWorldTransforms,
@@ -25,7 +18,13 @@ import {
   type BoneWorldTransform,
   type ResolvedSlotBinding,
 } from "./rig";
-import { buildMotionConstraintContext, type MotionConstraintContext } from "./motion-constraints";
+import {
+  buildMotionConstraintContext,
+  type ActiveVariantMap,
+  type MotionConstraintContext,
+} from "./motion-constraints";
+import { resolvePinnedBonesForAngle, upgradeCharacterRigV2 } from "./rig-v2";
+import { registrationForPart } from "./registration";
 
 export type RuntimeCharacterSlot = ReturnType<typeof listCharacterSlots>[number];
 
@@ -61,7 +60,7 @@ export interface RuntimePartPlacement {
   scaleX: number;
   scaleY: number;
   depth: number;
-  transformTarget: "slot" | "bone";
+  drawOrder: number;
   basePart: CharacterPart;
   referencePart?: CharacterPart;
 }
@@ -73,6 +72,10 @@ export interface RuntimePartPlacementOptions {
    */
   poseKey?: string;
   basePart?: CharacterPart;
+  /** Active slot variants used to resolve socket-driven child bone rest transforms. */
+  activeVariants?: ActiveVariantMap;
+  /** Pre-resolved pose skeleton when the caller already needs it for frame or drag math. */
+  worldByBone?: ReadonlyMap<string, BoneWorldTransform>;
 }
 
 /**
@@ -85,27 +88,33 @@ export function buildCharacterRuntime(
   character: CharacterPreset,
   options: BuildCharacterRuntimeOptions = {},
 ): CharacterRuntime {
-  const rig = normalizeCharacterRig(character);
-  const angle = resolveRuntimeAngle(character, rig, options.angle);
-  const angleRig = angleRigForRuntime(rig, angle);
+  const canonicalCharacter = upgradeCharacterRigV2(character);
+  const rig = normalizeCharacterRig(canonicalCharacter);
+  const angle = resolveRuntimeAngle(canonicalCharacter, rig, options.angle);
+  const baseAngleRig = angleRigForRuntime(rig, angle);
   const bindingBySlot = new Map<string, ResolvedSlotBinding>();
-  for (const binding of angleRig.slotBindings) {
+  for (const binding of baseAngleRig.slotBindings) {
     const resolved = resolveSlotBinding(rig, binding.slotId, angle);
     if (resolved) bindingBySlot.set(binding.slotId, resolved);
   }
-  const slots = listCharacterSlots(character, { angle, includeEmpty: false }).filter(
+  const slots = listCharacterSlots(canonicalCharacter, { angle, includeEmpty: false }).filter(
     (slot) =>
       bindingBySlot.has(slot.id) &&
-      (options.includeDisabledRoles || roleEnabledByManifest(slot.role, character.manifest)),
+      (options.includeDisabledRoles ||
+        roleEnabledByManifest(slot.role, canonicalCharacter.manifest)),
   );
   const slotById = new Map(slots.map((slot) => [slot.id, slot]));
+  const angleRig = {
+    ...baseAngleRig,
+    bones: resolvePinnedBonesForAngle(canonicalCharacter, baseAngleRig, angle),
+  };
   const boneById = new Map(angleRig.bones.map((bone) => [bone.id, bone]));
-  const worldByBone = computeBoneWorldTransforms(rig, angle);
+  const worldByBone = computeAngleRigWorldTransforms(rig, angleRig, angle);
   const parentBoneIds = new Set(
     angleRig.bones.map((bone) => bone.parentId).filter((id): id is string => !!id),
   );
   return {
-    character,
+    character: canonicalCharacter,
     rig,
     angle,
     angleRig,
@@ -117,8 +126,8 @@ export function buildCharacterRuntime(
     parentBoneIds,
     constraintContext: buildMotionConstraintContext({
       reaches: angleRig.reaches,
-      variantPackages: character.variantPackages,
-      parts: character.parts,
+      variantPackages: canonicalCharacter.variantPackages,
+      parts: canonicalCharacter.parts,
       bones: angleRig.bones,
     }),
   };
@@ -130,9 +139,10 @@ export function resolveRuntimeSlotPart(
   poseKey?: string,
 ): CharacterPart | undefined {
   const visibleParts = slot.parts.filter((part) => part.visible);
-  const activePose = runtime.bindingBySlot.get(slot.id)?.effectivePartId ?? poseKey;
+  const boundPartId = runtime.bindingBySlot.get(slot.id)?.effectivePartId;
   return (
-    (activePose ? visibleParts.find((part) => partMatchesVariant(part, activePose)) : undefined) ??
+    (poseKey ? visibleParts.find((part) => partMatchesVariant(part, poseKey)) : undefined) ??
+    (boundPartId ? visibleParts.find((part) => part.id === boundPartId) : undefined) ??
     (runtime.angle
       ? visibleParts.find(
           (part) => partMatchesVariant(part, runtime.angle) || part.name === runtime.angle,
@@ -151,69 +161,58 @@ export function runtimePartPlacement(
   const binding = runtime.bindingBySlot.get(slot.id);
   const basePart =
     options.basePart ?? resolveRuntimeSlotPart(slot, runtime, options.poseKey) ?? part;
-  const boneWorld = binding ? runtime.worldByBone.get(binding.effectiveBoneId) : undefined;
+  const worldByBone =
+    options.worldByBone ??
+    (options.activeVariants
+      ? runtimeBoneWorldTransforms(runtime, options.activeVariants)
+      : runtime.worldByBone);
+  const boneWorld = binding ? worldByBone.get(binding.effectiveBoneId) : undefined;
   const boneRotation = boneWorld?.rotation ?? 0;
-  const slotX = binding ? binding.x : basePart.x;
-  const slotY = binding ? binding.y : basePart.y;
+  const slotX = binding?.x ?? 0;
+  const slotY = binding?.y ?? 0;
   const slotOrigin = boneWorld
     ? addPoint(boneWorld, rotatePoint({ x: slotX, y: slotY }, boneRotation))
-    : { x: slotX, y: slotY };
-  const slotRotation = binding ? binding.rotation : basePart.rotation;
+    : { x: basePart.x + slotX, y: basePart.y + slotY };
+  const slotRotation = binding?.rotation ?? 0;
   const slotScaleX = binding?.scaleX ?? 1;
   const slotScaleY = binding?.scaleY ?? 1;
-  const offset = runtimePartOffset(slot, part, binding, basePart);
-  const pivot = pivotForPart(part);
-  const pivotLocal = { x: pivot.x - part.x, y: pivot.y - part.y };
-  const slotPivotLocal = transformPointAroundOrigin(
-    { x: offset.x + pivotLocal.x, y: offset.y + pivotLocal.y },
-    {
-      x: basePart.anchorX * basePart.width,
-      y: basePart.anchorY * basePart.height,
-    },
-    slotRotation,
-    slotScaleX,
-    slotScaleY,
-  );
-  const pivotWorld = addPoint(slotOrigin, rotatePoint(slotPivotLocal, boneRotation));
+  const registration = registrationForPart(part);
+  const pivotWorld = slotOrigin;
   const referencePart =
     binding && slot.role !== "eye" && slot.role !== "mouth"
       ? (representativePart(slot) ?? basePart)
       : undefined;
+  const drawOrderIndex = runtime.angleRig.drawOrder.indexOf(slot.id);
   return {
-    x: pivotWorld.x - pivotLocal.x,
-    y: pivotWorld.y - pivotLocal.y,
+    x: pivotWorld.x - registration.x,
+    y: pivotWorld.y - registration.y,
     pivotX: pivotWorld.x,
     pivotY: pivotWorld.y,
     containerX: slotOrigin.x,
     containerY: slotOrigin.y,
-    offsetX: offset.x,
-    offsetY: offset.y,
-    rotation: boneRotation + slotRotation + part.rotation - basePart.rotation,
+    offsetX: 0,
+    offsetY: 0,
+    rotation: boneRotation + slotRotation + registration.rotation,
     scaleX: slotScaleX,
     scaleY: slotScaleY,
     depth: binding?.effectiveDepth ?? part.depth,
-    transformTarget:
-      binding && runtime.parentBoneIds.has(binding.effectiveBoneId) ? "bone" : "slot",
+    drawOrder: drawOrderIndex >= 0 ? drawOrderIndex : part.zIndex,
     basePart,
     referencePart,
   };
 }
 
-function runtimePartOffset(
-  slot: RuntimeCharacterSlot,
-  part: CharacterPart,
-  binding: ResolvedSlotBinding | undefined,
-  basePart: CharacterPart,
-): { x: number; y: number } {
-  if (!binding || slot.role === "eye" || slot.role === "mouth") {
-    return { x: part.x - basePart.x, y: part.y - basePart.y };
-  }
-  const referencePart = representativePart(slot) ?? basePart;
-  return pivotAlignedPartOffset(
-    referencePart,
-    anchorPartForVariant(slot.parts, variantKeyForPart(part)) ?? part,
-    part,
+export function runtimeBoneWorldTransforms(
+  runtime: CharacterRuntime,
+  activeVariants: ActiveVariantMap,
+): Map<string, BoneWorldTransform> {
+  const bones = resolvePinnedBonesForAngle(
+    runtime.character,
+    runtime.angleRig,
+    runtime.angle,
+    activeVariants,
   );
+  return computeAngleRigWorldTransforms(runtime.rig, { ...runtime.angleRig, bones }, runtime.angle);
 }
 
 function resolveRuntimeAngle(
@@ -269,4 +268,23 @@ function addPoint(
   b: { x: number; y: number },
 ): { x: number; y: number } {
   return { x: a.x + b.x, y: a.y + b.y };
+}
+
+function computeAngleRigWorldTransforms(
+  rig: CharacterRig,
+  angleRig: CharacterAngleRig,
+  angle: CharacterAngle,
+): Map<string, BoneWorldTransform> {
+  return computeBoneWorldTransforms(
+    {
+      ...rig,
+      activeAngle: angle,
+      bones: angleRig.bones,
+      angles: {
+        ...rig.angles,
+        [angle]: angleRig,
+      },
+    },
+    angle,
+  );
 }

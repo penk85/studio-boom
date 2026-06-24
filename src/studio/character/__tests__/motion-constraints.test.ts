@@ -3,7 +3,6 @@ import type { CharacterReach, CharacterSlotVariantPackage } from "../../types";
 import { makePart } from "../character-utils";
 import {
   buildMotionConstraintContext,
-  childAnchorForVariant,
   effectiveReachForSlot,
   motionDeltaMovesJoint,
   parentSlotIdForBone,
@@ -262,18 +261,6 @@ describe("motion-constraints boundary", () => {
     ).toBe(false);
     expect(motionDeltaMovesJoint({ dx: 0, dy: 0, rotation: 12 })).toBe(true);
     expect(motionDeltaMovesJoint({ dx: 0, dy: 0, rotation: 0, scaleX: 1.1 })).toBe(true);
-  });
-
-  it("resolves child anchors per parent variant with base fallback", () => {
-    const bone = {
-      x: 40,
-      y: -22,
-      rotation: 5,
-      parentVariantAnchors: { bent: { x: 12, y: 30, rotation: -35 } },
-    };
-    expect(childAnchorForVariant(bone, "bent")).toEqual({ x: 12, y: 30, rotation: -35 });
-    expect(childAnchorForVariant(bone, "straight")).toEqual({ x: 40, y: -22, rotation: 5 });
-    expect(childAnchorForVariant(bone, undefined)).toEqual({ x: 40, y: -22, rotation: 5 });
   });
 
   it("finds the parent slot whose variant re-anchors a bone", () => {

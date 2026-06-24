@@ -3,7 +3,13 @@ import type { CharacterPreset, CharacterReach } from "../../types";
 import { createBlankCharacter, makePart } from "../character-utils";
 import { effectiveReachForSlot } from "../motion-constraints";
 import { buildDefaultRig } from "../rig";
-import { buildCharacterRuntime, runtimePartPlacement } from "../runtime";
+import {
+  buildCharacterRuntime,
+  resolveRuntimeSlotPart,
+  runtimeBoneWorldTransforms,
+  runtimePartPlacement,
+} from "../runtime";
+import { makeVariantArmCharacter } from "./fixtures";
 
 function makeMultiAngleCharacter(): CharacterPreset {
   return {
@@ -152,7 +158,7 @@ describe("character runtime resolver", () => {
       id: "rotated-runtime-actor",
       parts: [part],
       rig: {
-        version: 1,
+        version: 2,
         activeAngle: "front",
         bones: [],
         slotBindings: [],
@@ -204,10 +210,80 @@ describe("character runtime resolver", () => {
     if (!slot) throw new Error("Expected body slot.");
 
     const placement = runtimePartPlacement(slot, part, runtime);
-    expect(placement.x).toBeCloseTo(80);
-    expect(placement.y).toBeCloseTo(110);
-    expect(placement.pivotX).toBeCloseTo(90);
-    expect(placement.pivotY).toBeCloseTo(120);
+    expect(placement.x).toBeCloseTo(90);
+    expect(placement.y).toBeCloseTo(100);
+    expect(placement.pivotX).toBeCloseTo(100);
+    expect(placement.pivotY).toBeCloseTo(110);
     expect(placement.rotation).toBeCloseTo(90);
+  });
+
+  it("lets an explicit active-angle variant override the binding rest part", () => {
+    const rest = makePart("arm", "rest-media", {
+      id: "arm-rest",
+      slotId: "slot:left-arm",
+      side: "left",
+      pose: "rest",
+    });
+    const raised = makePart("arm", "raised-media", {
+      id: "arm-raised",
+      slotId: "slot:left-arm",
+      side: "left",
+      pose: "raised",
+    });
+    const character = {
+      ...createBlankCharacter("Variant actor"),
+      parts: [rest, raised],
+    };
+    const builtRig = buildDefaultRig(character);
+    const angleRig = builtRig.angles?.front;
+    if (!angleRig) throw new Error("Expected front angle rig.");
+    const runtime = buildCharacterRuntime({
+      ...character,
+      rig: {
+        ...builtRig,
+        angles: {
+          ...builtRig.angles,
+          front: {
+            ...angleRig,
+            slotBindings: angleRig.slotBindings.map((binding) =>
+              binding.slotId === "slot:left-arm" ? { ...binding, partId: rest.id } : binding,
+            ),
+          },
+        },
+      },
+    });
+    const slot = runtime.slotById.get("slot:left-arm");
+    if (!slot) throw new Error("Expected arm slot.");
+
+    expect(resolveRuntimeSlotPart(slot, runtime)?.id).toBe(rest.id);
+    expect(resolveRuntimeSlotPart(slot, runtime, "raised")?.id).toBe(raised.id);
+  });
+
+  it("uses the active parent variant socket for child placement", () => {
+    const character = makeVariantArmCharacter();
+    const runtime = buildCharacterRuntime({
+      ...character,
+      rig: buildDefaultRig(character),
+    });
+    const handSlot = runtime.slotById.get("slot:right-hand");
+    const bentHand = handSlot ? resolveRuntimeSlotPart(handSlot, runtime, "bent") : undefined;
+    if (!handSlot || !bentHand) throw new Error("Expected bent hand.");
+    const activeVariants = {
+      "slot:right-arm": "bent",
+      "slot:right-hand": "bent",
+    };
+    const worldByBone = runtimeBoneWorldTransforms(runtime, activeVariants);
+    const placement = runtimePartPlacement(handSlot, bentHand, runtime, {
+      poseKey: "bent",
+      activeVariants,
+      worldByBone,
+    });
+
+    expect(worldByBone.get("bone:slot:right-hand")).toMatchObject({
+      x: 370,
+      y: 230,
+    });
+    expect(placement.pivotX).toBeCloseTo(370);
+    expect(placement.pivotY).toBeCloseTo(230);
   });
 });

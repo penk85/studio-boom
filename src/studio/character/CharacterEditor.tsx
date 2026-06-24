@@ -7,9 +7,11 @@ import {
   resolveDragSubject,
   resolveDrillSelection,
 } from "../interaction/select-drag";
+import { startWindowPointerDrag } from "../interaction/pointer-drag";
 import {
   ArrowDown,
   ArrowUp,
+  Check,
   ChevronDown,
   ChevronRight,
   Copy,
@@ -32,6 +34,7 @@ import { useStudio } from "../store";
 import {
   createBlankCharacter,
   CHARACTER_VARIANT_KIND_VALUES,
+  defaultSlotIdForRole,
   defaultMotionBehaviorForRole,
   defaultVariantForSlotParts,
   findCharacterSlot,
@@ -44,6 +47,7 @@ import {
   partMatchesVariant,
   roleEnabledByManifest,
   roleLabel,
+  slotLabelForRoleSide,
   withUpdatedCharacterSlot,
   claimSharedPartsForAngles,
   partAvailableForAngle,
@@ -52,7 +56,6 @@ import {
   variantKeyForPart,
   variantKeySourceForPart,
   variantLabelForPart,
-  withInferredHumanParentIds,
   type VariantKeySource,
 } from "./character-utils";
 import {
@@ -61,11 +64,12 @@ import {
   buildRigHealthReport,
   collectVariantKeyIssues,
   migrateLegacyVariantSockets,
-  removeVariantSocket,
+  removeVariantPin,
+  resetVariantPinToArtwork,
   renameVariantKeyEverywhere,
-  setVariantAnchorRotation,
+  setVariantPinRotation,
   slotVariantKeys,
-  upsertVariantSocketAtPoint,
+  upsertVariantPinAtPoint,
   variantPreviewDeltas,
   type RigHealthReport,
   type VariantKeyIssue,
@@ -94,8 +98,16 @@ import {
   pointInEditorHitBounds,
   type AlphaHitMask,
 } from "./alpha-bounds";
+import {
+  composeMatrices,
+  invertMatrix,
+  matrixAroundPoint,
+  rectCorners,
+  transformPoint,
+  transformVector,
+  translationMatrix,
+} from "./geometry";
 import { MOUTH_VISEMES, MOUTH_VISEME_DESCRIPTIONS } from "../lipsync/viseme-schema";
-import type { CharacterCommand } from "../character-document";
 import type {
   CharacterAngle,
   CharacterPart,
@@ -120,24 +132,34 @@ import {
   bindSlotPartToAngle,
   buildDefaultRig,
   rebuildRigPreservingConstraints,
-  computeBoneWorldTransforms,
-  moveBone,
-  moveBoneForSlot,
   moveSlotBinding,
   moveSlotParts,
   normalizeCharacterRig,
   parentSlotIdForSlot,
   resolveSlotBinding,
   setBoneDepth,
-  setBoneTransform,
   setSlotHostConstraint,
-  setSlotParentSocket,
   setSlotDepth,
   setSlotReach,
   setSlotRotReach,
   slotIdsForBoneSubtree,
+  clampMotionDeltaToReach,
 } from "./rig";
-import { buildCharacterRuntime, runtimePartPlacement, type RuntimePartPlacement } from "./runtime";
+import {
+  buildCharacterRuntime,
+  runtimeBoneWorldTransforms,
+  runtimePartPlacement,
+  type CharacterRuntime,
+  type RuntimePartPlacement,
+} from "./runtime";
+import { runtimeAncestorMotionTargets } from "./motion-targets";
+import {
+  moveCharacterBoneRest,
+  resolvePinnedBonesForAngle,
+  setCharacterBoneRestTransform,
+  setCharacterSlotParent,
+  upgradeCharacterRigV2,
+} from "./rig-v2";
 
 interface Props {
   characterId: string;
@@ -181,6 +203,22 @@ const SLOT_DEFS: Array<{ label: string; role: PartRole; side?: CharacterPart["si
   { label: "Hair Front", role: "hair", side: "front" },
   { label: "Accessory", role: "accessory" },
 ];
+
+type SlotDefinition = (typeof SLOT_DEFS)[number];
+
+function matchesSlotDefinition(
+  value: Pick<CharacterPart, "role" | "side"> | Pick<CharacterSlot, "role" | "side">,
+  definition: SlotDefinition,
+): boolean {
+  return (
+    value.role === definition.role &&
+    (definition.side === undefined || value.side === definition.side)
+  );
+}
+
+function defaultSlotIdForDefinition(definition: SlotDefinition): ID {
+  return defaultSlotIdForRole(definition.role, undefined, definition.side);
+}
 
 const ROLE_OPTIONS: PartRole[] = [
   "head",
@@ -326,10 +364,9 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         await db.characters.put(row);
         useStudio.getState().registerCharacterPreset(row);
       }
-      const normalized = withInferredHumanParentIds(normalizeCharacterSlots(row));
-      // One-time: legacy variant-package sockets become per-angle rig joints (the bone owns
-      // the joint). Conservative and idempotent; the autosave persists the converted shape.
-      const migrated = migrateLegacyVariantSockets(normalized);
+      const normalized = normalizeCharacterSlots(row);
+      // One-time: legacy sockets become variant-local output pins; autosave persists rig v2.
+      const migrated = upgradeCharacterRigV2(migrateLegacyVariantSockets(normalized));
       // A character should never sit in a non-pose: seed a "Standing" default once (the
       // autosave persists it), then park the editor on the default pose.
       const seeded = seedDefaultPosePreset(migrated) ?? migrated;
@@ -381,7 +418,8 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     setEditorPhase(phase);
     // Sensible overlay defaults per phase; the floating view toggles can override.
     setShowBones(phase === "rig");
-    setShowAnchors(phase === "rig");
+    // Pins remain one click away, but do not cover the artwork while joints are aligned.
+    setShowAnchors(false);
     if (phase !== "rig") setSelectedBoneId(null);
   };
 
@@ -414,7 +452,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       )
         return;
       if (e.key === "Escape") {
-        if (socketPlacement) setSocketPlacement(null);
+        if (pinPlacement) setPinPlacement(null);
         else if (rangeEdit) exitReachEdit();
         else if (mode !== "select") setMode("select");
         else {
@@ -487,7 +525,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       return next;
     });
   // Live anchor-edit drag: while a parent variant is previewed, dragging the child moves its
-  // variant anchor (socket), not its rest position. dx/dy are the in-flight canvas offsets.
+  // Variant output pin, not the child's rest artwork position. dx/dy are in-flight offsets.
   const [anchorDrag, setAnchorDrag] = useState<{
     childSlotId: ID;
     parentSlotId: ID;
@@ -496,8 +534,8 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     dy: number;
   } | null>(null);
   // One-shot "pin anchor" placement armed from the Anchor section: the next canvas click
-  // writes the socket at the clicked point.
-  const [socketPlacement, setSocketPlacement] = useState<{
+  // writes the active parent artwork's output pin at the clicked point.
+  const [pinPlacement, setPinPlacement] = useState<{
     childSlotId: ID;
     parentSlotId: ID;
     variantKey: string;
@@ -916,42 +954,28 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     setDoc((d) => (d ? withRig({ ...d, ...patch, updatedAt: Date.now() }, "rig" in patch) : d));
   };
 
-  const applyLiveCharacterCommand = (command: CharacterCommand) => {
-    try {
-      useStudio.getState().applyCharacterDocumentCommand(doc.id, command, { history: false });
-    } catch (error) {
-      console.warn("Character document command rejected", error);
-      setStatus("Live character document rejected the edit");
-    }
+  const fitActiveAngleToCanvas = () => {
+    pushUndoSnapshot();
+    setDoc((d) => {
+      if (!d) return d;
+      const activeAngle = normalizeCharacterRig(d).activeAngle;
+      const activeParts = d.parts.filter((part) => partAvailableForAngle(part, activeAngle));
+      const fittedParts = fitPartsToCanvasFrame(activeParts, d.canvasWidth, d.canvasHeight);
+      if (!fittedParts) return d;
+      const fittedById = new Map(fittedParts.map((part) => [part.id, part]));
+      return withRig({
+        ...d,
+        parts: d.parts.map((part) => fittedById.get(part.id) ?? part),
+        updatedAt: Date.now(),
+      });
+    });
+    setStatusUndoable("Fitted active angle to canvas");
   };
 
-  const applyLiveSlotBinding = (rig: CharacterRig, slotId: ID) => {
-    const binding = resolveSlotBinding(rig, slotId);
-    if (!binding) return;
-    applyLiveCharacterCommand({
-      type: "setSlotBinding",
-      slotId,
-      boneId: binding.effectiveBoneId,
-      x: binding.x,
-      y: binding.y,
-      rotation: binding.rotation,
-      scaleX: binding.scaleX,
-      scaleY: binding.scaleY,
-      depth: binding.effectiveDepth,
-    });
-  };
-
-  const applyLiveBoneTransform = (rig: CharacterRig, boneId: ID) => {
-    const bone = rig.bones.find((candidate) => candidate.id === boneId);
-    if (!bone) return;
-    applyLiveCharacterCommand({
-      type: "setBoneTransform",
-      boneId,
-      x: bone.x,
-      y: bone.y,
-      rotation: bone.rotation,
-      depth: bone.depth ?? 0,
-    });
+  const syncLiveCharacterPreset = (character: CharacterPreset) => {
+    // Rebuild the canonical HyperFrames composition through the same runtime used by playback.
+    // Direct DOM bone/slot commands cannot express registration and variant-local output pins.
+    useStudio.getState().registerCharacterPreset(character);
   };
 
   const updatePart = (
@@ -967,6 +991,23 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         original && patch.rotation !== undefined && Number.isFinite(patch.rotation)
           ? patch.rotation - original.rotation
           : 0;
+      const semanticSlotChanged =
+        !!original && (patch.role !== undefined || "side" in patch) && patch.slotId === undefined;
+      const nextRole = patch.role ?? original?.role;
+      const nextSide =
+        "side" in patch ? patch.side : original ? (patch.side ?? original.side) : patch.side;
+      const canonicalSlotId =
+        original && semanticSlotChanged && nextRole
+          ? defaultSlotIdForRole(nextRole, nextRole === "custom" ? id : undefined, nextSide)
+          : undefined;
+      const semanticSlot = canonicalSlotId ? findCharacterSlot(d, canonicalSlotId) : undefined;
+      const semanticPatch =
+        original && semanticSlotChanged && nextRole && canonicalSlotId
+          ? {
+              slotId: canonicalSlotId,
+              slotName: semanticSlot?.name ?? slotLabelForRoleSide(nextRole, nextSide),
+            }
+          : {};
       const parentPivot = original ? pivotForPart(original) : null;
       const rig = normalizeCharacterRig(d);
       const originalSlotId = original ? getPartSlotId(original) : "";
@@ -977,7 +1018,8 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       return withRig({
         ...d,
         parts: d.parts.map((part) => {
-          if (part.id === id) return normalizePartPatch({ ...part, ...patch }, patch);
+          if (part.id === id)
+            return normalizePartPatch({ ...part, ...patch, ...semanticPatch }, patch);
           if (!parentPivot || rotationDelta === 0 || !descendantIds.has(part.id)) return part;
           const pivot = pivotForPart(part);
           const rotatedPivot = rotateCanvasPointAroundPivot(pivot, parentPivot, rotationDelta);
@@ -1037,13 +1079,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
   const addPart = (part: CharacterPart) => {
     pushUndoSnapshot();
-    setDoc((d) =>
-      d
-        ? withRig(
-            withInferredHumanParentIds({ ...d, parts: [...d.parts, part], updatedAt: Date.now() }),
-          )
-        : d,
-    );
+    setDoc((d) => (d ? withRig({ ...d, parts: [...d.parts, part], updatedAt: Date.now() }) : d));
     setSelectedPartId(part.id);
   };
 
@@ -1220,7 +1256,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     setDoc((d) => {
       if (!d) return d;
       const rig = normalizeCharacterRig(d);
-      const limited = clampSlotDeltaToHost(d, rig, slotId, dx, dy);
+      const limited = clampSlotDragDelta(d, rig, slotId, dx, dy);
       const angle = rig.activeAngle;
       return withRig(
         {
@@ -1468,7 +1504,13 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   // The animation-test delta plus the variant-preview re-anchor shift — every hit test and
   // local-point mapping must use this so clicks land on the art where it is actually drawn.
   const partPreviewTransform = (part: CharacterPart) => {
-    const base = previewDelta(part, preview, previewParentPart, editorAngleParts);
+    const base = previewDelta(
+      part,
+      preview,
+      previewParentPart,
+      editorAngleParts,
+      resolvedEditorRuntime,
+    );
     const shift = partShift(part);
     return composeEditorPartTransform(part, base, shift, runtimePlacementForPart(part));
   };
@@ -1488,9 +1530,26 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     const candidates = visibleEditorParts
       .filter((part) => (part.visible || part.id === selectedPartId) && !part.locked)
       .slice()
-      .sort((a, b) => b.zIndex - a.zIndex);
+      .sort(
+        (a, b) =>
+          (runtimePlacementForPart(b)?.drawOrder ?? b.zIndex) -
+          (runtimePlacementForPart(a)?.drawOrder ?? a.zIndex),
+      );
 
     for (const part of candidates) {
+      // Skip non-active variants: invisible slot siblings must not intercept clicks.
+      // Mirrors PartLayer's rendering decision so hit testing and drawing always agree.
+      if (part.id !== selectedPartId) {
+        const slotId = getPartSlotId(part);
+        const sameSlotParts = visibleEditorParts.filter((c) => getPartSlotId(c) === slotId);
+        if (sameSlotParts.length > 1) {
+          const activeVariant =
+            variantPreview[slotId] ??
+            activePreviewVariantForPart(part, preview) ??
+            defaultVariantForSlotParts(sameSlotParts, part.role);
+          if (activeVariant && !partMatchesVariant(part, activeVariant)) continue;
+        }
+      }
       const transform = partPreviewTransform(part);
       if (transform.opacity <= 0.05 && part.id !== selectedPartId) continue;
       const local = canvasPointToPartLocal(part, point, transform);
@@ -1595,7 +1654,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     const subtreeSlotIds = binding
       ? slotIdsForBoneSubtree(rigSnapshot, binding.effectiveBoneId, angle)
       : new Set<ID>([slotId]);
-    let latestRig = rigSnapshot;
+    let latestCharacter = doc;
     const snapshot = doc.parts.map((snapshotPart) => {
       const pivot = pivotForPart(snapshotPart);
       return { id: snapshotPart.id, x: snapshotPart.x, y: snapshotPart.y, pivot };
@@ -1617,7 +1676,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
             pivot: snapshotPart.pivot,
           };
         });
-        const limited = clampSlotDeltaToHost(
+        const limited = clampSlotDragDelta(
           { ...d, parts: snapshotParts },
           rigSnapshot,
           slotId,
@@ -1626,22 +1685,30 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         );
         const appliedDx = limited.dx;
         const appliedDy = limited.dy;
+        if (movesBone && binding) {
+          const moved = moveCharacterBoneRest(
+            { ...d, parts: snapshotParts, rig: rigSnapshot },
+            binding.effectiveBoneId,
+            appliedDx,
+            appliedDy,
+            angle,
+            { activeVariants: variantPreview },
+          );
+          latestCharacter = { ...moved, updatedAt: Date.now() };
+          return latestCharacter;
+        }
         const parts = movesBone
           ? moveSlotSetFromSnapshot(snapshotParts, snapshot, subtreeSlotIds, appliedDx, appliedDy)
           : moveSlotParts({ ...d, parts: snapshotParts }, slotId, appliedDx, appliedDy, angle);
-        const rig = movesBone
-          ? moveBoneForSlot(rigSnapshot, slotId, appliedDx, appliedDy)
-          : moveSlotBinding(rigSnapshot, slotId, appliedDx, appliedDy);
-        latestRig = rig;
-        return withRig({ ...d, parts, rig, updatedAt: Date.now() }, true);
+        const rig = moveSlotBinding(rigSnapshot, slotId, appliedDx, appliedDy);
+        latestCharacter = withRig({ ...d, parts, rig, updatedAt: Date.now() }, true);
+        return latestCharacter;
       });
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      const binding = resolveSlotBinding(rigSnapshot, slotId);
-      if (movesBone && binding) applyLiveBoneTransform(latestRig, binding.effectiveBoneId);
-      else applyLiveSlotBinding(latestRig, slotId);
+      syncLiveCharacterPreset(latestCharacter);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -1662,7 +1729,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     const sy = e.clientY;
     const rigSnapshot = normalizeCharacterRig(doc);
     const angle = rigSnapshot.activeAngle;
-    let latestRig = rigSnapshot;
+    let latestCharacter = doc;
     const move = (ev: PointerEvent) => {
       const dx = Math.round((ev.clientX - sx) / scale);
       const dy = Math.round((ev.clientY - sy) / scale);
@@ -1673,7 +1740,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           if (!s) return p;
           return { ...p, x: s.x, y: s.y, pivot: s.pivot };
         });
-        const limited = clampSlotDeltaToHost(
+        const limited = clampSlotDragDelta(
           { ...d, parts: snapshotParts },
           rigSnapshot,
           slotId,
@@ -1681,8 +1748,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           dy,
         );
         const rig = moveSlotBinding(rigSnapshot, slotId, limited.dx, limited.dy);
-        latestRig = rig;
-        return withRig(
+        latestCharacter = withRig(
           {
             ...d,
             parts: moveSlotParts(
@@ -1700,12 +1766,13 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           },
           true,
         );
+        return latestCharacter;
       });
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      applyLiveSlotBinding(latestRig, slotId);
+      syncLiveCharacterPreset(latestCharacter);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -1719,54 +1786,22 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     selectBone(boneId);
     const sx = e.clientX;
     const sy = e.clientY;
-    const pinArtwork = boneDragMode === "calibrate";
-    // Calibrate mode moves only the skeleton/socket and counter-moves slot bindings so art stays
-    // visually pinned. Move-art mode moves the affected art subtree with the socket so the builder
-    // canvas and generated HyperFrames character stay aligned.
-    const rigSnapshot = normalizeCharacterRig(doc);
-    let latestRig = rigSnapshot;
-    const startBoneWorld = computeBoneWorldTransforms(rigSnapshot).get(boneId);
-    const slotIds = slotIdsForBoneSubtree(rigSnapshot, boneId);
-    const snapshot = doc.parts.map((part) => ({
-      id: part.id,
-      x: part.x,
-      y: part.y,
-      pivot: pivotForPart(part),
-    }));
+    const keepArtwork = boneDragMode === "calibrate";
+    const snapshot = doc;
+    let latest = snapshot;
     const move = (ev: PointerEvent) => {
       const dx = Math.round((ev.clientX - sx) / scale);
       const dy = Math.round((ev.clientY - sy) / scale);
-      const movedRig = moveBone(rigSnapshot, boneId, dx, dy);
-      const rig = pinArtwork ? pinRigSlotPlacements(doc, rigSnapshot, movedRig, slotIds) : movedRig;
-      latestRig = rig;
-      const movedBoneWorld = computeBoneWorldTransforms(rig).get(boneId);
-      const appliedDx =
-        startBoneWorld && movedBoneWorld ? Math.round(movedBoneWorld.x - startBoneWorld.x) : dx;
-      const appliedDy =
-        startBoneWorld && movedBoneWorld ? Math.round(movedBoneWorld.y - startBoneWorld.y) : dy;
-      setDoc((d) =>
-        d
-          ? withRig(
-              {
-                ...d,
-                parts: pinArtwork
-                  ? d.parts
-                  : moveSlotSetFromSnapshot(d.parts, snapshot, slotIds, appliedDx, appliedDy),
-                rig,
-                updatedAt: Date.now(),
-              },
-              true,
-            )
-          : d,
-      );
+      latest = moveCharacterBoneRest(snapshot, boneId, dx, dy, currentAngle(), {
+        keepArtwork,
+        activeVariants: variantPreview,
+      });
+      setDoc({ ...latest, updatedAt: Date.now() });
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      applyLiveBoneTransform(latestRig, boneId);
-      if (pinArtwork) {
-        for (const slotId of slotIds) applyLiveSlotBinding(latestRig, slotId);
-      }
+      syncLiveCharacterPreset(latest);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -1834,12 +1869,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           : d,
       );
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    startWindowPointerDrag({ onMove: move });
   };
 
   const startGroupRotate = (e: React.PointerEvent, slotId: ID) => {
@@ -1896,18 +1926,13 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           : d,
       );
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    startWindowPointerDrag({ onMove: move });
   };
 
   // Once a select-mode drag actually begins, dispatch to a slot-group drag (multi-variant
   // slots) or a single-part drag. Both select the subject and install their own listeners.
   // When a child's parent slot previews a non-default variant, dragging that child edits its
-  // variant anchor (socket) instead of its rest position — the user-chosen "small corrections"
+  // variant output pin instead of its rest position — the user-chosen "small corrections"
   // gesture. Returns null when ordinary rest-position dragging should apply.
   const anchorDragContextForSlot = (
     slotId: ID,
@@ -1939,16 +1964,13 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     const startX = e.clientX;
     const startY = e.clientY;
     // The anchor's current canvas position: the child bone at rest plus the preview shift.
-    const rig = normalizeCharacterRig(doc);
-    const world = computeBoneWorldTransforms(rig);
-    const boneId = rig.slotBindings.find(
+    const runtime = buildCharacterRuntime(doc);
+    const previewWorld = runtimeBoneWorldTransforms(runtime, variantPreview);
+    const boneId = runtime.angleRig.slotBindings.find(
       (binding) => binding.slotId === context.childSlotId,
     )?.boneId;
-    const boneWorld = boneId ? world.get(boneId) : undefined;
-    const previewOffset = (boneId && variantShift.bones.get(boneId)) || { dx: 0, dy: 0 };
-    const startAnchor = boneWorld
-      ? { x: boneWorld.x + previewOffset.dx, y: boneWorld.y + previewOffset.dy }
-      : null;
+    const boneWorld = boneId ? previewWorld.get(boneId) : undefined;
+    const startAnchor = boneWorld ? { x: boneWorld.x, y: boneWorld.y } : null;
 
     const onMove = (ev: PointerEvent) => {
       const dx = (ev.clientX - startX) / scale;
@@ -1962,25 +1984,38 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       if (!startAnchor) return;
       const dx = (ev.clientX - startX) / scale;
       const dy = (ev.clientY - startY) / scale;
-      const next = upsertVariantSocketAtPoint(doc, {
+      const next = upsertVariantPinAtPoint(doc, {
         parentSlotId: context.parentSlotId,
         variantKey: context.variantKey,
         childSlotId: context.childSlotId,
         anchorPoint: { x: startAnchor.x + dx, y: startAnchor.y + dy },
       });
-      updateDoc({ rig: next.rig }, { history: false });
-      setStatus(`Anchor pinned — ${childName} rides ${parentName} : ${context.variantKey}`);
+      updateDoc({ parts: next.parts, rig: next.rig }, { history: false });
+      setStatus(`Pin placed — ${childName} follows ${parentName} : ${context.variantKey}`);
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
 
-  const clearSocket = (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => {
+  const clearPin = (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => {
     pushUndoSnapshot();
-    const next = removeVariantSocket(doc, context);
-    updateDoc({ rig: next.rig }, { history: false });
+    const next = removeVariantPin(doc, context);
+    updateDoc({ parts: next.parts, rig: next.rig }, { history: false });
     setStatus(
-      `Anchor cleared — ${slotDisplayName(context.childSlotId)} uses the inferred anchor again`,
+      `Pin removed — ${slotDisplayName(context.childSlotId)} is unresolved for this variant`,
+    );
+  };
+
+  const resetPinToArtwork = (context: {
+    parentSlotId: ID;
+    variantKey: string;
+    childSlotId: ID;
+  }) => {
+    pushUndoSnapshot();
+    const next = resetVariantPinToArtwork(doc, context);
+    updateDoc({ parts: next.parts, rig: next.rig }, { history: false });
+    setStatus(
+      `Pin reset from artwork — ${slotDisplayName(context.childSlotId)} now uses its authored pivot`,
     );
   };
 
@@ -1989,8 +2024,8 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     rotation: number,
   ) => {
     pushUndoSnapshot();
-    const next = setVariantAnchorRotation(doc, { ...context, rotation });
-    updateDoc({ rig: next.rig }, { history: false });
+    const next = setVariantPinRotation(doc, { ...context, rotation });
+    updateDoc({ parts: next.parts, rig: next.rig }, { history: false });
     setStatus(
       `Anchor angle — ${slotDisplayName(context.childSlotId)} at ${rotation}° under ` +
         `${slotDisplayName(context.parentSlotId)} : ${context.variantKey}`,
@@ -2163,26 +2198,11 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     window.addEventListener("pointerup", up);
   };
 
-  // Set which layer a slot is attached to for the active angle. Stored as a slot relation plus a
-  // base socket; individual parts keep their import-time parentId out of rig authoring.
+  // Set the child bone's parent for the active angle. The bone graph is the hierarchy; parent
+  // artwork supplies the named output pin that derives the child joint.
   const setSlotAttachTo = (slotId: ID, parentSlotId: ID | "") => {
-    const rig = normalizeCharacterRig(doc);
-    const activeAngle = rig.activeAngle;
-    const childParts = partsInSlot(slotId, activeAngle);
-    const childRep = childParts.find((part) => part.visible) ?? childParts[0];
-    const pivot = childRep ? pivotForPart(childRep) : undefined;
-    updateDoc({
-      rig: setSlotParentSocket(
-        rig,
-        {
-          childSlotId: slotId,
-          parentSlotId: parentSlotId || undefined,
-          x: pivot?.x,
-          y: pivot?.y,
-        },
-        activeAngle,
-      ),
-    });
+    const next = setCharacterSlotParent(doc, slotId, parentSlotId || undefined, currentAngle());
+    updateDoc({ parts: next.parts, rig: next.rig });
   };
 
   // Sweep the layer around its extremes; the traced outline (convex hull of its swept footprint)
@@ -2279,20 +2299,20 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
     // One-shot anchor placement armed from the Anchor section: the click point becomes the
     // child's anchor under the armed parent variant. Mirrors the pivot tool's act-and-disarm.
-    if (socketPlacement) {
+    if (pinPlacement) {
       pushUndoSnapshot();
-      const next = upsertVariantSocketAtPoint(doc, {
-        parentSlotId: socketPlacement.parentSlotId,
-        variantKey: socketPlacement.variantKey,
-        childSlotId: socketPlacement.childSlotId,
+      const next = upsertVariantPinAtPoint(doc, {
+        parentSlotId: pinPlacement.parentSlotId,
+        variantKey: pinPlacement.variantKey,
+        childSlotId: pinPlacement.childSlotId,
         anchorPoint: point,
       });
-      updateDoc({ rig: next.rig }, { history: false });
+      updateDoc({ parts: next.parts, rig: next.rig }, { history: false });
       setStatus(
-        `Anchor pinned — ${slotDisplayName(socketPlacement.childSlotId)} rides ` +
-          `${slotDisplayName(socketPlacement.parentSlotId)} : ${socketPlacement.variantKey}`,
+        `Pin placed — ${slotDisplayName(pinPlacement.childSlotId)} follows ` +
+          `${slotDisplayName(pinPlacement.parentSlotId)} : ${pinPlacement.variantKey}`,
       );
-      setSocketPlacement(null);
+      setPinPlacement(null);
       return;
     }
 
@@ -2422,12 +2442,12 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           anchorDrag.parentSlotId,
         )} : ${anchorDrag.variantKey}. Release to pin.`,
       };
-    if (socketPlacement)
+    if (pinPlacement)
       return {
-        text: `Click where ${slotDisplayName(socketPlacement.childSlotId)} should anchor under ${slotDisplayName(
-          socketPlacement.parentSlotId,
-        )} : ${socketPlacement.variantKey}.`,
-        cancel: () => setSocketPlacement(null),
+        text: `Click where ${slotDisplayName(pinPlacement.childSlotId)} should anchor under ${slotDisplayName(
+          pinPlacement.parentSlotId,
+        )} : ${pinPlacement.variantKey}.`,
+        cancel: () => setPinPlacement(null),
       };
     if (rangeEdit)
       return {
@@ -2875,6 +2895,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   preview={preview}
                   previewParentPart={previewParentPart}
                   allParts={editorAngleParts}
+                  runtime={resolvedEditorRuntime}
                   previewVariantKey={variantPreview[getPartSlotId(part)]}
                   shift={partShift(part)}
                   placement={runtimePlacementForPart(part)}
@@ -2883,19 +2904,23 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               {showBones && !focusEditing && (
                 <RigBonesOverlay
                   doc={doc}
+                  variantPreview={variantPreview}
                   selectedBoneId={selectedBoneId}
                   scale={scale}
                   onSelectBone={selectBone}
                   onStartBoneDrag={startBoneDrag}
                 />
               )}
-              {(showAnchors || Object.keys(variantPreview).length > 0) && !focusEditing && (
+              {showAnchors && !focusEditing && (
                 <VariantAnchorOverlay
                   doc={doc}
                   variantPreview={variantPreview}
-                  variantShift={variantShift}
                   anchorDrag={anchorDrag}
-                  emphasisSlotId={restrictSlotId}
+                  emphasisSlotId={
+                    restrictSlotId ??
+                    selectedSlotId ??
+                    (selectedPart ? getPartSlotId(selectedPart) : null)
+                  }
                   scale={scale}
                   onStartAnchorDrag={startAnchorDrag}
                 />
@@ -2911,6 +2936,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   preview={preview}
                   previewParentPart={previewParentPart}
                   allParts={editorAngleParts}
+                  runtime={resolvedEditorRuntime}
                   shift={partShift(selectedEditorPart)}
                   placement={runtimePlacementForPart(selectedEditorPart)}
                   onBeginChange={() => {
@@ -3194,7 +3220,11 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           <div className="flex-1 overflow-auto p-3">
             <div className="space-y-4">
               {editorPhase === "build" && (
-                <CanvasSection doc={doc} onChange={(patch) => updateDoc(patch)} />
+                <CanvasSection
+                  doc={doc}
+                  onChange={(patch) => updateDoc(patch)}
+                  onFitActiveAngle={fitActiveAngleToCanvas}
+                />
               )}
               {editorPhase === "rig" && (
                 <>
@@ -3206,6 +3236,10 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                     }
                     selectedPart={selectedPart}
                     showBones={showBones}
+                    activeVariants={variantPreview}
+                    onCharacterChange={(character) =>
+                      updateDoc({ parts: character.parts, rig: character.rig })
+                    }
                     onRigChange={(rig) => updateDoc({ rig })}
                     onResetRig={() => {
                       updateDoc({ rig: buildDefaultRig(doc) });
@@ -3249,11 +3283,12 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   onSwitchPhase={switchPhase}
                   previewedKey={variantPreview[selectedSlotId]}
                   variantPreview={variantPreview}
-                  socketPlacement={socketPlacement}
+                  pinPlacement={pinPlacement}
                   onPreviewVariant={previewVariant}
                   onClearPreview={clearVariantPreview}
-                  onArmPlacement={setSocketPlacement}
-                  onClearSocket={clearSocket}
+                  onArmPinPlacement={setPinPlacement}
+                  onClearPin={clearPin}
+                  onResetPin={resetPinToArtwork}
                   onSetRotation={setAnchorRotation}
                   onUpdateSlot={(patch) => updateSlotRecord(selectedSlotId, patch)}
                   onMove={(dx, dy) => applyGroupMove(selectedSlotId, dx, dy)}
@@ -3280,10 +3315,11 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   anchorDragContext={
                     selectedPart ? anchorDragContextForSlot(getPartSlotId(selectedPart)) : null
                   }
-                  socketPlacement={socketPlacement}
+                  pinPlacement={pinPlacement}
                   onPreviewVariant={previewVariant}
-                  onArmPlacement={setSocketPlacement}
-                  onClearSocket={clearSocket}
+                  onArmPinPlacement={setPinPlacement}
+                  onClearPin={clearPin}
+                  onResetPin={resetPinToArtwork}
                   onSetRotation={setAnchorRotation}
                   onModeChange={setMode}
                   onBoundsModeChange={setBoundsMode}
@@ -3383,10 +3419,9 @@ function BodyMapPanel({
   const selectedSlot = selectedSlotId
     ? slots.find((slot) => slot.id === selectedSlotId)
     : undefined;
-  const slotIds = new Set(slots.map((slot) => slot.id));
   const missingSlots = SLOT_DEFS.filter((slot) => {
     if (!roleEnabledByManifest(slot.role, manifest)) return false;
-    return !slotIds.has(`slot:${slug(slot.label)}`);
+    return !slots.some((candidate) => matchesSlotDefinition(candidate, slot));
   });
 
   return (
@@ -3493,7 +3528,7 @@ function BodyMapPanel({
           </div>
           <div className="flex flex-wrap gap-1">
             {missingSlots.map((slot, index) => {
-              const id = `slot:${slug(slot.label)}`;
+              const id = defaultSlotIdForDefinition(slot);
               return (
                 <button
                   key={id}
@@ -3595,14 +3630,18 @@ function UploadSlots({
             slot.role !== "iris" &&
             roleEnabledByManifest(slot.role, manifest),
         ).map((slot) => {
-          const slotId = `slot:${slug(slot.label)}`;
+          const existingSlot = bodySlots.find((candidate) =>
+            matchesSlotDefinition(candidate, slot),
+          );
+          const slotId = existingSlot?.id ?? defaultSlotIdForDefinition(slot);
+          const filled = parts.some(
+            (part) => matchesSlotDefinition(part, slot) && partAvailableForAngle(part, activeAngle),
+          );
           return (
             <SlotUpload
               key={`${slot.label}-${slot.role}`}
               label={slot.label}
-              filled={parts.some(
-                (p) => getPartSlotId(p) === slotId && partAvailableForAngle(p, activeAngle),
-              )}
+              filled={filled}
               onUpload={(file) =>
                 onImport(file, {
                   role: slot.role,
@@ -3809,16 +3848,22 @@ function SlotUpload({
   return (
     <>
       <button
+        type="button"
         onClick={() => {
           if (!disabled) inputRef.current?.click();
         }}
         disabled={disabled}
+        title={filled ? `${label}: artwork is assigned for this angle` : `Upload ${label} artwork`}
         className={`flex items-center justify-between gap-2 rounded border px-2 text-left hover:bg-panel disabled:cursor-not-allowed disabled:opacity-50 ${
           compact ? "py-1" : "py-2"
         } ${filled ? "border-primary/60 bg-primary/10" : "border-border bg-panel-2"}`}
       >
         <span className="truncate">{label}</span>
-        <Upload size={13} className="shrink-0 text-muted-foreground" />
+        {filled ? (
+          <Check size={13} className="shrink-0 text-primary" aria-label="Artwork assigned" />
+        ) : (
+          <Upload size={13} className="shrink-0 text-muted-foreground" />
+        )}
       </button>
       <input
         ref={inputRef}
@@ -4250,10 +4295,11 @@ function Inspector({
   onSelectSlot,
   variantPreview,
   anchorDragContext,
-  socketPlacement,
+  pinPlacement,
   onPreviewVariant,
-  onArmPlacement,
-  onClearSocket,
+  onArmPinPlacement,
+  onClearPin,
+  onResetPin,
   onSetRotation,
   onModeChange,
   onBoundsModeChange,
@@ -4274,12 +4320,13 @@ function Inspector({
   variantPreview: Record<ID, string>;
   /** Set when dragging this part on the canvas would pin its anchor (parent variant previewed). */
   anchorDragContext: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
-  socketPlacement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
+  pinPlacement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
   onPreviewVariant: (slotId: ID, key: string) => void;
-  onArmPlacement: (
+  onArmPinPlacement: (
     placement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null,
   ) => void;
-  onClearSocket: (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => void;
+  onClearPin: (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => void;
+  onResetPin: (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => void;
   onSetRotation: (
     context: { parentSlotId: ID; variantKey: string; childSlotId: ID },
     rotation: number,
@@ -4430,6 +4477,23 @@ function Inspector({
                   ))}
                 </select>
               </Field>
+              <Field label="Side">
+                <select
+                  value={part.side ?? ""}
+                  onChange={(e) =>
+                    onChange(part.id, {
+                      side: (e.target.value || undefined) as CharacterPart["side"] | undefined,
+                    })
+                  }
+                  className="w-full rounded border border-border bg-background px-2 py-1"
+                >
+                  {SLOT_SIDE_OPTIONS.map((option) => (
+                    <option key={option.value || "none"} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
               <Field label="Motion behavior">
                 <select
                   value={part.motionBehavior ?? "none"}
@@ -4494,7 +4558,7 @@ function Inspector({
                   </select>
                 </Field>
               )}
-              <Field label="Socket parent">
+              <Field label="Attached to">
                 <select
                   value={parentValue}
                   onChange={(e) => onAttachSlot(partSlotId, e.target.value)}
@@ -4637,10 +4701,11 @@ function Inspector({
           doc={doc}
           childSlotId={getPartSlotId(part)}
           variantPreview={variantPreview}
-          socketPlacement={socketPlacement}
+          pinPlacement={pinPlacement}
           onPreviewVariant={onPreviewVariant}
-          onArmPlacement={onArmPlacement}
-          onClearSocket={onClearSocket}
+          onArmPinPlacement={onArmPinPlacement}
+          onClearPin={onClearPin}
+          onResetPin={onResetPin}
           onSetRotation={onSetRotation}
         />
       )}
@@ -4829,9 +4894,11 @@ function Inspector({
 function CanvasSection({
   doc,
   onChange,
+  onFitActiveAngle,
 }: {
   doc: CharacterPreset;
   onChange: (patch: Partial<CharacterPreset>) => void;
+  onFitActiveAngle: () => void;
 }) {
   return (
     <section className="rounded border border-border bg-panel-2 p-3">
@@ -4866,6 +4933,14 @@ function CanvasSection({
           onChange={(canvasHeight) => onChange({ canvasHeight })}
         />
       </div>
+      <button
+        type="button"
+        onClick={onFitActiveAngle}
+        className="mt-2 w-full rounded border border-border bg-background px-2 py-1 text-[11px] font-medium text-foreground hover:bg-panel"
+        title="Uniformly scale and center this angle using full transparent part frames"
+      >
+        Fit active angle to canvas
+      </button>
     </section>
   );
 }
@@ -4906,6 +4981,8 @@ function SkeletonCard({
   selectedSlotId,
   selectedPart,
   showBones,
+  activeVariants,
+  onCharacterChange,
   onRigChange,
   onResetRig,
 }: {
@@ -4914,11 +4991,20 @@ function SkeletonCard({
   selectedSlotId: ID | null;
   selectedPart: CharacterPart | null;
   showBones: boolean;
+  activeVariants: Readonly<Record<ID, string>>;
+  onCharacterChange: (character: CharacterPreset) => void;
   onRigChange: (rig: CharacterRig) => void;
   onResetRig: () => void;
 }) {
   const rig = normalizeCharacterRig(doc);
-  const selectedBone = rig.bones.find((bone) => bone.id === selectedBoneId) ?? null;
+  const runtime = buildCharacterRuntime(doc);
+  const resolvedBones = resolvePinnedBonesForAngle(
+    runtime.character,
+    runtime.angleRig,
+    runtime.angle,
+    activeVariants,
+  );
+  const selectedBone = resolvedBones.find((bone) => bone.id === selectedBoneId) ?? null;
   const selectedBinding = selectedSlotId ? resolveSlotBinding(rig, selectedSlotId) : undefined;
   const bindSelectedPart = () => {
     if (!selectedPart) return;
@@ -4945,18 +5031,34 @@ function SkeletonCard({
           <NumberField
             label="Bone X"
             value={selectedBone.x}
-            onChange={(x) => onRigChange(setBoneTransform(rig, selectedBone.id, { x }))}
+            onChange={(x) =>
+              onCharacterChange(
+                setCharacterBoneRestTransform(doc, selectedBone.id, { x }, runtime.angle, {
+                  activeVariants,
+                }),
+              )
+            }
           />
           <NumberField
             label="Bone Y"
             value={selectedBone.y}
-            onChange={(y) => onRigChange(setBoneTransform(rig, selectedBone.id, { y }))}
+            onChange={(y) =>
+              onCharacterChange(
+                setCharacterBoneRestTransform(doc, selectedBone.id, { y }, runtime.angle, {
+                  activeVariants,
+                }),
+              )
+            }
           />
           <NumberField
             label="Bone Rot"
             value={selectedBone.rotation}
             onChange={(rotation) =>
-              onRigChange(setBoneTransform(rig, selectedBone.id, { rotation }))
+              onCharacterChange(
+                setCharacterBoneRestTransform(doc, selectedBone.id, { rotation }, runtime.angle, {
+                  activeVariants,
+                }),
+              )
             }
           />
           <NumberField
@@ -5174,8 +5276,7 @@ function RigHealthPanel({
                     <span className="font-mono">{row.variantKey}</span>
                   </span>
                   <span className="shrink-0 text-muted-foreground">
-                    {row.source === "pairedArt" ? "paired art" : row.source} · {row.anchor.x},
-                    {row.anchor.y}
+                    {row.source} · {row.anchor.x}, {row.anchor.y}
                   </span>
                 </button>
               ))}
@@ -5190,27 +5291,29 @@ function RigHealthPanel({
 /**
  * Where a child slot sits under each of its parent slot's variants: pick a parent variant (which
  * also previews it in place so the limb you anchor onto is visible), see how the anchor resolves,
- * pin it by clicking the canvas, or clear an authored socket.
+ * place it by clicking the canvas, or clear an authored pin.
  */
 function VariantAnchorSection({
   doc,
   childSlotId,
   variantPreview,
-  socketPlacement,
+  pinPlacement,
   onPreviewVariant,
-  onArmPlacement,
-  onClearSocket,
+  onArmPinPlacement,
+  onClearPin,
+  onResetPin,
   onSetRotation,
 }: {
   doc: CharacterPreset;
   childSlotId: ID;
   variantPreview: Record<ID, string>;
-  socketPlacement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
+  pinPlacement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
   onPreviewVariant: (slotId: ID, key: string) => void;
-  onArmPlacement: (
+  onArmPinPlacement: (
     placement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null,
   ) => void;
-  onClearSocket: (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => void;
+  onClearPin: (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => void;
+  onResetPin: (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => void;
   onSetRotation: (
     context: { parentSlotId: ID; variantKey: string; childSlotId: ID },
     rotation: number,
@@ -5220,28 +5323,26 @@ function VariantAnchorSection({
   const parentSlotId = parentSlotIdForSlot(rig, childSlotId);
   if (!parentSlotId) return null;
   const parentKeys = slotVariantKeys(doc, parentSlotId, rig.activeAngle);
-  const hasPackages = (doc.variantPackages ?? []).some(
-    (pkg) =>
-      pkg.slotId === parentSlotId &&
-      (!pkg.angleIds?.length || pkg.angleIds.includes(rig.activeAngle)),
-  );
-  if (parentKeys.length <= 1 && !hasPackages) return null;
+  if (parentKeys.length === 0) return null;
   const parentName = findCharacterSlot(doc, parentSlotId)?.name ?? parentSlotId;
   const previewKey = variantPreview[parentSlotId] ?? "";
-  const selectedKey = parentKeys.includes(previewKey) ? previewKey : "";
+  const selectedKey = parentKeys.includes(previewKey)
+    ? previewKey
+    : parentKeys.length === 1
+      ? parentKeys[0]
+      : "";
   const anchorEntry = selectedKey ? anchorEntryForChild(doc, childSlotId, selectedKey) : undefined;
   const source = selectedKey ? (anchorEntry?.source ?? "fallback") : null;
-  const armed = socketPlacement?.childSlotId === childSlotId;
-  const sourceLabel =
-    source === "socket" ? "pinned socket" : source === "pairedArt" ? "paired art" : "rest fallback";
+  const armed = pinPlacement?.childSlotId === childSlotId;
+  const sourceLabel = source === "pin" ? "authored pin" : "missing pin";
   return (
     <section className="rounded border border-border bg-panel-2 p-3">
       <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-        Socket overrides
+        Variant pins
       </div>
       <div className="mb-2 text-[10px] leading-snug text-muted-foreground">
-        Optional per-variant positions for this layer&apos;s base socket on{" "}
-        <span className="text-foreground">{parentName}</span>. Picking one shows it in place.
+        Each <span className="text-foreground">{parentName}</span> variant provides the output pin
+        used by this child bone. Picking one shows that artwork in place.
       </div>
       <label className="mb-2 grid grid-cols-[64px_1fr] items-center gap-2 text-[10px]">
         <span className="text-muted-foreground">Variant</span>
@@ -5249,7 +5350,7 @@ function VariantAnchorSection({
           value={selectedKey}
           onChange={(e) => {
             if (e.target.value) onPreviewVariant(parentSlotId, e.target.value);
-            if (armed) onArmPlacement(null);
+            if (armed) onArmPinPlacement(null);
           }}
           className="w-full rounded border border-border bg-input px-2 py-1"
         >
@@ -5306,7 +5407,7 @@ function VariantAnchorSection({
           </div>
           <button
             type="button"
-            onClick={() => onArmPlacement(null)}
+            onClick={() => onArmPinPlacement(null)}
             className="w-full rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
           >
             Cancel
@@ -5318,19 +5419,30 @@ function VariantAnchorSection({
             type="button"
             disabled={!selectedKey}
             onClick={() =>
-              selectedKey && onArmPlacement({ childSlotId, parentSlotId, variantKey: selectedKey })
+              selectedKey &&
+              onArmPinPlacement({ childSlotId, parentSlotId, variantKey: selectedKey })
             }
             className="flex-1 rounded border border-border px-2 py-1 text-[10px] hover:bg-panel disabled:opacity-40"
             title="Then click the canvas where this layer should anchor — or just drag the layer while the variant is previewed"
           >
             Pin anchor{selectedKey ? ` under ${parentName} : ${selectedKey}` : ""}
           </button>
-          {source === "socket" && selectedKey && (
+          {source === "pin" && selectedKey && (
             <button
               type="button"
-              onClick={() => onClearSocket({ parentSlotId, variantKey: selectedKey, childSlotId })}
+              onClick={() => onResetPin({ parentSlotId, variantKey: selectedKey, childSlotId })}
               className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
-              title="Remove the pinned socket and fall back to the inferred anchor"
+              title="Recalculate this pin from the child artwork's authored pivot"
+            >
+              Reset
+            </button>
+          )}
+          {source === "pin" && selectedKey && (
+            <button
+              type="button"
+              onClick={() => onClearPin({ parentSlotId, variantKey: selectedKey, childSlotId })}
+              className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
+              title="Remove this variant's pin; the rig checklist will mark it unresolved"
             >
               Clear
             </button>
@@ -5479,7 +5591,16 @@ function RestrictMovementPanel({
   const parentSlotId = parentSlotIdForSlot(rig, slotId) ?? "";
   const parentName = slots.find((s) => s.id === parentSlotId)?.name;
   const parentOptions = slots.filter((s) => s.id !== slotId);
-  const socket = (rig.sockets ?? []).find((entry) => entry.childSlotId === slotId);
+  const binding = rig.slotBindings.find((entry) => entry.slotId === slotId);
+  const bone = binding ? rig.bones.find((entry) => entry.id === binding.boneId) : undefined;
+  const pinName = bone?.restSource?.pinName;
+  const parentParts = parentSlotId
+    ? doc.parts.filter(
+        (part) =>
+          getPartSlotId(part) === parentSlotId && partAvailableForAngle(part, rig.activeAngle),
+      )
+    : [];
+  const pinsReady = !!pinName && parentParts.every((part) => !!part.pins?.[pinName]);
   const hostConstraint = rig.hostConstraints.find((c) => c.slotId === slotId);
   const hostSlotId = hostConstraint?.hostSlotId ?? "";
   const hostName = slots.find((s) => s.id === hostSlotId)?.name;
@@ -5499,7 +5620,7 @@ function RestrictMovementPanel({
 
       {/* At-a-glance status: green = set, amber = still needs setting. */}
       <div className="mb-3 flex flex-wrap gap-1">
-        <ConstraintPill set={!!parentSlotId} label={socket ? "Socket" : "Attached"} />
+        <ConstraintPill set={pinsReady} label="Pins" />
         <ConstraintPill set={!!hostSlotId} label="Drag boundary" />
         <ConstraintPill set={hasPosReach} label="Drift" />
         <ConstraintPill
@@ -5512,7 +5633,7 @@ function RestrictMovementPanel({
         />
       </div>
 
-      <Field label="Socket parent">
+      <Field label="Attached to">
         <select
           value={parentSlotId}
           onChange={(e) => onAttachTo(e.target.value)}
@@ -5527,10 +5648,10 @@ function RestrictMovementPanel({
         </select>
       </Field>
       <p className="mb-2 mt-1 text-[10px] leading-snug text-muted-foreground">
-        {parentName && socket
-          ? `${socket.name ?? "Socket"} at ${Math.round(socket.x)}, ${Math.round(socket.y)} on ${parentName}.`
+        {parentName && pinName
+          ? `${pinName} on ${parentName}${pinsReady ? "" : " needs placement on every variant"}.`
           : parentName
-            ? `Carried by ${parentName} when it moves.`
+            ? `Carried by ${parentName}; place its required output pin.`
             : "Not attached — moves on its own."}
       </p>
 
@@ -5787,20 +5908,18 @@ function RotationReachOverlay({
 }
 
 const ANCHOR_SOURCE_COLORS = {
-  socket: "#4ade80",
-  pairedArt: "#38bdf8",
+  pin: "#4ade80",
   fallback: "#fbbf24",
 } as const;
 
 /**
  * Editor chrome marking, for every bone whose anchor depends on its parent slot's variant, the
  * parent pivot (white) and the currently resolved child anchor — colored by resolution path
- * (socket green / paired art blue / fallback amber), matching the Motion Editor's overlay.
+ * (pin green / paired art blue / missing amber), matching the Motion Editor's overlay.
  */
 function VariantAnchorOverlay({
   doc,
   variantPreview,
-  variantShift,
   anchorDrag,
   emphasisSlotId,
   scale,
@@ -5808,7 +5927,6 @@ function VariantAnchorOverlay({
 }: {
   doc: CharacterPreset;
   variantPreview: Record<ID, string>;
-  variantShift: VariantPreviewShift;
   anchorDrag: { childSlotId: ID; dx: number; dy: number } | null;
   emphasisSlotId: ID | null;
   scale: number;
@@ -5817,8 +5935,8 @@ function VariantAnchorOverlay({
     context: { childSlotId: ID; parentSlotId: ID; variantKey: string },
   ) => void;
 }) {
-  const rig = normalizeCharacterRig(doc);
-  const world = computeBoneWorldTransforms(rig);
+  const runtime = buildCharacterRuntime(doc);
+  const world = runtimeBoneWorldTransforms(runtime, variantPreview);
   const slotName = (slotId: ID) => findCharacterSlot(doc, slotId)?.name ?? slotId;
   const dotRadius = Math.max(4, 5 / Math.max(0.0001, scale));
   const fontSize = Math.max(9, 10 / Math.max(0.0001, scale));
@@ -5831,43 +5949,39 @@ function VariantAnchorOverlay({
     color: string;
     label: string;
     faded: boolean;
+    focused: boolean;
     /** Set when a parent variant is previewed — the marker is then a draggable anchor handle. */
     dragContext: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
   }> = [];
-  for (const bone of rig.bones) {
+  for (const bone of runtime.angleRig.bones) {
     if (!bone.parentId) continue;
     const at = world.get(bone.id);
     const parentAt = world.get(bone.parentId);
-    const childSlotId = rig.slotBindings.find((binding) => binding.boneId === bone.id)?.slotId;
-    const parentSlotId = parentSlotIdForBone(rig, bone.id);
+    const childSlotId = runtime.angleRig.slotBindings.find(
+      (binding) => binding.boneId === bone.id,
+    )?.slotId;
+    const parentSlotId = bone.restSource?.slotId;
     if (!at || !parentAt || !childSlotId || !parentSlotId) continue;
-    // Anchors only matter under a parent that actually has variants — but show those children
-    // even before any anchor is authored, so the Anchors toggle always has a visible effect.
-    if (
-      !bone.parentVariantAnchors &&
-      slotVariantKeys(doc, parentSlotId, rig.activeAngle).length <= 1
-    )
-      continue;
     const activeKey = variantPreview[parentSlotId];
-    const entry = activeKey ? bone.parentVariantAnchors?.[activeKey] : undefined;
-    const source = entry?.source ?? "fallback";
-    const shift = variantShift.bones.get(bone.id) ?? { dx: 0, dy: 0 };
+    const source = activeKey ? anchorSourceForChild(doc, childSlotId, activeKey) : "pin";
     const dragShift =
       anchorDrag && anchorDrag.childSlotId === childSlotId
         ? { dx: anchorDrag.dx, dy: anchorDrag.dy }
         : { dx: 0, dy: 0 };
-    const parentShift = variantShift.bones.get(bone.parentId) ?? { dx: 0, dy: 0 };
     markers.push({
       boneId: bone.id,
-      x: at.x + shift.dx + dragShift.dx,
-      y: at.y + shift.dy + dragShift.dy,
-      parentX: parentAt.x + parentShift.dx,
-      parentY: parentAt.y + parentShift.dy,
+      x: at.x + dragShift.dx,
+      y: at.y + dragShift.dy,
+      parentX: parentAt.x,
+      parentY: parentAt.y,
       color: activeKey ? ANCHOR_SOURCE_COLORS[source] : "#94a3b8",
       label: `${slotName(childSlotId)} ← ${slotName(parentSlotId)} : ${activeKey ?? "rest"}${
-        activeKey ? ` (${source === "pairedArt" ? "paired art" : source})` : ""
+        activeKey ? ` (${source})` : ""
       }`,
       faded: !!emphasisSlotId && childSlotId !== emphasisSlotId && parentSlotId !== emphasisSlotId,
+      focused:
+        (!!emphasisSlotId && (childSlotId === emphasisSlotId || parentSlotId === emphasisSlotId)) ||
+        anchorDrag?.childSlotId === childSlotId,
       dragContext: activeKey ? { childSlotId, parentSlotId, variantKey: activeKey } : null,
     });
   }
@@ -5880,7 +5994,7 @@ function VariantAnchorOverlay({
       style={{ zIndex: 11000 }}
     >
       {markers.map((marker) => (
-        <g key={marker.boneId} opacity={marker.faded ? 0.25 : 1}>
+        <g key={marker.boneId} className="group" opacity={marker.faded ? 0.18 : 1}>
           <line
             x1={marker.parentX}
             y1={marker.parentY}
@@ -5918,19 +6032,33 @@ function VariantAnchorOverlay({
                 stroke="#0f172a"
                 strokeWidth={Math.max(0.75, 1 / Math.max(0.0001, scale))}
               />
-              <title>Drag to move this anchor (writes the socket on release)</title>
+              <title>Drag to move this variant pin</title>
             </g>
           ) : (
-            <circle
-              cx={marker.x}
-              cy={marker.y}
-              r={dotRadius}
-              fill={marker.color}
-              stroke="#0f172a"
-              strokeWidth={Math.max(0.75, 1 / Math.max(0.0001, scale))}
-            />
+            <>
+              <circle
+                className="pointer-events-auto"
+                cx={marker.x}
+                cy={marker.y}
+                r={dotRadius * 2.2}
+                fill="transparent"
+              />
+              <circle
+                cx={marker.x}
+                cy={marker.y}
+                r={dotRadius}
+                fill={marker.color}
+                stroke="#0f172a"
+                strokeWidth={Math.max(0.75, 1 / Math.max(0.0001, scale))}
+              />
+            </>
           )}
           <text
+            className={
+              marker.focused
+                ? "opacity-100"
+                : "opacity-0 transition-opacity group-hover:opacity-100"
+            }
             x={marker.x + dotRadius + 3}
             y={marker.y - dotRadius - 3}
             fill={marker.color}
@@ -5949,19 +6077,22 @@ function VariantAnchorOverlay({
 
 function RigBonesOverlay({
   doc,
+  variantPreview,
   selectedBoneId,
   scale,
   onSelectBone,
   onStartBoneDrag,
 }: {
   doc: CharacterPreset;
+  variantPreview: Readonly<Record<ID, string>>;
   selectedBoneId: ID | null;
   scale: number;
   onSelectBone: (boneId: ID) => void;
   onStartBoneDrag: (e: React.PointerEvent, boneId: ID) => void;
 }) {
-  const rig = normalizeCharacterRig(doc);
-  const world = computeBoneWorldTransforms(rig);
+  const runtime = buildCharacterRuntime(doc);
+  const world = runtimeBoneWorldTransforms(runtime, variantPreview);
+  const bones = runtime.angleRig.bones;
   const radius = Math.max(6, 8 / Math.max(0.0001, scale));
   return (
     <svg
@@ -5970,7 +6101,7 @@ function RigBonesOverlay({
       height={doc.canvasHeight}
       style={{ zIndex: 12000 }}
     >
-      {rig.bones.map((bone) => {
+      {bones.map((bone) => {
         const point = world.get(bone.id);
         const parent = bone.parentId ? world.get(bone.parentId) : undefined;
         if (!point || !parent) return null;
@@ -5986,7 +6117,7 @@ function RigBonesOverlay({
           />
         );
       })}
-      {rig.bones.map((bone) => {
+      {bones.map((bone) => {
         const point = world.get(bone.id);
         if (!point) return null;
         const selected = bone.id === selectedBoneId;
@@ -5996,7 +6127,7 @@ function RigBonesOverlay({
             role="button"
             tabIndex={0}
             aria-label={`Select ${bone.name} bone`}
-            className="pointer-events-auto cursor-move"
+            className="group pointer-events-auto cursor-move"
             onClick={(e) => {
               e.stopPropagation();
               onSelectBone(bone.id);
@@ -6012,6 +6143,11 @@ function RigBonesOverlay({
               strokeWidth={Math.max(1, 1.5 / Math.max(0.0001, scale))}
             />
             <text
+              className={
+                selected
+                  ? "opacity-100"
+                  : "opacity-0 transition-opacity group-hover:opacity-100 group-focus:opacity-100"
+              }
               x={point.x + radius + 3}
               y={point.y - radius - 3}
               fill="#0f172a"
@@ -6123,11 +6259,12 @@ function GroupInspector({
   onSwitchPhase,
   previewedKey,
   variantPreview,
-  socketPlacement,
+  pinPlacement,
   onPreviewVariant,
   onClearPreview,
-  onArmPlacement,
-  onClearSocket,
+  onArmPinPlacement,
+  onClearPin,
+  onResetPin,
   onSetRotation,
   onUpdateSlot,
   onMove,
@@ -6149,13 +6286,14 @@ function GroupInspector({
   onSwitchPhase: (phase: "build" | "rig" | "pose") => void;
   previewedKey?: string;
   variantPreview: Record<ID, string>;
-  socketPlacement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
+  pinPlacement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
   onPreviewVariant: (slotId: ID, key: string) => void;
   onClearPreview: (slotId: ID) => void;
-  onArmPlacement: (
+  onArmPinPlacement: (
     placement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null,
   ) => void;
-  onClearSocket: (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => void;
+  onClearPin: (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => void;
+  onResetPin: (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => void;
   onSetRotation: (
     context: { parentSlotId: ID; variantKey: string; childSlotId: ID },
     rotation: number,
@@ -6383,10 +6521,11 @@ function GroupInspector({
           doc={doc}
           childSlotId={slotId}
           variantPreview={variantPreview}
-          socketPlacement={socketPlacement}
+          pinPlacement={pinPlacement}
           onPreviewVariant={onPreviewVariant}
-          onArmPlacement={onArmPlacement}
-          onClearSocket={onClearSocket}
+          onArmPinPlacement={onArmPinPlacement}
+          onClearPin={onClearPin}
+          onResetPin={onResetPin}
           onSetRotation={onSetRotation}
         />
       )}
@@ -6422,6 +6561,7 @@ function PartLayer({
   preview,
   previewParentPart,
   allParts,
+  runtime,
   previewVariantKey,
   shift,
   placement,
@@ -6438,11 +6578,12 @@ function PartLayer({
   preview: PreviewState | null;
   previewParentPart?: CharacterPart;
   allParts: CharacterPart[];
+  runtime: CharacterRuntime;
   /** The slot's in-place variant preview key — wins over the default variant resolution. */
   previewVariantKey?: string;
   /** Variant-preview re-anchor offset (canvas px) + rotation when a parent previews a variant. */
   shift?: { dx: number; dy: number; rotation?: number };
-  /** Resolved rig/socket placement; keeps builder art in the same place as generated output. */
+  /** Resolved registration/pin placement shared with generated output. */
   placement?: RuntimePartPlacement;
 }) {
   const url = useMediaUrl(part.mediaId);
@@ -6459,7 +6600,7 @@ function PartLayer({
   }
   if (!part.visible && !selected && !previewVariantKey) return null;
 
-  const baseTransform = previewDelta(part, preview, previewParentPart, allParts);
+  const baseTransform = previewDelta(part, preview, previewParentPart, allParts, runtime);
   const previewTransform = composeEditorPartTransform(part, baseTransform, shift, placement);
   const baseOpacity = part.visible ? previewTransform.opacity : 0.28;
   // In movement-range focus mode, fade everything except the layer being edited. While the
@@ -6484,7 +6625,7 @@ function PartLayer({
           top: part.y + previewTransform.dy,
           width: part.width,
           height: part.height,
-          zIndex: part.zIndex,
+          zIndex: placement?.drawOrder ?? part.zIndex,
           opacity,
           filter: ghost ? "blur(1.5px)" : blurred && !dimmed ? "blur(2px)" : undefined,
           transition: "filter 120ms ease",
@@ -6516,6 +6657,7 @@ function PartControlsOverlay({
   preview,
   previewParentPart,
   allParts,
+  runtime,
   shift,
   placement,
   onBeginChange,
@@ -6530,14 +6672,15 @@ function PartControlsOverlay({
   preview: PreviewState | null;
   previewParentPart?: CharacterPart;
   allParts: CharacterPart[];
+  runtime: CharacterRuntime;
   /** Variant-preview re-anchor offset/rotation — the chrome must sit where the art is drawn. */
   shift?: { dx: number; dy: number; rotation?: number };
-  /** Resolved rig/socket placement; keeps the chrome on the generated character position. */
+  /** Resolved registration/pin placement keeps chrome on the generated character position. */
   placement?: RuntimePartPlacement;
   onBeginChange: () => void;
   onChange: (patch: Partial<CharacterPart>) => void;
 }) {
-  const baseTransform = previewDelta(part, preview, previewParentPart, allParts);
+  const baseTransform = previewDelta(part, preview, previewParentPart, allParts, runtime);
   const previewTransform = composeEditorPartTransform(part, baseTransform, shift, placement);
   const pivot = pivotForPart(part);
   const selection = editorSelectionBounds(part, boundsMode);
@@ -6549,11 +6692,13 @@ function PartControlsOverlay({
   const toggleSize = 22 / viewportScale;
   const pivotSize = 10 / viewportScale;
   const margin = 12 / viewportScale;
-  const origin = {
-    x: part.x + previewTransform.dx,
-    y: part.y + previewTransform.dy,
-  };
-  const handlePositions = controlHandlePositions(
+  const selectionQuad = rectCorners(selection).map((point) =>
+    partLocalPointToCanvas(part, point, previewTransform),
+  );
+  const alphaQuad = rectCorners(alpha).map((point) =>
+    partLocalPointToCanvas(part, point, previewTransform),
+  );
+  const localHandlePositions = controlHandlePositions(
     part,
     control,
     previewTransform,
@@ -6561,22 +6706,31 @@ function PartControlsOverlay({
     canvasHeight,
     margin,
   );
-  const rotatePosition = rotateHandlePosition(
+  const handlePositions = Object.fromEntries(
+    Object.entries(localHandlePositions).map(([corner, point]) => [
+      corner,
+      partLocalPointToCanvas(part, point, previewTransform),
+    ]),
+  ) as Record<ResizeCorner, { x: number; y: number }>;
+  const rotatePosition = partLocalPointToCanvas(
     part,
-    control,
+    rotateHandlePosition(part, control, previewTransform, canvasWidth, canvasHeight, margin),
     previewTransform,
-    canvasWidth,
-    canvasHeight,
-    margin,
   );
-  const togglePosition = clampLocalPointToCanvas(
+  const togglePosition = partLocalPointToCanvas(
     part,
-    { x: control.x - margin * 1.8, y: control.y - margin * 1.8 },
+    clampLocalPointToCanvas(
+      part,
+      { x: control.x - margin * 1.8, y: control.y - margin * 1.8 },
+      previewTransform,
+      canvasWidth,
+      canvasHeight,
+      margin,
+    ),
     previewTransform,
-    canvasWidth,
-    canvasHeight,
-    margin,
   );
+  const pivotLocal = { x: pivot.x - part.x, y: pivot.y - part.y };
+  const pivotCanvas = partLocalPointToCanvas(part, pivotLocal, previewTransform);
 
   const resize = (corner: ResizeCorner) => (e: React.PointerEvent<HTMLButtonElement>) => {
     e.preventDefault();
@@ -6595,12 +6749,7 @@ function PartControlsOverlay({
       );
       onChange(resizePartFromLocalBounds(part, selection, corner, delta.x, delta.y));
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    startWindowPointerDrag({ onMove: move });
   };
 
   const rotate = (e: React.PointerEvent<HTMLButtonElement>) => {
@@ -6612,8 +6761,8 @@ function PartControlsOverlay({
     const rect = canvas?.getBoundingClientRect();
     if (!rect) return;
     const pivotScreen = {
-      x: rect.left + (pivot.x + previewTransform.dx) * scale,
-      y: rect.top + (pivot.y + previewTransform.dy) * scale,
+      x: rect.left + pivotCanvas.x * scale,
+      y: rect.top + pivotCanvas.y * scale,
     };
     const startAngle = Math.atan2(e.clientY - pivotScreen.y, e.clientX - pivotScreen.x);
     const baseRotation = part.rotation;
@@ -6622,48 +6771,30 @@ function PartControlsOverlay({
       const deltaDeg = ((nextAngle - startAngle) * 180) / Math.PI;
       onChange({ rotation: Math.round(baseRotation + deltaDeg) });
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    startWindowPointerDrag({ onMove: move });
   };
 
   return (
-    <div
-      className="pointer-events-none absolute select-none"
-      style={{
-        left: origin.x,
-        top: origin.y,
-        width: part.width,
-        height: part.height,
-        zIndex: 10000,
-        transform: `rotate(${part.rotation + previewTransform.rotation}deg) scale(${previewTransform.scale}, ${previewTransform.scaleY ?? previewTransform.scale})`,
-        transformOrigin: `${((pivot.x - part.x) / part.width) * 100}% ${((pivot.y - part.y) / part.height) * 100}%`,
-      }}
-    >
-      <div
-        className="absolute border border-primary"
-        style={{
-          left: selection.x,
-          top: selection.y,
-          width: selection.width,
-          height: selection.height,
-          boxShadow: "0 0 0 1px rgba(255,255,255,0.45)",
-        }}
-      />
-      {boundsMode === "frame" && part.alphaBounds && (
-        <div
-          className="absolute border border-dashed border-primary/60"
-          style={{
-            left: alpha.x,
-            top: alpha.y,
-            width: alpha.width,
-            height: alpha.height,
-          }}
+    <div className="pointer-events-none absolute inset-0 select-none" style={{ zIndex: 10000 }}>
+      <svg className="absolute inset-0 h-full w-full overflow-visible" aria-hidden="true">
+        <polygon
+          points={selectionQuad.map((point) => `${point.x},${point.y}`).join(" ")}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1 / viewportScale}
+          className="text-primary"
         />
-      )}
+        {boundsMode === "frame" && part.alphaBounds && (
+          <polygon
+            points={alphaQuad.map((point) => `${point.x},${point.y}`).join(" ")}
+            fill="none"
+            stroke="currentColor"
+            strokeDasharray={`${4 / viewportScale} ${3 / viewportScale}`}
+            strokeWidth={1 / viewportScale}
+            className="text-primary/60"
+          />
+        )}
+      </svg>
       {(["nw", "ne", "sw", "se"] as ResizeCorner[]).map((corner) => (
         <button
           key={corner}
@@ -6726,8 +6857,8 @@ function PartControlsOverlay({
       <div
         className="absolute rounded-full border-2 border-primary bg-background"
         style={{
-          left: pivot.x - part.x,
-          top: pivot.y - part.y,
+          left: pivotCanvas.x,
+          top: pivotCanvas.y,
           width: Math.max(8, pivotSize),
           height: Math.max(8, pivotSize),
           transform: "translate(-50%, -50%)",
@@ -6743,25 +6874,7 @@ function canvasPointToPartLocal(
   canvasPoint: { x: number; y: number },
   previewTransform: ReturnType<typeof previewDelta>,
 ) {
-  const pivot = pivotForPart(part);
-  const pivotLocal = { x: pivot.x - part.x, y: pivot.y - part.y };
-  const pivotCanvas = {
-    x: part.x + previewTransform.dx + pivotLocal.x,
-    y: part.y + previewTransform.dy + pivotLocal.y,
-  };
-  const angle = -(((part.rotation + previewTransform.rotation) * Math.PI) / 180);
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  const relX = canvasPoint.x - pivotCanvas.x;
-  const relY = canvasPoint.y - pivotCanvas.y;
-  const unrotatedX = relX * cos - relY * sin;
-  const unrotatedY = relX * sin + relY * cos;
-  return {
-    x: pivotLocal.x + unrotatedX / Math.max(0.0001, previewTransform.scale),
-    y:
-      pivotLocal.y +
-      unrotatedY / Math.max(0.0001, previewTransform.scaleY ?? previewTransform.scale),
-  };
+  return transformPoint(invertMatrix(editorPartMatrix(part, previewTransform)), canvasPoint);
 }
 
 function partLocalPointToCanvas(
@@ -6769,21 +6882,7 @@ function partLocalPointToCanvas(
   localPoint: { x: number; y: number },
   previewTransform: ReturnType<typeof previewDelta>,
 ) {
-  const pivot = pivotForPart(part);
-  const pivotLocal = { x: pivot.x - part.x, y: pivot.y - part.y };
-  const pivotCanvas = {
-    x: part.x + previewTransform.dx + pivotLocal.x,
-    y: part.y + previewTransform.dy + pivotLocal.y,
-  };
-  const angle = ((part.rotation + previewTransform.rotation) * Math.PI) / 180;
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  const relX = (localPoint.x - pivotLocal.x) * previewTransform.scale;
-  const relY = (localPoint.y - pivotLocal.y) * (previewTransform.scaleY ?? previewTransform.scale);
-  return {
-    x: pivotCanvas.x + relX * cos - relY * sin,
-    y: pivotCanvas.y + relX * sin + relY * cos,
-  };
+  return transformPoint(editorPartMatrix(part, previewTransform), localPoint);
 }
 
 function pointerDeltaToPartLocalDelta(
@@ -6793,17 +6892,30 @@ function pointerDeltaToPartLocalDelta(
   part: CharacterPart,
   previewTransform: ReturnType<typeof previewDelta>,
 ) {
-  const canvasDx = screenDx / Math.max(0.0001, viewportScale);
-  const canvasDy = screenDy / Math.max(0.0001, viewportScale);
-  const angle = -(((part.rotation + previewTransform.rotation) * Math.PI) / 180);
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  const unrotatedX = canvasDx * cos - canvasDy * sin;
-  const unrotatedY = canvasDx * sin + canvasDy * cos;
-  return {
-    x: unrotatedX / Math.max(0.0001, previewTransform.scale),
-    y: unrotatedY / Math.max(0.0001, previewTransform.scaleY ?? previewTransform.scale),
-  };
+  return transformVector(invertMatrix(editorPartMatrix(part, previewTransform)), {
+    x: screenDx / Math.max(0.0001, viewportScale),
+    y: screenDy / Math.max(0.0001, viewportScale),
+  });
+}
+
+function editorPartMatrix(part: CharacterPart, previewTransform: ReturnType<typeof previewDelta>) {
+  const pivot = pivotForPart(part);
+  const pivotLocal = { x: pivot.x - part.x, y: pivot.y - part.y };
+  return composeMatrices(
+    translationMatrix(
+      part.x + previewTransform.dx + pivotLocal.x,
+      part.y + previewTransform.dy + pivotLocal.y,
+    ),
+    matrixAroundPoint(
+      { x: 0, y: 0 },
+      {
+        rotation: part.rotation + previewTransform.rotation,
+        scaleX: previewTransform.scale,
+        scaleY: previewTransform.scaleY ?? previewTransform.scale,
+      },
+    ),
+    translationMatrix(-pivotLocal.x, -pivotLocal.y),
+  );
 }
 
 function controlHandlePositions(
@@ -7052,6 +7164,7 @@ function previewDelta(
   preview: PreviewState | null,
   previewParentPart?: CharacterPart,
   allParts: CharacterPart[] = [],
+  runtime?: CharacterRuntime,
 ) {
   if (!preview) return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: 1, opacity: 1 };
   const targetsPart = part.id === preview.targetPartId || part.slotId === preview.targetSlotId;
@@ -7060,7 +7173,7 @@ function previewDelta(
   const wave = Math.sin(t * Math.PI * 2);
   if (!targetsPart) {
     const ancestor =
-      previewTargetAncestor(part, preview, allParts) ??
+      previewTargetAncestor(part, preview, allParts, runtime) ??
       (isLegacyHeadPreviewChild(part, preview) ? previewParentPart : undefined);
     const motion = ancestor ? previewMotionForPart(ancestor, preview, t, wave) : null;
     if (!ancestor || !motion || !hasGeometricPreviewMotion(motion)) {
@@ -7192,7 +7305,19 @@ function previewTargetAncestor(
   part: CharacterPart,
   preview: PreviewState,
   allParts: CharacterPart[],
+  runtime?: CharacterRuntime,
 ): CharacterPart | undefined {
+  if (
+    runtime &&
+    runtimeAncestorMotionTargets(runtime, getPartSlotId(part)).some(
+      (target) => target.slotId === preview.targetSlotId,
+    )
+  ) {
+    return allParts.find(
+      (candidate) =>
+        candidate.id === preview.targetPartId || getPartSlotId(candidate) === preview.targetSlotId,
+    );
+  }
   const byId = new Map(allParts.map((candidate) => [candidate.id, candidate]));
   let current = part.parentId ? byId.get(part.parentId) : undefined;
   const seen = new Set<ID>();
@@ -7378,17 +7503,13 @@ function defaultVariantKindForRole(
 
 function slotIdForImport(
   role: PartRole,
-  label: string,
-  viseme: MouthViseme | undefined,
+  _label: string,
+  _viseme: MouthViseme | undefined,
   id: ID,
   side: CharacterPart["side"],
 ) {
-  if (role === "mouth") return "role:mouth";
-  if (role === "eye" && (side === "left" || side === "right")) return `slot:${side}-eye`;
-  if (role === "iris" && (side === "left" || side === "right")) return `slot:${side}-iris`;
-  if (role === "nose") return "role:nose";
   if (role === "custom") return `custom:${id}`;
-  return `slot:${slug(label || role)}${viseme ? `:${viseme}` : ""}`;
+  return defaultSlotIdForRole(role, undefined, side);
 }
 
 function slug(value: string) {
@@ -7421,6 +7542,77 @@ function unionFrameBounds(
   const maxX = Math.max(...rects.map((r) => r.x + r.width));
   const maxY = Math.max(...rects.map((r) => r.y + r.height));
   return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+}
+
+function fitPartsToCanvasFrame(
+  parts: CharacterPart[],
+  canvasWidth: number,
+  canvasHeight: number,
+): CharacterPart[] | null {
+  const visibleParts = parts.filter((part) => part.visible);
+  const scopedParts = visibleParts.length > 0 ? visibleParts : parts;
+  if (scopedParts.length === 0) return null;
+  const bounds = unionFrameBounds(scopedParts);
+  const padding = Math.max(16, Math.min(canvasWidth, canvasHeight) * 0.04);
+  const targetWidth = Math.max(1, canvasWidth - padding * 2);
+  const targetHeight = Math.max(1, canvasHeight - padding * 2);
+  const scale = Math.min(targetWidth / bounds.width, targetHeight / bounds.height);
+  if (!Number.isFinite(scale) || scale <= 0) return null;
+  const left = (canvasWidth - bounds.width * scale) / 2;
+  const top = (canvasHeight - bounds.height * scale) / 2;
+  const targetIds = new Set(scopedParts.map((part) => part.id));
+  return parts.map((part) => {
+    if (!targetIds.has(part.id)) return part;
+    const pivot = pivotForPart(part);
+    const nextX = left + (part.x - bounds.x) * scale;
+    const nextY = top + (part.y - bounds.y) * scale;
+    const nextPivot = {
+      x: left + (pivot.x - bounds.x) * scale,
+      y: top + (pivot.y - bounds.y) * scale,
+    };
+    const pins = part.pins
+      ? Object.fromEntries(
+          Object.entries(part.pins).map(([name, pin]) => [
+            name,
+            {
+              ...pin,
+              x: pin.x * scale,
+              y: pin.y * scale,
+            },
+          ]),
+        )
+      : part.pins;
+    const authoredBounds = part.bounds
+      ? {
+          ...part.bounds,
+          x: left + (part.bounds.x - bounds.x) * scale,
+          y: top + (part.bounds.y - bounds.y) * scale,
+          width: Math.max(1, part.bounds.width * scale),
+          height: Math.max(1, part.bounds.height * scale),
+        }
+      : part.bounds;
+    return normalizePartPatch(
+      {
+        ...part,
+        x: Math.round(nextX),
+        y: Math.round(nextY),
+        width: Math.max(1, Math.round(part.width * scale)),
+        height: Math.max(1, Math.round(part.height * scale)),
+        pivot: { x: Math.round(nextPivot.x), y: Math.round(nextPivot.y) },
+        pins,
+        bounds: authoredBounds,
+      },
+      {
+        x: nextX,
+        y: nextY,
+        width: part.width * scale,
+        height: part.height * scale,
+        pivot: nextPivot,
+        pins,
+        bounds: authoredBounds,
+      },
+    );
+  });
 }
 
 function localRectCanvasBoundsWithTransform(
@@ -7460,6 +7652,21 @@ function unionEditorArtBounds(parts: CharacterPart[]) {
   return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
 }
 
+function unionAlphaBounds(parts: CharacterPart[]) {
+  if (parts.length === 0) return { x: 0, y: 0, width: 0, height: 0 };
+  const rects = parts.map((part) => localRectCanvasBounds(part, localAlphaBounds(part)));
+  const minX = Math.min(...rects.map((rect) => rect.x));
+  const minY = Math.min(...rects.map((rect) => rect.y));
+  const maxX = Math.max(...rects.map((rect) => rect.x + rect.width));
+  const maxY = Math.max(...rects.map((rect) => rect.y + rect.height));
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(1, maxX - minX),
+    height: Math.max(1, maxY - minY),
+  };
+}
+
 function unionHostClampBounds(parts: CharacterPart[], mode: "insideHostMask" | "insideHostBounds") {
   return mode === "insideHostBounds" ? unionFrameBounds(parts) : unionEditorArtBounds(parts);
 }
@@ -7485,70 +7692,25 @@ function moveSlotSetFromSnapshot(
   });
 }
 
-function pinRigSlotPlacements(
-  character: CharacterPreset,
-  beforeRig: CharacterRig,
-  movedRig: CharacterRig,
-  slotIds: Set<ID>,
-): CharacterRig {
-  let pinnedRig = movedRig;
-  const beforeRuntime = buildCharacterRuntime({ ...character, rig: beforeRig });
-  const movedRuntime = buildCharacterRuntime({ ...character, rig: movedRig });
-  for (const slotId of slotIds) {
-    const beforeSlot = beforeRuntime.slotById.get(slotId);
-    const movedSlot = movedRuntime.slotById.get(slotId);
-    const movedBinding = movedRuntime.bindingBySlot.get(slotId);
-    if (!beforeSlot || !movedSlot || !movedBinding) continue;
-    const beforePart = beforeSlot.parts.find((part) => part.visible) ?? beforeSlot.parts[0];
-    const movedPart =
-      movedSlot.parts.find((part) => part.id === beforePart?.id) ??
-      movedSlot.parts.find((part) => part.visible) ??
-      movedSlot.parts[0];
-    if (!beforePart || !movedPart) continue;
-    const beforePlacement = runtimePartPlacement(beforeSlot, beforePart, beforeRuntime, {
-      poseKey: variantKeyForPart(beforePart),
-    });
-    const movedPlacement = runtimePartPlacement(movedSlot, movedPart, movedRuntime, {
-      poseKey: variantKeyForPart(movedPart),
-    });
-    const worldDelta = {
-      x: beforePlacement.x - movedPlacement.x,
-      y: beforePlacement.y - movedPlacement.y,
-    };
-    if (Math.abs(worldDelta.x) < 0.5 && Math.abs(worldDelta.y) < 0.5) continue;
-    const boneWorld = movedRuntime.worldByBone.get(movedBinding.effectiveBoneId);
-    const localDelta = rotateVector(worldDelta, -(boneWorld?.rotation ?? 0));
-    pinnedRig = moveSlotBinding(
-      pinnedRig,
-      slotId,
-      Math.round(localDelta.x),
-      Math.round(localDelta.y),
-      movedRig.activeAngle,
-    );
-  }
-  return pinnedRig;
-}
-
-function rotateVector(point: { x: number; y: number }, degrees: number): { x: number; y: number } {
-  const radians = (degrees * Math.PI) / 180;
-  const cos = Math.cos(radians);
-  const sin = Math.sin(radians);
-  return { x: point.x * cos - point.y * sin, y: point.x * sin + point.y * cos };
-}
-
-function clampSlotDeltaToHost(
+function clampSlotDragDelta(
   character: CharacterPreset,
   rig: CharacterRig,
   slotId: ID,
   dx: number,
   dy: number,
 ): { dx: number; dy: number; clamped: boolean } {
+  const reach = rig.reaches.find((entry) => entry.slotId === slotId);
+  const reachLimited = clampMotionDeltaToReach(reach, dx, dy, 0);
+  let nextDx = reachLimited.dx;
+  let nextDy = reachLimited.dy;
+  let clamped = reachLimited.clamped;
+
   const constraint = rig.hostConstraints.find((entry) => entry.slotId === slotId);
   if (!constraint || constraint.reachPolicy === "allow" || constraint.mode === "reach") {
-    return { dx, dy, clamped: false };
+    return { dx: nextDx, dy: nextDy, clamped };
   }
   const hostSlotId = constraint.hostSlotId;
-  if (!hostSlotId || hostSlotId === slotId) return { dx, dy, clamped: false };
+  if (!hostSlotId || hostSlotId === slotId) return { dx: nextDx, dy: nextDy, clamped };
   const activeAngle = rig.activeAngle;
   const slotParts = character.parts.filter(
     (part) => getPartSlotId(part) === slotId && partAvailableForAngle(part, activeAngle),
@@ -7556,12 +7718,17 @@ function clampSlotDeltaToHost(
   const hostParts = character.parts.filter(
     (part) => getPartSlotId(part) === hostSlotId && partAvailableForAngle(part, activeAngle),
   );
-  if (slotParts.length === 0 || hostParts.length === 0) return { dx, dy, clamped: false };
+  if (slotParts.length === 0 || hostParts.length === 0) {
+    return { dx: nextDx, dy: nextDy, clamped };
+  }
 
   const subject = unionHostClampBounds(slotParts, constraint.mode);
   const host = unionHostClampBounds(hostParts, constraint.mode);
-  const next = clampRectInsideHost(subject, host, dx, dy);
-  return { ...next, clamped: next.dx !== dx || next.dy !== dy };
+  const hostLimited = clampRectInsideHost(subject, host, nextDx, nextDy);
+  nextDx = hostLimited.dx;
+  nextDy = hostLimited.dy;
+  clamped = clamped || nextDx !== dx || nextDy !== dy;
+  return { dx: nextDx, dy: nextDy, clamped };
 }
 
 function clampRectInsideHost(
@@ -7632,6 +7799,14 @@ function normalizePartPatch(part: CharacterPart, patch: Partial<CharacterPart>):
     anchorX,
     anchorY,
     pivot,
+    registration: pivot
+      ? {
+          x: pivot.x - part.x,
+          y: pivot.y - part.y,
+          rotation: part.rotation,
+          space: "part-local-pixels",
+        }
+      : part.registration,
     variant: normalizePartVariant(part),
     motionBehavior: part.motionBehavior ?? defaultMotionBehaviorForRole(part.role, part.viseme),
   };

@@ -11,13 +11,24 @@ describe("MotionPresetRecorder source integration", () => {
     expect(source).toContain("buildCharacterCompositionHtml");
     expect(source).toContain("<RecorderHyperFramesPreview");
     expect(source).toContain("__timelines?");
-    expect(source).toContain("timeline.seek(Math.max(0, time), false)");
+    expect(source).toContain("timeline?.seek?.(Math.max(0, time), false)");
     expect(source).toContain("characterAssetIds(character)");
     expect(source).toContain('sandbox="allow-scripts allow-same-origin"');
     expect(source).toContain("const [playbackPreset, setPlaybackPreset]");
     expect(source).toContain("commitRecorderPreviewToHtml");
+    expect(source).toContain("setTime(0)");
+    // stablePreviewPreset drives srcDoc (DOM + committed GSAP); editPreviewPreset drives
+    // GSAP script injection so overrides/face-turn update without a DOM reload.
+    expect(source).toContain("const stablePreviewPreset = useMemo");
     expect(source).toContain("const editPreviewPreset = useMemo");
-    expect(source).toContain("preset={previewPlaying ? playbackPreset : editPreviewPreset}");
+    expect(source).toContain("preset={previewPlaying ? playbackPreset : stablePreviewPreset}");
+    expect(source).toContain("editPreset={previewPlaying ? null : editPreviewPreset}");
+    // GSAP script injection: buildCharacterGsapScript produces the IIFE directly (no HTML
+    // serialization or DOMParser extraction), then applyEditScriptToIframe injects it.
+    expect(source).toContain("buildCharacterGsapScript");
+    expect(source).toContain("function applyEditScriptToIframe");
+    expect(source).toContain("timeline.kill?.()");
+    expect(source).toContain("timeline?.seek?.(Math.max(0, time), false)");
     expect(source).toContain("GeneratedEditorShell");
     expect(source).toContain("AiAddonPromptPanel");
     expect(source).toContain("useAiGeneratedArtifactAddon");
@@ -27,6 +38,10 @@ describe("MotionPresetRecorder source integration", () => {
     // The preview iframe is built once and seeked — it must not reload on identical
     // composition HTML, otherwise the playhead loop trips React's update-depth guard.
     expect(source).toContain("prev === resolved ? prev : resolved");
+    expect(source).toContain("const [previewCompileRevision, setPreviewCompileRevision]");
+    expect(source).toContain("setPreviewCompileRevision((revision) => revision + 1)");
+    expect(source).toContain("function recorderHtmlKey");
+    expect(source).toContain("key={iframeKey}");
     expect(source).not.toContain("preset={draftPreviewPreset}");
     expect(source).not.toContain("function RiggedPosePreview");
     expect(source).not.toContain("applyRecorderEditPose");
@@ -96,12 +111,27 @@ describe("MotionPresetRecorder source integration", () => {
     );
   });
 
+  it("does not expose rig pivot editing in the motion editor", () => {
+    const source = readFileSync(recorderPath, "utf8");
+
+    expect(source).toContain("!previewPlaying && selectedSlot && selectedPart && selectedOverride");
+    expect(source).toContain("if (previewPlaying) return;");
+    expect(source).not.toContain('title="Set pivot"');
+    expect(source).not.toContain('label="Pivot X"');
+    expect(source).not.toContain('label="Pivot Y"');
+    expect(source).not.toContain("runtimePartFrameLocalPoint");
+  });
+
   it("keeps recorder geometry aligned with rig-bound and swapped variants", () => {
     const source = readFileSync(recorderPath, "utf8");
 
-    expect(source).toContain("resolveSlotBinding(rig, slot.id)?.effectivePartId");
+    expect(source).toContain("resolveRuntimeSlotPart(slot, runtime, poseKey)");
     expect(source).toContain("function recorderPartPlacement");
     expect(source).toContain("runtimePartPlacement(slot, part, runtime");
+    expect(source).toContain("resolveRuntimePosePartFrame({");
+    expect(source).toContain("resolveTransformForSlot:");
+    expect(source).toContain("canvasDeltaToMotionDelta(runtime");
+    expect(source).toContain('{ target: "slot", boneId: target.boneId }');
     expect(source).toContain("defaultPoseForCharacter(character)");
     expect(source).toContain("poses: basePoses");
   });

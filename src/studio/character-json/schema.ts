@@ -200,6 +200,11 @@ export interface AngleBoneJson {
   depth?: number;
   length?: number;
   maxExtension?: number | null;
+  restSource?: {
+    parentSlotId: ID;
+    pinName: string;
+    offset?: { x: number; y: number; rotation: number };
+  };
 }
 
 export interface AngleSlotVariantJson {
@@ -216,6 +221,8 @@ export interface AngleSlotVariantJson {
   pose?: string;
   viseme?: MouthViseme;
   eyeState?: EyeState;
+  registration?: { x: number; y: number; rotation: number; space: "part-local-pixels" };
+  pins?: Record<string, { x: number; y: number; rotation: number; space: "part-local-pixels" }>;
 }
 
 export interface AngleSlotJson {
@@ -292,16 +299,12 @@ export interface AngleRigJson extends StudioBoomJsonArtifactBase {
   slotRelations?: AngleSlotRelationJson[];
   hostConstraints?: AngleHostConstraintJson[];
   reaches?: AngleReachJson[];
-  /** Angle-local joints: base socket anchors plus optional per-parent-variant overrides. */
-  sockets?: Array<{
-    id: ID;
-    slotId: ID;
-    childSlotId: ID;
-    name?: string;
-    x: number;
-    y: number;
-    rotation?: number;
-    variantAnchors: Record<string, { x: number; y: number; rotation?: number }>;
+  /** Required output-pin contracts derived from child-bone rest sources. */
+  pinContracts?: Array<{
+    parentSlotId: ID;
+    childBoneId: ID;
+    childSlotId?: ID;
+    pinName: string;
   }>;
   drawOrder: ID[];
 }
@@ -538,15 +541,12 @@ export interface MotionPromptAngleJson {
   slotRelations?: AngleSlotRelationJson[];
   hostConstraints?: AngleHostConstraintJson[];
   reaches?: MotionPromptReachJson[];
-  sockets?: Array<{
-    id: ID;
-    slotId: ID;
-    childSlotId: ID;
-    name?: string;
-    x: number;
-    y: number;
-    rotation?: number;
-    variantKeys: string[];
+  pinContracts?: Array<{
+    parentSlotId: ID;
+    childBoneId: ID;
+    childSlotId?: ID;
+    pinName: string;
+    suppliedByVariantIds: ID[];
   }>;
 }
 

@@ -115,7 +115,7 @@ describe("character document boundary", () => {
 
     expect(document.compositionId).toBe("char_doc_comp");
     expect(document.root.characterId).toBe("char-doc-1");
-    expect(document.root.rigVersion).toBe(1);
+    expect(document.root.rigVersion).toBe(2);
     expect(document.root.activeAngle).toBe("front");
     expect(document.bones.some((bone) => bone.boneId === "bone:role:body")).toBe(true);
     expect(document.slots.some((slot) => slot.slotId === "slot:left-eye")).toBe(true);
@@ -189,13 +189,30 @@ describe("character document boundary", () => {
       ...base,
       parts: base.parts.filter((part) => part.role !== "mouth"),
     };
+
+    // Characters without any mouth configuration must not get a phantom SVG mouth —
+    // the fallback is only rendered when the user explicitly opts into rig-style mode.
+    const noMouthHtml = buildCharacterCompositionHtml({
+      compositionId: "char_doc_no_mouth",
+      clipId: "clip-no-mouth",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character: withoutMouth,
+      meta: { characterId: "char-doc-1", poses: {}, autoBlink: false },
+      motionPresets: new Map(),
+    });
+    const noMouthDocument = parseCharacterDocument(noMouthHtml);
+    expect(noMouthDocument.slots.find((slot) => slot.slotId === "fallback:mouth")).toBeUndefined();
+
+    // With explicit mouthStyle:"rig", the fallback SVG mouth is generated and bound to the head.
     const fallbackHtml = buildCharacterCompositionHtml({
       compositionId: "char_doc_fallback_mouth",
       clipId: "clip-fallback-mouth",
       width: 300,
       height: 450,
       duration: 4,
-      character: withoutMouth,
+      character: { ...withoutMouth, mouthStyle: "rig" as const },
       meta: {
         characterId: "char-doc-1",
         poses: {},

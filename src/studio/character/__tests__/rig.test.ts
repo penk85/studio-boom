@@ -7,10 +7,7 @@ import {
   availableCharacterAngles,
   buildDefaultRig,
   clampMotionDeltaToReach,
-  clearSlotSocketAnchor,
-  upsertSlotSocketAnchor,
   computeBoneWorldTransforms,
-  moveBoneForSlot,
   moveSlotBinding,
   normalizeCharacterRig,
   rebuildRigPreservingConstraints,
@@ -19,6 +16,13 @@ import {
   setSlotRotReach,
   validateCharacterRig,
 } from "../rig";
+import {
+  moveCharacterBoneRest,
+  setCharacterBoneRestTransform,
+  upgradeCharacterRigV2,
+  validateCharacterPinRig,
+} from "../rig-v2";
+import { buildCharacterRuntime, runtimeBoneWorldTransforms } from "../runtime";
 
 function makeRigCharacter(): CharacterPreset {
   return {
@@ -88,125 +92,198 @@ function makeRigCharacter(): CharacterPreset {
   };
 }
 
-describe("parent variant child anchors", () => {
-  it("re-anchors the hand bone from child art paired to the bent arm variant", () => {
-    const rig = buildDefaultRig(makeVariantArmCharacter());
-    const hand = rig.bones.find((bone) => bone.id === "bone:slot:right-hand");
-    expect(hand?.parentId).toBe("bone:slot:right-arm");
-    // Base anchor comes from the straight (representative) hand: pivot 300,345 − arm pivot 290,170.
-    expect(hand?.x).toBe(10);
-    expect(hand?.y).toBe(175);
-    // Bent arm carries the hand to the bent-hand pivot: 370,230 − 290,170.
-    expect(hand?.parentVariantAnchors).toEqual({ bent: { x: 80, y: 60, source: "pairedArt" } });
-  });
-
-  it("prefers an authored joint socket over paired child art", () => {
-    const character = makeVariantArmCharacter();
-    const withSocket = upsertSlotSocketAnchor(buildDefaultRig(character), {
-      parentSlotId: "slot:right-arm",
-      childSlotId: "slot:right-hand",
-      variantKey: "bent",
-      x: 352,
-      y: 248,
-    });
-    const rig = normalizeCharacterRig({ ...character, rig: withSocket });
-    const hand = rig.bones.find((bone) => bone.id === "bone:slot:right-hand");
-    expect(hand?.parentVariantAnchors).toEqual({ bent: { x: 62, y: 78, source: "socket" } });
-  });
-
-  it("scopes joints to their angle — a front wrist never moves the side-view hand", () => {
-    const character: CharacterPreset = {
-      ...makeVariantArmCharacter(),
-      angles: ["front", "sideL"],
+describe("pin-driven child bones", () => {
+  it("repairs pre-revision singleton wrist pins from authored artwork in place", () => {
+    const source: CharacterPreset = {
+      ...createBlankCharacter("Singleton arm actor"),
+      parts: [
+        makePart("body", "body-media", {
+          id: "body-only",
+          slotId: "role:body",
+          x: 100,
+          y: 100,
+          width: 200,
+          height: 300,
+          pivot: { x: 200, y: 200 },
+        }),
+        makePart("arm", "arm-media", {
+          id: "arm-only",
+          slotId: "slot:right-arm",
+          side: "right",
+          x: 280,
+          y: 180,
+          width: 60,
+          height: 170,
+          pivot: { x: 290, y: 190 },
+        }),
+        makePart("hand", "hand-media", {
+          id: "hand-only",
+          slotId: "slot:right-hand",
+          side: "right",
+          x: 300,
+          y: 335,
+          width: 40,
+          height: 40,
+          pivot: { x: 310, y: 345 },
+        }),
+      ],
     };
-    const withSocket = upsertSlotSocketAnchor(
-      buildDefaultRig(character),
-      {
-        parentSlotId: "slot:right-arm",
-        childSlotId: "slot:right-hand",
-        variantKey: "bent",
-        x: 352,
-        y: 248,
-      },
-      "front",
-    );
-    const rig = normalizeCharacterRig({ ...character, rig: withSocket });
-    const handOn = (angle: "front" | "sideL") =>
-      rig.angles?.[angle]?.bones.find((bone) => bone.id === "bone:slot:right-hand");
-    expect(handOn("front")?.parentVariantAnchors?.bent?.source).toBe("socket");
-    // The side skeleton falls back to its own paired art — the front joint does not leak.
-    expect(handOn("sideL")?.parentVariantAnchors?.bent?.source).toBe("pairedArt");
-  });
+    const migrated = upgradeCharacterRigV2(source);
+    const stale: CharacterPreset = {
+      ...migrated,
+      parts: migrated.parts.map((part) =>
+        part.id === "arm-only"
+          ? {
+              ...part,
+              pins: {
+                ...(part.pins ?? {}),
+                "wrist:right": {
+                  x: 999,
+                  y: 999,
+                  rotation: 0,
+                  space: "part-local-pixels",
+                },
+              },
+            }
+          : part,
+      ),
+      rig: migrated.rig ? { ...migrated.rig, pinSchemaRevision: undefined } : migrated.rig,
+    };
 
-  it("carries authored joints across constraint-preserving rebuilds and clears cleanly", () => {
-    const character = makeVariantArmCharacter();
-    const withSocket = upsertSlotSocketAnchor(buildDefaultRig(character), {
-      parentSlotId: "slot:right-arm",
-      childSlotId: "slot:right-hand",
-      variantKey: "bent",
-      x: 352,
-      y: 248,
-      rotation: -35,
-    });
-    const rebuilt = rebuildRigPreservingConstraints({ ...character, rig: withSocket });
-    const rebuiltSocket = rebuilt.sockets?.find(
-      (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
-    );
-    expect(rebuiltSocket).toMatchObject({
-      x: 300,
+    const repaired = upgradeCharacterRigV2(stale);
+    const runtime = buildCharacterRuntime(repaired);
+    expect(runtime.worldByBone.get("bone:slot:right-hand")).toMatchObject({
+      x: 310,
       y: 345,
-      variantAnchors: { bent: { x: 352, y: 248, rotation: -35 } },
     });
-    // Re-pinning the position preserves the authored rotation.
-    const moved = upsertSlotSocketAnchor(rebuilt, {
-      parentSlotId: "slot:right-arm",
-      childSlotId: "slot:right-hand",
-      variantKey: "bent",
-      x: 360,
-      y: 240,
-    });
-    const movedSocket = moved.sockets?.find(
-      (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
-    );
-    expect(movedSocket?.variantAnchors.bent).toEqual({ x: 360, y: 240, rotation: -35 });
-    // Clearing the only override keeps the base rest socket.
-    const cleared = clearSlotSocketAnchor(moved, {
-      parentSlotId: "slot:right-arm",
-      childSlotId: "slot:right-hand",
-      variantKey: "bent",
-    });
-    const clearedSocket = cleared.sockets?.find(
-      (socket) => socket.slotId === "slot:right-arm" && socket.childSlotId === "slot:right-hand",
-    );
-    expect(clearedSocket?.variantAnchors.bent).toBeUndefined();
-    expect(clearedSocket).toMatchObject({ x: 300, y: 345 });
+    expect(repaired.rig?.pinSchemaRevision).toBe(2);
   });
 
-  it("computes no anchors for variant-less characters", () => {
-    const rig = buildDefaultRig(makeRigCharacter());
-    for (const bone of rig.bones) {
-      expect(bone.parentVariantAnchors).toBeUndefined();
-    }
+  it("migrates paired arm artwork into variant-local wrist pins", () => {
+    const character = upgradeCharacterRigV2(makeVariantArmCharacter());
+    const rig = normalizeCharacterRig(character);
+    const hand = rig.bones.find((bone) => bone.id === "bone:slot:right-hand");
+    const straight = character.parts.find((part) => part.id === "arm-straight");
+    const bent = character.parts.find((part) => part.id === "arm-bent");
+
+    expect(hand?.parentId).toBe("bone:slot:right-arm");
+    expect(hand?.restSource).toEqual({
+      slotId: "slot:right-arm",
+      pinName: "wrist:right",
+    });
+    expect(straight?.pins?.["wrist:right"]).toMatchObject({ x: 20, y: 185 });
+    expect(bent?.pins?.["wrist:right"]).toMatchObject({ x: 90, y: 70 });
+    expect(rig.sockets).toBeUndefined();
+    expect(hand?.parentVariantAnchors).toBeUndefined();
   });
 
-  it("keeps freshly derived anchors when a saved rig restates the bone", () => {
-    const character = makeVariantArmCharacter();
-    const built = buildDefaultRig(character);
-    const staleBones = built.bones.map((bone) =>
-      bone.id === "bone:slot:right-hand"
-        ? { ...bone, parentVariantAnchors: { bent: { x: 1, y: 1 } } }
-        : bone,
-    );
-    const normalized = normalizeCharacterRig({
-      ...character,
-      rig: { ...built, bones: staleBones },
+  it("resolves the child bone from the active parent artwork pin", () => {
+    const character = upgradeCharacterRigV2(makeVariantArmCharacter());
+    const runtime = buildCharacterRuntime(character);
+    const world = runtimeBoneWorldTransforms(runtime, {
+      "slot:right-arm": "bent",
+      "slot:right-hand": "bent",
     });
-    const hand = normalized.bones.find((bone) => bone.id === "bone:slot:right-hand");
-    expect(hand?.parentVariantAnchors).toEqual({ bent: { x: 80, y: 60, source: "pairedArt" } });
+    expect(world.get("bone:slot:right-hand")).toMatchObject({ x: 370, y: 230 });
+  });
+
+  it("reports a missing required variant pin instead of silently falling back", () => {
+    const upgraded = upgradeCharacterRigV2(makeVariantArmCharacter());
+    const character = {
+      ...upgraded,
+      parts: upgraded.parts.map((part) =>
+        part.id === "arm-bent" ? { ...part, pins: undefined } : part,
+      ),
+    };
+    expect(validateCharacterPinRig(character)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          severity: "error",
+          path: "parts.arm-bent.pins.wrist:right",
+        }),
+      ]),
+    );
+  });
+
+  it("can validate only the runtime angle while other angles are unfinished", () => {
+    const upgraded = upgradeCharacterRigV2(makeVariantArmCharacter());
+    const frontRig = upgraded.rig!.angles!.front!;
+    const character: CharacterPreset = {
+      ...upgraded,
+      angles: ["front", "3qR"],
+      parts: upgraded.parts.map((part) => ({ ...part, angleIds: ["3qR"] })),
+      rig: {
+        ...upgraded.rig!,
+        activeAngle: "3qR",
+        angles: {
+          front: frontRig,
+          "3qR": { ...frontRig, angleId: "3qR" },
+        },
+      },
+    };
+
+    expect(validateCharacterPinRig(character)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          severity: "error",
+          message: expect.stringContaining("no front artwork"),
+        }),
+      ]),
+    );
+    expect(validateCharacterPinRig(character, { angle: "3qR" })).toEqual([]);
+  });
+
+  it("edits only the active parent artwork pin", () => {
+    const character = upgradeCharacterRigV2(makeVariantArmCharacter());
+    const straightBefore = character.parts.find((part) => part.id === "arm-straight")?.pins?.[
+      "wrist:right"
+    ];
+    const moved = moveCharacterBoneRest(character, "bone:slot:right-hand", 10, 5, "front", {
+      activeVariants: { "slot:right-arm": "bent" },
+    });
+
+    expect(moved.parts.find((part) => part.id === "arm-straight")?.pins?.["wrist:right"]).toEqual(
+      straightBefore,
+    );
+    expect(moved.parts.find((part) => part.id === "arm-bent")?.pins?.["wrist:right"]).toMatchObject(
+      { x: 100, y: 75 },
+    );
+  });
+
+  it("uses the same pin path for numeric joint edits as canvas dragging", () => {
+    const character = upgradeCharacterRigV2(makeVariantArmCharacter());
+    const edited = setCharacterBoneRestTransform(
+      character,
+      "bone:slot:right-hand",
+      { x: 95, y: 75, rotation: 22 },
+      "front",
+      { activeVariants: { "slot:right-arm": "bent" } },
+    );
+    const runtime = buildCharacterRuntime(edited);
+    const world = runtimeBoneWorldTransforms(runtime, {
+      "slot:right-arm": "bent",
+      "slot:right-hand": "bent",
+    });
+
+    expect(world.get("bone:slot:right-hand")).toMatchObject({
+      x: 385,
+      y: 245,
+      rotation: 22,
+    });
+    expect(
+      edited.parts.find((part) => part.id === "arm-straight")?.pins?.["wrist:right"],
+    ).toMatchObject({ x: 20, y: 185, rotation: 0 });
+  });
+
+  it("keeps variant-less rigs free of legacy socket and anchor records", () => {
+    const character = upgradeCharacterRigV2(makeRigCharacter());
+    const rig = normalizeCharacterRig(character);
+    expect(rig.sockets).toBeUndefined();
+    expect(rig.bones.every((bone) => bone.parentVariantAnchors === undefined)).toBe(true);
   });
 });
 
-describe("CharacterRig V1", () => {
+describe("CharacterRig V2", () => {
   it("uses character.angles as the canonical angle list when present", () => {
     const character: CharacterPreset = {
       ...makeRigCharacter(),
@@ -342,7 +419,8 @@ describe("CharacterRig V1", () => {
       ],
     };
 
-    const rig = buildDefaultRig(character);
+    const upgraded = upgradeCharacterRigV2(character);
+    const rig = normalizeCharacterRig(upgraded);
     expect(rig.bones.find((bone) => bone.id === "bone:slot:right-lowerArm")?.parentId).toBe(
       "bone:slot:right-upperArm",
     );
@@ -356,20 +434,14 @@ describe("CharacterRig V1", () => {
       "bone:slot:right-lowerLeg",
     );
     expect(
-      rig.sockets?.find(
-        (socket) =>
-          socket.slotId === "slot:right-lowerArm" && socket.childSlotId === "slot:right-hand",
-      ),
-    ).toMatchObject({ name: "Wrist", x: 320, y: 405 });
+      upgraded.parts.find((part) => part.id === "lower-arm")?.pins?.["wrist:right"],
+    ).toMatchObject({ x: 20, y: 110 });
     expect(
-      rig.sockets?.find(
-        (socket) =>
-          socket.slotId === "slot:right-upperLeg" && socket.childSlotId === "slot:right-lowerLeg",
-      ),
-    ).toMatchObject({ name: "Knee", x: 250, y: 530 });
+      upgraded.parts.find((part) => part.id === "upper-leg")?.pins?.["knee:right"],
+    ).toMatchObject({ x: 25, y: 130 });
   });
 
-  it("infers same-side limb parents from slot ids when explicit side metadata is missing", () => {
+  it("repairs stale cross-side artwork and rig parents from semantic slot sides", () => {
     const character: CharacterPreset = {
       ...createBlankCharacter("Inferred sides"),
       id: "inferred-sides",
@@ -417,6 +489,7 @@ describe("CharacterRig V1", () => {
           id: "right-hand",
           slotId: "slot:hand-right",
           slotName: "Right hand",
+          parentId: "left-arm",
           x: 284,
           y: 360,
           width: 42,
@@ -434,6 +507,44 @@ describe("CharacterRig V1", () => {
     expect(rightHand?.side).toBe("right");
     expect(leftHand?.parentId).toBe("bone:slot:arm-left");
     expect(rightHand?.parentId).toBe("bone:slot:arm-right");
+
+    const front = rig.angles?.front;
+    if (!front) throw new Error("Expected front rig.");
+    const staleFront = {
+      ...front,
+      bones: front.bones.map((bone) =>
+        bone.id === "bone:slot:hand-right" ? { ...bone, parentId: "bone:slot:arm-left" } : bone,
+      ),
+      sockets: (front.sockets ?? []).map((socket) =>
+        socket.childSlotId === "slot:hand-right" ? { ...socket, slotId: "slot:arm-left" } : socket,
+      ),
+      slotRelations: front.slotRelations.map((relation) =>
+        relation.childSlotId === "slot:hand-right"
+          ? { ...relation, parentRef: { type: "slot" as const, id: "slot:arm-left" } }
+          : relation,
+      ),
+    };
+    const repaired = normalizeCharacterRig({
+      ...character,
+      rig: {
+        ...rig,
+        bones: staleFront.bones,
+        sockets: staleFront.sockets,
+        slotRelations: staleFront.slotRelations,
+        angles: { ...rig.angles, front: staleFront },
+      },
+    });
+
+    expect(repaired.bones.find((bone) => bone.id === "bone:slot:hand-right")?.parentId).toBe(
+      "bone:slot:arm-right",
+    );
+    expect(
+      repaired.bones.find((bone) => bone.id === "bone:slot:hand-right")?.restSource?.slotId,
+    ).toBe("slot:arm-right");
+    expect(
+      repaired.slotRelations.find((relation) => relation.childSlotId === "slot:hand-right")
+        ?.parentRef,
+    ).toEqual({ type: "slot", id: "slot:arm-right" });
   });
 
   it("rejects invalid bone graphs before AI rigger suggestions can be applied", () => {
@@ -451,31 +562,6 @@ describe("CharacterRig V1", () => {
 
     expect(validation.ok).toBe(false);
     expect(validation.errors.join("\n")).toContain("parent cycle");
-  });
-
-  it("separates slot attachment moves from bone rest moves", () => {
-    const rig = buildDefaultRig(makeRigCharacter());
-    const footBone = rig.bones.find((bone) => bone.id === "bone:slot:left-foot");
-    const footBinding = rig.slotBindings.find((binding) => binding.slotId === "slot:left-foot");
-
-    const attachmentMoved = moveSlotBinding(rig, "slot:left-foot", 12, -4);
-    const boneMoved = moveBoneForSlot(rig, "slot:left-foot", 12, -4);
-
-    expect(attachmentMoved.bones.find((bone) => bone.id === "bone:slot:left-foot")).toEqual(
-      footBone,
-    );
-    expect(
-      attachmentMoved.slotBindings.find((binding) => binding.slotId === "slot:left-foot")?.x,
-    ).toBe((footBinding?.x ?? 0) + 12);
-    expect(
-      attachmentMoved.slotBindings.find((binding) => binding.slotId === "slot:left-foot")?.y,
-    ).toBe((footBinding?.y ?? 0) - 4);
-    expect(boneMoved.slotBindings.find((binding) => binding.slotId === "slot:left-foot")).toEqual(
-      footBinding,
-    );
-    expect(boneMoved.bones.find((bone) => bone.id === "bone:slot:left-foot")?.x).toBe(
-      (footBone?.x ?? 0) + 12,
-    );
   });
 
   it("normalizes angle rigs as independent concrete skeletons", () => {

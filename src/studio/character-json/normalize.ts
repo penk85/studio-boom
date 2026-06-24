@@ -15,6 +15,8 @@ import {
   variantKeyForPart,
 } from "../character/character-utils";
 import { availableCharacterAngles, normalizeCharacterRig } from "../character/rig";
+import { upgradeCharacterRigV2 } from "../character/rig-v2";
+import { registrationForPart } from "../character/registration";
 import {
   ANGLE_RIG_JSON_KIND,
   CHARACTER_JSON_KIND,
@@ -109,17 +111,18 @@ export function angleRigJsonFromPreset(
   character: CharacterPreset,
   angleId = normalizeCharacterRig(character).activeAngle,
 ): AngleRigJson {
+  const canonical = upgradeCharacterRigV2(character);
   const rig = normalizeCharacterRig({
-    ...character,
-    rig: { ...normalizeCharacterRig(character), activeAngle: angleId },
+    ...canonical,
+    rig: { ...normalizeCharacterRig(canonical), activeAngle: angleId },
   });
-  const slots = listCharacterSlots(character, { angle: rig.activeAngle, includeEmpty: false });
+  const slots = listCharacterSlots(canonical, { angle: rig.activeAngle, includeEmpty: false });
   const variantsBySlot = new Map(
     slots.map((slot) => [
       slot.id,
       variantsForParts(
         slot.parts,
-        character.variantPackages?.filter((variant) => variant.slotId === slot.id) ?? [],
+        canonical.variantPackages?.filter((variant) => variant.slotId === slot.id) ?? [],
       ),
     ]),
   );
@@ -143,6 +146,13 @@ export function angleRigJsonFromPreset(
       depth: bone.depth,
       length: bone.length,
       maxExtension: null,
+      restSource: bone.restSource
+        ? {
+            parentSlotId: bone.restSource.slotId,
+            pinName: bone.restSource.pinName,
+            offset: bone.restSource.offset,
+          }
+        : undefined,
     })),
     slots: slots.map((slot) => ({
       id: slot.id,
@@ -171,10 +181,17 @@ export function angleRigJsonFromPreset(
     slotRelations: rig.slotRelations.map((relation) => ({ ...relation })),
     hostConstraints: rig.hostConstraints.map((constraint) => ({ ...constraint })),
     reaches: rig.reaches.map((reach) => ({ ...reach })),
-    sockets: (rig.sockets ?? []).map((socket) => ({
-      ...socket,
-      variantAnchors: { ...socket.variantAnchors },
-    })),
+    pinContracts: rig.bones.flatMap((bone) => {
+      if (!bone.restSource) return [];
+      return [
+        {
+          parentSlotId: bone.restSource.slotId,
+          childBoneId: bone.id,
+          childSlotId: rig.slotBindings.find((binding) => binding.boneId === bone.id)?.slotId,
+          pinName: bone.restSource.pinName,
+        },
+      ];
+    }),
     drawOrder: rig.drawOrder,
   };
 }
@@ -296,6 +313,8 @@ function variantsForParts(
       pose: representative.pose,
       viseme: representative.viseme,
       eyeState: representative.eyeState,
+      registration: registrationForPart(representative),
+      pins: representative.pins,
     };
   });
 }
