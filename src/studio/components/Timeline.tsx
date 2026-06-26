@@ -25,6 +25,17 @@ import {
 import { useLiveQuery } from "dexie-react-hooks";
 import { PlayerControls, liveTime, usePlayerStore } from "@hyperframes/studio";
 import { db, uid } from "../db";
+import {
+  ACTION_CATEGORY_COLORS,
+  ACTION_CATEGORY_DOT_COLORS,
+  ACTION_LANE_DOT_COLORS,
+  ACTION_LANE_LABELS,
+  ACTION_LANE_ORDER,
+  type ActionLaneKind,
+  actionBadgeFallback,
+  actionLaneForPreset,
+  actionTitle,
+} from "../presets/action-terminology";
 import { generateMotionOccurrences } from "../presets/apply";
 import { resolveExclusiveMotionOverlaps } from "../presets/motion-scheduling";
 import { useStudio, type ProjectMutationOptions } from "../store";
@@ -62,38 +73,6 @@ const RULER_HEIGHT = 28;
 const CLIP_DRAG_THRESHOLD_PX = 4;
 const SEEK_DRAG_EDGE_ZONE_PX = 40;
 const SEEK_DRAG_MAX_SCROLL_PX = 12;
-const MOTION_CATEGORY_ORDER: MotionCategory[] = [
-  "expression",
-  "headTurn",
-  "gesture",
-  "full-body",
-  "camera",
-  "custom",
-];
-const CATEGORY_LABELS: Record<MotionCategory, string> = {
-  expression: "Expression",
-  gesture: "Gesture",
-  "full-body": "Full body",
-  camera: "Camera",
-  headTurn: "Head turn",
-  custom: "Custom",
-};
-const CATEGORY_COLORS: Record<MotionCategory, string> = {
-  expression: "bg-sky-500/75 border-sky-300/80",
-  gesture: "bg-emerald-500/75 border-emerald-300/80",
-  "full-body": "bg-amber-500/80 border-amber-300/80",
-  camera: "bg-violet-500/75 border-violet-300/80",
-  headTurn: "bg-fuchsia-500/75 border-fuchsia-300/80",
-  custom: "bg-slate-400/75 border-slate-200/80",
-};
-const CATEGORY_DOT_COLORS: Record<MotionCategory, string> = {
-  expression: "bg-sky-300",
-  gesture: "bg-emerald-300",
-  "full-body": "bg-amber-300",
-  camera: "bg-violet-300",
-  headTurn: "bg-fuchsia-300",
-  custom: "bg-slate-300",
-};
 
 interface TimelineProps {
   togglePlay: () => void;
@@ -822,8 +801,8 @@ function ClipBlock({
     compositionSourceErrors.length > 0
       ? `Malformed composition source:\n${compositionSourceErrors.join("\n")}`
       : undefined;
-  const motionTitle = characterMotionTitle(clipMotions, presetMap);
-  const motionBadge = characterMotionBadge(clipMotions, presetMap);
+  const motionTitle = characterActionTitle(clipMotions, presetMap);
+  const motionBadge = characterActionBadge(clipMotions, presetMap);
   const clipVolume = clip.volume ?? 1;
   const clipTitle = [
     clip.name,
@@ -1009,7 +988,7 @@ function ClipBlock({
                 <span
                   aria-hidden="true"
                   className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                    CATEGORY_DOT_COLORS[motionBadge.category]
+                    ACTION_CATEGORY_DOT_COLORS[motionBadge.category]
                   }`}
                 />
                 <span className="truncate">{motionBadge.label}</span>
@@ -1036,38 +1015,45 @@ function ClipBlock({
   );
 }
 
-function characterMotionBadge(
+function characterActionBadge(
   motions: AppliedMotion[],
   presetMap: Map<string, MotionPreset>,
 ): { label: string; title: string; category: MotionCategory } | null {
   if (motions.length === 0) return null;
   const firstPreset = presetMap.get(motions[0]?.presetId ?? "");
   return {
-    label: characterMotionBadgeLabel(motions, presetMap),
-    title: characterMotionTitle(motions, presetMap) ?? "Movement",
+    label: characterActionBadgeLabel(motions, presetMap),
+    title: characterActionTitle(motions, presetMap) ?? "Action",
     category: firstPreset?.category ?? "custom",
   };
 }
 
-function characterMotionBadgeLabel(
+function characterActionBadgeLabel(
   motions: AppliedMotion[],
   presetMap: Map<string, MotionPreset>,
 ): string {
   if (motions.length === 0) return "";
   const firstName = presetMap.get(motions[0]?.presetId ?? "")?.name;
-  if (motions.length === 1) return firstName ?? "1 movement";
-  return firstName ? `${firstName} +${motions.length - 1}` : `${motions.length} movements`;
+  if (motions.length === 1) return firstName ?? actionBadgeFallback(1);
+  return firstName ? `${firstName} +${motions.length - 1}` : actionBadgeFallback(motions.length);
 }
 
-function characterMotionTitle(
+function characterActionTitle(
   motions: AppliedMotion[],
   presetMap: Map<string, MotionPreset>,
 ): string | undefined {
   if (motions.length === 0) return undefined;
   const names = motions.map(
-    (motion, index) => presetMap.get(motion.presetId)?.name ?? `Movement ${index + 1}`,
+    (motion, index) => presetMap.get(motion.presetId)?.name ?? `Action ${index + 1}`,
   );
-  return `Movements: ${names.join(", ")}`;
+  const lanes = new Set(
+    motions.map((motion) => actionLaneForPreset(presetMap.get(motion.presetId))),
+  );
+  if (lanes.size === 1) {
+    const lane = Array.from(lanes)[0];
+    return `${ACTION_LANE_LABELS[lane]}: ${names.join(", ")}`;
+  }
+  return actionTitle(names);
 }
 
 interface ExpandedClipRow {
@@ -1831,8 +1817,9 @@ interface PackedMotion {
 }
 
 interface MotionGroupLayout {
-  category: MotionCategory;
+  id: ActionLaneKind;
   label: string;
+  dotClass: string;
   rows: PackedMotion[][];
 }
 
@@ -1888,11 +1875,11 @@ function CharacterMotionHeader({
       {layout.groups.map((group) =>
         group.rows.map((_, rowIndex) => (
           <div
-            key={`${group.category}-${rowIndex}`}
+            key={`${group.id}-${rowIndex}`}
             style={{ height: MOTION_ROW_HEIGHT }}
             className="flex items-center gap-1 border-t border-border/40 px-3 pl-6 text-muted-foreground"
           >
-            <span className={`h-1.5 w-1.5 rounded-full ${CATEGORY_DOT_COLORS[group.category]}`} />
+            <span className={`h-1.5 w-1.5 rounded-full ${group.dotClass}`} />
             <span className="truncate">
               {group.label}
               {group.rows.length > 1 ? ` ${rowIndex + 1}` : ""}
@@ -2001,7 +1988,7 @@ function MotionLaneSet({
         groupTop += group.rows.length * MOTION_ROW_HEIGHT;
         return (
           <div
-            key={group.category}
+            key={group.id}
             className="absolute left-0 right-0"
             style={{
               top: thisGroupTop,
@@ -2010,7 +1997,7 @@ function MotionLaneSet({
           >
             {group.rows.map((row, rowIndex) => (
               <div
-                key={`${group.category}-${rowIndex}`}
+                key={`${group.id}-${rowIndex}`}
                 className="absolute left-0 right-0 border-t border-border/40"
                 style={{ top: rowIndex * MOTION_ROW_HEIGHT, height: MOTION_ROW_HEIGHT }}
               >
@@ -2062,7 +2049,7 @@ function MotionBlock({
   const occurrences = preset
     ? generateMotionOccurrences(motion, preset, clip.duration)
     : [{ start: motion.offset, end: motion.offset + duration }];
-  const color = preset ? CATEGORY_COLORS[preset.category] : CATEGORY_COLORS.custom;
+  const color = preset ? ACTION_CATEGORY_COLORS[preset.category] : ACTION_CATEGORY_COLORS.custom;
 
   const startDrag = (e: React.PointerEvent, mode: "move" | "resize") => {
     e.stopPropagation();
@@ -2120,11 +2107,11 @@ function MotionBlock({
               left: (clip.start + start) * zoom,
               width: Math.max(8, (end - start) * zoom),
             }}
-            title={`${preset?.name ?? "Motion"} ${formatSeconds(start)}-${formatSeconds(end)}`}
+            title={`${preset?.name ?? "Action"} ${formatSeconds(start)}-${formatSeconds(end)}`}
           >
             {isPrimary && (
               <>
-                <span className="block truncate px-1.5 leading-5">{preset?.name ?? "Motion"}</span>
+                <span className="block truncate px-1.5 leading-5">{preset?.name ?? "Action"}</span>
                 <span
                   onPointerDown={(e) => startDrag(e, "resize")}
                   className="absolute right-0 top-0 h-full w-2 cursor-ew-resize rounded-r bg-white/50"
@@ -2328,7 +2315,12 @@ function buildExpandedClipLayout(
     if (voiceRows > 0) {
       return { voices, groups: [], height: MOTION_PARENT_HEIGHT + MOTION_ROW_HEIGHT };
     }
-    const emptyGroup: MotionGroupLayout = { category: "custom", label: "Motions", rows: [[]] };
+    const emptyGroup: MotionGroupLayout = {
+      id: "action",
+      label: ACTION_LANE_LABELS.action,
+      dotClass: ACTION_LANE_DOT_COLORS.action,
+      rows: [[]],
+    };
     return {
       voices,
       groups: [emptyGroup],
@@ -2336,16 +2328,17 @@ function buildExpandedClipLayout(
     };
   }
 
-  const groups = MOTION_CATEGORY_ORDER.flatMap((category) => {
-    const categoryMotions = motions
-      .filter((motion) => (presetMap.get(motion.presetId)?.category ?? "custom") === category)
+  const groups = ACTION_LANE_ORDER.flatMap((lane) => {
+    const laneMotions = motions
+      .filter((motion) => actionLaneForPreset(presetMap.get(motion.presetId)) === lane)
       .map((motion) => ({ motion, preset: presetMap.get(motion.presetId) }));
-    if (categoryMotions.length === 0) return [];
+    if (laneMotions.length === 0) return [];
     return [
       {
-        category,
-        label: CATEGORY_LABELS[category],
-        rows: packMotionsForRows(categoryMotions, clip),
+        id: lane,
+        label: ACTION_LANE_LABELS[lane],
+        dotClass: ACTION_LANE_DOT_COLORS[lane],
+        rows: packMotionsForRows(laneMotions, clip),
       },
     ];
   });

@@ -304,4 +304,52 @@ describe("applied expression state with lip sync", () => {
     expect(state.activeEyeState).toBe(customEyePose);
     expect(state.activeEyePart?.id).toBe(customEye.id);
   });
+
+  it("can apply a full-body action to only the lower body", () => {
+    const preset: MotionPreset = {
+      id: "walk-1",
+      name: "Walk",
+      category: "full-body",
+      duration: 1,
+      loop: false,
+      tracks: [],
+      keyposes: [
+        {
+          t: 0,
+          parts: [
+            { partRole: "arm", slotId: "slot:left-arm", rotation: 30 },
+            { partRole: "leg", slotId: "slot:left-leg", rotation: -20 },
+            { partRole: "foot", slotId: "slot:left-foot", dx: 12 },
+          ],
+        },
+        {
+          t: 1,
+          parts: [
+            { partRole: "arm", slotId: "slot:left-arm", rotation: 30 },
+            { partRole: "leg", slotId: "slot:left-leg", rotation: -20 },
+            { partRole: "foot", slotId: "slot:left-foot", dx: 12 },
+          ],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const clip = makeClip({
+      motions: [
+        {
+          id: "motion-1",
+          presetId: preset.id,
+          offset: 0,
+          intensity: 1,
+          region: "lowerBody",
+        },
+      ],
+    });
+
+    const composed = composeMotionsAt(clip, 0.5, new Map([[preset.id, preset]]));
+
+    expect(deltaFor(composed, "arm", "slot:left-arm").rotation).toBe(0);
+    expect(deltaFor(composed, "leg", "slot:left-leg").rotation).toBeCloseTo(-20);
+    expect(deltaFor(composed, "foot", "slot:left-foot").dx).toBeCloseTo(12);
+  });
 });

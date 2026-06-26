@@ -35,6 +35,9 @@ Implemented:
 - Validation errors can be copied as repair prompts.
 - Character speech audio now lives inside character sub-compositions, not as
   linked root audio siblings.
+- Character timed animation is presented as Actions and Expressions. The current
+  import/export transport still uses legacy `studioBoom.motion.v1` JSON names
+  until a mechanical schema rename happens.
 
 Not implemented yet:
 
@@ -148,6 +151,8 @@ Prompt pack must include:
   - no remote images by default
   - request missing assets explicitly
 - Motion/transition guardrails.
+- Character Action/Expression guardrails, including pose vs action vs expression
+  vs speech/lip-sync vs Stage motion terminology.
 - Two allowed output modes:
   - custom composition block
   - editable top-level clip set

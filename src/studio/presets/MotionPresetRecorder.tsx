@@ -60,6 +60,12 @@ import {
   motionJsonFilename,
 } from "../character-json/normalize";
 import { buildMotionRequestPrompt } from "../character-json/ai-context";
+import {
+  ACTION_CATEGORY_TABS,
+  ACTION_REGION_OPTIONS,
+  actionRegionLabel,
+  defaultActionRegionForCategory,
+} from "./action-terminology";
 import { sampleKeyposesAtTime } from "./keypose-sampling";
 import { sampleMotionEase } from "./easing";
 import { motionJsonToPreset, parseJsonArtifact, validateMotionJsonForAngle } from "./motion-json";
@@ -82,6 +88,7 @@ import type {
   MotionCategory,
   MotionKeyframe,
   MotionPreset,
+  MotionRegion,
   MotionTrack,
   PartRole,
   RecordedKeypose,
@@ -89,14 +96,7 @@ import type {
 } from "../types";
 import type { MotionJson } from "../character-json/schema";
 
-const CATEGORIES: { value: MotionCategory; label: string }[] = [
-  { value: "expression", label: "Expression" },
-  { value: "gesture", label: "Body gesture" },
-  { value: "full-body", label: "Full body" },
-  { value: "camera", label: "Camera move" },
-  { value: "headTurn", label: "Head turn" },
-  { value: "custom", label: "Custom" },
-];
+const CATEGORIES = ACTION_CATEGORY_TABS.filter((tab) => tab.id !== "all");
 
 const EASE_OPTIONS = [
   { label: "Linear", value: "linear" },
@@ -150,12 +150,14 @@ export function MotionPresetRecorder({
   character,
   onClose,
   initialPreset,
+  initialCategory,
   onSaved,
   copyOnSave,
 }: {
   character: CharacterPreset;
   onClose: () => void;
   initialPreset?: MotionPreset;
+  initialCategory?: MotionCategory;
   onSaved?: (preset: MotionPreset) => void;
   copyOnSave?: boolean;
 }) {
@@ -172,9 +174,15 @@ export function MotionPresetRecorder({
   const [name, setName] = useState(
     initialPreset && (initialPreset.builtin || copyOnSave)
       ? customPresetName(initialPreset.name)
-      : (initialPreset?.name ?? "New movement"),
+      : (initialPreset?.name ?? "New action"),
   );
-  const [category, setCategory] = useState<MotionCategory>(initialPreset?.category ?? "expression");
+  const [category, setCategory] = useState<MotionCategory>(
+    initialPreset?.category ?? initialCategory ?? "full-body",
+  );
+  const [region, setRegion] = useState<MotionRegion | "">(
+    initialPreset?.region ??
+      defaultActionRegionForCategory(initialPreset?.category ?? initialCategory ?? "full-body"),
+  );
   const [duration, setDuration] = useState(initialPreset?.duration ?? 1);
   const [time, setTime] = useState(0);
   const [keyposes, setKeyposes] = useState<RecordedKeypose[]>(() =>
@@ -182,8 +190,8 @@ export function MotionPresetRecorder({
   );
   const [overrides, setOverrides] = useState<Map<string, RecorderPartState>>(new Map());
   const [draftDirty, setDraftDirty] = useState(false);
-  // Layers this movement may push past the character's reach (slot ids and/or roles) — the
-  // per-movement escape hatch. Carried from the loaded preset and saved back with it.
+  // Layers this action may push past the character's reach (slot ids and/or roles) — the
+  // per-action escape hatch. Carried from the loaded preset and saved back with it.
   const [allowOutOfBounds, setAllowOutOfBounds] = useState<string[]>(
     () => initialPreset?.allowOutOfBounds ?? [],
   );
@@ -220,8 +228,8 @@ export function MotionPresetRecorder({
   );
   const motionAiAdapter = useMemo<AiGeneratedFeatureAdapter<MotionJson>>(
     () => ({
-      featureName: "Studio Boom motion editor",
-      artifactLabel: "movement JSON",
+      featureName: "Studio Boom action editor",
+      artifactLabel: "action JSON",
       buildPrompt: (request) =>
         buildMotionRequestPrompt({
           character: characterJson,
@@ -264,6 +272,9 @@ export function MotionPresetRecorder({
 
         setName(converted.preset.name);
         setCategory(converted.preset.category);
+        setRegion(
+          converted.preset.region ?? defaultActionRegionForCategory(converted.preset.category),
+        );
         setDuration(converted.preset.duration);
         setKeyposes(cloneKeyposes(converted.preset.keyposes ?? []));
         setAllowOutOfBounds(converted.preset.allowOutOfBounds ?? []);
@@ -277,7 +288,7 @@ export function MotionPresetRecorder({
           warnings: converted.warnings,
           summary: {
             title: converted.preset.name,
-            detail: "Loaded into the motion editor.",
+            detail: "Loaded into the action editor.",
             items: [
               `Category: ${editorTitle(converted.preset.category)}`,
               `Duration: ${converted.preset.duration.toFixed(2)}s`,
@@ -288,8 +299,8 @@ export function MotionPresetRecorder({
       },
       buildRepairPrompt: ({ errors, source }) =>
         buildJsonRepairPrompt({
-          featureName: "Studio Boom motion editor",
-          artifactLabel: "movement JSON",
+          featureName: "Studio Boom action editor",
+          artifactLabel: "action JSON",
           errors,
           source,
         }),
@@ -506,11 +517,12 @@ export function MotionPresetRecorder({
     return recorderPreviewPreset({
       name,
       category,
+      region,
       duration,
       keyposes: sortedKeyposes,
       allowOutOfBounds,
     });
-  }, [allowOutOfBounds, category, duration, name, sortedKeyposes]);
+  }, [allowOutOfBounds, category, duration, name, region, sortedKeyposes]);
 
   // Edit preset: current overrides + face-turn at t=0.
   // Used for GSAP script injection — changes every drag frame but never reloads the DOM.
@@ -520,6 +532,7 @@ export function MotionPresetRecorder({
     return recorderPreviewPreset({
       name,
       category,
+      region,
       duration,
       keyposes: [
         {
@@ -532,7 +545,16 @@ export function MotionPresetRecorder({
       ],
       allowOutOfBounds,
     });
-  }, [allowOutOfBounds, category, currentRecordedParts, duration, faceTurnX, faceTurnY, name]);
+  }, [
+    allowOutOfBounds,
+    category,
+    currentRecordedParts,
+    duration,
+    faceTurnX,
+    faceTurnY,
+    name,
+    region,
+  ]);
 
   const commitRecorderPreviewToHtml = useCallback(() => {
     const playbackKeyposes = keyposesForPlayback();
@@ -541,6 +563,7 @@ export function MotionPresetRecorder({
         ? recorderPreviewPreset({
             name,
             category,
+            region,
             duration,
             keyposes: playbackKeyposes,
             allowOutOfBounds,
@@ -550,7 +573,7 @@ export function MotionPresetRecorder({
     setPreviewCompileRevision((revision) => revision + 1);
     setTime(0);
     setPreviewPlaying(true);
-  }, [allowOutOfBounds, category, duration, keyposesForPlayback, name]);
+  }, [allowOutOfBounds, category, duration, keyposesForPlayback, name, region]);
 
   const stopCompiledPreview = useCallback(() => {
     setPreviewPlaying(false);
@@ -750,8 +773,9 @@ export function MotionPresetRecorder({
     const savingCopy = !!initialPreset && (!!initialPreset.builtin || !!copyOnSave);
     const preset: MotionPreset = {
       id: savingCopy ? uid() : (initialPreset?.id ?? uid()),
-      name: name.trim() || "Untitled movement",
+      name: name.trim() || "Untitled action",
       category,
+      region: region || undefined,
       duration: Math.max(0.1, duration),
       loop: initialPreset?.loop ?? false,
       tracks: [],
@@ -775,17 +799,33 @@ export function MotionPresetRecorder({
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="Movement name"
+            placeholder="Action name"
             className="rounded border border-border bg-input px-2 py-1 text-xs"
           />
           <select
             value={category}
-            onChange={(e) => setCategory(e.target.value as MotionCategory)}
+            onChange={(e) => {
+              const nextCategory = e.target.value as MotionCategory;
+              setCategory(nextCategory);
+              setRegion(defaultActionRegionForCategory(nextCategory));
+            }}
             className="rounded border border-border bg-input px-2 py-1 text-xs"
           >
             {CATEGORIES.map((c) => (
-              <option key={c.value} value={c.value}>
+              <option key={c.id} value={c.id}>
                 {c.label}
+              </option>
+            ))}
+          </select>
+          <select
+            value={region}
+            onChange={(e) => setRegion(e.target.value as MotionRegion | "")}
+            className="rounded border border-border bg-input px-2 py-1 text-xs"
+            title={`Default scope: ${actionRegionLabel(defaultActionRegionForCategory(category))}`}
+          >
+            {ACTION_REGION_OPTIONS.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
               </option>
             ))}
           </select>
@@ -847,10 +887,10 @@ export function MotionPresetRecorder({
             className="rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-90"
           >
             {initialPreset?.builtin || copyOnSave
-              ? "Save custom movement"
+              ? "Save custom action"
               : initialPreset
-                ? "Update movement"
-                : "Save movement"}
+                ? "Update action"
+                : "Save action"}
           </button>
         </>
       }
@@ -958,18 +998,18 @@ export function MotionPresetRecorder({
         <>
           <AiAddonPromptPanel
             open={aiAddon.open}
-            title="AI Movement"
+            title="AI Action"
             intro={
               <>
                 Optional AI add-on. Copy one prompt package, use it in your AI chat, then paste the
-                returned movement JSON here to preview before saving.
+                returned action JSON here to preview before saving.
               </>
             }
-            requestLabel="Describe movement"
+            requestLabel="Describe action"
             request={aiAddon.request}
-            pasteLabel="Paste returned movement JSON"
+            pasteLabel="Paste returned action JSON"
             paste={aiAddon.paste}
-            pastePlaceholder={`Paste ${motionJsonFilename("AI movement")} or *.motion-suggestion.ai-in.json`}
+            pastePlaceholder={`Paste ${motionJsonFilename("AI action")} or *.motion-suggestion.ai-in.json`}
             status={aiAddon.status}
             promptText={aiAddon.promptText}
             promptOpen={aiAddon.promptOpen}
@@ -1395,7 +1435,7 @@ function PropertiesPanel({
             <span
               title={
                 allowOutOfBounds
-                  ? "This movement may exceed the limit."
+                  ? "This action may exceed the limit."
                   : "Edits stop at this limit, matching playback."
               }
             >
@@ -1813,20 +1853,23 @@ function AnchorDebugOverlay({
 function recorderPreviewPreset({
   name,
   category,
+  region,
   duration,
   keyposes,
   allowOutOfBounds,
 }: {
   name: string;
   category: MotionCategory;
+  region: MotionRegion | "";
   duration: number;
   keyposes: RecordedKeypose[];
   allowOutOfBounds?: string[];
 }): MotionPreset {
   return {
     id: "__recorder_draft_motion",
-    name: name.trim() || "Draft movement",
+    name: name.trim() || "Draft action",
     category,
+    region: region || undefined,
     duration: Math.max(0.1, duration),
     loop: false,
     tracks: [],
@@ -2086,15 +2129,15 @@ function editorTitle(category: MotionCategory) {
     case "expression":
       return "Expression Editor";
     case "gesture":
-      return "Body Gesture Editor";
+      return "Gesture Action Editor";
     case "full-body":
-      return "Full Body Movement Editor";
+      return "Full Body Action Editor";
     case "camera":
-      return "Camera Movement Editor";
+      return "Camera Cue Editor";
     case "headTurn":
       return "Head Turn Editor";
     case "custom":
-      return "Custom Movement Editor";
+      return "Custom Action Editor";
   }
 }
 

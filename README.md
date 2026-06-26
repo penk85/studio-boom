@@ -40,7 +40,7 @@ Studio Boom is under active development, but the main editing loop is usable.
 Working now:
 
 - Local browser studio with Library, Stage, Timeline, Inspector, and playback controls.
-- Projects, media, characters, motion presets, pinned voices, and generated/imported
+- Projects, media, characters, action/expression presets, pinned voices, and generated/imported
   speech audio saved in IndexedDB.
 - Image, audio, and video asset upload.
 - First-class media clips, text clips, character composition clips, and custom
@@ -54,7 +54,11 @@ Working now:
 - Undo/redo for project edits.
 - Layered puppet character builder with parts, variants, eyes, brows, mouth shapes,
   generated mouth rigs, parallax, auto-blink, and motion behavior metadata.
-- Character motion presets and clip motion checkpoints/steps.
+- Character Actions and Expressions:
+  - reusable body actions, facial expressions, head turns, and camera cues
+  - separate timeline subtracks for Actions, Expressions, and Voice/lip sync
+  - per-clip scope controls such as full body, upper body, lower body, face, and head
+- Stage motion checkpoints/steps for moving objects around the canvas.
 - Speech tab for character clips:
   - lists ElevenLabs account voices by name
   - lets you pin voices for reuse
@@ -79,12 +83,13 @@ Still in progress:
 
 Requirements:
 
-- Node.js 22+
-- npm
+- Node.js 22.22.2
+- npm 10.9.7
 - A modern desktop browser with IndexedDB support
 
 ```bash
-npm install
+nvm use
+npm ci
 npm run dev
 ```
 
@@ -136,7 +141,8 @@ A character can include:
 - Per-part transforms, pivots, alpha bounds, depth, and motion behavior.
 - Head-direction variants for head turns.
 - Parallax settings.
-- Motion presets and clip-level motion steps/checkpoints.
+- Action and expression presets, with optional per-clip body-region scope.
+- Stage motion steps/checkpoints for moving the character clip itself through the scene.
 - One or more placed speech clips.
 
 The old static bake pipeline has been removed. Character tools now author native
@@ -190,7 +196,7 @@ Dexie / IndexedDB
   projects
   media metadata and blobs
   characters
-  motion presets
+  action/expression presets
   pinned ElevenLabs voices
 
 Zustand
@@ -198,7 +204,7 @@ Zustand
   selection
   undo/redo
   editor UI state
-  hydrated media/character/preset maps
+  hydrated media/character/action preset maps
 ```
 
 The durable movie source lives on the project:
@@ -254,6 +260,16 @@ npm run test:ui   # Vitest UI
 npm run lint      # ESLint
 npm run format    # Prettier
 ```
+
+Use the pinned toolchain:
+
+```bash
+nvm use           # reads .nvmrc (22.22.2)
+npm ci            # reproducible install from package-lock.json
+```
+
+`package.json` declares `packageManager: npm@10.9.7`, exact Node/npm engines, and
+`.npmrc` enables `engine-strict=true` so mismatched versions fail early.
 
 ## Technical Stack
 

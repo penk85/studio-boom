@@ -1,19 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { db } from "@/studio/db";
+import { ACTION_CATEGORY_TABS } from "@/studio/presets/action-terminology";
 import { ensureMotionPresetsSeeded } from "@/studio/presets/seed";
 import { MotionPresetRecorder } from "@/studio/presets/MotionPresetRecorder";
 import type { CharacterPreset, MotionCategory, MotionPreset } from "@/studio/types";
-
-const CATEGORIES: { id: MotionCategory | "all"; label: string }[] = [
-  { id: "all", label: "All" },
-  { id: "expression", label: "Expressions" },
-  { id: "gesture", label: "Body gestures" },
-  { id: "full-body", label: "Full body" },
-  { id: "camera", label: "Camera moves" },
-  { id: "headTurn", label: "Head turns" },
-  { id: "custom", label: "Custom" },
-];
 
 export function PresetsModal({ onClose }: { onClose: () => void }) {
   const [cat, setCat] = useState<MotionCategory | "all">("all");
@@ -67,9 +58,9 @@ export function PresetsModal({ onClose }: { onClose: () => void }) {
           >
             ← Studio
           </button>
-          <h1 className="text-2xl font-semibold">Motion Presets</h1>
+          <h1 className="text-2xl font-semibold">Action Presets</h1>
           <p className="ml-3 text-xs text-muted-foreground">
-            Reusable expressions, body gestures, full-body motion, head turns, and camera moves.
+            Reusable actions, expressions, head turns, and camera cues.
           </p>
           <div className="ml-auto flex items-center gap-2">
             {characters.length > 0 ? (
@@ -92,13 +83,13 @@ export function PresetsModal({ onClose }: { onClose: () => void }) {
               disabled={!selectedChar}
               className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              + New motion preset
+              + New action preset
             </button>
           </div>
         </header>
 
         <div className="mb-4 flex flex-wrap gap-2">
-          {CATEGORIES.map((c) => (
+          {ACTION_CATEGORY_TABS.map((c) => (
             <button
               key={c.id}
               onClick={() => setCat(c.id)}

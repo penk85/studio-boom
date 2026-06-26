@@ -9,6 +9,7 @@ import type {
   RecordedKeypose,
   RecordedPartOverride,
 } from "../types";
+import { effectiveActionRegion, roleMatchesActionRegion } from "./action-terminology";
 import { EXCLUSIVE_MOTION_CATEGORIES } from "./motion-scheduling";
 
 export interface ComposedDelta {
@@ -283,6 +284,7 @@ export function composeMotionsAt(
       continue;
     }
     const dur = a.duration ?? preset.duration;
+    const activeRegion = effectiveActionRegion(a, preset);
     const occurrences = generateMotionOccurrences(a, preset, clip.duration);
     const occurrence = occurrences.find((o) => tInClip >= o.start && tInClip <= o.end);
     if (!occurrence) continue;
@@ -302,7 +304,14 @@ export function composeMotionsAt(
     }
 
     if (preset.keyposes && preset.keyposes.length > 0) {
-      applyKeyposes(out, expandKeyposesWithAnticipation(preset.keyposes), dur, local, intensity);
+      applyKeyposes(
+        out,
+        expandKeyposesWithAnticipation(preset.keyposes),
+        dur,
+        local,
+        intensity,
+        activeRegion,
+      );
       continue;
     }
 
@@ -310,11 +319,13 @@ export function composeMotionsAt(
       if (!trackAppliesToAngle(track, activeAngle)) continue;
       const sample = applyIntensity(sampleTrack(track.keyframes, u), intensity);
       if (track.partRole === "__camera") {
+        if (activeRegion !== "camera") continue;
         out.camera.dx += sample.dx;
         out.camera.dy += sample.dy;
         out.camera.zoom *= sample.scale;
         continue;
       }
+      if (!roleMatchesActionRegion(track.partRole, activeRegion)) continue;
       const key = trackTargetKey(track);
       if (track.target === "bone" && track.boneId) {
         const prev = out.perBone.get(key) ?? emptyDelta();
@@ -378,6 +389,7 @@ function applyKeyposes(
   dur: number,
   local: number,
   intensity: number,
+  activeRegion: ReturnType<typeof effectiveActionRegion>,
 ) {
   if (keyposes.length === 0) return;
   const sorted = [...keyposes].sort((a, b) => a.t - b.t);
@@ -419,6 +431,7 @@ function applyKeyposes(
     const pb = b.parts.find((p) => overrideTargetKey(p) === key);
     const role = (pa ?? pb)?.partRole;
     if (!role) continue;
+    if (!roleMatchesActionRegion(role, activeRegion)) continue;
     const sample: ComposedDelta = {
       dx: lerp(pa?.dx, pb?.dx, 0),
       dy: lerp(pa?.dy, pb?.dy, 0),

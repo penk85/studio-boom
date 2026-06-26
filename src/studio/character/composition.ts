@@ -1926,9 +1926,10 @@ export function buildCharacterGsapScript(args: {
   const height = positiveNumber(args.height, 1);
   const runtime = buildCharacterRuntime(args.character);
   assertCharacterPinRigReadyForAngle(runtime.character, runtime.angle);
-  const scaleX = width / Math.max(1, args.character.canvasWidth);
-  const scaleY = height / Math.max(1, args.character.canvasHeight);
-  const dom = buildPuppetDom(args.character, runtime, args.meta, scaleX, scaleY);
+  const character = runtime.character;
+  const scaleX = width / Math.max(1, character.canvasWidth);
+  const scaleY = height / Math.max(1, character.canvasHeight);
+  const dom = buildPuppetDom(character, runtime, args.meta, scaleX, scaleY);
   return buildCharacterTimelineScriptText({
     compositionId: args.compositionId,
     clipId: args.clipId,
@@ -1938,8 +1939,8 @@ export function buildCharacterGsapScript(args: {
     meta: args.meta,
     motionPresets: args.motionPresets,
     motionTargets: dom.motionTargets,
-    canvasWidth: args.character.canvasWidth,
-    canvasHeight: args.character.canvasHeight,
+    canvasWidth: character.canvasWidth,
+    canvasHeight: character.canvasHeight,
     slotTimelines: dom.slotTimelines,
     boneAnchorTimelines: dom.boneAnchorTimelines,
     constraintContext: runtime.constraintContext,

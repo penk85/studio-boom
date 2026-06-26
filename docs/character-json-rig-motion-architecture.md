@@ -2,7 +2,8 @@
 
 > The canonical vocabulary and ownership model (angles, slots, bones, joints, sockets,
 > variants, poses) is defined in [character-rig-architecture.md](./character-rig-architecture.md).
-> This document covers the HyperFrames document model, JSON artifacts, and motion contract.
+> This document covers the HyperFrames document model, JSON artifacts, and Action/Expression
+> contract. Some current persisted/file names still use `motion` as a legacy internal term.
 
 ## Summary
 
@@ -20,7 +21,7 @@ document for inspectors and overlays, then writes back through typed character
 commands.
 
 JSON remains important, but it is not the living model. Character JSON, angle rig
-JSON, motion JSON, and AI suggestion JSON are portable exchange formats:
+JSON, Action/Expression JSON, and AI suggestion JSON are portable exchange formats:
 
 ```text
 HyperFrames character document
@@ -89,8 +90,8 @@ applyMotionDraft(html, { motion });
 commitMotion(html, { motion });
 ```
 
-The command layer is the guardrail. Character Builder, Motion Editor, AI import,
-and future rig assistants should all use the same commands.
+The command layer is the guardrail. Character Builder, the Action/Expression editor,
+AI import, and future rig assistants should all use the same commands.
 
 ### Parser and Inspector Model
 
@@ -129,9 +130,9 @@ AI JSON
 
 - Make the HyperFrames character sub-composition the source of truth for character
   authoring, preview, and export.
-- Give Character Builder and Motion Editor the same real document surface, not two
+- Give Character Builder and the Action/Expression editor the same real document surface, not two
   renderers.
-- Make character and motion data readable, copyable, and AI-friendly through JSON
+- Make character Action/Expression data readable, copyable, and AI-friendly through JSON
   import/export artifacts.
 - Keep every JSON artifact easy to identify by filename and top-level `kind`.
 - Support first-class custom slots such as umbrellas, tails, wings, props, clothing,
@@ -163,7 +164,7 @@ character is being edited in Studio Boom.
 ```text
 <character-slug>.character.json
 <character-slug>.<angle-id>.angle-rig.json
-<motion-slug>.motion.json
+<action-slug>.motion.json
 ```
 
 Examples:
@@ -183,7 +184,7 @@ These are copied from Studio Boom and pasted into an AI tool.
 ```text
 <character-slug>.rig-context.ai-out.json
 <character-slug>.<angle-id>.angle-context.ai-out.json
-<motion-request-slug>.motion-request.ai-out.json
+<action-request-slug>.motion-request.ai-out.json
 ```
 
 Examples:
@@ -200,7 +201,7 @@ These are pasted back into Studio Boom for validation and preview.
 
 ```text
 <character-slug>.rig-suggestion.ai-in.json
-<motion-slug>.motion-suggestion.ai-in.json
+<action-slug>.motion-suggestion.ai-in.json
 ```
 
 Examples:
@@ -453,12 +454,18 @@ Depth and draw order stay separate:
 If an angle has different depth values, that is deliberate. The active angle's
 depth is the depth used for parallax while that angle is active.
 
-## Motion JSON
+## Action / Expression JSON
+
+Studio Boom calls timed character animation **Actions** and timed facial animation
+**Expressions** in the UI. The current exchange files still use the historical
+`studioBoom.motion.v1` kind and `.motion.json` suffix until the schema is renamed.
+Treat "motion JSON" in code and filenames as the transport format for Actions,
+Expressions, head turns, and camera cues.
 
 `*.motion.json` exports reusable animation intent. It should target semantic bones
 and semantic slots whenever possible so the same motion can resolve across angles.
-When imported, it should become a draft motion command against a temporary copy of
-the HyperFrames character document. Saving commits it as a named motion and/or
+When imported, it should become a draft Action/Expression command against a temporary copy of
+the HyperFrames character document. Saving commits it as a named preset and/or
 applies it to the selected character clip.
 
 ```json
@@ -469,6 +476,7 @@ applies it to the selected character clip.
   "id": "motion:hand-clap",
   "name": "Hand Clap",
   "category": "gesture",
+  "region": "upperBody",
   "duration": 0.9,
   "loop": false,
   "targetSpace": "parentRelative",
@@ -515,9 +523,39 @@ applies it to the selected character clip.
 }
 ```
 
+### Kind, Lane, and Scope
+
+The editor resolves each preset into a semantic lane:
+
+```text
+expression/headTurn -> Expressions lane
+gesture/full-body/custom -> Actions lane
+camera -> Camera cues lane
+speech audio -> Voice / lip sync lane
+```
+
+Actions and Expressions may carry a `region`:
+
+```text
+fullBody
+upperBody
+lowerBody
+face
+head
+hands
+camera
+custom
+```
+
+An applied preset can override the preset's default region. This lets a user apply
+a full-body walk as `lowerBody` only, preserving a held upper-body pose such as
+folded arms. The compositor filters tracks/keyposes by role through the shared
+Action/Expression terminology boundary; the timeline and recorder use the same
+region vocabulary.
+
 ### Transform Keyframe Fields (native control surface)
 
-Motion is authored by the AI from low-level primitives — there are **no named
+Actions are authored by the AI from low-level primitives — there are **no named
 effects**. Studio Boom exposes the control vocabulary; the AI composes the movement
 (a card flip, a pendulum, a spin) directly as keyframes, and the editor renders it.
 The transform `channel` accepts these per-keyframe fields (all optional, `t`
@@ -547,7 +585,7 @@ Recipes the AI expresses with these primitives (illustrative, not built-in):
 
 This list is the single source of truth in
 `src/studio/character-json/schema.ts` (`MOTION_TRANSFORM_FIELD_NAMES`,
-`MOTION_EASE_NAMES`); the motion-request OUT JSON advertises it as `controls` and
+`MOTION_EASE_NAMES`); the action-request OUT JSON advertises it as `controls` and
 validation accepts exactly these, so OUT and IN cannot drift.
 
 ### Overlays (reserved seam — not rendered yet)
@@ -596,7 +634,7 @@ Use slot tracks for:
 
 ## Target Resolution
 
-Motion JSON can target semantic IDs or concrete angle IDs.
+Action/Expression JSON can target semantic IDs or concrete angle IDs.
 
 Preferred reusable target:
 
@@ -613,7 +651,7 @@ Angle-specific target:
 The resolver maps semantic targets to the active angle:
 
 ```text
-motion target semanticSlot:slot:rightHand
+action target semanticSlot:slot:rightHand
   -> active angle sideL
   -> sideL semantic map
   -> sideL:slot:visibleHand
@@ -623,21 +661,21 @@ If a semantic target cannot resolve for the active angle, validation should repo
 specific error before preview:
 
 ```text
-Motion "Hand Clap" targets slot:rightHand, but angle sideL has no mapped slot.
+Action "Hand Clap" targets slot:rightHand, but angle sideL has no mapped slot.
 ```
 
 ## AI Workflow
 
 ### Copy Out
 
-The Motion Editor should expose clear JSON buttons:
+The Action/Expression editor should expose clear prompt buttons:
 
 - `Copy Character Context JSON`
 - `Copy Active Angle Rig JSON`
-- `Copy Motion Request JSON`
+- `Copy Action Request`
 
-The copied outbound motion prompt should be plain key-value text with a compact
-motion context, not a full JSON dump of the authoring document. It should include:
+The copied outbound Action/Expression prompt should be plain key-value text with a
+compact character context, not a full JSON dump of the authoring document. It should include:
 
 - character identity,
 - semantic bones and slots,
@@ -655,7 +693,7 @@ motion context, not a full JSON dump of the authoring document. It should includ
 It should not include media IDs, artwork layers, full variant rig packages,
 complete draw-order arrays, or any other render/build internals. The app keeps
 the full `AngleRigJson` for validation and import; the AI receives only the
-motion-facing target map.
+action-facing target map.
 
 The model's answer is still JSON (`studioBoom.ai.motionSuggestion.v1` or
 `studioBoom.motion.v1`) because paste/import needs strict validation. The prompt
@@ -663,7 +701,7 @@ itself does not need JSON syntax and should prefer simple sections like
 `active_angle`, `facing`, `active_angle.bones`, `active_angle.slots`, and
 `controls.transform_fields`.
 
-The compact motion context should carry distilled locomotion metrics when they
+The compact Action context should carry distilled locomotion metrics when they
 can be derived from the active angle:
 
 - canvas-space bone pivots, rest angles, segment vectors, and segment lengths,
@@ -684,7 +722,7 @@ keyframes.
 The editor should expose:
 
 - `Paste Rig Suggestion JSON`
-- `Paste Motion Suggestion JSON`
+- `Paste Action/Expression Suggestion JSON`
 
 Paste flow:
 
@@ -727,7 +765,8 @@ src/studio/character-json/schema.ts       JSON exchange schemas only
 src/studio/character-json/normalize.ts    JSON -> command normalization
 src/studio/character-json/validate.ts     JSON validation before commands
 src/studio/character-json/ai-context.ts   AI context and prompt packages
-src/studio/presets/motion-json.ts         motion JSON import/export adapter
+src/studio/presets/motion-json.ts         Action/Expression JSON import/export adapter
+src/studio/presets/action-terminology.ts  shared lanes, labels, regions, and exclusivity
 ```
 
 These modules should not import React components. React components may call them,
@@ -753,9 +792,9 @@ Commands are allowed to edit DOM attrs, style blocks, and editor-readable metada
 inside the character composition, but they must preserve valid HyperFrames HTML and
 a finite paused timeline.
 
-## Motion Editor Runtime Contract
+## Action / Expression Editor Runtime Contract
 
-The Motion Editor must not maintain a flat private puppet renderer.
+The Action/Expression editor must not maintain a flat private puppet renderer.
 
 It should author against a draft copy of the real HyperFrames character document:
 
@@ -767,7 +806,7 @@ current character composition HTML
   -> commitMotion command when saved
 ```
 
-The Motion Editor may use React overlays for:
+The editor may use React overlays for:
 
 - selection,
 - bone handles,
@@ -777,8 +816,7 @@ The Motion Editor may use React overlays for:
 - JSON validation messages.
 
 It must not draw a second copy of the puppet. The character body parts in the
-Motion Editor should come from the same HyperFrames DOM shape used by Stage and
-export.
+editor should come from the same HyperFrames DOM shape used by Stage and export.
 
 ## Character Document Lint
 
@@ -797,8 +835,8 @@ It should catch:
 - bone parent cycles,
 - host constraints referencing missing slots or bones,
 - reach constraints referencing missing slots,
-- motion targets that do not resolve,
-- unknown motion categories normalized to `custom`,
+- Action/Expression targets that do not resolve,
+- unknown Action/Expression categories normalized to `custom`,
 - missing asset refs,
 - empty or non-finite timelines,
 - child motion that restates inherited parent translation in built-in presets.
@@ -808,13 +846,13 @@ and before export/debug package generation.
 
 ## Bounds and Reach
 
-Character documents define host constraints and reach. Motions respect them by
+Character documents define host constraints and reach. Actions and Expressions respect them by
 default.
 
 Default behavior:
 
 ```text
-motion exceeds reach
+action exceeds reach
   -> scale the motion delta to fit
   -> preserve gesture shape and timing
 ```
@@ -822,7 +860,7 @@ motion exceeds reach
 Avoid hard capping unless the user explicitly chooses a mechanical limit. Scaling
 keeps the motion expressive; capping makes parts appear to hit an invisible wall.
 
-Per-motion escape hatch:
+Per-action escape hatch:
 
 ```json
 {
@@ -837,11 +875,11 @@ Per-motion escape hatch:
 }
 ```
 
-This is scoped to the movement, not the character.
+This is scoped to the Action/Expression, not the character.
 
-## Built-In Motion Cleanup
+## Built-In Action Cleanup
 
-Built-in motions should be converted from flat absolute tracks to parent-relative
+Built-in Actions should be converted from flat absolute tracks to parent-relative
 bone tracks.
 
 For example, a jump should move the body/root bone upward. The head should not also
@@ -880,14 +918,14 @@ The incorrect shape double-counts once the head is nested under the body.
   custom slot hints, and angle list.
 - Angle Rig JSON validates bone graph, slot bindings, host constraints, depth, and
   draw order.
-- Motion JSON validates target resolution, keyframe values, variants, and
-  per-motion bounds overrides.
-- A semantic motion resolves correctly for `front` and fails with a clear message
+- Action/Expression JSON validates target resolution, keyframe values, variants,
+  regions, and per-action bounds overrides.
+- A semantic Action resolves correctly for `front` and fails with a clear message
   for an unmapped side angle.
 - Built-in Jump moves the head exactly once through parent inheritance.
 - Wave rotates an arm bone and carries the hand slot automatically.
 - A slot variant track swaps open hand to closed fist without changing bone motion.
-- The Motion Editor previews a draft copy of the real HyperFrames character
+- The Action/Expression editor previews a draft copy of the real HyperFrames character
   document.
 - Pasted AI JSON cannot write directly to HyperFrames HTML; it must become
   validated character commands first.
@@ -899,21 +937,21 @@ The incorrect shape double-counts once the head is nested under the body.
    metadata needed by the parser.
 3. Move Character Builder edits onto character commands against
    `project.hf.compositionHtml[compositionId]`.
-4. Move Motion Editor preview to a draft copy of the real character document in a
+4. Move Action/Expression editor preview to a draft copy of the real character document in a
    HyperFrames player.
 5. Route AI JSON imports through validation and character commands.
 6. Convert built-in presets to parent-relative bone/slot tracks.
-7. Add per-track or per-target `allowOutOfBounds` UI in Motion Editor.
+7. Add per-track or per-target `allowOutOfBounds` UI in the Action/Expression editor.
 8. Keep mesh/deformation extensions behind the same character document command
    contract.
 
-## Variant Anchors and the Motion-Constraint Boundary (implemented June 2026)
+## Variant Anchors and the Action-Constraint Boundary (implemented June 2026)
 
 ### Hierarchy (confirmed)
 
 The character hierarchy is **character → angles → slots → variants**. A "pose" is
 only a saved `Record<slotId, variantKey>` map (`CharacterClipMeta.poses`) plus
-motion `channel: "variant"` tracks — **never a structural schema tier**. This is
+Action/Expression variant tracks — **never a structural schema tier**. This is
 also stated in the AI rig-context instructions so suggestions don't reinvent a
 `poses[]` schema object.
 
@@ -945,35 +983,35 @@ At composition time the anchors are scaled, expanded to every variant alias, and
 
 - baked into the bone group's initial CSS `left/top` from the placed pose,
 - emitted as `data-character-variant-anchors` on the bone element (consumed by
-  the Motion Editor's live preview),
+  the Action/Expression editor's live preview),
 - attached to variant slot events as `boneAnchors` and applied by the runtime
   script via `gsap.set(selector, { left, top })` on swap, in `tl.set` events, and
   in `resetInitialState`. Re-anchoring uses CSS `left/top`; the GSAP transform
-  channel stays owned by motion deltas.
+  channel stays owned by Action/Expression deltas.
 
 ### One rotation-constraint vocabulary, one enforcement boundary
 
 `src/studio/character/motion-constraints.ts` is the single boundary every
-movement consumer passes through:
+Action/Expression consumer passes through:
 
 - `effectiveReachForSlot(ctx, slotId, activeVariants)` — the slot's authored
   `rotReach`, overridden by the active variant's bone `rotationLimits` while that
   variant is selected (a fist may twist differently than an open hand).
 - `resolveMotionDelta({...})` — clamps `dx/dy/rotation` to the effective reach,
-  honoring the per-movement `allowOutOfBounds` escape hatch; returns
+  honoring the per-action `allowOutOfBounds` escape hatch; returns
   `clampReasons` and `effectiveReachSource` so the editor and AI debugging can
   explain _why_ a value stopped.
 - `childAnchorForVariant` / `parentSlotIdForBone` — anchor lookups shared by
   composition and editor.
 
-Consumers: the compiled GSAP timeline (`buildMotionFrame`) and the Motion
-Editor's `updateOverride` (covering the rotation slider, rotate drag, and plane
+Consumers: the compiled GSAP timeline (`buildMotionFrame`) and the
+Action/Expression editor's `updateOverride` (covering the rotation slider, rotate drag, and plane
 drag) — editing is WYSIWYG with playback. The recorder surfaces the effective
 limit next to the rotation row with an "Allow out of bounds" toggle that is
 loaded from, and saved back to, `MotionPreset.allowOutOfBounds`. Any future
-movement consumer (e.g. stage-level posing) must route through this boundary;
+Action/Expression consumer (e.g. stage-level posing) must route through this boundary;
 nothing applies a raw delta to a character layer directly.
 
-A dev-only "Anchors" toggle in the Motion Editor overlays bone pivots and each
+A dev-only "Anchors" toggle in the Action/Expression editor overlays bone pivots and each
 resolved anchor with its resolution path (socket / paired art / fallback) as
 editor chrome — never rendered into composition HTML or export.

@@ -761,6 +761,16 @@ export type MotionCategory =
   | "headTurn"
   | "custom";
 
+export type MotionRegion =
+  | "fullBody"
+  | "upperBody"
+  | "lowerBody"
+  | "face"
+  | "head"
+  | "hands"
+  | "camera"
+  | "custom";
+
 /** Recorded pose snapshot used by the Motion Preset Recorder.
  *  Each part override stores a *delta* relative to that part's rest pose. */
 export interface RecordedPartOverride {
@@ -823,6 +833,8 @@ export interface MotionPreset {
   id: ID;
   name: string;
   category: MotionCategory;
+  /** Semantic body region this preset is intended to own. Undefined = category default. */
+  region?: MotionRegion;
   /** Optional angle availability. Undefined means the motion is angle-agnostic. */
   angleIds?: CharacterAngle[];
   /** Base duration in seconds. */
@@ -883,6 +895,8 @@ export interface AppliedMotion {
   offset: number;
   duration?: number;
   intensity: number;
+  /** Per-clip region mask. Undefined = preset region/category default. */
+  region?: MotionRegion;
   loop?: boolean;
   loopGap?: number;
   loopMode?: "fixed" | "random";

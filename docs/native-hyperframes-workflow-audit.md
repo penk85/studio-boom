@@ -44,6 +44,11 @@ movie. `editorMeta` is editor-only intent and UI state.
   HyperFrames-first document model in `docs/character-json-rig-motion-architecture.md`.
   The character sub-composition HTML is the editable document; JSON artifacts are
   import/export and AI exchange formats.
+- Character Action/Expression boundary: reusable character presets are currently
+  persisted through legacy `motionPresets`/`MotionPreset` names, but product
+  vocabulary is Pose (held variant state), Action (timed body animation),
+  Expression (timed facial animation), Speech/lip-sync, and separate Stage
+  motion for moving the whole clip.
 - Speech/lip-sync boundary: character speech audio is reusable library media.
   Speech placement lives in character clip metadata, viseme timing lives on the
   audio `MediaAsset`, and `character/composition.ts` serializes placed speech as
@@ -99,11 +104,12 @@ movie. `editorMeta` is editor-only intent and UI state.
   HyperFrames bundler's embedded-runtime stripping list.
 - Crop and mirror only after confirming the native HyperFrames representation; do
   not fake them with a second renderer.
-- Timeline control polish: reset to start and draggable seek needle.
+- Timeline polish: keep Voice/lip-sync, Expressions, Actions, and Camera cues as
+  distinct character subtracks; keep Stage motion separate from character Actions.
 - Voice library polish: editing/removing reusable voice assets, clearer speech
   placement controls, and generic audio alignment cleanup.
-- Character rig tool polish: richer rig editing and drag/drop motion authoring on
-  top of the native character composition contract.
+- Character rig tool polish: richer rig editing and drag/drop Action/Expression
+  authoring on top of the native character composition contract.
 
 ## Deferred Audio Capabilities (gain > 100% and fades)
 

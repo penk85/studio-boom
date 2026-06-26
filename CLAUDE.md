@@ -106,7 +106,7 @@ Dexie (browser persistence)
   projects table:  { id, hf: { rootHtml, compositionHtml, assets }, editorMeta }
   media table:     blobs for video, audio, images
   characters:      character definitions (parts, layout, rig)
-  motionPresets:   keyframe data for character animation
+  motionPresets:   persisted action/expression presets (legacy table name)
   savedVoices:     pinned ElevenLabs voice ids/names for reuse
 
 Zustand (in-memory UI state)
@@ -206,7 +206,7 @@ Reusable library identity stays in nested metadata:
 character: {
   characterId: string
   poses: Record<slotId, partId>
-  motions?: AppliedMotion[]
+  motions?: AppliedMotion[] // applied Actions/Expressions; legacy field name
   visemes?: VisemeEntry[]
   autoBlink?: boolean
   lipSyncAudioId?: string
@@ -219,6 +219,24 @@ audio `MediaAsset`; character clips place one or more speech entries through
 `character.speeches`. The character sub-composition serializes each placed speech
 as a HyperFrames `<audio>` clip. Do not add locked root audio siblings for
 character speech.
+
+Character animation vocabulary:
+
+- **Pose** is a held variant map with no timing. It chooses semantic slot variants
+  such as standing, explaining, folded arms, or open hand.
+- **Action** is repeatable timed body animation. An applied Action may be scoped
+  to a body region (`fullBody`, `upperBody`, `lowerBody`, `hands`, etc.) so, for
+  example, a walk can drive legs without overwriting folded arms.
+- **Expression** is timed facial animation. Expressions live on their own timeline
+  subtrack and override facial movement from Actions without double-applying it.
+- **Speech / lip sync** is its own placed audio/viseme track and should remain
+  separate from Actions and Expressions.
+- **Stage motion** means moving a whole clip around the canvas. Do not confuse it
+  with character Actions.
+
+The current persisted names still include `MotionPreset`, `AppliedMotion`, and
+`character.motions`; treat those as legacy internal names for Action/Expression
+data until a mechanical schema rename is done.
 
 The generated character source must contain explicit puppet DOM, stable
 `data-character-*` attrs, `asset:<id>` media refs, base transforms/pivots, and a
@@ -277,14 +295,15 @@ ClipEditorMeta {
 | `src/studio/components/Stage.tsx`                | HyperFrames player iframe via `srcdoc`, `resolveIframe`, `useElementPicker`, editor chrome only                                                |
 | `src/studio/components/Timeline.tsx`             | Timeline UI; `PlayerControls`                                                                                                                  |
 | `src/studio/components/VoiceLipSyncPanel.tsx`    | Character Speech inspector tab: voice library, TTS, upload, forced alignment, speech placement                                                 |
-| `src/studio/components/Library.tsx`              | Media, text presets, characters, motion presets, and custom HyperFrames block import                                                           |
+| `src/studio/components/Library.tsx`              | Media, text presets, characters, action/expression presets, and custom HyperFrames block import                                                |
 | `src/studio/Studio.tsx`                          | Calls `useTimelinePlayer()` once; distributes `iframeRef`, `togglePlay`, `seek`                                                                |
 | `src/studio/hyperframes/assets.ts`               | Generic `project.hf.assets` registration/pruning helpers                                                                                       |
 | `src/studio/hyperframes/html.ts`                 | Parser adapter for current `@hyperframes/core` boundary behavior                                                                               |
 | `src/studio/hyperframes/native.ts`               | Native HTML normalization boundary for root/stage/viewport metadata and export parity                                                          |
 | `src/studio/hyperframes/player-editing.ts`       | Live player edit boundary for real iframe elements during stage manipulation                                                                   |
 | `src/studio/hyperframes/root-composition.ts`     | Root composition creation and root metadata updates                                                                                            |
-| `src/studio/character/composition.ts`            | Native character composition builder for puppet DOM, speech audio, visemes, blink, and motion timelines                                        |
+| `src/studio/character/composition.ts`            | Native character composition builder for puppet DOM, speech audio, visemes, blink, and Action/Expression timelines                             |
+| `src/studio/presets/action-terminology.ts`       | Shared Action/Expression labels, lanes, regions, exclusivity, and role-to-region rules                                                         |
 | `docs/ai-generated-hyperframes-clips-roadmap.md` | Roadmap for AI-generated clips, source-visible custom HyperFrames blocks, native text/composition clip support, and nested composition editing |
 
 ---

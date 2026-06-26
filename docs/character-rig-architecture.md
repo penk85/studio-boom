@@ -165,7 +165,7 @@ A durable distinction matters:
 ```text
 Semantic variant
   "right arm = bent"
-  stable across angles; used by poses, AI, dropdowns, and motion JSON
+  stable across angles; used by poses, AI, dropdowns, and Action/Expression JSON
 
 Angle-specific variant asset
   "3qR right arm art that implements bent"
@@ -227,6 +227,26 @@ Pose    = full character configuration.
 
 Pose presets should reference semantic slot variant keys, not concrete part IDs. The active
 angle resolves those semantic keys to its own angle-specific artwork and socket overrides.
+
+Poses have no timing. Timed character changes are separate:
+
+```text
+Pose
+  held body/variant state; no keyframes
+
+Action
+  repeatable body animation; can be scoped to full body, upper body, lower body,
+  hands, head, or another region
+
+Expression
+  timed facial animation; overrides facial movement from Actions
+
+Speech / lip sync
+  placed audio plus viseme timing; separate from Actions and Expressions
+```
+
+Stage motion is different again: it moves the entire character clip around the scene and
+does not change the character rig.
 
 ## 10. Pose Preset
 

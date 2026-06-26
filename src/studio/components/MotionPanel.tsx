@@ -7,6 +7,13 @@ import { useStudio } from "../store";
 import { ensureMotionPresetsSeeded } from "../presets/seed";
 import { MotionPresetRecorder } from "../presets/MotionPresetRecorder";
 import {
+  ACTION_CATEGORY_COLORS,
+  ACTION_CATEGORY_TABS,
+  ACTION_REGION_OPTIONS,
+  actionRegionLabel,
+  defaultActionRegion,
+} from "../presets/action-terminology";
+import {
   EXCLUSIVE_MOTION_CATEGORIES,
   resolveExclusiveMotionOverlaps,
 } from "../presets/motion-scheduling";
@@ -17,26 +24,8 @@ import type {
   CompositionClip,
   MotionCategory,
   MotionPreset,
+  MotionRegion,
 } from "../types";
-
-const CATEGORY_TABS: { id: MotionCategory | "all"; label: string }[] = [
-  { id: "all", label: "All" },
-  { id: "expression", label: "Expression" },
-  { id: "gesture", label: "Body gesture" },
-  { id: "full-body", label: "Full body" },
-  { id: "camera", label: "Camera move" },
-  { id: "headTurn", label: "Head turn" },
-  { id: "custom", label: "Custom" },
-];
-
-const CATEGORY_COLORS: Record<MotionCategory, string> = {
-  expression: "bg-sky-500/70 border-sky-300/80",
-  gesture: "bg-emerald-500/70 border-emerald-300/80",
-  "full-body": "bg-amber-500/75 border-amber-300/80",
-  camera: "bg-violet-500/70 border-violet-300/80",
-  headTurn: "bg-fuchsia-500/70 border-fuchsia-300/80",
-  custom: "bg-slate-400/70 border-slate-200/80",
-};
 
 export function MotionPanel({
   clip,
@@ -52,6 +41,7 @@ export function MotionPanel({
   const [filterCat, setFilterCat] = useState<MotionCategory | "all">("all");
   const [search, setSearch] = useState("");
   const [recording, setRecording] = useState(false);
+  const [recordingCategory, setRecordingCategory] = useState<MotionCategory>("full-body");
   const [editingPreset, setEditingPreset] = useState<MotionPreset | null>(null);
   const [editingMotionId, setEditingMotionId] = useState<string | null>(null);
   const [applyEditedPresetOnSave, setApplyEditedPresetOnSave] = useState(false);
@@ -151,11 +141,12 @@ export function MotionPanel({
       <MotionPresetRecorder
         character={character}
         initialPreset={editingPreset ?? undefined}
+        initialCategory={recordingCategory}
         copyOnSave={!!editingMotionId}
         onSaved={(preset) => {
           if (editingMotionId) {
             updateMotion(editingMotionId, { presetId: preset.id });
-            setPanelStatus(`Saved "${preset.name}" and updated the selected movement.`);
+            setPanelStatus(`Saved "${preset.name}" and updated the selected action.`);
           } else if (recording || applyEditedPresetOnSave) {
             addMotion(preset);
             setPanelStatus(`Saved and applied "${preset.name}" at the playhead.`);
@@ -177,29 +168,40 @@ export function MotionPanel({
     <div className="rounded border border-border bg-panel-2 p-2">
       <div className="mb-2 flex items-center justify-between">
         <span className="font-semibold uppercase tracking-wider text-muted-foreground">
-          Clip movements
+          Actions & expressions
         </span>
         <div className="flex items-center gap-1">
           <button
             onClick={() => {
               setRecording(true);
+              setRecordingCategory("full-body");
               setEditingMotionId(null);
             }}
             className="rounded border border-border bg-panel px-2 py-0.5 text-[10px] text-foreground hover:bg-panel-2"
           >
-            Create movement
+            Create action
+          </button>
+          <button
+            onClick={() => {
+              setRecording(true);
+              setRecordingCategory("expression");
+              setEditingMotionId(null);
+            }}
+            className="rounded border border-border bg-panel px-2 py-0.5 text-[10px] text-foreground hover:bg-panel-2"
+          >
+            Create expression
           </button>
           <button
             onClick={() => setPicking((v) => !v)}
             className="rounded bg-primary/30 px-2 py-0.5 text-[10px] text-foreground hover:bg-primary/50"
           >
-            {picking ? "Cancel" : "+ Add saved preset"}
+            {picking ? "Cancel" : "+ Add saved action"}
           </button>
         </div>
       </div>
       <div className="mb-2 rounded border border-border bg-panel px-2 py-1 text-[10px] text-muted-foreground">
-        These are movements applied to this character clip. Create a movement to preview, save, and
-        apply it here; saved presets can be reused later.
+        Actions are repeatable body changes. Expressions are facial presets that can layer above an
+        action on the same character clip.
       </div>
       {panelStatus && (
         <div className="mb-2 rounded border border-primary/30 bg-primary/10 px-2 py-1 text-[10px] text-foreground">
@@ -210,7 +212,7 @@ export function MotionPanel({
       {picking && (
         <div className="mb-2 rounded border border-border bg-panel">
           <div className="flex flex-wrap gap-1 border-b border-border p-1.5">
-            {CATEGORY_TABS.map((c) => (
+            {ACTION_CATEGORY_TABS.map((c) => (
               <button
                 key={c.id}
                 onClick={() => setFilterCat(c.id)}
@@ -268,13 +270,15 @@ export function MotionPanel({
         <div className="space-y-1">
           {appliedMotions.length === 0 && (
             <div className="rounded border border-dashed border-border p-2 text-center text-[11px] text-muted-foreground">
-              No clip movements yet.
+              No clip actions yet.
             </div>
           )}
 
           {appliedMotions.map((motion) => {
             const preset = presetMap.get(motion.presetId);
-            const color = preset ? CATEGORY_COLORS[preset.category] : CATEGORY_COLORS.custom;
+            const color = preset
+              ? ACTION_CATEGORY_COLORS[preset.category]
+              : ACTION_CATEGORY_COLORS.custom;
             const selected = motion.id === selectedMotionId;
             return (
               <button
@@ -286,7 +290,7 @@ export function MotionPanel({
               >
                 <span className={`h-2.5 w-2.5 shrink-0 rounded-full border ${color}`} />
                 <span className="min-w-0 flex-1 truncate text-foreground">
-                  {preset?.name ?? "Unknown motion"}
+                  {preset?.name ?? "Unknown action"}
                 </span>
                 <span className="shrink-0 text-[10px] text-muted-foreground">
                   {formatSeconds(motion.offset)}
@@ -309,7 +313,7 @@ export function MotionPanel({
                 onClick={() => editPreset(selectedPreset, selectedMotion.id)}
                 className="text-muted-foreground hover:text-foreground"
               >
-                Customize movement
+                Customize action
               </button>
               <button onClick={() => removeMotion(selectedMotion.id)} className="text-destructive">
                 Remove
@@ -331,6 +335,27 @@ export function MotionPanel({
                 step={0.05}
                 onChange={(value) => updateMotion(selectedMotion.id, { duration: value })}
               />
+              <label>
+                <span className="block text-muted-foreground">Scope</span>
+                <select
+                  value={selectedMotion.region ?? ""}
+                  onChange={(e) =>
+                    updateMotion(selectedMotion.id, {
+                      region: (e.target.value || undefined) as MotionRegion | undefined,
+                    })
+                  }
+                  className="w-full rounded border border-border bg-input px-1 py-0.5"
+                >
+                  <option value="">
+                    Preset default ({actionRegionLabel(defaultActionRegion(selectedPreset))})
+                  </option>
+                  {ACTION_REGION_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
 
             <label className="mt-2 block">
@@ -358,7 +383,7 @@ export function MotionPanel({
                   checked={selectedMotion.loop ?? selectedPreset.loop}
                   onChange={(e) => updateMotion(selectedMotion.id, { loop: e.target.checked })}
                 />
-                Repeat this motion
+                Repeat this action
               </label>
             )}
 

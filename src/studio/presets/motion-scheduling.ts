@@ -1,8 +1,9 @@
 import type { AppliedMotion, MotionCategory, MotionPreset } from "../types";
+import { isActionCategoryExclusive } from "./action-terminology";
 
 const MIN_DURATION = 0.05;
 
-export const EXCLUSIVE_MOTION_CATEGORIES = new Set<MotionCategory>(["expression"]);
+export const EXCLUSIVE_MOTION_CATEGORIES = new Set<MotionCategory>(["expression", "headTurn"]);
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -72,7 +73,7 @@ export function resolveExclusiveMotionOverlaps({
   if (!edited) return motions;
 
   const category = categoryForMotion(edited, presetMap);
-  if (!category || !EXCLUSIVE_MOTION_CATEGORIES.has(category)) return motions;
+  if (!category || !isActionCategoryExclusive(category)) return motions;
 
   const editedPreset = presetMap.get(edited.presetId);
   const editedInterval = singleInterval(edited, editedPreset, clipDuration);
