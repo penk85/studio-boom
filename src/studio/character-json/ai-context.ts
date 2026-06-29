@@ -15,10 +15,10 @@ import {
   type MotionPromptSlotJson,
   type CharacterRigContextAiOutJson,
   type MotionControlSurfaceJson,
-  type MotionJson,
+  type MotionDraftJson,
   type MotionRequestAiOutJson,
 } from "./schema";
-import { aiOutFilename, motionJsonFilename, slugifyName } from "./normalize";
+import { aiOutFilename, slugifyName } from "./normalize";
 import { inferCharacterSideFromText, type CharacterPartSide } from "../character/side-utils";
 
 export function buildCharacterRigContextAiOut(
@@ -82,7 +82,7 @@ export function buildMotionRequestAiOut(args: {
   character: CharacterJson;
   activeAngle: AngleRigJson;
   request: string;
-  exampleMotion?: MotionJson;
+  exampleMotion?: MotionDraftJson;
 }): MotionRequestAiOutJson {
   const requestSlug = slugifyName(args.request, "motion-request");
   return {
@@ -93,16 +93,17 @@ export function buildMotionRequestAiOut(args: {
     character: motionPromptCharacter(args.character),
     activeAngle: motionPromptAngle(args.activeAngle),
     instructions: [
-      "Return a single JSON object.",
-      `Use kind "${MOTION_SUGGESTION_AI_IN_KIND}" with a nested motion object of kind "studioBoom.motion.v1".`,
-      "Use targetSpace parentRelative.",
-      'Choose category from exactly: "expression", "gesture", "full-body", "camera", "headTurn", or "custom". Do not invent category labels.',
+      "Return a single JSON object: { tracks: [...] }. Author only the movement — do not emit kind, schemaVersion, id, filename, targetSpace, loop, or any wrapper. The editor and rig fill those in.",
+      "Each track is { target, keyframes } with optional track-level `ease` and `perspective`. Keyframes hold a normalized time `t` (0..1) plus only the values that animate.",
+      'target is a bare string: "bone:<id>" for a bone, "slot:<id>" or "role:<id>" for a slot, or "camera". Use the exact ids from semantic_bones / semantic_slots below. Do not wrap it in an object.',
+      "Do not author originX/originY — the rig owns each joint's pivot. Do not author `channel` — a keyframe with `variant` is a pose swap, one with `visible` is an on/off, otherwise it is a transform.",
+      "Optional top-level hints (prefill the editor, never required): `name`, `category` (one of expression, gesture, full-body, camera, headTurn, custom), and `feel` (a default ease word like smooth, snappy, bouncy, weighty).",
+      "Set `duration` (seconds) — it is part of the movement design and changes how the action reads.",
+      "IMPORTANT: every track that should animate in from rest must include an explicit t:0 keyframe at the neutral value. A track whose first keyframe is later than 0 starts already displaced at that value.",
       "Author the movement yourself from the native controls in `controls` — there are no named effects. Express flips, spins, swings, twirls, etc. directly as transform keyframes.",
-      "Use rotationX/rotationY together with transformPerspective for true 3D (flips, card flips); plain rotation is 2D about the Z axis.",
-      "Set each keyframe's `ease` from controls.easings to shape the curve between keyframes; for oscillations (swing/pendulum) author multiple keyframes.",
-      "Prefer semanticBone targets for inherited body movement.",
-      "Prefer semanticSlot targets for variant swaps, visibility, opacity, or local offsets.",
-      `Set angleIds to ["${args.activeAngle.angleId}"] when the requested motion is only valid for this angle.`,
+      "Use rotationX/rotationY with a track-level `perspective` for true 3D (flips, card flips); plain rotation is 2D about the Z axis.",
+      "Shape feel with ease from controls.easings: a per-keyframe `ease` overrides the track `ease`, which overrides the top-level `feel`. For oscillations (swing/pendulum) author multiple keyframes.",
+      'Use "bone:" targets for inherited body movement; "slot:"/"role:" targets for variant swaps, visibility, or local offsets.',
       "Use activeAngle.bones[].pivot/restAngle/segmentLength for believable rotations around real joints; local rotation values may be less informative than the derived restAngle.",
       "Use activeAngle.ground.y and foot-slot contact hints to keep planted feet near the contact line. footLockAvailable=false means the runtime will not solve IK for you.",
       "Use activeAngle.facing.screenVector to choose the sign of forward/back movement for this view.",
@@ -111,7 +112,7 @@ export function buildMotionRequestAiOut(args: {
       "Bone hierarchy is locked FK. Child bones inherit parent motion; do not restate inherited parent motion on children.",
       "There is no bidirectional IK yet. For attached hands/feet, animate the arm/leg parent for placement and use the hand/foot only for small local roll, lag, scale, or variant changes.",
       "Do not put dx/dy on a child bone when any ancestor is also animated; that moves the pin-derived joint instead of preserving the attachment.",
-      "Use finite normalized keyframe times from 0 to 1.",
+      "Use finite normalized keyframe times from 0 to 1. Rotation past a joint's limit is automatically clamped by the editor, so stay within the listed ranges for predictable results.",
     ],
     controls: buildMotionControlSurface(),
     exampleMotion: args.exampleMotion ?? exampleMotion(args.request),
@@ -122,7 +123,7 @@ export function buildMotionRequestPrompt(args: {
   character: CharacterJson;
   activeAngle: AngleRigJson;
   request: string;
-  exampleMotion?: MotionJson;
+  exampleMotion?: MotionDraftJson;
 }): string {
   const context = buildMotionRequestAiOut(args);
   return [
@@ -134,9 +135,9 @@ export function buildMotionRequestPrompt(args: {
     `available_angles: ${context.character.angles.join(", ") || "none"}`,
     "",
     "return",
-    `kind: ${MOTION_SUGGESTION_AI_IN_KIND}`,
-    "shape: one JSON object only; nested motion.kind must be studioBoom.motion.v1",
-    "target_space: parentRelative",
+    "shape: one JSON object — { duration, tracks: [ { target, keyframes }, ... ] }",
+    "movement only: no kind/schemaVersion/id/filename/targetSpace/loop/channel/origin — the editor and rig fill those in",
+    "optional hints: name, category, feel",
     `categories: expression, gesture, full-body, camera, headTurn, custom`,
     "",
     "instructions",
@@ -452,28 +453,30 @@ function slotPromptLines(slot: MotionPromptSlotJson): string[] {
   ];
 }
 
-function motionExampleLines(motion: MotionJson): string[] {
-  return [
-    `name: ${motion.name}`,
-    `category: ${motion.category}`,
-    `duration: ${motion.duration}`,
-    `loop: ${motion.loop ? "yes" : "no"}`,
-    ...motion.tracks.flatMap((track) => [
-      `track: id=${track.id}; target=${targetText(track.target)}; channel=${track.channel}`,
-      ...track.keyframes.map(
-        (keyframe) =>
-          `  keyframe: t=${keyframe.t}; ${Object.entries(keyframe)
-            .filter(([key]) => key !== "t")
-            .map(([key, value]) => `${key}=${String(value)}`)
-            .join("; ")}`,
-      ),
-    ]),
-  ];
-}
-
-function targetText(target: MotionJson["tracks"][number]["target"]): string {
-  if (target.kind === "camera") return "camera";
-  return `${target.kind}:${target.id}${"angleId" in target ? `@${target.angleId}` : ""}`;
+function motionExampleLines(motion: MotionDraftJson): string[] {
+  const lines: string[] = [];
+  if (motion.name) lines.push(`name: ${motion.name}   (optional hint)`);
+  if (motion.category) lines.push(`category: ${motion.category}   (optional hint)`);
+  if (motion.feel) lines.push(`feel: ${motion.feel}   (optional default ease)`);
+  if (motion.duration !== undefined) lines.push(`duration: ${motion.duration}`);
+  for (const track of motion.tracks) {
+    const meta = [
+      `target=${track.target}`,
+      track.ease ? `ease=${track.ease}` : null,
+      track.perspective !== undefined ? `perspective=${track.perspective}` : null,
+    ]
+      .filter(Boolean)
+      .join("; ");
+    lines.push(`track: ${meta}`);
+    for (const keyframe of track.keyframes) {
+      const fields = Object.entries(keyframe)
+        .filter(([key]) => key !== "t")
+        .map(([key, value]) => `${key}=${String(value)}`)
+        .join("; ");
+      lines.push(`  keyframe: t=${keyframe.t}${fields ? `; ${fields}` : ""}`);
+    }
+  }
+  return lines;
 }
 
 function pointText(point: { x: number; y: number }): string {
@@ -714,23 +717,21 @@ function compactReaches(angle: AngleRigJson): MotionPromptReachJson[] | undefine
   });
 }
 
-function exampleMotion(request: string): MotionJson {
+function exampleMotion(request: string): MotionDraftJson {
   const name = request.trim() || "Example Gesture";
   return {
-    kind: "studioBoom.motion.v1",
-    schemaVersion: CHARACTER_JSON_SCHEMA_VERSION,
-    suggestedFilename: motionJsonFilename(name),
-    id: `motion:${slugifyName(name, "example")}`,
+    // name/category are optional intent hints — they prefill the editor; the editor owns the final
+    // values. Author them anyway: committing to an intent makes the movement more coherent.
     name,
     category: "gesture",
+    // feel seeds the default ease for any track/keyframe that doesn't override it.
+    feel: "smooth",
     duration: 1,
-    loop: false,
-    targetSpace: "parentRelative",
     tracks: [
       {
-        id: "track:body",
-        target: { kind: "semanticBone", id: "bone:torso" },
-        channel: "transform",
+        // Bare-string target: kind is inferred from the prefix (bone:/slot:/role:/camera).
+        // The rig owns the pivot, so no origin is authored.
+        target: "bone:torso",
         keyframes: [
           { t: 0, dy: 0 },
           { t: 0.5, dy: -12, ease: "easeOut" },
@@ -738,9 +739,8 @@ function exampleMotion(request: string): MotionJson {
         ],
       },
       {
-        id: "track:right-hand-variant",
-        target: { kind: "semanticSlot", id: "slot:rightHand" },
-        channel: "variant",
+        // A `variant` keyframe makes this a stepped pose-swap track — no `channel` needed.
+        target: "slot:rightHand",
         keyframes: [
           { t: 0, variant: "openPalm" },
           { t: 0.5, variant: "closedFist" },
@@ -748,28 +748,27 @@ function exampleMotion(request: string): MotionJson {
         ],
       },
       {
-        // Illustrative 3D "card flip" — authored as plain keyframes, not a named effect.
-        id: "track:head-cardflip",
-        target: { kind: "semanticBone", id: "bone:head" },
-        channel: "transform",
+        // 3D "card flip" — plain keyframes, not a named effect. Track-level `perspective` is
+        // expanded onto every keyframe, so you state it once.
+        target: "bone:head",
+        perspective: 800,
         keyframes: [
-          { t: 0, rotationY: 0, transformPerspective: 800, ease: "easeInOut" },
-          { t: 1, rotationY: 360, transformPerspective: 800, ease: "easeInOut" },
+          { t: 0, rotationY: 0 },
+          { t: 1, rotationY: 360 },
         ],
       },
       {
-        // Illustrative "pendulum" — oscillating 2D rotation pivoting from the top edge (originY 0).
-        id: "track:arm-pendulum",
-        target: { kind: "semanticBone", id: "bone:armR" },
-        channel: "transform",
+        // "Pendulum" — an oscillating 2D rotation. A track-level ease sets the feel for the whole
+        // swing; the rig's joint pivot is the rotation point.
+        target: "bone:armR",
+        ease: "easeInOut",
         keyframes: [
-          { t: 0, rotation: 0, originY: 0, ease: "easeInOut" },
-          { t: 0.25, rotation: 18, originY: 0, ease: "easeInOut" },
-          { t: 0.75, rotation: -18, originY: 0, ease: "easeInOut" },
-          { t: 1, rotation: 0, originY: 0, ease: "easeInOut" },
+          { t: 0, rotation: 0 },
+          { t: 0.25, rotation: 18 },
+          { t: 0.75, rotation: -18 },
+          { t: 1, rotation: 0 },
         ],
       },
     ],
-    constraints: { defaultReachPolicy: "scaleToFit" },
   };
 }

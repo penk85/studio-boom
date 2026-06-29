@@ -292,8 +292,13 @@ vi.mock("@hyperframes/core", () => {
 });
 import { createBlankCharacter, makePart } from "../character/character-utils";
 import { sampleClipKeyframedState } from "../hyperframes/keyframes";
-import type { CompositionClip, MediaAsset, MotionPreset, TextClip } from "../types";
+import type { CompositionClip, MediaAsset, MotionPreset, Project, TextClip } from "../types";
 import { deriveEditorClips } from "../types";
+import {
+  buildSceneEditingProject,
+  deriveProjectScenes,
+  deriveProjectTimelineClips,
+} from "../scenes";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -320,6 +325,35 @@ function makeMediaAsset(id: string, name = id): MediaAsset {
   };
 }
 
+function firstSceneProject(project: Project): Project {
+  const sceneId = deriveProjectScenes(project)[0]?.id ?? null;
+  return buildSceneEditingProject(project, sceneId);
+}
+
+function firstSceneClips(project: Project) {
+  return deriveEditorClips(firstSceneProject(project));
+}
+
+function currentEditingProject(): Project {
+  const state = useStudio.getState();
+  if (!state.project) throw new Error("No project in store");
+  return buildSceneEditingProject(state.project, state.activeSceneId);
+}
+
+function currentEditingHtml(): string {
+  return currentEditingProject().hf.rootHtml;
+}
+
+function currentEditingClips() {
+  return deriveEditorClips(currentEditingProject());
+}
+
+function openFirstScene(project: Project): string | null {
+  const sceneId = deriveProjectScenes(project)[0]?.id ?? null;
+  useStudio.setState({ activeSceneId: sceneId });
+  return sceneId;
+}
+
 function resetStudioStore() {
   useStudio.setState({
     project: null,
@@ -329,6 +363,7 @@ function resetStudioStore() {
     mediaAssets: new Map(),
     selectedClipId: null,
     selectedKeyframe: null,
+    activeSceneId: null,
     zoom: 60,
     historyPast: [],
     historyFuture: [],
@@ -427,9 +462,145 @@ describe("createBlankProject", () => {
     expect(p.editorMeta.tracks[3].kind).toBe("audio");
   });
 
-  it("has no clips", () => {
+  it("starts with one root scene and no scene content", () => {
     const p = createBlankProject();
-    expect(deriveEditorClips(p)).toEqual([]);
+    const scenes = deriveProjectScenes(p);
+    expect(scenes).toHaveLength(1);
+    expect(scenes[0]?.duration).toBe(5);
+    expect(firstSceneClips(p)).toEqual([]);
+  });
+
+  it("duplicates scene content as an independent composition", () => {
+    const project = createBlankProject("Scene duplicate");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+    });
+    const sourceSceneId = openFirstScene(project)!;
+
+    useStudio.getState().addClip({
+      id: "scene-title",
+      kind: "text",
+      name: "Title",
+      content: "Original title",
+      trackIndex: 1,
+      start: 0,
+      duration: 4,
+      x: 0,
+      y: 0,
+      width: 400,
+      height: 120,
+      rotation: 0,
+      opacity: 1,
+      zIndex: 0,
+    });
+
+    useStudio.getState().duplicateScene(sourceSceneId);
+
+    const state = useStudio.getState();
+    const scenes = deriveProjectScenes(state.project!);
+    expect(scenes).toHaveLength(2);
+    expect(state.activeSceneId).toBe(scenes[1]!.id);
+    expect(currentEditingHtml()).toContain("Original title");
+    expect(currentEditingHtml()).not.toContain('id="scene-title"');
+    const timelineTitles = deriveProjectTimelineClips(state.project!).filter(
+      (clip) => clip.kind === "text",
+    );
+    expect(timelineTitles).toHaveLength(2);
+    expect(timelineTitles.map((clip) => clip.start)).toEqual([scenes[0]!.start, scenes[1]!.start]);
+
+    const duplicatedTitle = currentEditingClips().find((clip) => clip.kind === "text")!;
+    useStudio.getState().updateClip(duplicatedTitle.id, { content: "Duplicate title" });
+
+    const originalScene = buildSceneEditingProject(useStudio.getState().project!, sourceSceneId);
+    expect(originalScene.hf.rootHtml).toContain("Original title");
+    expect(originalScene.hf.rootHtml).not.toContain("Duplicate title");
+  });
+
+  it("removes a scene without deleting the final remaining scene", () => {
+    const project = createBlankProject("Scene remove");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+    });
+    const firstSceneId = openFirstScene(project)!;
+
+    useStudio.getState().addClip({
+      id: "remove-me-title",
+      kind: "text",
+      name: "Remove me",
+      content: "Temporary scene",
+      trackIndex: 1,
+      start: 0,
+      duration: 4,
+      x: 0,
+      y: 0,
+      width: 400,
+      height: 120,
+      rotation: 0,
+      opacity: 1,
+      zIndex: 0,
+    });
+    const firstScene = deriveProjectScenes(useStudio.getState().project!).find(
+      (scene) => scene.id === firstSceneId,
+    )!;
+
+    useStudio.getState().addScene();
+    useStudio.getState().removeScene(firstSceneId);
+
+    let state = useStudio.getState();
+    let scenes = deriveProjectScenes(state.project!);
+    expect(scenes).toHaveLength(1);
+    expect(state.project!.hf.rootHtml).not.toContain(firstSceneId);
+    expect(state.project!.hf.compositionHtml[firstScene.compositionId]).toBeUndefined();
+    expect(state.project!.editorMeta.clips["remove-me-title"]).toBeUndefined();
+
+    const remainingSceneId = scenes[0]!.id;
+    useStudio.getState().removeScene(remainingSceneId);
+
+    state = useStudio.getState();
+    scenes = deriveProjectScenes(state.project!);
+    expect(scenes).toHaveLength(1);
+    expect(scenes[0]!.id).toBe(remainingSceneId);
+  });
+
+  it("reports scene overflow when content exceeds scene duration", () => {
+    const project = createBlankProject("Scene overflow");
+    useStudio.setState({
+      project,
+      tracks: project.editorMeta.tracks,
+    });
+    const sceneId = openFirstScene(project)!;
+
+    useStudio.getState().addClip({
+      id: "long-title",
+      kind: "text",
+      name: "Long title",
+      content: "Runs long",
+      trackIndex: 1,
+      start: 2,
+      duration: 5,
+      x: 0,
+      y: 0,
+      width: 400,
+      height: 120,
+      rotation: 0,
+      opacity: 1,
+      zIndex: 0,
+    });
+
+    let scene = deriveProjectScenes(useStudio.getState().project!).find(
+      (candidate) => candidate.id === sceneId,
+    )!;
+    expect(scene.contentEnd).toBe(7);
+    expect(scene.contentOverflow).toBe(2);
+
+    useStudio.getState().resizeScene(sceneId, 3);
+    scene = deriveProjectScenes(useStudio.getState().project!).find(
+      (candidate) => candidate.id === sceneId,
+    )!;
+    expect(scene.duration).toBe(3);
+    expect(scene.contentOverflow).toBe(4);
   });
 
   it("assigns unique ids", () => {
@@ -460,25 +631,26 @@ describe("createBlankProject", () => {
       tracks: project.editorMeta.tracks,
       mediaAssets: new Map([[asset.id, asset]]),
     });
+    openFirstScene(project);
 
     useStudio.getState().addMediaToTimeline(asset);
 
-    const rootHtml = useStudio.getState().project!.hf.rootHtml;
-    expect(rootHtml).toContain('data-hf-core="true"');
-    expect(rootHtml).toContain("gsap.timeline");
-    expect(rootHtml).toContain("window.__timelines");
-    expect(rootHtml).toContain('src="asset:media-1"');
-    expect(rootHtml).toContain('data-start="0"');
-    expect(rootHtml).toContain('data-duration="4"');
-    expect(rootHtml).toContain('data-track-index="1000"');
-    expect(rootHtml).toContain('data-x="910"');
-    expect(rootHtml).toContain('data-y="490"');
-    expect(rootHtml).toContain('data-width="100"');
-    expect(rootHtml).toContain('data-height="100"');
-    expect(rootHtml).toContain("z-index: 0");
-    expect(rootHtml).toContain("translate(910px, 490px)");
-    expect(rootHtml).not.toContain("data-end=");
-    expect(rootHtml).not.toContain("data-layer=");
+    const sceneHtml = firstSceneProject(useStudio.getState().project!).hf.rootHtml;
+    expect(sceneHtml).toContain('data-hf-core="true"');
+    expect(sceneHtml).toContain("gsap.timeline");
+    expect(sceneHtml).toContain("window.__timelines");
+    expect(sceneHtml).toContain('src="asset:media-1"');
+    expect(sceneHtml).toContain('data-start="0"');
+    expect(sceneHtml).toContain('data-duration="4"');
+    expect(sceneHtml).toContain('data-track-index="1000"');
+    expect(sceneHtml).toContain('data-x="910"');
+    expect(sceneHtml).toContain('data-y="490"');
+    expect(sceneHtml).toContain('data-width="100"');
+    expect(sceneHtml).toContain('data-height="100"');
+    expect(sceneHtml).toContain("z-index: 0");
+    expect(sceneHtml).toContain("translate(910px, 490px)");
+    expect(sceneHtml).not.toContain("data-end=");
+    expect(sceneHtml).not.toContain("data-layer=");
     expect(coreMock.generateCalls.at(-1)?.opts).toMatchObject({
       includeStyles: true,
       includeScripts: true,
@@ -493,19 +665,20 @@ describe("createBlankProject", () => {
       tracks: project.editorMeta.tracks,
       mediaAssets: new Map([[asset.id, asset]]),
     });
+    openFirstScene(project);
     useStudio.getState().addMediaToTimeline(asset);
-    const clipId = deriveEditorClips(useStudio.getState().project!)[0]!.id;
+    const clipId = firstSceneClips(useStudio.getState().project!)[0]!.id;
 
     useStudio.getState().updateClip(clipId, { volume: 0.5 });
-    let html = useStudio.getState().project!.hf.rootHtml;
+    let html = firstSceneProject(useStudio.getState().project!).hf.rootHtml;
     expect(html).toContain('data-volume="0.5"');
     expect(
-      deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clipId)!.volume,
+      firstSceneClips(useStudio.getState().project!).find((c) => c.id === clipId)!.volume,
     ).toBe(0.5);
 
     // Back to full volume removes the attribute (1 is the default).
     useStudio.getState().updateClip(clipId, { volume: 1 });
-    html = useStudio.getState().project!.hf.rootHtml;
+    html = firstSceneProject(useStudio.getState().project!).hf.rootHtml;
     expect(html).not.toContain("data-volume=");
   });
 
@@ -518,7 +691,9 @@ describe("createBlankProject", () => {
       mediaAssets: new Map([[asset.id, asset]]),
     });
     useStudio.getState().addMediaToTimeline(asset);
-    let added = deriveEditorClips(useStudio.getState().project!)[0]!;
+    let added = deriveEditorClips(useStudio.getState().project!).find(
+      (clip) => clip.kind === "audio",
+    )!;
     // Defaults: full source length, in-point 0.
     expect(added.sourceDuration).toBe(30);
     expect(added.mediaStartTime).toBe(0);
@@ -575,7 +750,7 @@ describe("createBlankProject", () => {
       zIndex: 1,
     });
 
-    const rootHtml = useStudio.getState().project!.hf.rootHtml;
+    const rootHtml = currentEditingHtml();
     const doc = new DOMParser().parseFromString(rootHtml, "text/html");
     expect(doc.getElementById("background-clip")?.getAttribute("data-track-index")).toBe("2000");
     expect(doc.getElementById("overlay-clip")?.getAttribute("data-track-index")).toBe("1000");
@@ -583,10 +758,7 @@ describe("createBlankProject", () => {
     expect(rootHtml).toContain("z-index: 1");
 
     useStudio.getState().updateClip("overlay-clip", { trackIndex: 2, laneIndex: 1 });
-    const updatedDoc = new DOMParser().parseFromString(
-      useStudio.getState().project!.hf.rootHtml,
-      "text/html",
-    );
+    const updatedDoc = new DOMParser().parseFromString(currentEditingHtml(), "text/html");
     expect(updatedDoc.getElementById("overlay-clip")?.getAttribute("data-track-index")).toBe(
       "2001",
     );
@@ -713,8 +885,8 @@ describe("createBlankProject", () => {
     useStudio.getState().addClip(clip);
 
     const state = useStudio.getState();
-    const rootHtml = state.project!.hf.rootHtml;
-    const added = deriveEditorClips(state.project!).find((c) => c.id === clip.id);
+    const rootHtml = currentEditingHtml();
+    const added = currentEditingClips().find((c) => c.id === clip.id);
 
     expect(rootHtml).toContain('data-type="text"');
     expect(rootHtml).toContain("Hello Studio");
@@ -732,8 +904,8 @@ describe("createBlankProject", () => {
     });
 
     useStudio.getState().updateClip(clip.id, { content: "Updated", x: 240 });
-    expect(useStudio.getState().project!.hf.rootHtml).toContain("Updated");
-    expect(useStudio.getState().project!.hf.rootHtml).toContain('data-x="240"');
+    expect(currentEditingHtml()).toContain("Updated");
+    expect(currentEditingHtml()).toContain('data-x="240"');
   });
 
   it("adds non-character composition clips with source html", () => {
@@ -778,8 +950,8 @@ describe("createBlankProject", () => {
     useStudio.getState().addClip(clip);
 
     const state = useStudio.getState();
-    const rootHtml = state.project!.hf.rootHtml;
-    const added = deriveEditorClips(state.project!).find((c) => c.id === clip.id);
+    const rootHtml = currentEditingHtml();
+    const added = currentEditingClips().find((c) => c.id === clip.id);
 
     expect(rootHtml).toContain('data-type="composition"');
     expect(rootHtml).toContain('data-composition-id="ai-title"');
@@ -795,11 +967,11 @@ describe("createBlankProject", () => {
     });
 
     useStudio.getState().undo();
-    expect(useStudio.getState().project!.hf.rootHtml).not.toContain("composition-1");
+    expect(currentEditingHtml()).not.toContain("composition-1");
     expect(useStudio.getState().project!.hf.compositionHtml["ai-title"]).toBeUndefined();
 
     useStudio.getState().redo();
-    expect(useStudio.getState().project!.hf.rootHtml).toContain("composition-1");
+    expect(currentEditingHtml()).toContain("composition-1");
     expect(useStudio.getState().project!.hf.compositionHtml["ai-title"]).toContain("AI block");
   });
 
@@ -840,9 +1012,9 @@ describe("createBlankProject", () => {
     });
 
     const state = useStudio.getState();
-    const added = deriveEditorClips(state.project!).find((c) => c.id === "composition-source-id");
+    const added = currentEditingClips().find((c) => c.id === "composition-source-id");
     expect(added?.compositionId).toBe("ai-source-id");
-    expect(state.project!.hf.rootHtml).toContain('data-composition-id="ai-source-id"');
+    expect(currentEditingHtml()).toContain('data-composition-id="ai-source-id"');
     expect(state.project!.hf.compositionHtml["ai-source-id"]).toContain(
       'window.__timelines["ai-source-id"]',
     );
@@ -1005,7 +1177,7 @@ describe("createBlankProject", () => {
 
     useStudio.getState().addClip(clip);
 
-    const added = deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clip.id);
+    const added = currentEditingClips().find((c) => c.id === clip.id);
     expect(added).toMatchObject({
       id: "character-1",
       kind: "composition",
@@ -1311,8 +1483,8 @@ describe("createBlankProject", () => {
     useStudio.getState().removeClip(clipId);
 
     const rootHtml = useStudio.getState().project!.hf.rootHtml;
-    expect(coreMock.generateCalls).toHaveLength(1);
-    expect(coreMock.addCalls).toBe(1);
+    expect(coreMock.generateCalls).toHaveLength(2);
+    expect(coreMock.addCalls).toBe(2);
     expect(coreMock.updateCalls).toBeGreaterThanOrEqual(1);
     expect(coreMock.removeCalls).toBe(1);
     expect(rootHtml).toContain('data-composition-duration="45"');
@@ -1335,7 +1507,7 @@ describe("createBlankProject", () => {
 
     useStudio.getState().updateClip(clipId, { x: 128, y: 96 });
 
-    const rootHtml = useStudio.getState().project!.hf.rootHtml;
+    const rootHtml = currentEditingHtml();
     expect(coreMock.updateCalls).toBeGreaterThanOrEqual(1);
     expect(rootHtml).toContain('data-x="128"');
     expect(rootHtml).toContain('data-y="96"');
@@ -1358,7 +1530,7 @@ describe("createBlankProject", () => {
       .upsertClipKeyframe(clipId, "position", 1, { x: 150, y: 125 });
 
     const state = useStudio.getState();
-    const rootHtml = state.project!.hf.rootHtml;
+    const rootHtml = currentEditingHtml();
     expect(keyframeId).toBeTruthy();
     expect(rootHtml).toContain("data-keyframes=");
     expect(rootHtml).toContain("data-studio-timeline");
@@ -1383,16 +1555,12 @@ describe("createBlankProject", () => {
 
     useStudio.getState().addMediaToTimeline(asset);
     const clipId = useStudio.getState().selectedClipId!;
-    const baseClip = deriveEditorClips(useStudio.getState().project!).find(
-      (candidate) => candidate.id === clipId,
-    )!;
+    const baseClip = currentEditingClips().find((candidate) => candidate.id === clipId)!;
 
     const keyframeId = useStudio
       .getState()
       .upsertClipKeyframe(clipId, "position", 1, { x: baseClip.x, y: baseClip.y - 300 });
-    const clipWithPath = deriveEditorClips(useStudio.getState().project!).find(
-      (candidate) => candidate.id === clipId,
-    )!;
+    const clipWithPath = currentEditingClips().find((candidate) => candidate.id === clipId)!;
     const storedPosition = clipWithPath.keyframes.find(
       (keyframe) => keyframe.id === keyframeId,
     )!.properties;
@@ -1401,9 +1569,7 @@ describe("createBlankProject", () => {
 
     useStudio.getState().updateClip(clipId, { x: baseClip.x + 400, y: baseClip.y });
 
-    const movedClip = deriveEditorClips(useStudio.getState().project!).find(
-      (candidate) => candidate.id === clipId,
-    )!;
+    const movedClip = currentEditingClips().find((candidate) => candidate.id === clipId)!;
     const movedKeyframe = movedClip.keyframes.find((keyframe) => keyframe.id === keyframeId);
     const movedEndState = sampleClipKeyframedState(movedClip, 1);
 
@@ -1412,7 +1578,7 @@ describe("createBlankProject", () => {
       x: baseClip.x + 400,
       y: baseClip.y - 300,
     });
-    expect(useStudio.getState().project!.hf.rootHtml).toContain(
+    expect(currentEditingHtml()).toContain(
       `tl.to("#${clipId}", { x: ${baseClip.x + 400}, y: ${baseClip.y - 300}, duration: 1 }, 0);`,
     );
   });
@@ -1472,13 +1638,13 @@ describe("createBlankProject", () => {
     const selection = useStudio.getState().addClipMotionStep(clipId, 0.5);
 
     const state = useStudio.getState();
-    const rootHtml = state.project!.hf.rootHtml;
+    const rootHtml = currentEditingHtml();
     expect(selection).toMatchObject({ clipId, property: "position" });
     expect(rootHtml).toContain("data-keyframes=");
     expect(rootHtml).toContain("data-motion-steps=");
     expect(state.project!.editorMeta.clips[clipId]).not.toHaveProperty("motionSteps");
 
-    const clip = deriveEditorClips(state.project!).find((candidate) => candidate.id === clipId);
+    const clip = currentEditingClips().find((candidate) => candidate.id === clipId);
     expect(clip?.motionSteps).toHaveLength(1);
     expect(clip?.motionSteps[0]).toMatchObject({
       label: "Motion",
@@ -1491,28 +1657,24 @@ describe("createBlankProject", () => {
     ]);
 
     useStudio.getState().renameClipMotionStep(clipId, clip!.motionSteps[0]!.id, "Hero glide");
-    const namedClip = deriveEditorClips(useStudio.getState().project!).find(
-      (candidate) => candidate.id === clipId,
-    );
+    const namedClip = currentEditingClips().find((candidate) => candidate.id === clipId);
     expect(namedClip?.motionSteps[0]).toMatchObject({
       name: "Hero glide",
       label: "Hero glide",
     });
-    expect(useStudio.getState().project!.hf.rootHtml).toContain("Hero glide");
+    expect(currentEditingHtml()).toContain("Hero glide");
 
     const checkpointSelection = useStudio
       .getState()
       .addClipMotionCheckpoint(clipId, namedClip!.motionSteps[0]!.id, 1);
-    const checkpointClip = deriveEditorClips(useStudio.getState().project!).find(
-      (candidate) => candidate.id === clipId,
-    );
+    const checkpointClip = currentEditingClips().find((candidate) => candidate.id === clipId);
     expect(checkpointSelection).toMatchObject({ clipId, property: "position" });
     expect(
       checkpointClip?.motionSteps[0]?.checkpoints.map((checkpoint) => checkpoint.label),
     ).toEqual(["Begin", "Point 1", "End"]);
 
     useStudio.getState().removeClipMotionStep(clipId, checkpointClip!.motionSteps[0]!.id);
-    const removedHtml = useStudio.getState().project!.hf.rootHtml;
+    const removedHtml = currentEditingHtml();
     expect(removedHtml).not.toContain("data-keyframes=");
     expect(removedHtml).not.toContain("data-motion-steps=");
     expect(removedHtml).toContain("data-studio-timeline");
@@ -1530,13 +1692,13 @@ describe("createBlankProject", () => {
     useStudio.getState().addMediaToTimeline(asset);
     const clipId = useStudio.getState().selectedClipId!;
     useStudio.getState().upsertClipKeyframe(clipId, "opacity", 1, { opacity: 0.25 });
-    expect(useStudio.getState().project!.hf.rootHtml).toContain("data-keyframes=");
+    expect(currentEditingHtml()).toContain("data-keyframes=");
 
     useStudio.getState().undo();
-    expect(useStudio.getState().project!.hf.rootHtml).not.toContain("data-keyframes=");
+    expect(currentEditingHtml()).not.toContain("data-keyframes=");
 
     useStudio.getState().redo();
-    expect(useStudio.getState().project!.hf.rootHtml).toContain("data-keyframes=");
+    expect(currentEditingHtml()).toContain("data-keyframes=");
   });
 
   it("keeps keyframe timing relative when clip start changes and clamps on trim", () => {
@@ -1555,12 +1717,12 @@ describe("createBlankProject", () => {
       .upsertClipKeyframe(clipId, "rotation", 3, { rotation: 45 });
 
     useStudio.getState().updateClip(clipId, { start: 2 });
-    expect(useStudio.getState().project!.hf.rootHtml).toContain(
+    expect(currentEditingHtml()).toContain(
       'tl.to("#' + clipId + '", { rotation: 45, duration: 3 }, 2);',
     );
 
     useStudio.getState().updateClip(clipId, { duration: 1 });
-    const clip = deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clipId);
+    const clip = currentEditingClips().find((c) => c.id === clipId);
     expect(clip?.keyframes).toEqual(
       expect.arrayContaining([{ id: keyframeId!, time: 1, properties: { rotation: 45 } }]),
     );
@@ -1581,7 +1743,7 @@ describe("createBlankProject", () => {
 
     useStudio.getState().updateClip(clipId, { width: 320, height: 180 });
 
-    const rootHtml = useStudio.getState().project!.hf.rootHtml;
+    const rootHtml = currentEditingHtml();
     expect(coreMock.updateCalls).toBeGreaterThanOrEqual(1);
     expect(rootHtml).toContain('data-source-width="320"');
     expect(rootHtml).toContain('data-source-height="180"');
@@ -1603,8 +1765,8 @@ describe("createBlankProject", () => {
 
     useStudio.getState().updateClip(clipId, { rotation: 18 });
 
-    const rootHtml = useStudio.getState().project!.hf.rootHtml;
-    const clip = deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clipId);
+    const rootHtml = currentEditingHtml();
+    const clip = currentEditingClips().find((c) => c.id === clipId);
     expect(coreMock.updateCalls).toBeGreaterThanOrEqual(1);
     expect(rootHtml).toContain('data-rotation="18"');
     expect(rootHtml).toContain("rotate(18deg)");
@@ -1623,6 +1785,7 @@ describe("createBlankProject", () => {
         [frontAsset.id, frontAsset],
       ]),
     });
+    openFirstScene(project);
 
     useStudio.getState().addMediaToTimeline(backAsset);
     const backClipId = useStudio.getState().selectedClipId!;
@@ -1631,10 +1794,10 @@ describe("createBlankProject", () => {
 
     useStudio.getState().bringClipToFront(backClipId);
 
-    const clips = deriveEditorClips(useStudio.getState().project!);
+    const clips = firstSceneClips(useStudio.getState().project!);
     const backClip = clips.find((clip) => clip.id === backClipId);
     const frontClip = clips.find((clip) => clip.id === frontClipId);
-    const rootHtml = useStudio.getState().project!.hf.rootHtml;
+    const rootHtml = firstSceneProject(useStudio.getState().project!).hf.rootHtml;
 
     expect(backClip?.zIndex).toBe(1);
     expect(frontClip?.zIndex).toBe(0);
@@ -1643,7 +1806,7 @@ describe("createBlankProject", () => {
     expect(rootHtml).toContain("z-index: 0");
 
     useStudio.getState().undo();
-    const undone = deriveEditorClips(useStudio.getState().project!);
+    const undone = firstSceneClips(useStudio.getState().project!);
     expect(undone.find((clip) => clip.id === backClipId)?.zIndex).toBe(0);
     expect(undone.find((clip) => clip.id === frontClipId)?.zIndex).toBe(1);
   });
@@ -1659,18 +1822,18 @@ describe("createBlankProject", () => {
 
     useStudio.getState().addMediaToTimeline(asset);
     const clipId = useStudio.getState().selectedClipId!;
-    const beforeUpdate = useStudio.getState().project!.hf.rootHtml;
+    const beforeUpdate = currentEditingHtml();
 
     useStudio.getState().updateClip(clipId, { x: 128, y: 96 });
-    expect(useStudio.getState().project!.hf.rootHtml).toContain('data-x="128"');
-    expect(useStudio.getState().project!.hf.rootHtml).toContain('data-y="96"');
+    expect(currentEditingHtml()).toContain('data-x="128"');
+    expect(currentEditingHtml()).toContain('data-y="96"');
 
     useStudio.getState().undo();
-    expect(useStudio.getState().project!.hf.rootHtml).toBe(beforeUpdate);
+    expect(currentEditingHtml()).toBe(beforeUpdate);
 
     useStudio.getState().redo();
-    expect(useStudio.getState().project!.hf.rootHtml).toContain('data-x="128"');
-    expect(useStudio.getState().project!.hf.rootHtml).toContain('data-y="96"');
+    expect(currentEditingHtml()).toContain('data-x="128"');
+    expect(currentEditingHtml()).toContain('data-y="96"');
   });
 
   it("groups interactive timeline updates behind one explicit checkpoint", () => {
@@ -1684,7 +1847,7 @@ describe("createBlankProject", () => {
 
     useStudio.getState().addMediaToTimeline(asset);
     const clipId = useStudio.getState().selectedClipId!;
-    const beforeDrag = useStudio.getState().project!.hf.rootHtml;
+    const beforeDrag = currentEditingHtml();
     const initialHistoryCount = useStudio.getState().historyPast.length;
 
     useStudio.getState().checkpointHistory();
@@ -1692,10 +1855,10 @@ describe("createBlankProject", () => {
     useStudio.getState().updateClip(clipId, { start: 2 }, { history: false });
 
     expect(useStudio.getState().historyPast).toHaveLength(initialHistoryCount + 1);
-    expect(useStudio.getState().project!.hf.rootHtml).toContain('data-start="2"');
+    expect(currentEditingHtml()).toContain('data-start="2"');
 
     useStudio.getState().undo();
-    expect(useStudio.getState().project!.hf.rootHtml).toBe(beforeDrag);
+    expect(currentEditingHtml()).toBe(beforeDrag);
   });
 });
 
@@ -1884,21 +2047,17 @@ describe("layer locking", () => {
       mediaAssets: new Map([[asset.id, asset]]),
     });
     useStudio.getState().addMediaToTimeline(asset, 0);
-    const clipId = deriveEditorClips(useStudio.getState().project!)[0]!.id;
+    const clipId = currentEditingClips()[0]!.id;
 
-    expect(deriveEditorClips(useStudio.getState().project!)[0]!.locked).toBe(false);
+    expect(currentEditingClips()[0]!.locked).toBe(false);
 
     useStudio.getState().toggleClipLock(clipId);
     expect(useStudio.getState().project!.editorMeta.clips[clipId]?.locked).toBe(true);
-    expect(
-      deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clipId)!.locked,
-    ).toBe(true);
+    expect(currentEditingClips().find((c) => c.id === clipId)!.locked).toBe(true);
     expect(useStudio.getState().isClipLocked(clipId)).toBe(true);
 
     useStudio.getState().toggleClipLock(clipId);
-    expect(
-      deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clipId)!.locked,
-    ).toBe(false);
+    expect(currentEditingClips().find((c) => c.id === clipId)!.locked).toBe(false);
     expect(useStudio.getState().isClipLocked(clipId)).toBe(false);
   });
 
@@ -1911,18 +2070,14 @@ describe("layer locking", () => {
       mediaAssets: new Map([[asset.id, asset]]),
     });
     useStudio.getState().addMediaToTimeline(asset, 0);
-    const clip = deriveEditorClips(useStudio.getState().project!)[0]!;
+    const clip = currentEditingClips()[0]!;
     expect(clip.locked).toBe(false);
 
     useStudio.getState().setTrackLock(clip.trackIndex, true);
-    expect(
-      deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clip.id)!.locked,
-    ).toBe(true);
+    expect(currentEditingClips().find((c) => c.id === clip.id)!.locked).toBe(true);
     expect(useStudio.getState().isClipLocked(clip.id)).toBe(true);
 
     useStudio.getState().setTrackLock(clip.trackIndex, false);
-    expect(
-      deriveEditorClips(useStudio.getState().project!).find((c) => c.id === clip.id)!.locked,
-    ).toBe(false);
+    expect(currentEditingClips().find((c) => c.id === clip.id)!.locked).toBe(false);
   });
 });

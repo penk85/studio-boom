@@ -711,6 +711,11 @@ export interface CharacterPreset {
   mouthRig?: MouthRig;
   /** Preferred mouth slot render strategy. Defaults to uploaded/generated variants when present. */
   mouthStyle?: "rig" | "images";
+  /**
+   * Generator revision for built-in/seeded characters. Lets the seeder detect when its generated
+   * art has changed and replace an out-of-date persisted copy. Absent on user characters.
+   */
+  builtinVersion?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -905,7 +910,12 @@ export interface AppliedMotion {
 
 export type NativeClipKind = "image" | "audio" | "video" | "text" | "composition";
 
-export type CompositionKind = "ai-block" | "registry-block" | "character" | "user-composition";
+export type CompositionKind =
+  | "ai-block"
+  | "registry-block"
+  | "character"
+  | "scene"
+  | "user-composition";
 
 export interface VoiceLineMeta {
   text: string;
@@ -983,6 +993,23 @@ export interface ClipEditorMeta {
 
 export type { ClipKeyframeProperty, ClipMotionStep, ClipMotionStepMeta };
 
+export interface SceneCameraMeta {
+  mode: "none" | "parallax2d";
+  keyframes?: CameraKeyframe[];
+}
+
+/** Editor-only scene metadata. The canonical scene timing lives on the scene clip. */
+export interface SceneMeta {
+  /** The root timeline composition clip id for this scene. */
+  id: ID;
+  compositionId: ID;
+  name?: string;
+  thumbnail?: string;
+  backgroundColor?: string;
+  camera?: SceneCameraMeta;
+  collapsed?: boolean;
+}
+
 export interface ClipKeyframeSelection {
   clipId: string;
   keyframeId: string;
@@ -1003,6 +1030,7 @@ export interface TrackMeta {
 export interface ProjectEditorMeta {
   tracks: TrackMeta[];
   clips: Record<string, ClipEditorMeta>; // clipId → authoring state
+  scenes?: SceneMeta[];
 }
 
 // ─── Project ──────────────────────────────────────────────────────────────────

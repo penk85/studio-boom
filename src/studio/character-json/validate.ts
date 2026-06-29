@@ -582,7 +582,13 @@ export function validateMotionJsonForAngle(
     const target = track.target as MotionTargetJson;
     const resolved = resolveMotionTarget(target, angleRig);
     if (!resolved.ok) {
-      issues.error(`$.tracks[${index}].target`, resolved.message);
+      // A target this character doesn't have is not a failure of the action — it just doesn't
+      // apply here. Warn and skip the track so the rest of the action still loads (this is what
+      // makes body parts genuinely optional). The keypose builder skips the same unresolved tracks.
+      issues.warn(
+        `$.tracks[${index}].target`,
+        `${resolved.message} This track is skipped for this character.`,
+      );
       continue;
     }
     if (track.channel === "variant" && resolved.target.kind === "angleSlot") {
@@ -595,9 +601,11 @@ export function validateMotionJsonForAngle(
           variants.size > 0 &&
           !variants.has(keyframe.variant)
         ) {
-          issues.error(
+          // The slot exists but lacks this pose variant — fall back to the slot's resolvable state
+          // rather than rejecting the whole action.
+          issues.warn(
             `$.tracks[${index}].keyframes[${kfIndex}].variant`,
-            `Variant "${keyframe.variant}" is not defined on slot "${resolved.target.id}".`,
+            `Variant "${keyframe.variant}" is not defined on slot "${resolved.target.id}"; this keyframe falls back to the slot's default.`,
           );
         }
       }

@@ -2,6 +2,8 @@
 import {
   ChevronDown,
   ChevronRight,
+  Copy,
+  GripVertical,
   Lock,
   Mic2,
   Minus,
@@ -9,6 +11,7 @@ import {
   SkipBack,
   SlidersHorizontal,
   TriangleAlert,
+  Trash2,
   Unlock,
   Volume2,
   VolumeX,
@@ -20,6 +23,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type RefObject,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
@@ -59,7 +63,13 @@ import type {
   MediaAsset,
   Project,
 } from "../types";
-import { characterSpeeches, deriveEditorClips, isCharacterCompositionClip } from "../types";
+import {
+  deriveProjectScenes,
+  deriveProjectTimelineClips,
+  type ProjectScene,
+  type ProjectTimelineClip,
+} from "../scenes";
+import { characterSpeeches, isCharacterCompositionClip } from "../types";
 import { fmtTime } from "../timeline-utils";
 
 const TRACK_HEIGHT = 44;
@@ -74,16 +84,23 @@ const CLIP_DRAG_THRESHOLD_PX = 4;
 const SEEK_DRAG_EDGE_ZONE_PX = 40;
 const SEEK_DRAG_MAX_SCROLL_PX = 12;
 
+type TimelineCharacterClip = ProjectTimelineClip & CharacterCompositionClip;
+
 interface TimelineProps {
   togglePlay: () => void;
   seek: (time: number) => void;
 }
 
 export function Timeline({ togglePlay, seek }: TimelineProps) {
-  const project = useStudio((s) => s.project);
+  const rootProject = useStudio((s) => s.project);
+  const activeSceneId = useStudio((s) => s.activeSceneId);
+  const project = rootProject;
   const timelineReady = usePlayerStore((s) => s.timelineReady);
   const currentTime = usePlayerStore((s) => s.currentTime);
-  const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
+  const clips = useMemo(
+    () => (rootProject ? deriveProjectTimelineClips(rootProject) : []),
+    [rootProject],
+  );
   const tracks = useStudio((s) => s.tracks);
   const zoom = useStudio((s) => s.zoom);
   const setZoom = useStudio((s) => s.setZoom);
@@ -91,6 +108,12 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const selectClip = useStudio((s) => s.selectClip);
   const updateClip = useStudio((s) => s.updateClip);
   const removeClip = useStudio((s) => s.removeClip);
+  const setActiveScene = useStudio((s) => s.setActiveScene);
+  const addScene = useStudio((s) => s.addScene);
+  const duplicateScene = useStudio((s) => s.duplicateScene);
+  const removeScene = useStudio((s) => s.removeScene);
+  const moveScene = useStudio((s) => s.moveScene);
+  const resizeScene = useStudio((s) => s.resizeScene);
   const addLane = useStudio((s) => s.addLane);
   const setTrackLock = useStudio((s) => s.setTrackLock);
   const removeLane = useStudio((s) => s.removeLane);
@@ -109,13 +132,17 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
 
   const playheadRef = useRef<HTMLDivElement>(null);
   const timeDisplayRef = useRef<HTMLSpanElement>(null);
+  const sceneScrollerRef = useRef<HTMLDivElement>(null);
+  const timelineTimeOffsetRef = useRef(0);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
 
   useEffect(() => {
     const update = (t: number) => {
-      if (playheadRef.current) playheadRef.current.style.left = `${t * zoomRef.current}px`;
-      if (timeDisplayRef.current) timeDisplayRef.current.textContent = fmtTime(t);
+      const projectTime = t + timelineTimeOffsetRef.current;
+      if (playheadRef.current)
+        playheadRef.current.style.left = `${projectTime * zoomRef.current}px`;
+      if (timeDisplayRef.current) timeDisplayRef.current.textContent = fmtTime(projectTime);
     };
     const unsub = liveTime.subscribe(update);
     update(usePlayerStore.getState().currentTime);
@@ -141,14 +168,57 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
     return merged;
   }, [presets, storePresetMap]);
   const mediaAssets = useStudio((s) => s.mediaAssets);
-  const mediaHealth = useHfMediaHealth(project?.hf);
-  const projectDuration = project?.hf.duration ?? 0;
+  const mediaHealth = useHfMediaHealth(rootProject?.hf);
+  const projectDuration = rootProject?.hf.duration ?? 0;
+  const scenes = useMemo(
+    () => (rootProject ? deriveProjectScenes(rootProject) : []),
+    [rootProject],
+  );
+  const activeSceneStart = scenes.find((scene) => scene.id === activeSceneId)?.start ?? 0;
+  timelineTimeOffsetRef.current = activeSceneStart;
+  const projectCurrentTime = currentTime + activeSceneStart;
+  useEffect(() => {
+    if (playheadRef.current) playheadRef.current.style.left = `${projectCurrentTime * zoom}px`;
+    if (timeDisplayRef.current) timeDisplayRef.current.textContent = fmtTime(projectCurrentTime);
+  }, [projectCurrentTime, zoom]);
   const compositionOutlinesByClipId = useMemo(
     () =>
-      project
-        ? buildCompositionOutlines(project, clips)
+      rootProject
+        ? buildCompositionOutlines(rootProject, clips)
         : new Map<string, CompositionOutlineItem[]>(),
-    [project, clips],
+    [rootProject, clips],
+  );
+
+  const seekProjectTime = useCallback(
+    (projectTime: number) => {
+      const boundedTime = Math.max(0, Math.min(projectDuration, projectTime));
+      const scene =
+        scenes.find(
+          (candidate) =>
+            boundedTime >= candidate.start &&
+            boundedTime < candidate.start + candidate.duration - 0.0001,
+        ) ??
+        [...scenes]
+          .reverse()
+          .find(
+            (candidate) =>
+              boundedTime >= candidate.start && boundedTime <= candidate.start + candidate.duration,
+          );
+      if (!scene) {
+        setActiveScene(null);
+        timelineTimeOffsetRef.current = 0;
+        liveTime.notify(boundedTime);
+        seek(boundedTime);
+        return;
+      }
+
+      const localTime = Math.max(0, Math.min(scene.duration, boundedTime - scene.start));
+      if (activeSceneId !== scene.id) setActiveScene(scene.id);
+      timelineTimeOffsetRef.current = scene.start;
+      liveTime.notify(localTime);
+      seek(localTime);
+    },
+    [activeSceneId, projectDuration, scenes, seek, setActiveScene],
   );
 
   const seekFromClientX = useCallback(
@@ -158,10 +228,9 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
       const rect = scroller.getBoundingClientRect();
       const x = clientX - rect.left + scroller.scrollLeft;
       const nextTime = Math.max(0, Math.min(projectDuration, x / Math.max(zoomRef.current, 1)));
-      liveTime.notify(nextTime);
-      seek(nextTime);
+      seekProjectTime(nextTime);
     },
-    [projectDuration, seek, timelineReady],
+    [projectDuration, seekProjectTime, timelineReady],
   );
 
   const stepSeekDragAutoScroll = useCallback(() => {
@@ -249,10 +318,10 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
 
   useEffect(() => stopSeekDrag, [stopSeekDrag]);
 
-  if (!project) return null;
-  const totalWidth = Math.max(1200, project.hf.duration * zoom);
+  if (!project || !rootProject) return null;
+  const totalWidth = Math.max(1200, rootProject.hf.duration * zoom);
   const timelineClips = clips;
-  const compositionSourceErrorsByClipId = buildCompositionSourceErrors(project, timelineClips);
+  const compositionSourceErrorsByClipId = buildCompositionSourceErrors(rootProject, timelineClips);
   const expandedCompositionOutlines = clips.filter(
     (clip) =>
       clip.kind === "composition" &&
@@ -273,7 +342,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
       expandedClipIds.has(clip.id),
   );
   const expandedCharacters = clips.filter(
-    (clip): clip is CharacterCompositionClip =>
+    (clip): clip is TimelineCharacterClip =>
       isCharacterCompositionClip(clip) && expandedClipIds.has(clip.id),
   );
   const expandedLayouts = new Map<string, ExpandedClipLayout>(
@@ -299,6 +368,25 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
     timelineClips.some(
       (clip) => clip.trackIndex === trackIndex && (clip.laneIndex ?? 0) === laneIndex,
     );
+  const activateTimelineClip = (clip: ProjectTimelineClip) => {
+    if (activeSceneId !== clip.sceneId) setActiveScene(clip.sceneId);
+  };
+  const updateTimelineClip = (
+    clip: ProjectTimelineClip,
+    patch: Partial<AnyClip>,
+    options?: ProjectMutationOptions,
+  ) => {
+    activateTimelineClip(clip);
+    updateClip(clip.id, toSceneLocalClipPatch(clip, patch), options);
+  };
+  const removeTimelineClip = (clip: ProjectTimelineClip) => {
+    activateTimelineClip(clip);
+    removeClip(clip.id);
+  };
+  const selectTimelineClip = (clip: ProjectTimelineClip) => {
+    activateTimelineClip(clip);
+    selectClip(clip.id);
+  };
   const toggleExpandedClip = (id: string) => {
     setExpandedClipIds((prev) => {
       const next = new Set(prev);
@@ -313,6 +401,18 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
     const headerTracks = headerTracksRef.current;
     if (!scroller || !headerTracks) return;
     headerTracks.style.transform = `translateY(${-scroller.scrollTop}px)`;
+    if (
+      sceneScrollerRef.current &&
+      Math.abs(sceneScrollerRef.current.scrollLeft - scroller.scrollLeft) > 0.5
+    ) {
+      sceneScrollerRef.current.scrollLeft = scroller.scrollLeft;
+    }
+  };
+
+  const syncTimelineScrollLeft = (scrollLeft: number) => {
+    const scroller = scrollerRef.current;
+    if (!scroller || Math.abs(scroller.scrollLeft - scrollLeft) <= 0.5) return;
+    scroller.scrollLeft = scrollLeft;
   };
 
   return (
@@ -334,7 +434,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
           <span className="text-muted-foreground">
             <span ref={timeDisplayRef}>{fmtTime(0)}</span>
             {" / "}
-            {fmtTime(project.hf.duration)}
+            {fmtTime(rootProject.hf.duration)}
           </span>
           <span className="text-muted-foreground">Zoom</span>
           <input
@@ -347,6 +447,22 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
           />
         </div>
       </div>
+
+      <SceneStrip
+        scenes={scenes}
+        activeSceneId={activeSceneId}
+        zoom={zoom}
+        scrollRef={sceneScrollerRef}
+        onScrollLeft={syncTimelineScrollLeft}
+        onProjectView={() => setActiveScene(null)}
+        onSelectScene={(sceneId) => setActiveScene(sceneId)}
+        onAddScene={addScene}
+        onDuplicateScene={duplicateScene}
+        onRemoveScene={removeScene}
+        onMoveScene={moveScene}
+        onResizeScene={resizeScene}
+        onHistoryCheckpoint={checkpointHistory}
+      />
 
       {/* Track headers + tracks */}
       <div className="flex min-h-0 flex-1">
@@ -484,8 +600,10 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
               className="sticky top-0 z-10 border-b border-border bg-panel-2"
               style={{ height: RULER_HEIGHT }}
             >
-              <Ruler duration={project.hf.duration} zoom={zoom} />
+              <Ruler duration={rootProject.hf.duration} zoom={zoom} />
             </div>
+
+            <SceneBoundaryOverlay scenes={scenes} zoom={zoom} top={RULER_HEIGHT} />
 
             {/* Tracks */}
             {tracks.map((t, i) => {
@@ -533,16 +651,16 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                           zoom={zoom}
                           selected={c.id === selectedId}
                           tracks={tracks.length}
-                          duration={project.hf.duration}
+                          duration={rootProject.hf.duration}
                           laneTops={laneTops}
                           top={laneTop + 4}
                           presetMap={presetMap}
                           expanded={expandedClipIds.has(c.id)}
                           onToggleExpanded={() => toggleExpandedClip(c.id)}
-                          onSelect={() => selectClip(c.id)}
-                          onChange={(p, options) => updateClip(c.id, p, options)}
+                          onSelect={() => selectTimelineClip(c)}
+                          onChange={(p, options) => updateTimelineClip(c, p, options)}
                           onHistoryCheckpoint={checkpointHistory}
-                          onDelete={() => removeClip(c.id)}
+                          onDelete={() => removeTimelineClip(c)}
                         />
                       );
                     })}
@@ -553,42 +671,54 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                         clip={row.clip}
                         zoom={zoom}
                         top={row.top}
-                        currentTime={currentTime}
+                        currentTime={projectCurrentTime}
                         selectedKeyframe={selectedKeyframe}
-                        onSelectClip={() => selectClip(row.clip.id)}
+                        onSelectClip={() => selectTimelineClip(row.clip)}
                         onSelectEndpoint={(selection, time) => {
+                          activateTimelineClip(row.clip);
                           selectKeyframe(selection);
                           seek(row.clip.start + time);
                         }}
                         onAddMotion={(time) => {
+                          activateTimelineClip(row.clip);
                           const selection = addClipMotionStep(row.clip.id, time);
                           if (selection) {
                             selectKeyframe(selection);
-                            const nextClip = deriveEditorClips(useStudio.getState().project!).find(
-                              (candidate) => candidate.id === row.clip.id,
-                            );
+                            const state = useStudio.getState();
+                            const nextProject = state.project;
+                            const nextClip = nextProject
+                              ? deriveProjectTimelineClips(nextProject).find(
+                                  (candidate) => candidate.id === row.clip.id,
+                                )
+                              : null;
                             const keyframe = nextClip?.keyframes.find(
                               (candidate) => candidate.id === selection.keyframeId,
                             );
                             if (keyframe) seek(row.clip.start + keyframe.time);
                           }
                         }}
-                        onMoveMotion={(motionId, patch) =>
-                          moveClipMotionStep(row.clip.id, motionId, patch, { history: false })
-                        }
+                        onMoveMotion={(motionId, patch) => {
+                          activateTimelineClip(row.clip);
+                          moveClipMotionStep(row.clip.id, motionId, patch, { history: false });
+                        }}
                         onAddCheckpoint={(motionId, time) => {
+                          activateTimelineClip(row.clip);
                           const selection = addClipMotionCheckpoint(row.clip.id, motionId, time);
                           if (selection) {
                             selectKeyframe(selection);
                             seek(row.clip.start + time);
                           }
                         }}
-                        onMoveCheckpoint={(motionId, checkpointId, time) =>
+                        onMoveCheckpoint={(motionId, checkpointId, time) => {
+                          activateTimelineClip(row.clip);
                           moveClipMotionCheckpoint(row.clip.id, motionId, checkpointId, time, {
                             history: false,
-                          })
-                        }
-                        onRemoveMotion={(motionId) => removeClipMotionStep(row.clip.id, motionId)}
+                          });
+                        }}
+                        onRemoveMotion={(motionId) => {
+                          activateTimelineClip(row.clip);
+                          removeClipMotionStep(row.clip.id, motionId);
+                        }}
                         onSeekLocal={(time) => seek(row.clip.start + time)}
                         onHistoryCheckpoint={checkpointHistory}
                       />
@@ -602,7 +732,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                         outline={row.outline}
                         zoom={zoom}
                         top={row.top}
-                        onSelect={() => selectClip(row.clip.id)}
+                        onSelect={() => selectTimelineClip(row.clip)}
                       />
                     )),
                   )}
@@ -615,23 +745,29 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                         top={row.top}
                         layout={row.layout}
                         selectedMotionId={selectedMotionId}
-                        onSelect={() => selectClip(row.clip.id)}
+                        onSelect={() => selectTimelineClip(row.clip)}
                         onSelectMotion={setSelectedMotionId}
                         onChange={(motions) =>
-                          updateClip(row.clip.id, {
+                          updateTimelineClip(row.clip, {
                             character: { ...row.clip.character, motions },
                           } as Partial<CompositionClip>)
                         }
-                        onMoveVoice={(speechId, start, options) =>
-                          moveSpeech(row.clip.id, speechId, start, options)
-                        }
-                        onTrimVoice={(speechId, patch, options) =>
-                          trimSpeech(row.clip.id, speechId, patch, options)
-                        }
-                        onOpenVoiceSettings={(speechId) =>
-                          openSpeechSettings(row.clip.id, speechId)
-                        }
-                        onRemoveVoice={(speechId) => removeSpeech(row.clip.id, speechId)}
+                        onMoveVoice={(speechId, start, options) => {
+                          activateTimelineClip(row.clip);
+                          moveSpeech(row.clip.id, speechId, start, options);
+                        }}
+                        onTrimVoice={(speechId, patch, options) => {
+                          activateTimelineClip(row.clip);
+                          trimSpeech(row.clip.id, speechId, patch, options);
+                        }}
+                        onOpenVoiceSettings={(speechId) => {
+                          activateTimelineClip(row.clip);
+                          openSpeechSettings(row.clip.id, speechId);
+                        }}
+                        onRemoveVoice={(speechId) => {
+                          activateTimelineClip(row.clip);
+                          removeSpeech(row.clip.id, speechId);
+                        }}
                         onVoiceHistoryCheckpoint={checkpointHistory}
                         createMotionId={uid}
                         presetMap={presetMap}
@@ -701,6 +837,288 @@ function Ruler({ duration, zoom }: { duration: number; zoom: number }) {
   );
 }
 
+function SceneBoundaryOverlay({
+  scenes,
+  zoom,
+  top,
+}: {
+  scenes: ProjectScene[];
+  zoom: number;
+  top: number;
+}) {
+  return (
+    <div
+      aria-hidden="true"
+      className="pointer-events-none absolute bottom-0 left-0 right-0 z-30"
+      style={{ top }}
+    >
+      {scenes.slice(1).map((scene) => (
+        <div
+          key={scene.id}
+          className="absolute bottom-0 top-0 border-l border-primary/80"
+          style={{
+            left: scene.start * zoom,
+            boxShadow: "0 0 0 1px color-mix(in oklch, var(--color-primary) 24%, transparent)",
+          }}
+        >
+          <span className="absolute left-1 top-1 rounded-sm bg-panel/95 px-1 py-0.5 text-[10px] font-medium text-foreground shadow">
+            {scene.name || `Scene ${scene.index + 1}`}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SceneStrip({
+  scenes,
+  activeSceneId,
+  zoom,
+  scrollRef,
+  onScrollLeft,
+  onProjectView,
+  onSelectScene,
+  onAddScene,
+  onDuplicateScene,
+  onRemoveScene,
+  onMoveScene,
+  onResizeScene,
+  onHistoryCheckpoint,
+}: {
+  scenes: ProjectScene[];
+  activeSceneId: string | null;
+  zoom: number;
+  scrollRef: RefObject<HTMLDivElement | null>;
+  onScrollLeft: (scrollLeft: number) => void;
+  onProjectView: () => void;
+  onSelectScene: (sceneId: string) => void;
+  onAddScene: () => void;
+  onDuplicateScene: (sceneId: string) => void;
+  onRemoveScene: (sceneId: string) => void;
+  onMoveScene: (sceneId: string, toIndex: number) => void;
+  onResizeScene: (sceneId: string, duration: number, options?: ProjectMutationOptions) => void;
+  onHistoryCheckpoint: () => void;
+}) {
+  const [dragSceneId, setDragSceneId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    sceneId: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const totalWidth = Math.max(480, scenes.reduce((sum, scene) => sum + scene.duration, 0) * zoom);
+  const contextScene = contextMenu
+    ? (scenes.find((scene) => scene.id === contextMenu.sceneId) ?? null)
+    : null;
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [contextMenu]);
+
+  const confirmRemoveScene = (scene: ProjectScene) => {
+    setContextMenu(null);
+    if (scenes.length <= 1) return;
+    const label = scene.name || `Scene ${scene.index + 1}`;
+    if (!window.confirm(`Delete "${label}" and all content inside it? This cannot be undone.`)) {
+      return;
+    }
+    onRemoveScene(scene.id);
+  };
+
+  return (
+    <div className="relative flex h-12 shrink-0 border-b border-border bg-panel-2 text-xs">
+      <div className="flex w-40 shrink-0 items-center gap-1 border-r border-border px-2">
+        <button
+          type="button"
+          onClick={onProjectView}
+          className={`rounded border px-2 py-1 text-[11px] ${
+            activeSceneId === null
+              ? "border-primary bg-primary text-primary-foreground"
+              : "border-border bg-panel text-muted-foreground hover:text-foreground"
+          }`}
+          title="Project timeline"
+        >
+          Project
+        </button>
+        <button
+          type="button"
+          onClick={onAddScene}
+          className="flex h-6 w-6 items-center justify-center rounded border border-border bg-panel text-muted-foreground hover:text-foreground"
+          aria-label="Add scene"
+          title="Add scene"
+        >
+          <Plus size={13} />
+        </button>
+      </div>
+      <div
+        ref={scrollRef}
+        onScroll={(event) => onScrollLeft(event.currentTarget.scrollLeft)}
+        className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden"
+      >
+        <div className="relative h-full" style={{ width: totalWidth }}>
+          {scenes.map((scene) => {
+            const active = scene.id === activeSceneId;
+            const left = scene.start * zoom;
+            const width = Math.max(48, scene.duration * zoom);
+            const contentOverflow = scene.contentOverflow > 0.03;
+            return (
+              <div
+                key={scene.id}
+                draggable
+                onDragStart={(event) => {
+                  setDragSceneId(scene.id);
+                  event.dataTransfer.effectAllowed = "move";
+                }}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "move";
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  if (dragSceneId && dragSceneId !== scene.id)
+                    onMoveScene(dragSceneId, scene.index);
+                  setDragSceneId(null);
+                }}
+                onDragEnd={() => setDragSceneId(null)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setContextMenu({ sceneId: scene.id, x: event.clientX, y: event.clientY });
+                }}
+                className={`group absolute top-1 flex h-10 items-center overflow-hidden rounded border ${
+                  active
+                    ? "border-primary bg-primary/20 ring-1 ring-primary"
+                    : contentOverflow
+                      ? "border-amber-500/60 bg-amber-500/10 hover:border-amber-400"
+                      : "border-border bg-panel hover:border-primary/70"
+                }`}
+                style={{
+                  left,
+                  width,
+                  backgroundImage: contentOverflow
+                    ? "repeating-linear-gradient(135deg, transparent 0, transparent 8px, rgba(245, 158, 11, 0.18) 8px, rgba(245, 158, 11, 0.18) 12px)"
+                    : undefined,
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => onSelectScene(scene.id)}
+                  className="flex h-full min-w-0 flex-1 items-center gap-1 px-2 text-left"
+                  title={
+                    contentOverflow
+                      ? `Scene content extends to ${formatSeconds(scene.contentEnd)}`
+                      : `Scene ${scene.index + 1}`
+                  }
+                >
+                  <GripVertical size={13} className="shrink-0 text-muted-foreground" />
+                  <span className="min-w-0 truncate font-medium text-foreground">
+                    {scene.name || `Scene ${scene.index + 1}`}
+                  </span>
+                  <span className="shrink-0 text-[10px] text-muted-foreground">
+                    {formatSeconds(scene.duration)}
+                  </span>
+                </button>
+                {contentOverflow && (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onResizeScene(scene.id, scene.contentEnd);
+                    }}
+                    className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded border border-amber-500/60 bg-panel text-amber-300 hover:bg-amber-500/10"
+                    aria-label={`Extend scene ${scene.index + 1} to fit content`}
+                    title={`Extend to fit content (${formatSeconds(scene.contentEnd)})`}
+                  >
+                    <TriangleAlert size={12} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onDuplicateScene(scene.id);
+                  }}
+                  className="mr-1 hidden h-6 w-6 shrink-0 items-center justify-center rounded border border-border bg-panel text-muted-foreground hover:text-foreground group-hover:flex"
+                  aria-label={`Duplicate scene ${scene.index + 1}`}
+                  title="Duplicate scene"
+                >
+                  <Copy size={12} />
+                </button>
+                <div
+                  role="separator"
+                  aria-orientation="vertical"
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const startX = event.clientX;
+                    const startDuration = scene.duration;
+                    onHistoryCheckpoint();
+                    const move = (moveEvent: MouseEvent) => {
+                      const nextDuration = Math.max(
+                        0.2,
+                        startDuration + (moveEvent.clientX - startX) / zoom,
+                      );
+                      onResizeScene(scene.id, nextDuration, { history: false });
+                    };
+                    const up = () => {
+                      window.removeEventListener("mousemove", move);
+                      window.removeEventListener("mouseup", up);
+                    };
+                    window.addEventListener("mousemove", move);
+                    window.addEventListener("mouseup", up);
+                  }}
+                  className="h-full w-2 shrink-0 cursor-ew-resize bg-black/20 opacity-0 group-hover:opacity-100"
+                  title="Resize scene"
+                />
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      {contextMenu && contextScene && (
+        <div
+          role="menu"
+          className="fixed z-50 min-w-40 rounded border border-border bg-panel p-1 text-xs shadow-xl"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setContextMenu(null);
+              onDuplicateScene(contextScene.id);
+            }}
+            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-foreground hover:bg-panel-2"
+          >
+            <Copy size={13} />
+            Duplicate scene
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={scenes.length <= 1}
+            onClick={() => confirmRemoveScene(contextScene)}
+            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-destructive hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Trash2 size={13} />
+            Delete scene
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function buildCompositionSourceErrors(
   project: Project,
   clips: EditorClip[],
@@ -742,6 +1160,17 @@ function buildCompositionOutlines(
     if (outline.length > 0) outlines.set(clip.id, outline);
   }
   return outlines;
+}
+
+function toSceneLocalClipPatch(
+  clip: ProjectTimelineClip,
+  patch: Partial<AnyClip>,
+): Partial<AnyClip> {
+  if (!clip.sceneId || patch.start === undefined) return patch;
+  return {
+    ...patch,
+    start: Math.max(0, patch.start - clip.sceneStart),
+  };
 }
 
 function ClipBlock({
@@ -1057,18 +1486,18 @@ function characterActionTitle(
 }
 
 interface ExpandedClipRow {
-  clip: CharacterCompositionClip;
+  clip: TimelineCharacterClip;
   layout: ExpandedClipLayout;
   top: number;
 }
 
 interface ExpandedKeyframeRow {
-  clip: EditorClip;
+  clip: ProjectTimelineClip;
   top: number;
 }
 
 interface ExpandedCompositionOutlineRow {
-  clip: EditorClip;
+  clip: ProjectTimelineClip;
   outline: CompositionOutlineItem[];
   top: number;
 }
@@ -1103,10 +1532,10 @@ function buildTrackLayout({
 }: {
   trackIndex: number;
   laneCount: number;
-  expandedMotionClips: EditorClip[];
-  expandedCompositionOutlines: EditorClip[];
+  expandedMotionClips: ProjectTimelineClip[];
+  expandedCompositionOutlines: ProjectTimelineClip[];
   compositionOutlinesByClipId: Map<string, CompositionOutlineItem[]>;
-  expandedCharacters: CharacterCompositionClip[];
+  expandedCharacters: TimelineCharacterClip[];
   expandedLayouts: Map<string, ExpandedClipLayout>;
 }): TrackLayout {
   let top = 0;
@@ -1247,7 +1676,7 @@ function CompositionOutlineLaneSet({
   top,
   onSelect,
 }: {
-  clip: EditorClip;
+  clip: ProjectTimelineClip;
   outline: CompositionOutlineItem[];
   zoom: number;
   top: number;
@@ -1369,7 +1798,7 @@ function VisualMotionLaneSet({
   onSeekLocal,
   onHistoryCheckpoint,
 }: {
-  clip: EditorClip;
+  clip: ProjectTimelineClip;
   zoom: number;
   top: number;
   currentTime: number;
@@ -1908,7 +2337,7 @@ function MotionLaneSet({
   createMotionId,
   presetMap,
 }: {
-  clip: CharacterCompositionClip;
+  clip: TimelineCharacterClip;
   zoom: number;
   top: number;
   layout: ExpandedClipLayout;

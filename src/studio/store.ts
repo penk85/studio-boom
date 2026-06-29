@@ -62,6 +62,13 @@ import {
   updateRootCompositionHtml,
 } from "./hyperframes/root-composition";
 import {
+  DEFAULT_SCENE_DURATION,
+  buildSceneEditingProject,
+  deriveProjectScenes,
+  getProjectScene,
+  sceneCompositionId,
+} from "./scenes";
+import {
   buildCharacterCompositionHtml,
   characterAssetIds,
   defaultCharacterCompositionId,
@@ -110,26 +117,71 @@ export function pickFreeLane(
 export function createBlankProject(name = "Untitled Movie"): Project {
   const now = Date.now();
   const projectId = uid();
+  const sceneId = uid();
+  const compositionId = sceneCompositionId(sceneId);
   const tracks = createDefaultTracks();
-  const rootHtml = createRootCompositionHtml(projectId, 30);
+  const duration = DEFAULT_SCENE_DURATION;
+  const baseRootHtml = createRootCompositionHtml(projectId, duration);
+  const sceneHtml = createRootCompositionHtml(compositionId, duration);
   const hf: HyperFramesProject = {
     id: projectId,
     name,
     width: 1920,
     height: 1080,
     fps: 30,
-    duration: 30,
+    duration,
     assets: [],
-    rootHtml,
-    compositionHtml: {},
+    rootHtml: baseRootHtml,
+    compositionHtml: {
+      [compositionId]: sceneHtml,
+    },
   };
+  const sceneElement = buildTimelineElement(
+    {
+      id: sceneId,
+      kind: "composition",
+      compositionKind: "scene",
+      compositionId,
+      name: "Scene",
+      trackIndex: 0,
+      laneIndex: 0,
+      start: 0,
+      duration,
+      x: 0,
+      y: 0,
+      width: hf.width,
+      height: hf.height,
+      rotation: 0,
+      opacity: 1,
+      zIndex: 0,
+    },
+    0,
+    0,
+  );
+  const { html: rootWithScene, id: insertedSceneId } = addStudioElementToHtml(
+    hf.rootHtml,
+    sceneElement,
+  );
+  hf.rootHtml = normalizeProjectRootHtml(hf, rootWithScene);
   return {
     id: projectId,
     name,
     createdAt: now,
     updatedAt: now,
     hf,
-    editorMeta: { tracks, clips: {} },
+    editorMeta: {
+      tracks,
+      clips: {
+        [insertedSceneId]: {
+          kind: "composition",
+          compositionKind: "scene",
+          compositionId,
+          uiTrackIndex: 0,
+          uiLaneIndex: 0,
+        },
+      },
+      scenes: [{ id: insertedSceneId, compositionId }],
+    },
   };
 }
 
@@ -209,6 +261,251 @@ function normalizeProjectRootHtml(hf: HyperFramesProject, html: string): string 
       height: hf.height,
     }),
   );
+}
+
+function getEditingProject(state: Pick<StudioState, "project" | "activeSceneId">): Project | null {
+  return state.project ? buildSceneEditingProject(state.project, state.activeSceneId) : null;
+}
+
+function commitEditingRootHtml(
+  project: Project,
+  activeSceneId: string | null,
+  html: string,
+): Project {
+  const scene = getProjectScene(project, activeSceneId);
+  const normalized = normalizeProjectRootHtml(project.hf, html);
+  if (!scene) {
+    return {
+      ...project,
+      hf: {
+        ...project.hf,
+        rootHtml: normalized,
+      },
+      updatedAt: Date.now(),
+    };
+  }
+
+  return {
+    ...project,
+    hf: {
+      ...project.hf,
+      compositionHtml: {
+        ...project.hf.compositionHtml,
+        [scene.compositionId]: normalized,
+      },
+    },
+    updatedAt: Date.now(),
+  };
+}
+
+function syncSceneTimeline(
+  project: Project,
+  scenes: NonNullable<ProjectEditorMeta["scenes"]>,
+): Project {
+  const rootClips = deriveEditorClips(project);
+  const clipById = new Map(rootClips.map((clip) => [clip.id, clip] as const));
+  let rootHtml = project.hf.rootHtml;
+  const compositionHtml = { ...project.hf.compositionHtml };
+  let start = 0;
+
+  scenes.forEach((scene, index) => {
+    const clip = clipById.get(scene.id);
+    const duration = Math.max(0.2, clip?.duration ?? DEFAULT_SCENE_DURATION);
+    rootHtml = updateStudioElementInHtml(rootHtml, scene.id, {
+      startTime: start,
+      duration,
+      zIndex: index,
+      renderTrackIndex: 0,
+      x: 0,
+      y: 0,
+      sourceWidth: project.hf.width,
+      sourceHeight: project.hf.height,
+    });
+    const source =
+      compositionHtml[scene.compositionId] ??
+      createRootCompositionHtml(scene.compositionId, duration, project.hf.width, project.hf.height);
+    compositionHtml[scene.compositionId] = updateRootCompositionHtml(source, {
+      duration,
+      width: project.hf.width,
+      height: project.hf.height,
+    });
+    start += duration;
+  });
+
+  const duration = Math.max(0.2, start);
+  rootHtml = updateRootCompositionHtml(rootHtml, {
+    duration,
+    width: project.hf.width,
+    height: project.hf.height,
+  });
+
+  return {
+    ...project,
+    hf: {
+      ...project.hf,
+      duration,
+      rootHtml: normalizeProjectRootHtml(project.hf, rootHtml),
+      compositionHtml,
+    },
+    editorMeta: {
+      ...project.editorMeta,
+      scenes,
+    },
+    updatedAt: Date.now(),
+  };
+}
+
+function cloneSceneSource(
+  project: Project,
+  sourceCompositionId: string,
+  targetCompositionId: string,
+): {
+  html: string;
+  compositionHtml: Record<string, string>;
+  clips: Record<string, ClipEditorMeta>;
+} {
+  const source =
+    project.hf.compositionHtml[sourceCompositionId] ??
+    createRootCompositionHtml(
+      targetCompositionId,
+      DEFAULT_SCENE_DURATION,
+      project.hf.width,
+      project.hf.height,
+    );
+  if (typeof DOMParser === "undefined") {
+    return {
+      html: source.split(sourceCompositionId).join(targetCompositionId),
+      compositionHtml: {},
+      clips: {},
+    };
+  }
+
+  const doc = new DOMParser().parseFromString(source, "text/html");
+  doc.documentElement.setAttribute("data-composition-id", targetCompositionId);
+  const stage = doc.getElementById("stage");
+  if (stage?.getAttribute("data-composition-id")) {
+    stage.setAttribute("data-composition-id", targetCompositionId);
+  }
+
+  const idMap = new Map<string, string>();
+  const compositionIdMap = new Map<string, string>([[sourceCompositionId, targetCompositionId]]);
+  for (const el of Array.from(doc.querySelectorAll<HTMLElement>("[id]"))) {
+    if (el.id === "stage") continue;
+    const oldId = el.id;
+    const newId = uid();
+    idMap.set(oldId, newId);
+    el.id = newId;
+
+    const nestedCompositionId = el.getAttribute("data-composition-id");
+    if (nestedCompositionId && nestedCompositionId !== sourceCompositionId) {
+      const nextCompositionId = clonedCompositionIdForClip(project.editorMeta.clips[oldId], newId);
+      compositionIdMap.set(nestedCompositionId, nextCompositionId);
+      el.setAttribute("data-composition-id", nextCompositionId);
+      if (el.hasAttribute("data-composition-src")) {
+        el.setAttribute("data-composition-src", `compositions/${nextCompositionId}.html`);
+      }
+      const iframe = el.querySelector<HTMLIFrameElement>("iframe[src]");
+      if (iframe) iframe.setAttribute("src", `compositions/${nextCompositionId}.html`);
+    }
+  }
+
+  let html = "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
+  html = rewriteSourceIds(html, idMap, compositionIdMap);
+
+  const compositionHtml: Record<string, string> = {};
+  for (const [fromCompositionId, toCompositionId] of compositionIdMap) {
+    if (fromCompositionId === sourceCompositionId) continue;
+    const nestedSource = project.hf.compositionHtml[fromCompositionId];
+    if (!nestedSource) continue;
+    compositionHtml[toCompositionId] = rewriteSourceIds(
+      nestedSource.split(fromCompositionId).join(toCompositionId),
+      idMap,
+      compositionIdMap,
+    );
+  }
+
+  const clips: Record<string, ClipEditorMeta> = {};
+  for (const [fromId, toId] of idMap) {
+    const meta = project.editorMeta.clips[fromId];
+    if (!meta) continue;
+    const nextCompositionId = meta.compositionId
+      ? (compositionIdMap.get(meta.compositionId) ?? meta.compositionId)
+      : undefined;
+    clips[toId] = {
+      ...meta,
+      ...(nextCompositionId ? { compositionId: nextCompositionId } : {}),
+    };
+  }
+
+  return { html, compositionHtml, clips };
+}
+
+function clonedCompositionIdForClip(meta: ClipEditorMeta | undefined, clipId: string): string {
+  if (meta?.compositionKind === "character") return defaultCharacterCompositionId(clipId);
+  if (meta?.compositionKind === "scene") return sceneCompositionId(clipId);
+  return `comp_${clipId}`;
+}
+
+function rewriteSourceIds(
+  source: string,
+  idMap: Map<string, string>,
+  compositionIdMap: Map<string, string>,
+): string {
+  let next = source;
+  for (const [from, to] of [...compositionIdMap, ...idMap]) {
+    next = next.split(from).join(to);
+  }
+  return next;
+}
+
+function deriveCompositionEditorClips(project: Project, compositionId: string): EditorClip[] {
+  const rootHtml = project.hf.compositionHtml[compositionId];
+  if (!rootHtml) return [];
+  return deriveEditorClips({
+    ...project,
+    hf: {
+      ...project.hf,
+      id: compositionId,
+      rootHtml,
+    },
+    editorMeta: {
+      ...project.editorMeta,
+      scenes: [],
+    },
+  });
+}
+
+function collectCompositionTreeRefs(
+  project: Project,
+  compositionId: string,
+  refs: {
+    compositionIds: Set<string>;
+    clipIds: Set<string>;
+    mediaIds: Set<string>;
+  } = {
+    compositionIds: new Set(),
+    clipIds: new Set(),
+    mediaIds: new Set(),
+  },
+): {
+  compositionIds: Set<string>;
+  clipIds: Set<string>;
+  mediaIds: Set<string>;
+} {
+  if (refs.compositionIds.has(compositionId)) return refs;
+  refs.compositionIds.add(compositionId);
+
+  for (const clip of deriveCompositionEditorClips(project, compositionId)) {
+    refs.clipIds.add(clip.id);
+    const meta = project.editorMeta.clips[clip.id];
+    if (meta?.mediaId) refs.mediaIds.add(meta.mediaId);
+    if (clip.mediaId) refs.mediaIds.add(clip.mediaId);
+    if (clip.kind === "composition" && clip.compositionId) {
+      collectCompositionTreeRefs(project, clip.compositionId, refs);
+    }
+  }
+
+  return refs;
 }
 
 type ValidCompositionSource = CompositionSourceValidation & {
@@ -312,7 +609,7 @@ function rebuildCharacterCompositionInProject(
 ): Project {
   const meta = project.editorMeta.clips[clipId];
   if (!isCharacterMeta(meta)) return project;
-  const clip = deriveEditorClips(project).find((candidate) => candidate.id === clipId);
+  const clip = findEditorClipInProject(project, clipId);
   if (!clip) return project;
   const character = characters.get(meta.character.characterId);
   if (!character) return project;
@@ -348,6 +645,35 @@ function rebuildCharacterCompositionInProject(
   };
   hf = registerCharacterAssets(hf, character, meta.character, mediaAssets);
   return { ...project, hf, updatedAt: Date.now() };
+}
+
+function findEditorClipInProject(project: Project, clipId: string): EditorClip | undefined {
+  const rootClip = deriveEditorClips(project).find((candidate) => candidate.id === clipId);
+  if (rootClip) return rootClip;
+  for (const scene of deriveProjectScenes(project)) {
+    const sceneProject = buildSceneEditingProject(project, scene.id);
+    const clip = deriveEditorClips(sceneProject).find((candidate) => candidate.id === clipId);
+    if (clip) return clip;
+  }
+  return undefined;
+}
+
+function findEditorClipByCompositionId(
+  project: Project,
+  compositionId: string,
+): EditorClip | undefined {
+  const rootClip = deriveEditorClips(project).find(
+    (candidate) => candidate.compositionId === compositionId,
+  );
+  if (rootClip) return rootClip;
+  for (const scene of deriveProjectScenes(project)) {
+    const sceneProject = buildSceneEditingProject(project, scene.id);
+    const clip = deriveEditorClips(sceneProject).find(
+      (candidate) => candidate.compositionId === compositionId,
+    );
+    if (clip) return clip;
+  }
+  return undefined;
 }
 
 function rebuildCharacterCompositions(
@@ -727,6 +1053,7 @@ interface HistoryEntry {
   project: Project;
   selectedClipId: string | null;
   selectedKeyframe: ClipKeyframeSelection | null;
+  activeSceneId: string | null;
 }
 
 export interface ProjectMutationOptions {
@@ -770,6 +1097,7 @@ interface StudioState {
   saveProject: (expectedGeneration?: number) => Promise<void>;
 
   selectClip: (id: string | null) => void;
+  setActiveScene: (sceneId: string | null) => void;
   selectKeyframe: (selection: ClipKeyframeSelection | null) => void;
   /** Select a speech within the currently open character Speech tab. */
   selectSpeech: (speechId: string | null) => void;
@@ -780,6 +1108,11 @@ interface StudioState {
   redo: () => void;
 
   addClip: (clip: AnyClip) => void;
+  addScene: () => void;
+  duplicateScene: (sceneId: string) => void;
+  removeScene: (sceneId: string) => void;
+  moveScene: (sceneId: string, toIndex: number) => void;
+  resizeScene: (sceneId: string, duration: number, options?: ProjectMutationOptions) => void;
   updateClip: (id: string, patch: Partial<AnyClip>, options?: ProjectMutationOptions) => void;
   /** Append an existing audio asset (library voice) as a new speech on a character
    *  clip, after the last one. Lip-sync data is reused from the asset — no regen. */
@@ -940,24 +1273,22 @@ function applyClipLayerMove(
   get: () => StudioState,
   set: (partial: Partial<StudioState>) => void,
 ): void {
-  const p = get().project;
-  if (!p) return;
+  const state = get();
+  const p = state.project;
+  const editingProject = getEditingProject(state);
+  if (!p || !editingProject) return;
 
-  const assignments = resolveLayerAssignments(p, id, placement);
+  const assignments = resolveLayerAssignments(editingProject, id, placement);
   if (!assignments) return;
 
   get().checkpointHistory();
 
-  let rootHtml = p.hf.rootHtml;
+  let rootHtml = editingProject.hf.rootHtml;
   for (const [clipId, zIndex] of assignments) {
     rootHtml = updateStudioElementInHtml(rootHtml, clipId, { zIndex });
   }
 
-  const newProject: Project = {
-    ...p,
-    hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
-    updatedAt: Date.now(),
-  };
+  const newProject = commitEditingRootHtml(p, state.activeSceneId, rootHtml);
   set({ project: newProject });
   scheduleSave(get, set);
 }
@@ -978,6 +1309,7 @@ function createHistoryEntry(state: StudioState): HistoryEntry | null {
     project: cloneProject(state.project),
     selectedClipId: state.selectedClipId,
     selectedKeyframe: state.selectedKeyframe,
+    activeSceneId: state.activeSceneId,
   };
 }
 
@@ -997,6 +1329,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   mediaAssets: new Map(),
   selectedClipId: null,
   selectedKeyframe: null,
+  activeSceneId: null,
   selectedSpeechId: null,
   speechFocusRequest: 0,
   zoom: 60,
@@ -1048,6 +1381,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       characters,
       motionPresets,
       mediaAssets,
+      activeSceneId: deriveProjectScenes(project)[0]?.id ?? null,
       selectedClipId: null,
       selectedKeyframe: null,
       historyPast: [],
@@ -1067,6 +1401,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       characters: new Map(),
       motionPresets: new Map(),
       mediaAssets: new Map(),
+      activeSceneId: deriveProjectScenes(project)[0]?.id ?? null,
       selectedClipId: null,
       selectedKeyframe: null,
       historyPast: [],
@@ -1112,6 +1447,17 @@ export const useStudio = create<StudioState>((set, get) => ({
     });
   },
 
+  setActiveScene(sceneId) {
+    const p = get().project;
+    const validSceneId = sceneId && p ? (getProjectScene(p, sceneId)?.id ?? null) : null;
+    set({
+      activeSceneId: validSceneId,
+      selectedClipId: null,
+      selectedKeyframe: null,
+      selectedSpeechId: null,
+    });
+  },
+
   selectSpeech(speechId) {
     set({ selectedSpeechId: speechId });
   },
@@ -1152,6 +1498,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     set({
       project,
       tracks: project.editorMeta.tracks,
+      activeSceneId: previous.activeSceneId,
       selectedClipId: previous.selectedClipId,
       selectedKeyframe: previous.selectedKeyframe,
       historyPast: state.historyPast.slice(0, -1),
@@ -1170,6 +1517,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     set({
       project,
       tracks: project.editorMeta.tracks,
+      activeSceneId: next.activeSceneId,
       selectedClipId: next.selectedClipId,
       selectedKeyframe: next.selectedKeyframe,
       historyPast: trimHistory([...state.historyPast, current]),
@@ -1181,7 +1529,15 @@ export const useStudio = create<StudioState>((set, get) => ({
   addClip(clip) {
     const state = get();
     const p = state.project;
-    if (!p) return;
+    const targetSceneId =
+      state.activeSceneId ??
+      (clip.kind !== "audio" && !(clip.kind === "composition" && clip.compositionKind === "scene")
+        ? p
+          ? (deriveProjectScenes(p).at(0)?.id ?? null)
+          : null
+        : null);
+    const editingProject = p ? buildSceneEditingProject(p, targetSceneId) : null;
+    if (!p || !editingProject) return;
 
     let validatedCompositionSource: ValidCompositionSource | null = null;
     if (
@@ -1204,12 +1560,12 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     get().checkpointHistory();
 
-    const currentClips = deriveEditorClips(p);
+    const currentClips = deriveEditorClips(editingProject);
 
     // Lane auto-assignment
     let nextClip = clip;
     if (clip.laneIndex === undefined) {
-      const track = p.editorMeta.tracks[clip.trackIndex];
+      const track = editingProject.editorMeta.tracks[clip.trackIndex];
       const maxLanes = track?.lanes ?? 1;
       const lane = pickFreeLane(currentClips, clip.trackIndex, clip.start, clip.duration, maxLanes);
       if (lane >= maxLanes) {
@@ -1223,6 +1579,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     }
 
     const currentProject = get().project!;
+    const targetProject = getEditingProject(get()) ?? currentProject;
     const zIndex = nextClip.zIndex !== undefined ? nextClip.zIndex : currentClips.length;
 
     const compositionHtml = { ...currentProject.hf.compositionHtml };
@@ -1296,37 +1653,329 @@ export const useStudio = create<StudioState>((set, get) => ({
 
     const renderTrackIndex = renderTrackIndexFor(nextClip.trackIndex, nextClip.laneIndex ?? 0);
     const { html: nextRootHtml, id: insertedId } = addStudioElementToHtml(
-      hf.rootHtml,
+      targetProject.hf.rootHtml,
       buildTimelineElement(nextClip, zIndex, renderTrackIndex),
     );
     const nextClipsMeta = { ...currentProject.editorMeta.clips, [insertedId]: meta };
     const rootHtml = normalizeProjectRootHtml(hf, nextRootHtml);
 
-    hf = { ...hf, rootHtml, compositionHtml };
+    hf = { ...hf, compositionHtml };
 
     const editorMeta: ProjectEditorMeta = {
       ...currentProject.editorMeta,
       clips: nextClipsMeta,
     };
-    const newProject: Project = syncProjectRenderTrackIndices({
-      ...currentProject,
-      hf,
-      editorMeta,
-      updatedAt: Date.now(),
-    });
+    const newProject: Project = syncProjectRenderTrackIndices(
+      commitEditingRootHtml(
+        {
+          ...currentProject,
+          hf,
+          editorMeta,
+          updatedAt: Date.now(),
+        },
+        targetSceneId,
+        rootHtml,
+      ),
+    );
     set({
       project: newProject,
       tracks: newProject.editorMeta.tracks,
+      activeSceneId: targetSceneId ?? get().activeSceneId,
       selectedClipId: insertedId,
       selectedKeyframe: null,
     });
     scheduleSave(get, set);
   },
 
-  updateClip(id, patch, options) {
+  addScene() {
+    const p = get().project;
+    if (!p) return;
+    get().checkpointHistory();
+
+    const sceneId = uid();
+    const compositionId = sceneCompositionId(sceneId);
+    const duration = DEFAULT_SCENE_DURATION;
+    const scenes = deriveProjectScenes(p);
+    const start = scenes.reduce((sum, scene) => sum + scene.duration, 0);
+    const sceneElement = buildTimelineElement(
+      {
+        id: sceneId,
+        kind: "composition",
+        compositionKind: "scene",
+        compositionId,
+        name: "Scene",
+        trackIndex: 0,
+        laneIndex: 0,
+        start,
+        duration,
+        x: 0,
+        y: 0,
+        width: p.hf.width,
+        height: p.hf.height,
+        rotation: 0,
+        opacity: 1,
+        zIndex: scenes.length,
+      },
+      scenes.length,
+      0,
+    );
+    const { html, id } = addStudioElementToHtml(p.hf.rootHtml, sceneElement);
+    const nextScenes = [...(p.editorMeta.scenes ?? []), { id, compositionId }];
+    const project = syncSceneTimeline(
+      {
+        ...p,
+        hf: {
+          ...p.hf,
+          rootHtml: normalizeProjectRootHtml(p.hf, html),
+          compositionHtml: {
+            ...p.hf.compositionHtml,
+            [compositionId]: createRootCompositionHtml(
+              compositionId,
+              duration,
+              p.hf.width,
+              p.hf.height,
+            ),
+          },
+        },
+        editorMeta: {
+          ...p.editorMeta,
+          clips: {
+            ...p.editorMeta.clips,
+            [id]: {
+              kind: "composition",
+              compositionKind: "scene",
+              compositionId,
+              uiTrackIndex: 0,
+              uiLaneIndex: 0,
+            },
+          },
+          scenes: nextScenes,
+        },
+      },
+      nextScenes,
+    );
+    set({
+      project,
+      tracks: project.editorMeta.tracks,
+      activeSceneId: id,
+      selectedClipId: null,
+      selectedKeyframe: null,
+    });
+    scheduleSave(get, set);
+  },
+
+  duplicateScene(sceneId) {
+    const p = get().project;
+    if (!p) return;
+    const scenes = deriveProjectScenes(p);
+    const scene = scenes.find((candidate) => candidate.id === sceneId);
+    if (!scene) return;
+    get().checkpointHistory();
+
+    const nextSceneId = uid();
+    const compositionId = sceneCompositionId(nextSceneId);
+    const cloned = cloneSceneSource(p, scene.compositionId, compositionId);
+    const sceneElement = buildTimelineElement(
+      {
+        id: nextSceneId,
+        kind: "composition",
+        compositionKind: "scene",
+        compositionId,
+        name: "Scene",
+        trackIndex: 0,
+        laneIndex: 0,
+        start: scene.start + scene.duration,
+        duration: scene.duration,
+        x: 0,
+        y: 0,
+        width: p.hf.width,
+        height: p.hf.height,
+        rotation: 0,
+        opacity: 1,
+        zIndex: scene.index + 1,
+      },
+      scene.index + 1,
+      0,
+    );
+    const { html, id } = addStudioElementToHtml(p.hf.rootHtml, sceneElement);
+    const nextSceneMeta = { id, compositionId };
+    const nextScenes = [...(p.editorMeta.scenes ?? [])];
+    nextScenes.splice(scene.index + 1, 0, nextSceneMeta);
+    const project = syncSceneTimeline(
+      {
+        ...p,
+        hf: {
+          ...p.hf,
+          rootHtml: normalizeProjectRootHtml(p.hf, html),
+          compositionHtml: {
+            ...p.hf.compositionHtml,
+            [compositionId]: cloned.html,
+            ...cloned.compositionHtml,
+          },
+        },
+        editorMeta: {
+          ...p.editorMeta,
+          clips: {
+            ...p.editorMeta.clips,
+            ...cloned.clips,
+            [id]: {
+              kind: "composition",
+              compositionKind: "scene",
+              compositionId,
+              uiTrackIndex: 0,
+              uiLaneIndex: 0,
+            },
+          },
+          scenes: nextScenes,
+        },
+      },
+      nextScenes,
+    );
+    set({
+      project,
+      tracks: project.editorMeta.tracks,
+      activeSceneId: id,
+      selectedClipId: null,
+      selectedKeyframe: null,
+    });
+    scheduleSave(get, set);
+  },
+
+  removeScene(sceneId) {
     const state = get();
     const p = state.project;
     if (!p) return;
+    const scenes = deriveProjectScenes(p);
+    const scene = scenes.find((candidate) => candidate.id === sceneId);
+    if (!scene || scenes.length <= 1) return;
+    get().checkpointHistory();
+
+    const nextSceneMetas = (p.editorMeta.scenes ?? [])
+      .filter((candidate) => candidate.id !== scene.id)
+      .map((candidate) => ({ ...candidate }));
+    const removedRefs = collectCompositionTreeRefs(p, scene.compositionId);
+    removedRefs.clipIds.add(scene.id);
+
+    const newClipsMeta = Object.fromEntries(
+      Object.entries(p.editorMeta.clips).filter(([clipId]) => !removedRefs.clipIds.has(clipId)),
+    );
+    const remainingCompositionIds = new Set(
+      [
+        ...nextSceneMetas.map((candidate) => candidate.compositionId),
+        ...Object.values(newClipsMeta)
+          .map((meta) => meta.compositionId)
+          .filter((compositionId): compositionId is string => typeof compositionId === "string"),
+      ].filter(Boolean),
+    );
+    const compositionHtml = { ...p.hf.compositionHtml };
+    for (const compositionId of removedRefs.compositionIds) {
+      if (!remainingCompositionIds.has(compositionId)) delete compositionHtml[compositionId];
+    }
+
+    const rootHtml = normalizeProjectRootHtml(p.hf, removeElementFromHtml(p.hf.rootHtml, scene.id));
+    const projectWithScenes = syncSceneTimeline(
+      {
+        ...p,
+        hf: {
+          ...p.hf,
+          rootHtml,
+          compositionHtml,
+        },
+        editorMeta: {
+          ...p.editorMeta,
+          clips: newClipsMeta,
+          scenes: nextSceneMetas,
+        },
+        updatedAt: Date.now(),
+      },
+      nextSceneMetas,
+    );
+    const referencedIds = collectReferencedAssetIds(newClipsMeta, state.characters);
+    const project: Project = {
+      ...projectWithScenes,
+      hf: pruneHfAssets(projectWithScenes.hf, referencedIds),
+      updatedAt: Date.now(),
+    };
+    const nextScenes = deriveProjectScenes(project);
+    const fallbackScene =
+      nextScenes[Math.min(scene.index, nextScenes.length - 1)] ?? nextScenes.at(-1) ?? null;
+
+    set({
+      project,
+      tracks: project.editorMeta.tracks,
+      activeSceneId:
+        state.activeSceneId === scene.id ? (fallbackScene?.id ?? null) : state.activeSceneId,
+      selectedClipId: removedRefs.clipIds.has(state.selectedClipId ?? "")
+        ? null
+        : state.selectedClipId,
+      selectedKeyframe: removedRefs.clipIds.has(state.selectedKeyframe?.clipId ?? "")
+        ? null
+        : state.selectedKeyframe,
+    });
+    scheduleSave(get, set);
+
+    if (typeof window !== "undefined" && removedRefs.mediaIds.size > 0) {
+      window.setTimeout(() => {
+        void get()
+          .saveProject()
+          .then(() =>
+            Promise.all(
+              Array.from(removedRefs.mediaIds).map((mediaId) =>
+                deleteMediaIfUnused(mediaId, { internalOnly: true }),
+              ),
+            ),
+          );
+      }, 0);
+    }
+  },
+
+  moveScene(sceneId, toIndex) {
+    const p = get().project;
+    if (!p) return;
+    const scenes = [...(p.editorMeta.scenes ?? [])];
+    const fromIndex = scenes.findIndex((scene) => scene.id === sceneId);
+    if (fromIndex < 0) return;
+    const targetIndex = Math.max(0, Math.min(scenes.length - 1, toIndex));
+    if (fromIndex === targetIndex) return;
+    get().checkpointHistory();
+
+    const [scene] = scenes.splice(fromIndex, 1);
+    if (!scene) return;
+    scenes.splice(targetIndex, 0, scene);
+    const project = syncSceneTimeline(p, scenes);
+    set({ project, tracks: project.editorMeta.tracks });
+    scheduleSave(get, set);
+  },
+
+  resizeScene(sceneId, duration, options) {
+    const p = get().project;
+    if (!p) return;
+    const scene = getProjectScene(p, sceneId);
+    if (!scene) return;
+    if (options?.history !== false) get().checkpointHistory();
+
+    const rootHtml = updateStudioElementInHtml(p.hf.rootHtml, scene.id, {
+      duration: Math.max(0.2, duration),
+    });
+    const project = syncSceneTimeline(
+      {
+        ...p,
+        hf: {
+          ...p.hf,
+          rootHtml: normalizeProjectRootHtml(p.hf, rootHtml),
+        },
+      },
+      p.editorMeta.scenes ?? [],
+    );
+    set({ project, tracks: project.editorMeta.tracks });
+    scheduleSave(get, set);
+  },
+
+  updateClip(id, patch, options) {
+    const state = get();
+    const p = state.project;
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return;
     if (options?.history !== false) get().checkpointHistory();
 
     const existingMeta = p.editorMeta.clips[id] ?? {};
@@ -1349,7 +1998,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       );
     }
 
-    const rootHtml = updateStudioElementInHtml(p.hf.rootHtml, id, elementUpdates);
+    const rootHtml = updateStudioElementInHtml(editingProject.hf.rootHtml, id, elementUpdates);
 
     if (patch.kind === "composition" || existingMeta.kind === "composition") {
       const compositionPatch = patch as Partial<CompositionClip>;
@@ -1383,12 +2032,17 @@ export const useStudio = create<StudioState>((set, get) => ({
       ...p.editorMeta,
       clips: { ...p.editorMeta.clips, [id]: newMeta },
     };
-    let newProject: Project = syncProjectRenderTrackIndices({
-      ...p,
-      hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
-      editorMeta,
-      updatedAt: Date.now(),
-    });
+    let newProject: Project = syncProjectRenderTrackIndices(
+      commitEditingRootHtml(
+        {
+          ...p,
+          editorMeta,
+          updatedAt: Date.now(),
+        },
+        state.activeSceneId,
+        rootHtml,
+      ),
+    );
     newProject = rebuildCharacterCompositionInProject(
       newProject,
       id,
@@ -1412,8 +2066,9 @@ export const useStudio = create<StudioState>((set, get) => ({
 
   attachVoiceToCharacter(clipId, audioId) {
     const state = get();
-    if (!state.project) return;
-    const clip = deriveEditorClips(state.project).find((candidate) => candidate.id === clipId);
+    const editingProject = getEditingProject(state);
+    if (!state.project || !editingProject) return;
+    const clip = deriveEditorClips(editingProject).find((candidate) => candidate.id === clipId);
     if (!isCharacterCompositionClip(clip)) return;
     const asset = state.mediaAssets.get(audioId);
     if (!asset || asset.kind !== "audio") return;
@@ -1446,8 +2101,9 @@ export const useStudio = create<StudioState>((set, get) => ({
 
   moveSpeech(clipId, speechId, start, options) {
     const state = get();
-    if (!state.project) return;
-    const clip = deriveEditorClips(state.project).find((candidate) => candidate.id === clipId);
+    const editingProject = getEditingProject(state);
+    if (!state.project || !editingProject) return;
+    const clip = deriveEditorClips(editingProject).find((candidate) => candidate.id === clipId);
     if (!isCharacterCompositionClip(clip)) return;
     const clamped = Math.max(0, Math.min(clip.duration, start));
     const speeches = characterSpeeches(clip.character).map((speech) =>
@@ -1464,8 +2120,9 @@ export const useStudio = create<StudioState>((set, get) => ({
 
   setSpeechVolume(clipId, speechId, volume) {
     const state = get();
-    if (!state.project) return;
-    const clip = deriveEditorClips(state.project).find((candidate) => candidate.id === clipId);
+    const editingProject = getEditingProject(state);
+    if (!state.project || !editingProject) return;
+    const clip = deriveEditorClips(editingProject).find((candidate) => candidate.id === clipId);
     if (!isCharacterCompositionClip(clip)) return;
     const clamped = Math.max(0, Math.min(1, volume));
     const speeches = characterSpeeches(clip.character).map((speech) =>
@@ -1478,8 +2135,9 @@ export const useStudio = create<StudioState>((set, get) => ({
 
   trimSpeech(clipId, speechId, patch, options) {
     const state = get();
-    if (!state.project) return;
-    const clip = deriveEditorClips(state.project).find((candidate) => candidate.id === clipId);
+    const editingProject = getEditingProject(state);
+    if (!state.project || !editingProject) return;
+    const clip = deriveEditorClips(editingProject).find((candidate) => candidate.id === clipId);
     if (!isCharacterCompositionClip(clip)) return;
     const speeches = characterSpeeches(clip.character).map((speech) => {
       if (speech.id !== speechId) return speech;
@@ -1514,8 +2172,9 @@ export const useStudio = create<StudioState>((set, get) => ({
 
   removeSpeech(clipId, speechId) {
     const state = get();
-    if (!state.project) return;
-    const clip = deriveEditorClips(state.project).find((candidate) => candidate.id === clipId);
+    const editingProject = getEditingProject(state);
+    if (!state.project || !editingProject) return;
+    const clip = deriveEditorClips(editingProject).find((candidate) => candidate.id === clipId);
     if (!isCharacterCompositionClip(clip)) return;
     const speeches = characterSpeeches(clip.character).filter((speech) => speech.id !== speechId);
     // Keep the audio blob (reusable voice); updateClip manifest-prunes the now
@@ -1560,7 +2219,8 @@ export const useStudio = create<StudioState>((set, get) => ({
   removeClip(id) {
     const state = get();
     const p = state.project;
-    if (!p) return;
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return;
     get().checkpointHistory();
 
     const existingMeta = p.editorMeta.clips[id];
@@ -1568,7 +2228,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     const newClipsMeta = Object.fromEntries(
       Object.entries(p.editorMeta.clips).filter(([clipId]) => clipId !== id),
     );
-    let rootHtml = removeElementFromHtml(p.hf.rootHtml, id);
+    let rootHtml = removeElementFromHtml(editingProject.hf.rootHtml, id);
     rootHtml = normalizeProjectRootHtml(p.hf, rootHtml);
 
     const compositionHtml = { ...p.hf.compositionHtml };
@@ -1576,12 +2236,21 @@ export const useStudio = create<StudioState>((set, get) => ({
       delete compositionHtml[existingMeta.compositionId ?? `comp_${id}`];
     }
 
+    const projectWithHtml = commitEditingRootHtml(
+      {
+        ...p,
+        hf: { ...p.hf, compositionHtml },
+        editorMeta: { ...p.editorMeta, clips: newClipsMeta },
+        updatedAt: Date.now(),
+      },
+      state.activeSceneId,
+      rootHtml,
+    );
     const referencedIds = collectReferencedAssetIds(newClipsMeta, state.characters);
-    const newHf = pruneHfAssets({ ...p.hf, rootHtml, compositionHtml }, referencedIds);
 
     const newProject: Project = {
-      ...p,
-      hf: newHf,
+      ...projectWithHtml,
+      hf: pruneHfAssets(projectWithHtml.hf, referencedIds),
       editorMeta: { ...p.editorMeta, clips: newClipsMeta },
       updatedAt: Date.now(),
     };
@@ -1674,8 +2343,9 @@ export const useStudio = create<StudioState>((set, get) => ({
   upsertClipKeyframe(clipId, property, time, values, options) {
     const state = get();
     const p = state.project;
-    if (!p) return null;
-    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return null;
+    const clip = deriveEditorClips(editingProject).find((candidate) => candidate.id === clipId);
     if (!clip || clip.kind === "audio") return null;
     if (options?.history !== false) get().checkpointHistory();
 
@@ -1689,18 +2359,18 @@ export const useStudio = create<StudioState>((set, get) => ({
     });
     if (!result.keyframeId) return null;
 
-    const rootHtml = setClipKeyframesInRootHtml(p.hf.rootHtml, clipId, result.keyframes);
+    const rootHtml = setClipKeyframesInRootHtml(
+      editingProject.hf.rootHtml,
+      clipId,
+      result.keyframes,
+    );
     const selectedKeyframe: ClipKeyframeSelection = {
       clipId,
       keyframeId: result.keyframeId,
       property,
     };
     set({
-      project: {
-        ...p,
-        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
-        updatedAt: Date.now(),
-      },
+      project: commitEditingRootHtml(p, state.activeSceneId, rootHtml),
       selectedClipId: clipId,
       selectedKeyframe,
     });
@@ -1711,8 +2381,11 @@ export const useStudio = create<StudioState>((set, get) => ({
   updateClipKeyframe(selection, patch, options) {
     const state = get();
     const p = state.project;
-    if (!p) return;
-    const clip = deriveEditorClips(p).find((candidate) => candidate.id === selection.clipId);
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return;
+    const clip = deriveEditorClips(editingProject).find(
+      (candidate) => candidate.id === selection.clipId,
+    );
     if (!clip || clip.kind === "audio") return;
     if (options?.history !== false) get().checkpointHistory();
 
@@ -1727,13 +2400,13 @@ export const useStudio = create<StudioState>((set, get) => ({
     });
     if (!result.keyframeId) return;
 
-    const rootHtml = setClipKeyframesInRootHtml(p.hf.rootHtml, selection.clipId, result.keyframes);
+    const rootHtml = setClipKeyframesInRootHtml(
+      editingProject.hf.rootHtml,
+      selection.clipId,
+      result.keyframes,
+    );
     set({
-      project: {
-        ...p,
-        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
-        updatedAt: Date.now(),
-      },
+      project: commitEditingRootHtml(p, state.activeSceneId, rootHtml),
       selectedClipId: selection.clipId,
       selectedKeyframe: selection,
     });
@@ -1743,8 +2416,11 @@ export const useStudio = create<StudioState>((set, get) => ({
   moveClipKeyframe(selection, time, options) {
     const state = get();
     const p = state.project;
-    if (!p) return;
-    const clip = deriveEditorClips(p).find((candidate) => candidate.id === selection.clipId);
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return;
+    const clip = deriveEditorClips(editingProject).find(
+      (candidate) => candidate.id === selection.clipId,
+    );
     if (!clip || clip.kind === "audio") return;
     if (options?.history !== false) get().checkpointHistory();
 
@@ -1756,17 +2432,17 @@ export const useStudio = create<StudioState>((set, get) => ({
     });
     if (!result.keyframeId) return;
 
-    const rootHtml = setClipKeyframesInRootHtml(p.hf.rootHtml, selection.clipId, result.keyframes);
+    const rootHtml = setClipKeyframesInRootHtml(
+      editingProject.hf.rootHtml,
+      selection.clipId,
+      result.keyframes,
+    );
     const selectedKeyframe: ClipKeyframeSelection = {
       ...selection,
       keyframeId: result.keyframeId,
     };
     set({
-      project: {
-        ...p,
-        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
-        updatedAt: Date.now(),
-      },
+      project: commitEditingRootHtml(p, state.activeSceneId, rootHtml),
       selectedClipId: selection.clipId,
       selectedKeyframe,
     });
@@ -1776,8 +2452,11 @@ export const useStudio = create<StudioState>((set, get) => ({
   removeClipKeyframe(selection, options) {
     const state = get();
     const p = state.project;
-    if (!p) return;
-    const clip = deriveEditorClips(p).find((candidate) => candidate.id === selection.clipId);
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return;
+    const clip = deriveEditorClips(editingProject).find(
+      (candidate) => candidate.id === selection.clipId,
+    );
     if (!clip || clip.kind === "audio") return;
     if (options?.history !== false) get().checkpointHistory();
 
@@ -1786,13 +2465,13 @@ export const useStudio = create<StudioState>((set, get) => ({
       selection.keyframeId,
       selection.property,
     );
-    const rootHtml = setClipKeyframesInRootHtml(p.hf.rootHtml, selection.clipId, keyframes);
+    const rootHtml = setClipKeyframesInRootHtml(
+      editingProject.hf.rootHtml,
+      selection.clipId,
+      keyframes,
+    );
     set({
-      project: {
-        ...p,
-        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
-        updatedAt: Date.now(),
-      },
+      project: commitEditingRootHtml(p, state.activeSceneId, rootHtml),
       selectedKeyframe: null,
     });
     scheduleSave(get, set);
@@ -1801,8 +2480,9 @@ export const useStudio = create<StudioState>((set, get) => ({
   addClipMotionStep(clipId, time, options) {
     const state = get();
     const p = state.project;
-    if (!p) return null;
-    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return null;
+    const clip = deriveEditorClips(editingProject).find((candidate) => candidate.id === clipId);
     if (!clip || clip.kind === "audio") return null;
     if (options?.history !== false) get().checkpointHistory();
 
@@ -1813,7 +2493,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (!result.selection) return null;
 
     const rootHtml = setClipMotionModelInRootHtml(
-      p.hf.rootHtml,
+      editingProject.hf.rootHtml,
       clipId,
       result.keyframes,
       result.motionSteps,
@@ -1824,11 +2504,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       property: result.selection.property,
     };
     set({
-      project: {
-        ...p,
-        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
-        updatedAt: Date.now(),
-      },
+      project: commitEditingRootHtml(p, state.activeSceneId, rootHtml),
       selectedClipId: clipId,
       selectedKeyframe,
     });
@@ -1839,8 +2515,9 @@ export const useStudio = create<StudioState>((set, get) => ({
   addClipMotionCheckpoint(clipId, motionId, time, options) {
     const state = get();
     const p = state.project;
-    if (!p) return null;
-    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return null;
+    const clip = deriveEditorClips(editingProject).find((candidate) => candidate.id === clipId);
     if (!clip || clip.kind === "audio") return null;
     if (options?.history !== false) get().checkpointHistory();
 
@@ -1852,7 +2529,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (!result.selection) return null;
 
     const rootHtml = setClipMotionModelInRootHtml(
-      p.hf.rootHtml,
+      editingProject.hf.rootHtml,
       clipId,
       result.keyframes,
       result.motionSteps,
@@ -1863,11 +2540,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       property: result.selection.property,
     };
     set({
-      project: {
-        ...p,
-        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
-        updatedAt: Date.now(),
-      },
+      project: commitEditingRootHtml(p, state.activeSceneId, rootHtml),
       selectedClipId: clipId,
       selectedKeyframe,
     });
@@ -1878,8 +2551,9 @@ export const useStudio = create<StudioState>((set, get) => ({
   moveClipMotionStep(clipId, motionId, patch, options) {
     const state = get();
     const p = state.project;
-    if (!p) return null;
-    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return null;
+    const clip = deriveEditorClips(editingProject).find((candidate) => candidate.id === clipId);
     if (!clip || clip.kind === "audio") return null;
     if (options?.history !== false) get().checkpointHistory();
 
@@ -1887,7 +2561,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (!result.selection) return null;
 
     const rootHtml = setClipMotionModelInRootHtml(
-      p.hf.rootHtml,
+      editingProject.hf.rootHtml,
       clipId,
       result.keyframes,
       result.motionSteps,
@@ -1898,11 +2572,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       property: result.selection.property,
     };
     set({
-      project: {
-        ...p,
-        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
-        updatedAt: Date.now(),
-      },
+      project: commitEditingRootHtml(p, state.activeSceneId, rootHtml),
       selectedClipId: clipId,
       selectedKeyframe,
     });
@@ -1913,8 +2583,9 @@ export const useStudio = create<StudioState>((set, get) => ({
   moveClipMotionCheckpoint(clipId, motionId, checkpointId, time, options) {
     const state = get();
     const p = state.project;
-    if (!p) return null;
-    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return null;
+    const clip = deriveEditorClips(editingProject).find((candidate) => candidate.id === clipId);
     if (!clip || clip.kind === "audio") return null;
     if (options?.history !== false) get().checkpointHistory();
 
@@ -1922,7 +2593,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (!result.selection) return null;
 
     const rootHtml = setClipMotionModelInRootHtml(
-      p.hf.rootHtml,
+      editingProject.hf.rootHtml,
       clipId,
       result.keyframes,
       result.motionSteps,
@@ -1933,11 +2604,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       property: result.selection.property,
     };
     set({
-      project: {
-        ...p,
-        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
-        updatedAt: Date.now(),
-      },
+      project: commitEditingRootHtml(p, state.activeSceneId, rootHtml),
       selectedClipId: clipId,
       selectedKeyframe,
     });
@@ -1948,24 +2615,21 @@ export const useStudio = create<StudioState>((set, get) => ({
   renameClipMotionStep(clipId, motionId, name, options) {
     const state = get();
     const p = state.project;
-    if (!p) return;
-    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return;
+    const clip = deriveEditorClips(editingProject).find((candidate) => candidate.id === clipId);
     if (!clip || clip.kind === "audio") return;
     if (options?.history !== false) get().checkpointHistory();
 
     const motionSteps = renameMotionStep(clip, motionId, name);
     const rootHtml = setClipMotionModelInRootHtml(
-      p.hf.rootHtml,
+      editingProject.hf.rootHtml,
       clipId,
       clip.keyframes,
       motionSteps,
     );
     set({
-      project: {
-        ...p,
-        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
-        updatedAt: Date.now(),
-      },
+      project: commitEditingRootHtml(p, state.activeSceneId, rootHtml),
       selectedClipId: clipId,
     });
     scheduleSave(get, set);
@@ -1974,24 +2638,21 @@ export const useStudio = create<StudioState>((set, get) => ({
   setClipMotionStepPathStyle(clipId, motionId, pathStyle, options) {
     const state = get();
     const p = state.project;
-    if (!p) return;
-    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return;
+    const clip = deriveEditorClips(editingProject).find((candidate) => candidate.id === clipId);
     if (!clip || clip.kind === "audio") return;
     if (options?.history !== false) get().checkpointHistory();
 
     const motionSteps = setMotionStepPathStyle(clip, motionId, pathStyle);
     const rootHtml = setClipMotionModelInRootHtml(
-      p.hf.rootHtml,
+      editingProject.hf.rootHtml,
       clipId,
       clip.keyframes,
       motionSteps,
     );
     set({
-      project: {
-        ...p,
-        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
-        updatedAt: Date.now(),
-      },
+      project: commitEditingRootHtml(p, state.activeSceneId, rootHtml),
       selectedClipId: clipId,
     });
     scheduleSave(get, set);
@@ -2000,24 +2661,21 @@ export const useStudio = create<StudioState>((set, get) => ({
   removeClipMotionStep(clipId, motionId, options) {
     const state = get();
     const p = state.project;
-    if (!p) return;
-    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return;
+    const clip = deriveEditorClips(editingProject).find((candidate) => candidate.id === clipId);
     if (!clip || clip.kind === "audio") return;
     if (options?.history !== false) get().checkpointHistory();
 
     const result = removeMotionStep(clip, motionId);
     const rootHtml = setClipMotionModelInRootHtml(
-      p.hf.rootHtml,
+      editingProject.hf.rootHtml,
       clipId,
       result.keyframes,
       result.motionSteps,
     );
     set({
-      project: {
-        ...p,
-        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
-        updatedAt: Date.now(),
-      },
+      project: commitEditingRootHtml(p, state.activeSceneId, rootHtml),
       selectedClipId: clipId,
       selectedKeyframe: null,
     });
@@ -2027,24 +2685,21 @@ export const useStudio = create<StudioState>((set, get) => ({
   removeClipMotionCheckpoint(clipId, motionId, checkpointId, options) {
     const state = get();
     const p = state.project;
-    if (!p) return;
-    const clip = deriveEditorClips(p).find((candidate) => candidate.id === clipId);
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return;
+    const clip = deriveEditorClips(editingProject).find((candidate) => candidate.id === clipId);
     if (!clip || clip.kind === "audio") return;
     if (options?.history !== false) get().checkpointHistory();
 
     const result = removeMotionCheckpoint(clip, motionId, checkpointId);
     const rootHtml = setClipMotionModelInRootHtml(
-      p.hf.rootHtml,
+      editingProject.hf.rootHtml,
       clipId,
       result.keyframes,
       result.motionSteps,
     );
     set({
-      project: {
-        ...p,
-        hf: { ...p.hf, rootHtml: normalizeProjectRootHtml(p.hf, rootHtml) },
-        updatedAt: Date.now(),
-      },
+      project: commitEditingRootHtml(p, state.activeSceneId, rootHtml),
       selectedClipId: clipId,
       selectedKeyframe: null,
     });
@@ -2052,18 +2707,12 @@ export const useStudio = create<StudioState>((set, get) => ({
   },
 
   updateRootHtml(html, options) {
-    const p = get().project;
+    const state = get();
+    const p = state.project;
     if (!p) return;
     if (options?.history !== false) get().checkpointHistory();
     set({
-      project: {
-        ...p,
-        hf: {
-          ...p.hf,
-          rootHtml: normalizeProjectRootHtml(p.hf, html),
-        },
-        updatedAt: Date.now(),
-      },
+      project: commitEditingRootHtml(p, state.activeSceneId, html),
     });
     scheduleSave(get, set);
   },
@@ -2071,9 +2720,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   updateCompositionHtml(compositionId, html, options) {
     const p = get().project;
     if (!p) return;
-    const clip = deriveEditorClips(p).find(
-      (candidate) => candidate.compositionId === compositionId,
-    );
+    const clip = findEditorClipByCompositionId(p, compositionId);
     const source = assertValidCompositionSourceHtml(
       html,
       {
@@ -2106,27 +2753,29 @@ export const useStudio = create<StudioState>((set, get) => ({
     const p = state.project;
     if (!p) return;
 
-    const characterClips = deriveEditorClips(p)
-      .filter(isCharacterCompositionClip)
-      .filter((clip) => clip.character.characterId === characterId);
-    if (characterClips.length === 0) return;
+    const characterClipIds = Object.entries(p.editorMeta.clips)
+      .filter(([, meta]) => isCharacterMeta(meta) && meta.character.characterId === characterId)
+      .map(([clipId]) => clipId);
+    if (characterClipIds.length === 0) return;
 
     let nextProject = p;
     let compositionHtml = { ...p.hf.compositionHtml };
     let changed = false;
 
-    for (const clip of characterClips) {
-      let html = compositionHtml[clip.compositionId];
+    for (const clipId of characterClipIds) {
+      const meta = nextProject.editorMeta.clips[clipId];
+      if (!isCharacterMeta(meta)) continue;
+      let html = compositionHtml[meta.compositionId];
       if (!html) {
         nextProject = rebuildCharacterCompositionInProject(
           nextProject,
-          clip.id,
+          clipId,
           state.characters,
           state.mediaAssets,
           state.motionPresets,
         );
         compositionHtml = { ...nextProject.hf.compositionHtml };
-        html = compositionHtml[clip.compositionId];
+        html = compositionHtml[meta.compositionId];
       }
       if (!html) continue;
 
@@ -2140,7 +2789,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         );
       }
       if (updated !== html) {
-        compositionHtml[clip.compositionId] = updated;
+        compositionHtml[meta.compositionId] = updated;
         changed = true;
       }
     }
@@ -2162,7 +2811,8 @@ export const useStudio = create<StudioState>((set, get) => ({
   addMediaToTimeline(asset, trackIndex, insertAtTime = 0) {
     const state = get();
     const p = state.project;
-    if (!p) return;
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return;
     get().registerMediaAsset(asset);
     let kindForTrack: TrackKind = "overlay";
     if (asset.kind === "audio") kindForTrack = "audio";
@@ -2180,7 +2830,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       cw = Math.round(cw * r);
       ch = Math.round(ch * r);
     }
-    const currentClips = deriveEditorClips(get().project!);
+    const currentClips = deriveEditorClips(editingProject);
     const clip: MediaClip = {
       id: uid(),
       kind: asset.kind,
@@ -2369,12 +3019,13 @@ export const useStudio = create<StudioState>((set, get) => ({
   removeLane(trackIndex, laneIndex) {
     const state = get();
     const p = state.project;
-    if (!p) return;
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return;
     const track = p.editorMeta.tracks[trackIndex];
     const laneCount = Math.max(1, track?.lanes ?? 1);
     if (!track || laneCount <= 1) return;
 
-    const currentClips = deriveEditorClips(p);
+    const currentClips = deriveEditorClips(editingProject);
     const laneHasClips = currentClips.some(
       (c) => c.trackIndex === trackIndex && (c.laneIndex ?? 0) === laneIndex,
     );

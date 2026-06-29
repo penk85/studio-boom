@@ -21,8 +21,9 @@ describe("Timeline selection integration", () => {
     expect(source).toContain("data-timeline-seek-surface");
     expect(source).toContain("data-timeline-playhead-handle");
     expect(source).toContain("seekDragRef");
-    expect(source).toContain("liveTime.notify(nextTime)");
-    expect(source).toContain("seek(nextTime)");
+    expect(source).toContain("seekProjectTime(nextTime)");
+    expect(source).toContain("liveTime.notify(localTime)");
+    expect(source).toContain("seek(localTime)");
     expect(source).toContain("autoScrollDuringSeekDrag");
     expect(source).toContain("isTimelineSeekTarget");
     expect(source).toContain("[data-timeline-clip-id]");

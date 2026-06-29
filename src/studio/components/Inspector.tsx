@@ -57,6 +57,7 @@ import {
   type ClipMotionCheckpoint,
 } from "../hyperframes/keyframes";
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
+import { buildSceneEditingProject } from "../scenes";
 import {
   CHARACTER_ANGLES,
   availableCharacterAngles,
@@ -71,7 +72,12 @@ type ClipUpdater = (patch: Partial<AnyClip>) => void;
 type IconComponent = ComponentType<{ size?: number; className?: string }>;
 
 export function Inspector({ seek }: { seek?: (time: number) => void }) {
-  const project = useStudio((s) => s.project);
+  const rootProject = useStudio((s) => s.project);
+  const activeSceneId = useStudio((s) => s.activeSceneId);
+  const project = useMemo(
+    () => (rootProject ? buildSceneEditingProject(rootProject, activeSceneId) : null),
+    [activeSceneId, rootProject],
+  );
   const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
   const tracks = useStudio((s) => s.tracks);
   const id = useStudio((s) => s.selectedClipId);
@@ -124,7 +130,7 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
     if (speechFocusRequest > 0) setActiveTab("speech");
   }, [speechFocusRequest]);
 
-  if (!project) return null;
+  if (!project || !rootProject) return null;
 
   return (
     <div className="flex h-full flex-col bg-panel">
@@ -133,7 +139,7 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
         {!clip ? (
           <div className="space-y-3 text-xs">
             <EmptyInspectorState />
-            <ProjectSettingsPanel project={project} />
+            <ProjectSettingsPanel project={rootProject} />
           </div>
         ) : (
           <div className="space-y-3 text-xs">
@@ -589,7 +595,7 @@ function AdvancedInspectorTab({
         <RootElementSourceInspector clip={clip} rootHtml={project.hf.rootHtml} />
       )}
 
-      <ProjectSettingsPanel project={project} />
+      <ProjectSettingsPanel project={rootProject} />
 
       <PanelSection title="Danger" icon={Trash2}>
         <button

@@ -11,6 +11,7 @@ import {
   validateCompositionSourceHtml,
 } from "../hyperframes/composition-source";
 import { buildCompositionPreviewProject } from "../hyperframes/composition-preview-project";
+import { buildSceneEditingProject } from "../scenes";
 import {
   createBlankCharacter,
   roleEnabledByManifest,
@@ -22,7 +23,8 @@ import {
   type CharacterThumbnailFrame,
 } from "./character-thumbnail-bounds";
 import { matrixToCss } from "../character/geometry";
-import { ensureStarterCharacterSeeded } from "../character/starter";
+import { createPresetCharacter, ensureStarterCharacterSeeded } from "../character/starter";
+import type { PresenterVariant } from "../character/presenter";
 import { defaultPoseForCharacter } from "../character/pose-presets";
 import { ensureMotionPresetsSeeded } from "../presets/seed";
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
@@ -44,6 +46,15 @@ type TabId = (typeof TABS)[number]["id"];
 
 export function Library() {
   const [tab, setTab] = useState<TabId>("media");
+  // Keep the store's media cache in sync with Dexie regardless of which tab is open. Characters
+  // (and their part blobs) are seeded/edited from the Characters tab; without this, those blobs
+  // would only reach the store after visiting the Media tab, so the stage couldn't resolve their
+  // `asset:` refs when the character is placed.
+  const syncMediaAssets = useStudio((s) => s.syncMediaAssets);
+  const allMedia = useLiveQuery(() => db.media.toArray(), []);
+  useEffect(() => {
+    if (allMedia) syncMediaAssets(allMedia);
+  }, [allMedia, syncMediaAssets]);
   return (
     <div className="flex h-full flex-col bg-panel">
       <div className="border-b border-border bg-panel p-2">
@@ -109,7 +120,12 @@ const TEXT_BLOCKS = [
 ] as const;
 
 function TextTab() {
-  const project = useStudio((s) => s.project);
+  const rootProject = useStudio((s) => s.project);
+  const activeSceneId = useStudio((s) => s.activeSceneId);
+  const project = useMemo(
+    () => (rootProject ? buildSceneEditingProject(rootProject, activeSceneId) : null),
+    [activeSceneId, rootProject],
+  );
   const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
   const tracks = useStudio((s) => s.tracks);
   const addClip = useStudio((s) => s.addClip);
@@ -170,7 +186,12 @@ function TextTab() {
 }
 
 function CharactersTab() {
-  const project = useStudio((s) => s.project);
+  const rootProject = useStudio((s) => s.project);
+  const activeSceneId = useStudio((s) => s.activeSceneId);
+  const project = useMemo(
+    () => (rootProject ? buildSceneEditingProject(rootProject, activeSceneId) : null),
+    [activeSceneId, rootProject],
+  );
   const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
   const tracks = useStudio((s) => s.tracks);
   const addClip = useStudio((s) => s.addClip);
@@ -199,6 +220,21 @@ function CharactersTab() {
     await db.characters.put(c);
     registerCharacterPreset(c);
     openModal({ type: "character-editor", characterId: c.id });
+  };
+
+  const [generatingPreset, setGeneratingPreset] = useState<PresenterVariant | null>(null);
+  const newPresetCharacter = async (variant: PresenterVariant) => {
+    if (generatingPreset) return;
+    setGeneratingPreset(variant);
+    try {
+      const c = await createPresetCharacter(variant);
+      registerCharacterPreset(c);
+      openModal({ type: "character-editor", characterId: c.id });
+    } catch (err) {
+      console.error("Failed to generate preset character", err);
+    } finally {
+      setGeneratingPreset(null);
+    }
   };
 
   const placeOnTimeline = (
@@ -305,6 +341,21 @@ function CharactersTab() {
         >
           Stub
         </button>
+      </div>
+
+      <div className="flex items-center gap-2 rounded border border-border bg-panel-2 p-2">
+        <span className="text-[11px] font-medium text-muted-foreground">Generate preset:</span>
+        {(["male", "female"] as const).map((variant) => (
+          <button
+            key={variant}
+            onClick={() => newPresetCharacter(variant)}
+            disabled={!!generatingPreset}
+            title={`Generate a rigged ${variant} presenter to customize`}
+            className="flex-1 rounded border border-border px-2 py-1.5 text-[11px] font-medium capitalize text-foreground hover:border-primary hover:bg-panel disabled:opacity-50"
+          >
+            {generatingPreset === variant ? "Generating…" : variant}
+          </button>
+        ))}
       </div>
 
       {characters.length === 0 && (
@@ -517,7 +568,12 @@ function PresetsTab() {
 }
 
 function BlocksTab() {
-  const project = useStudio((s) => s.project);
+  const rootProject = useStudio((s) => s.project);
+  const activeSceneId = useStudio((s) => s.activeSceneId);
+  const project = useMemo(
+    () => (rootProject ? buildSceneEditingProject(rootProject, activeSceneId) : null),
+    [activeSceneId, rootProject],
+  );
   const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
   const tracks = useStudio((s) => s.tracks);
   const addClip = useStudio((s) => s.addClip);
@@ -725,12 +781,6 @@ function MediaTab() {
   const inputRef = useRef<HTMLInputElement>(null);
   const addMedia = useStudio((s) => s.addMediaToTimeline);
   const registerMediaAsset = useStudio((s) => s.registerMediaAsset);
-  const syncMediaAssets = useStudio((s) => s.syncMediaAssets);
-
-  useEffect(() => {
-    if (!queriedItems) return;
-    syncMediaAssets(allItems);
-  }, [allItems, queriedItems, syncMediaAssets]);
 
   const internalMediaIds = useMemo(() => {
     const ids = new Set<string>();

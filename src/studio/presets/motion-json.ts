@@ -1,11 +1,17 @@
 import type {
   AngleRigJson,
+  MotionDraftJson,
+  MotionDraftKeyframe,
+  MotionDraftTrack,
   MotionJson,
   MotionJsonKeyframe,
   MotionJsonTrack,
   MotionTargetJson,
+  MotionTrackChannel,
 } from "../character-json/schema";
 import {
+  CHARACTER_JSON_SCHEMA_VERSION,
+  MOTION_JSON_KIND,
   MOTION_TRANSFORM_FIELD_NAMES,
   normalizeMotionCategoryForImport,
 } from "../character-json/schema";
@@ -239,6 +245,204 @@ function sampleInterpolatedTrack(
 
 function sortedKeyframes(track: MotionJsonTrack): MotionJsonKeyframe[] {
   return [...track.keyframes].sort((a, b) => a.t - b.t);
+}
+
+// ---------------------------------------------------------------------------
+// Lean AI authoring shape ("motion draft")
+//
+// What the AI actually writes is movement, nothing else. Everything that is
+// format identity (kind/schemaVersion/id/suggestedFilename/targetSpace), editor
+// concern (final name/category), or rig knowledge (joint pivots) is filled in by
+// `normalizeMotionInput` below, which expands a draft into the canonical
+// `MotionJson` that the rest of the pipeline already validates and renders.
+//
+// The expander is deliberately tolerant: it ingests the lean draft, a fully
+// verbose `studioBoom.motion.v1`, the legacy `motionSuggestion` envelope, and
+// anything in between, and always emits a complete `MotionJson`. The OUT prompt
+// advertises only the lean end of that spectrum.
+// ---------------------------------------------------------------------------
+
+/** Resolve a bare target string to a `MotionTargetJson`. Returns null for an unknown shape. */
+export function parseMotionTargetString(raw: string): MotionTargetJson | null {
+  const id = raw.trim();
+  if (!id) return null;
+  if (id === "camera" || id === "__camera") return { kind: "camera", id: "__camera" };
+  if (id.startsWith("bone:")) return { kind: "semanticBone", id };
+  if (id.startsWith("slot:") || id.startsWith("role:")) return { kind: "semanticSlot", id };
+  return null;
+}
+
+function coerceTarget(target: unknown): MotionTargetJson | null {
+  if (typeof target === "string") return parseMotionTargetString(target);
+  if (isRecord(target) && typeof target.kind === "string") return target as MotionTargetJson;
+  return null;
+}
+
+/**
+ * Channel is fully derivable from which key a keyframe carries — `variant` (string) is a stepped
+ * pose swap, `visible` (boolean) is a stepped on/off, and everything else (incl. `opacity` as a
+ * smooth number) is an interpolated transform. So the AI never declares it.
+ */
+function inferChannel(keyframes: MotionDraftKeyframe[]): MotionTrackChannel {
+  if (keyframes.some((kf) => isRecord(kf) && typeof kf.variant === "string")) return "variant";
+  if (keyframes.some((kf) => isRecord(kf) && typeof kf.visible === "boolean")) return "visibility";
+  return "transform";
+}
+
+const MOTION_EASE_SYNONYMS: Record<string, string> = {
+  bouncy: "bounce",
+  springy: "elastic",
+  rubbery: "elastic",
+  smooth: "soft",
+  gentle: "soft",
+  sharp: "snappy",
+  punchy: "snappy",
+  weighty: "easeInOut",
+  heavy: "easeInOut",
+  floaty: "easeOut",
+};
+
+/** Map an optional "feel" word to an ease name; pass valid ease names straight through. */
+function feelToEase(feel: unknown): string | undefined {
+  if (typeof feel !== "string") return undefined;
+  const key = feel.trim().toLowerCase();
+  return MOTION_EASE_SYNONYMS[key] ?? (key || undefined);
+}
+
+function expandDraftKeyframe(
+  kf: MotionDraftKeyframe,
+  track: MotionDraftTrack,
+  trackEase: string | undefined,
+): MotionJsonKeyframe {
+  const raw = kf as unknown as Record<string, unknown>;
+  const out: MotionJsonKeyframe = { t: typeof kf.t === "number" ? kf.t : 0 };
+  for (const key of MOTION_TRANSFORM_FIELD_NAMES) {
+    const value = raw[key];
+    if (typeof value === "number" && Number.isFinite(value)) out[key] = value;
+  }
+  if (typeof kf.variant === "string") out.variant = kf.variant;
+  if (typeof kf.visible === "boolean") out.visible = kf.visible;
+  // Track-level perspective expands down onto each keyframe unless the keyframe set its own.
+  if (out.transformPerspective === undefined && typeof track.perspective === "number") {
+    out.transformPerspective = track.perspective;
+  }
+  const ease = kf.ease ?? trackEase;
+  if (typeof ease === "string") out.ease = ease;
+  return out;
+}
+
+/**
+ * Expand a lean draft into the canonical `MotionJson`. Backfills all format/identity fields,
+ * infers channels, resolves bare-string targets, and cascades feel/track ease defaults onto
+ * keyframes. Returns authoring warnings (e.g. tracks that will start displaced for lack of a t≤0
+ * keyframe) — these are advisory; the existing validator owns hard errors after expansion.
+ */
+export function expandMotionDraft(draft: MotionDraftJson): {
+  motion: MotionJson;
+  warnings: string[];
+} {
+  const source = draft as unknown as Record<string, unknown>;
+  const warnings: string[] = [];
+  const name = (typeof draft.name === "string" && draft.name.trim()) || "AI motion";
+  const defaultEase = feelToEase(draft.feel);
+  const draftTracks = Array.isArray(draft.tracks) ? draft.tracks : [];
+
+  const tracks: MotionJsonTrack[] = draftTracks.map((track, index) => {
+    const rawTrack = track as unknown as Record<string, unknown>;
+    const target = coerceTarget(track.target);
+    const keyframes = Array.isArray(track.keyframes) ? track.keyframes : [];
+    const channel: MotionTrackChannel =
+      typeof rawTrack.channel === "string"
+        ? (rawTrack.channel as MotionTrackChannel)
+        : inferChannel(keyframes);
+    // Ease only shapes interpolation, so it is meaningless on stepped variant/visibility tracks —
+    // don't cascade the track ease or the `feel` default onto them.
+    const trackEase = channel === "transform" ? (track.ease ?? defaultEase) : undefined;
+    const expanded = keyframes.map((kf) => expandDraftKeyframe(kf, track, trackEase));
+
+    const times = expanded.map((kf) => kf.t).filter((t) => Number.isFinite(t));
+    if (channel === "transform" && times.length > 0 && Math.min(...times) > 0) {
+      warnings.push(
+        `$.tracks[${index}] (${stringifyTarget(track.target)}) has no keyframe at t<=0; it will ` +
+          `start at its first authored value instead of easing in from rest. Add a t:0 keyframe ` +
+          `at the neutral pose if you want it to animate in.`,
+      );
+    }
+
+    return {
+      id: typeof rawTrack.id === "string" ? (rawTrack.id as string) : `track:${index + 1}`,
+      // A null target is left as a best-effort value so the validator reports it at the right path.
+      target:
+        target ?? ({ kind: "semanticSlot", id: stringifyTarget(track.target) } as MotionTargetJson),
+      channel,
+      keyframes: expanded,
+    };
+  });
+
+  const motion: MotionJson = {
+    kind: MOTION_JSON_KIND,
+    schemaVersion: CHARACTER_JSON_SCHEMA_VERSION,
+    suggestedFilename:
+      typeof source.suggestedFilename === "string"
+        ? (source.suggestedFilename as string)
+        : motionJsonFilename(name),
+    id:
+      typeof source.id === "string" && source.id.trim()
+        ? (source.id as string)
+        : `motion:${slugifyName(name, "ai")}`,
+    name,
+    category: normalizeMotionCategoryForImport(
+      typeof draft.category === "string" ? draft.category : "custom",
+    ).category,
+    duration:
+      typeof draft.duration === "number" && Number.isFinite(draft.duration) && draft.duration > 0
+        ? draft.duration
+        : 1,
+    loop: typeof source.loop === "boolean" ? (source.loop as boolean) : false,
+    targetSpace: "parentRelative",
+    tracks,
+  };
+  if (Array.isArray(source.angleIds)) motion.angleIds = source.angleIds as MotionJson["angleIds"];
+  if (isRecord(source.constraints))
+    motion.constraints = source.constraints as MotionJson["constraints"];
+  if (typeof source.description === "string") motion.description = source.description;
+
+  return { motion, warnings };
+}
+
+/**
+ * Normalize any pasted motion input into a canonical `MotionJson`. Accepts the lean draft (current
+ * authoring shape), a full `studioBoom.motion.v1`, and the legacy `motionSuggestion` envelope.
+ */
+export function normalizeMotionInput(value: unknown): {
+  motion: MotionJson | null;
+  warnings: string[];
+} {
+  // A bare array is accepted as the tracks list (a model that dropped the object wrapper).
+  if (Array.isArray(value)) {
+    return expandMotionDraft({ tracks: value } as unknown as MotionDraftJson);
+  }
+  if (!isRecord(value)) return { motion: null, warnings: [] };
+  // Unwrap a nested motion object: the legacy `motionSuggestion` envelope, or any stray
+  // `{ motion: {...} }` wrapper a model may add despite the instructions.
+  if (!Array.isArray(value.tracks) && isRecord(value.motion)) {
+    return normalizeMotionInput(value.motion);
+  }
+  // Lean draft, full `studioBoom.motion.v1`, or anything else carrying a tracks array.
+  if (Array.isArray(value.tracks)) {
+    return expandMotionDraft(value as unknown as MotionDraftJson);
+  }
+  return { motion: null, warnings: [] };
+}
+
+function stringifyTarget(target: unknown): string {
+  if (typeof target === "string") return target;
+  if (isRecord(target) && typeof target.id === "string") return target.id;
+  return "unknown";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function clamp01(value: number): number {

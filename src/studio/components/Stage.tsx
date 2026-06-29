@@ -26,6 +26,7 @@ import {
   type ClipKeyframeSelection,
   type EditorClip,
 } from "../types";
+import { buildSceneEditingProject } from "../scenes";
 import { getKeyframesForProperty, sampleClipKeyframedState } from "../hyperframes/keyframes";
 import { buildPositionPath, type PositionCheckpoint } from "../hyperframes/motion-path";
 import {
@@ -172,7 +173,12 @@ interface StageClickTarget {
 }
 
 export function Stage({ iframeRef, onIframeLoad }: StageProps) {
-  const project = useStudio((s) => s.project);
+  const rootProject = useStudio((s) => s.project);
+  const activeSceneId = useStudio((s) => s.activeSceneId);
+  const project = useMemo(
+    () => (rootProject ? buildSceneEditingProject(rootProject, activeSceneId) : null),
+    [activeSceneId, rootProject],
+  );
   const selectClip = useStudio((s) => s.selectClip);
   const selectedClipId = useStudio((s) => s.selectedClipId);
   const selectedKeyframe = useStudio((s) => s.selectedKeyframe);
@@ -491,7 +497,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   // `hf`, so none of them reload. The latest `project` is read at resolve time.
   const projectHf = project?.hf;
   useEffect(() => {
-    const current = useStudio.getState().project;
+    const current = project;
     if (!current) {
       setResolvedHtml(null);
       setPreviewError(null);
@@ -518,7 +524,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     return () => {
       alive = false;
     };
-  }, [projectHf, repairTimelineLanes]);
+  }, [project, projectHf, repairTimelineLanes]);
 
   useEffect(() => {
     if (!resolvedHtml) return;

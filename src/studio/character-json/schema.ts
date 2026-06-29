@@ -551,6 +551,56 @@ export interface MotionPromptAngleJson {
 }
 
 /** The native control surface advertised to the AI — what it can author motion from. */
+/**
+ * The lean shape the AI actually authors. It is *only* the movement — every format/identity field
+ * (kind/schemaVersion/id/suggestedFilename/targetSpace), editor concern (final name/category), and
+ * rig fact (joint pivots) is filled in by the import adapter (`expandMotionDraft`). The OUT prompt
+ * advertises this shape; `normalizeMotionInput` expands it into the canonical `MotionJson` that the
+ * existing validator and renderer already consume.
+ */
+export interface MotionDraftKeyframe {
+  /** Normalized time 0..1. */
+  t: number;
+  dx?: number;
+  dy?: number;
+  scale?: number;
+  scaleX?: number;
+  scaleY?: number;
+  skewX?: number;
+  skewY?: number;
+  rotation?: number;
+  rotationX?: number;
+  rotationY?: number;
+  opacity?: number;
+  /** Pose-swap variant (a `variant` keyframe makes this a stepped variant track). */
+  variant?: string;
+  /** Hard on/off (a `visible` keyframe makes this a stepped visibility track). */
+  visible?: boolean;
+  /** Per-segment ease override of the track/feel default. */
+  ease?: string;
+}
+
+export interface MotionDraftTrack {
+  /** "bone:…" | "slot:…" | "role:…" | "camera". Kind is inferred from the prefix. */
+  target: string;
+  /** Track-level default ease applied to keyframes that omit one. */
+  ease?: string;
+  /** Track-level 3D perspective in px (pair with rotationX/rotationY). */
+  perspective?: number;
+  keyframes: MotionDraftKeyframe[];
+}
+
+export interface MotionDraftJson {
+  /** Optional intent hints — prefill the editor; never required, never authoritative. */
+  name?: string;
+  category?: string;
+  /** Optional "feel" word seeding the default ease for tracks that don't specify one. */
+  feel?: string;
+  /** Seconds the normalized keyframe times map onto. The AI's call; defaults if omitted. */
+  duration?: number;
+  tracks: MotionDraftTrack[];
+}
+
 export interface MotionControlSurfaceJson {
   /** Per-keyframe transform fields on a transform track (name, unit, meaning). */
   transformFields: Array<{ name: MotionTransformFieldName; unit: string; doc: string }>;
@@ -572,7 +622,7 @@ export interface MotionRequestAiOutJson extends StudioBoomJsonArtifactBase {
   instructions: string[];
   /** Native controls the AI authors movement from (single source of truth, see MOTION_TRANSFORM_FIELD_NAMES). */
   controls: MotionControlSurfaceJson;
-  exampleMotion: MotionJson;
+  exampleMotion: MotionDraftJson;
 }
 
 export type InboundAiSuggestionJson =

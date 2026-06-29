@@ -1,191 +1,82 @@
-import { db, importMediaFile } from "../db";
-import type { CharacterPreset, MouthViseme } from "../types";
-import { createBlankCharacter, makePart } from "./character-utils";
+import { db, deleteMediaIfUnused, importMediaFile, mediaIdsForCharacter, uid } from "../db";
+import type { CharacterPreset } from "../types";
+import {
+  buildPresenterCharacter,
+  presenterPartSpecs,
+  presenterPartSvg,
+  PRESENTER_VERSION,
+  type PresenterVariant,
+} from "./presenter";
 
 const STARTER_ID = "builtin-starter-character";
-const CANVAS_W = 600;
-const CANVAS_H = 900;
 
-export async function ensureStarterCharacterSeeded() {
-  const partFile = (name: string, body: string) =>
-    new File(
-      [
-        `<svg xmlns="http://www.w3.org/2000/svg" width="${CANVAS_W}" height="${CANVAS_H}" viewBox="0 0 ${CANVAS_W} ${CANVAS_H}">${body}</svg>`,
-      ],
-      `${name}.svg`,
-      { type: "image/svg+xml" },
-    );
+/** Up to date when the persisted copy was built by the current generator revision. */
+function isCurrentPresenter(character: CharacterPreset): boolean {
+  return character.builtinVersion === PRESENTER_VERSION && character.parts.length > 0;
+}
 
-  const importPart = (name: string, body: string) =>
-    importMediaFile(partFile(name, body), { scope: "character-part" });
+/**
+ * Generate a fully-rigged presenter `CharacterPreset` for the given id and variant: import one SVG
+ * media blob per part spec, then build the character against those media ids. Pure persistence of
+ * the art + character record is left to the caller.
+ */
+async function materializePresetCharacter(
+  id: string,
+  variant: PresenterVariant,
+): Promise<CharacterPreset> {
+  const specs = presenterPartSpecs(variant);
+  const mediaIdByKey = new Map<string, string>();
+  await Promise.all(
+    specs.map(async (spec) => {
+      const file = new File(
+        [presenterPartSvg(spec.svg, spec.frame)],
+        `${spec.key.replace(/[:]/g, "-")}.svg`,
+        { type: "image/svg+xml" },
+      );
+      const asset = await importMediaFile(file, { scope: "character-part" });
+      mediaIdByKey.set(spec.key, asset.id);
+    }),
+  );
 
-  const [
-    body,
-    head,
-    eyesOpen,
-    eyesClosed,
-    browsNeutral,
-    browsRaised,
-    mouthRest,
-    mouthA,
-    mouthE,
-    mouthO,
-    mouthU,
-    mouthMbp,
-    mouthFv,
-    mouthL,
-  ] = await Promise.all([
-    importPart(
-      "starter-body",
-      `<path d="M236 338c12 36 116 36 128 0l48 24c54 27 85 83 85 144v235c0 25-20 45-45 45H148c-25 0-45-20-45-45V506c0-61 31-117 85-144l48-24Z" fill="#5cc8a3"/>
-       <path d="M254 315h92v74c0 27-92 27-92 0v-74Z" fill="#f3b995"/>
-       <path d="M127 504c-52 84-58 167-17 250" fill="none" stroke="#439b82" stroke-width="56" stroke-linecap="round"/>
-       <path d="M473 504c52 84 58 167 17 250" fill="none" stroke="#439b82" stroke-width="56" stroke-linecap="round"/>
-       <path d="M224 784c-22 31-34 66-36 104" fill="none" stroke="#35796e" stroke-width="58" stroke-linecap="round"/>
-       <path d="M376 784c22 31 34 66 36 104" fill="none" stroke="#35796e" stroke-width="58" stroke-linecap="round"/>`,
-    ),
-    importPart(
-      "starter-head",
-      `<ellipse cx="300" cy="246" rx="128" ry="142" fill="#f5c2a3"/>
-       <path d="M174 236c3-83 55-140 126-140 72 0 124 52 128 136-37-23-76-31-118-24-48 8-88 22-136 28Z" fill="#393341"/>
-       <path d="M199 225c31-39 77-59 139-58-27 18-55 30-85 36-21 4-39 11-54 22Z" fill="#2f2a36"/>
-       <circle cx="177" cy="255" r="25" fill="#f5c2a3"/>
-       <circle cx="423" cy="255" r="25" fill="#f5c2a3"/>
-       <path d="M292 287c-5 18-8 33-2 42 5 7 17 6 25 2" fill="none" stroke="#d58d76" stroke-width="6" stroke-linecap="round"/>`,
-    ),
-    importPart(
-      "starter-eyes-open",
-      `<ellipse cx="252" cy="250" rx="28" ry="19" fill="#fff"/>
-       <ellipse cx="348" cy="250" rx="28" ry="19" fill="#fff"/>
-       <circle cx="257" cy="252" r="10" fill="#242735"/>
-       <circle cx="353" cy="252" r="10" fill="#242735"/>`,
-    ),
-    importPart(
-      "starter-eyes-closed",
-      `<path d="M224 253c18 14 39 14 57 0" fill="none" stroke="#242735" stroke-width="8" stroke-linecap="round"/>
-       <path d="M320 253c18 14 39 14 57 0" fill="none" stroke="#242735" stroke-width="8" stroke-linecap="round"/>`,
-    ),
-    importPart(
-      "starter-brows-neutral",
-      `<path d="M219 216c23-13 45-14 66-4" fill="none" stroke="#393341" stroke-width="10" stroke-linecap="round"/>
-       <path d="M315 212c22-10 45-9 66 4" fill="none" stroke="#393341" stroke-width="10" stroke-linecap="round"/>`,
-    ),
-    importPart(
-      "starter-brows-raised",
-      `<path d="M219 196c23-13 45-14 66-4" fill="none" stroke="#393341" stroke-width="10" stroke-linecap="round"/>
-       <path d="M315 192c22-10 45-9 66 4" fill="none" stroke="#393341" stroke-width="10" stroke-linecap="round"/>`,
-    ),
-    importPart(
-      "starter-mouth-rest",
-      `<path d="M270 363c20 9 41 9 62 0" fill="none" stroke="#733f43" stroke-width="8" stroke-linecap="round"/>`,
-    ),
-    importPart(
-      "starter-mouth-a",
-      `<ellipse cx="300" cy="362" rx="29" ry="31" fill="#733f43"/><ellipse cx="300" cy="376" rx="17" ry="10" fill="#e87f89"/>`,
-    ),
-    importPart(
-      "starter-mouth-e",
-      `<path d="M264 358c24 23 51 23 75 0 0 30-75 30-75 0Z" fill="#733f43"/><rect x="278" y="360" width="44" height="9" rx="3" fill="#fff"/>`,
-    ),
-    importPart("starter-mouth-o", `<ellipse cx="300" cy="362" rx="22" ry="26" fill="#733f43"/>`),
-    importPart(
-      "starter-mouth-u",
-      `<path d="M276 355c15 24 33 24 48 0 10 30-58 30-48 0Z" fill="#733f43"/>`,
-    ),
-    importPart(
-      "starter-mouth-mbp",
-      `<path d="M263 361c25-12 49-12 74 0-24 13-50 13-74 0Z" fill="#733f43"/>`,
-    ),
-    importPart(
-      "starter-mouth-fv",
-      `<path d="M268 355c22 18 43 18 64 0 0 22-64 22-64 0Z" fill="#733f43"/><rect x="276" y="355" width="48" height="9" rx="3" fill="#fff"/>`,
-    ),
-    importPart(
-      "starter-mouth-l",
-      `<path d="M276 356c16 24 32 24 48 0v24c-16 14-32 14-48 0v-24Z" fill="#733f43"/><path d="M288 374c9-10 16-10 24 0" fill="none" stroke="#e87f89" stroke-width="9" stroke-linecap="round"/>`,
-    ),
-  ]);
+  return buildPresenterCharacter(id, variant, (k) => {
+    const mediaId = mediaIdByKey.get(k);
+    if (!mediaId) throw new Error(`Missing seeded media for presenter part "${k}"`);
+    return mediaId;
+  });
+}
 
-  const fullCanvas = {
-    x: 0,
-    y: 0,
-    width: CANVAS_W,
-    height: CANVAS_H,
-  };
-
-  const mouthPart = (mediaId: string, viseme: MouthViseme) =>
-    makePart("mouth", mediaId, {
-      ...fullCanvas,
-      name: `Mouth ${viseme}`,
-      viseme,
-      zIndex: 50,
-    });
-
-  const now = Date.now();
-  const character: CharacterPreset = {
-    ...createBlankCharacter("Starter Actor"),
-    id: STARTER_ID,
-    canvasWidth: CANVAS_W,
-    canvasHeight: CANVAS_H,
-    parts: [
-      makePart("body", body.id, { ...fullCanvas, name: "Body front", pose: "front", zIndex: 10 }),
-      makePart("head", head.id, { ...fullCanvas, name: "Head front", zIndex: 30 }),
-      makePart("eye", eyesOpen.id, {
-        ...fullCanvas,
-        name: "Eyes open",
-        eyeState: "open",
-        zIndex: 40,
-      }),
-      makePart("eye", eyesClosed.id, {
-        ...fullCanvas,
-        name: "Eyes closed",
-        eyeState: "closed",
-        zIndex: 40,
-      }),
-      makePart("eyebrow", browsNeutral.id, {
-        ...fullCanvas,
-        name: "Brows neutral",
-        pose: "neutral",
-        zIndex: 45,
-      }),
-      makePart("eyebrow", browsRaised.id, {
-        ...fullCanvas,
-        name: "Brows raised",
-        pose: "raised",
-        zIndex: 45,
-      }),
-      mouthPart(mouthRest.id, "rest"),
-      mouthPart(mouthA.id, "A"),
-      mouthPart(mouthE.id, "E"),
-      mouthPart(mouthO.id, "O"),
-      mouthPart(mouthU.id, "U"),
-      mouthPart(mouthMbp.id, "MBP"),
-      mouthPart(mouthFv.id, "FV"),
-      mouthPart(mouthL.id, "L"),
-    ],
-    createdAt: now,
-    updatedAt: now,
-  };
-
+/**
+ * Seed (or replace) the built-in "Studio Presenter" character: a stylized human presenter rigged
+ * across front and two three-quarter angles, with full limbs, face/visemes, hand variants, and
+ * pose presets. Replaces an out-of-date persisted copy in place and prunes its orphan art.
+ */
+export async function ensureStarterCharacterSeeded(): Promise<CharacterPreset> {
   const existing = await db.characters.get(STARTER_ID);
-  if (existing) {
-    const hasOpenEyes = existing.parts.some(
-      (part) => part.role === "eye" && part.eyeState === "open",
-    );
-    const hasClosedEyes = existing.parts.some(
-      (part) => part.role === "eye" && part.eyeState === "closed",
-    );
-    const hasNeutralBrows = existing.parts.some(
-      (part) => part.role === "eyebrow" && (part.pose ?? "neutral") === "neutral",
-    );
-    const hasRaisedBrows = existing.parts.some(
-      (part) => part.role === "eyebrow" && part.pose === "raised",
-    );
-    const hasMouthParts = existing.parts.some((part) => part.role === "mouth");
-    if (hasOpenEyes && hasClosedEyes && hasNeutralBrows && hasRaisedBrows && hasMouthParts)
-      return existing;
-  }
+  if (existing && isCurrentPresenter(existing)) return existing;
 
+  const character = await materializePresetCharacter(STARTER_ID, "male");
+
+  const previousMediaIds = mediaIdsForCharacter(existing);
+  await db.characters.put(character);
+
+  // Drop the replaced starter's now-unused part art.
+  const nextMediaIds = mediaIdsForCharacter(character);
+  await Promise.all(
+    Array.from(previousMediaIds)
+      .filter((id) => !nextMediaIds.has(id))
+      .map((id) => deleteMediaIfUnused(id, { internalOnly: true })),
+  );
+
+  return character;
+}
+
+/**
+ * Create a fresh, user-owned preset character (its own id) from the generator — the base for
+ * "generate a preset character" in the Characters tab. Persisted to Dexie and returned; the caller
+ * registers it with the store and opens the editor.
+ */
+export async function createPresetCharacter(variant: PresenterVariant): Promise<CharacterPreset> {
+  const character = await materializePresetCharacter(uid(), variant);
   await db.characters.put(character);
   return character;
 }

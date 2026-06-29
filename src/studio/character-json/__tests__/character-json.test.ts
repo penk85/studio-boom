@@ -12,7 +12,11 @@ import {
   buildMotionRequestAiOut,
   buildMotionRequestPrompt,
 } from "../ai-context";
-import { motionJsonToPreset } from "../../presets/motion-json";
+import {
+  expandMotionDraft,
+  motionJsonToPreset,
+  normalizeMotionInput,
+} from "../../presets/motion-json";
 import {
   resolveMotionTarget,
   validateAngleRigJson,
@@ -492,7 +496,7 @@ describe("character JSON architecture", () => {
     }
   });
 
-  it("fails clearly when a semantic target is unmapped for an angle", () => {
+  it("skips (warns, not errors) a target this character does not have", () => {
     const angleRig = {
       ...angleRigJsonFromPreset(makeCharacter(), "front"),
       angleId: "sideL" as const,
@@ -522,8 +526,10 @@ describe("character JSON architecture", () => {
 
     const validation = validateMotionJsonForAngle(motion, angleRig);
 
-    expect(validation.ok).toBe(false);
-    expect(validation.errors.map((issue) => issue.message).join("\n")).toContain(
+    // An unresolvable target is a skip-with-warning, not a hard error — body parts are optional.
+    expect(validation.ok).toBe(true);
+    expect(validation.errors).toEqual([]);
+    expect(validation.warnings.map((issue) => issue.message).join("\n")).toContain(
       'angle "sideL" has no mapped slot',
     );
   });
@@ -557,14 +563,18 @@ describe("character JSON architecture", () => {
       character: characterJson,
       activeAngle: angleRig,
       request: "Forward walk",
-      exampleMotion: motionJson,
     });
 
     expect(rigContext.kind).toBe("studioBoom.ai.characterRigContext.v1");
     expect(rigContext.suggestedFilename).toBe("marisol.rig-context.ai-out.json");
     expect(motionRequest.kind).toBe("studioBoom.ai.motionRequest.v1");
     expect(motionRequest.suggestedFilename).toBe("forward-walk.motion-request.ai-out.json");
-    expect(motionRequest.instructions.join("\n")).toContain("semanticBone");
+    // The lean contract advertises bare-string targets ("bone:…"/"slot:…"), not wrapped objects.
+    expect(motionRequest.instructions.join("\n")).toContain('"bone:<id>"');
+    // The example the AI mirrors must be the lean draft shape — movement only, no format scaffolding.
+    expect(motionRequest.exampleMotion).not.toHaveProperty("kind");
+    expect(motionRequest.exampleMotion.tracks[0]).not.toHaveProperty("channel");
+    expect(typeof motionRequest.exampleMotion.tracks[0].target).toBe("string");
     expect(motionRequest.character).not.toHaveProperty("kind");
     expect(motionRequest.character).not.toHaveProperty("schemaVersion");
     expect(motionRequest.activeAngle).not.toHaveProperty("bindings");
@@ -672,7 +682,7 @@ describe("character JSON architecture", () => {
     );
   });
 
-  it("rejects AI motion JSON with invalid slot variants before preset creation", () => {
+  it("warns (does not reject) when a slot lacks a requested variant", () => {
     const angleRig = angleRigJsonFromPreset(makeCharacter(), "front");
     const result = motionJsonToPreset(
       {
@@ -698,8 +708,10 @@ describe("character JSON architecture", () => {
       { id: "preset:bad" },
     );
 
-    expect(result.preset).toBeUndefined();
-    expect(result.errors.join("\n")).toContain('Variant "laserHand" is not defined');
+    // The slot exists but lacks "laserHand": the action still loads; the keyframe falls back.
+    expect(result.errors).toEqual([]);
+    expect(result.preset).toBeTruthy();
+    expect(result.warnings.join("\n")).toContain('Variant "laserHand" is not defined');
   });
 
   it("rejects child bone translations when an ancestor bone is already animated", () => {
@@ -1057,5 +1069,180 @@ describe("native motion control surface (3D + easing)", () => {
     expect(prompt).toContain("active_angle.bone_locks");
     expect(prompt).toContain("active_angle.bones");
     expect(prompt.trim().startsWith("{")).toBe(false);
+  });
+});
+
+describe("lean motion draft adapter", () => {
+  it("expands a movement-only draft into a complete, valid MotionJson", () => {
+    const angleRig = angleRigJsonFromPreset(makeCharacter(), "front");
+    const { motion, warnings } = normalizeMotionInput({
+      name: "Wave",
+      duration: 0.8,
+      tracks: [
+        {
+          // bare-string target, no kind wrapper; no channel; no origin.
+          target: "bone:slot:rightHand",
+          ease: "easeInOut",
+          keyframes: [
+            { t: 0, rotation: 0 },
+            { t: 0.5, rotation: 25 },
+            { t: 1, rotation: 0 },
+          ],
+        },
+        {
+          // a `variant` keyframe makes this a stepped variant track with no `channel` declared.
+          target: "slot:rightHand",
+          keyframes: [
+            { t: 0, variant: "openPalm" },
+            { t: 0.5, variant: "closedFist" },
+            { t: 1, variant: "openPalm" },
+          ],
+        },
+      ],
+    });
+
+    expect(warnings).toEqual([]);
+    expect(motion).not.toBeNull();
+    // Identity/format fields are synthesized, not authored.
+    expect(motion?.kind).toBe("studioBoom.motion.v1");
+    expect(motion?.schemaVersion).toBe(1);
+    expect(motion?.targetSpace).toBe("parentRelative");
+    expect(motion?.id).toBeTruthy();
+    expect(motion?.suggestedFilename).toBeTruthy();
+    expect(motion?.duration).toBe(0.8);
+
+    // Bare-string targets resolve to semantic targets by prefix.
+    expect(motion?.tracks[0].target).toEqual({ kind: "semanticBone", id: "bone:slot:rightHand" });
+    expect(motion?.tracks[1].target).toEqual({ kind: "semanticSlot", id: "slot:rightHand" });
+
+    // Channel is inferred: numeric → transform, variant key → variant.
+    expect(motion?.tracks[0].channel).toBe("transform");
+    expect(motion?.tracks[1].channel).toBe("variant");
+
+    // Track-level ease cascades onto keyframes that omit one.
+    expect(motion?.tracks[0].keyframes.every((kf) => kf.ease === "easeInOut")).toBe(true);
+
+    // The expanded motion passes the existing validator unchanged.
+    const validation = validateMotionJsonForAngle(motion, angleRig);
+    expect(validation.ok).toBe(true);
+  });
+
+  it("warns when a transform track has no t<=0 keyframe", () => {
+    const { warnings } = normalizeMotionInput({
+      duration: 1,
+      tracks: [
+        {
+          target: "bone:slot:rightHand",
+          keyframes: [
+            { t: 0.4, rotation: -90 },
+            { t: 1, rotation: 0 },
+          ],
+        },
+      ],
+    });
+    expect(warnings.some((w) => w.includes("no keyframe at t<=0"))).toBe(true);
+  });
+
+  it("expands track-level perspective onto 3D keyframes", () => {
+    const { motion } = expandMotionDraft({
+      duration: 1,
+      tracks: [
+        {
+          target: "bone:head",
+          perspective: 800,
+          keyframes: [
+            { t: 0, rotationY: 0 },
+            { t: 1, rotationY: 360 },
+          ],
+        },
+      ],
+    });
+    expect(motion.tracks[0].keyframes.every((kf) => kf.transformPerspective === 800)).toBe(true);
+  });
+
+  it("still accepts the legacy motionSuggestion envelope", () => {
+    const { motion } = normalizeMotionInput({
+      kind: "studioBoom.ai.motionSuggestion.v1",
+      motion: {
+        name: "Nod",
+        duration: 1,
+        tracks: [{ target: "bone:head", keyframes: [{ t: 0, rotation: 0 }] }],
+      },
+    });
+    expect(motion?.tracks[0].target).toEqual({ kind: "semanticBone", id: "bone:head" });
+  });
+
+  it("rejects input with no tracks array", () => {
+    expect(normalizeMotionInput({ foo: "bar" }).motion).toBeNull();
+    expect(normalizeMotionInput(42).motion).toBeNull();
+  });
+
+  it("does not cascade feel/track ease onto stepped variant tracks", () => {
+    const { motion } = expandMotionDraft({
+      feel: "bouncy",
+      duration: 1,
+      tracks: [
+        {
+          target: "slot:right-eye",
+          ease: "snappy", // even an explicit track ease is meaningless on a stepped track
+          keyframes: [
+            { t: 0, variant: "open" },
+            { t: 0.1, variant: "closed" },
+            { t: 1, variant: "open" },
+          ],
+        },
+      ],
+    });
+    expect(motion.tracks[0].channel).toBe("variant");
+    expect(motion.tracks[0].keyframes.every((kf) => kf.ease === undefined)).toBe(true);
+  });
+
+  it("applies the resolvable tracks of an action and skips parts the character lacks", () => {
+    const angleRig = angleRigJsonFromPreset(makeCharacter(), "front");
+    const { motion } = normalizeMotionInput({
+      name: "Wave",
+      duration: 1,
+      tracks: [
+        {
+          target: "bone:slot:rightHand",
+          keyframes: [
+            { t: 0, rotation: 0 },
+            { t: 1, rotation: 25 },
+          ],
+        },
+        // This character has no tail bone — the track should be skipped, not fail the whole action.
+        {
+          target: "bone:slot:tail",
+          keyframes: [
+            { t: 0, rotation: 0 },
+            { t: 1, rotation: 40 },
+          ],
+        },
+      ],
+    });
+    const result = motionJsonToPreset(motion!, angleRig, { id: "preset:wave" });
+
+    // The action still converts (no hard error), with a warning about the missing part.
+    expect(result.errors).toEqual([]);
+    expect(result.preset).toBeTruthy();
+    expect(result.warnings.join("\n")).toContain("bone:slot:tail");
+    const parts = result.preset?.keyposes?.flatMap((kp) => kp.parts) ?? [];
+    expect(parts.some((p) => p.boneId === "bone:slot:rightHand")).toBe(true);
+    expect(parts.some((p) => p.boneId === "bone:slot:tail")).toBe(false);
+  });
+
+  it("tolerates a bare array of tracks and a stray { motion } wrapper", () => {
+    const fromArray = normalizeMotionInput([
+      { target: "bone:head", keyframes: [{ t: 0, rotation: 0 }] },
+    ]);
+    expect(fromArray.motion?.tracks[0].target).toEqual({ kind: "semanticBone", id: "bone:head" });
+
+    const fromWrapper = normalizeMotionInput({
+      motion: {
+        duration: 1,
+        tracks: [{ target: "bone:head", keyframes: [{ t: 0, rotation: 0 }] }],
+      },
+    });
+    expect(fromWrapper.motion?.tracks[0].target).toEqual({ kind: "semanticBone", id: "bone:head" });
   });
 });

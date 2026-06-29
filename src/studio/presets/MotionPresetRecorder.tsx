@@ -68,7 +68,12 @@ import {
 } from "./action-terminology";
 import { sampleKeyposesAtTime } from "./keypose-sampling";
 import { sampleMotionEase } from "./easing";
-import { motionJsonToPreset, parseJsonArtifact, validateMotionJsonForAngle } from "./motion-json";
+import {
+  motionJsonToPreset,
+  normalizeMotionInput,
+  parseJsonArtifact,
+  validateMotionJsonForAngle,
+} from "./motion-json";
 import { AiAddonPromptPanel, GeneratedEditorShell } from "../ai/generated-editor";
 import { buildJsonRepairPrompt } from "../ai/external-ai";
 import {
@@ -240,16 +245,19 @@ export function MotionPresetRecorder({
         const parsed = parseJsonArtifact(source);
         if (parsed.error) return { ok: false, errors: [`Invalid JSON: ${parsed.error}`] };
 
-        const motion = motionFromPastedJson(parsed.value);
+        const { motion, warnings: shapeWarnings } = normalizeMotionInput(parsed.value);
         if (!motion) {
           return {
             ok: false,
-            errors: ['Paste kind "studioBoom.ai.motionSuggestion.v1" or "studioBoom.motion.v1".'],
+            errors: ['Paste an action: a JSON object with a "tracks" array.'],
           };
         }
 
         const validation = validateMotionJsonForAngle(motion, activeAngleRig);
-        const warnings = validation.warnings.map((issue) => `${issue.path}: ${issue.message}`);
+        const warnings = [
+          ...shapeWarnings,
+          ...validation.warnings.map((issue) => `${issue.path}: ${issue.message}`),
+        ];
         if (!validation.ok) {
           return {
             ok: false,
@@ -2564,19 +2572,6 @@ function recorderOverridesEqual(a: RecorderPartState, b: RecorderPartState): boo
     Object.is(a.originY, b.originY) &&
     Object.is(a.opacity, b.opacity)
   );
-}
-
-function motionFromPastedJson(value: unknown): MotionJson | null {
-  if (!isRecord(value)) return null;
-  if (value.kind === "studioBoom.motion.v1") return value as MotionJson;
-  if (value.kind === "studioBoom.ai.motionSuggestion.v1" && isRecord(value.motion)) {
-    return value.motion as MotionJson;
-  }
-  return null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function generatedMouthPreviewPart(character: CharacterPreset): CharacterPart | null {
