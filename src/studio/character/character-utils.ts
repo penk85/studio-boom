@@ -660,6 +660,68 @@ export function normalizePartRole(role: string | undefined): PartRole {
   }
 }
 
+function normalizedPartRoleSearchText(value: string) {
+  const text = value
+    .replace(/\.[^.]+$/i, "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z])([A-Z][a-z])/g, "$1 $2")
+    .toLowerCase();
+  return {
+    text,
+    tokens: new Set(text.split(/[^a-z0-9]+/).filter(Boolean)),
+    compact: text.replace(/[^a-z0-9]+/g, ""),
+  };
+}
+
+function hasRoleAlias(
+  search: ReturnType<typeof normalizedPartRoleSearchText>,
+  aliases: string[],
+) {
+  return aliases.some((alias) => {
+    const compactAlias = alias.replace(/[^a-z0-9]+/g, "").toLowerCase();
+    if (compactAlias.length <= 3) {
+      return (
+        search.tokens.has(compactAlias) ||
+        search.compact.startsWith(compactAlias) ||
+        search.compact.endsWith(compactAlias) ||
+        search.compact.includes(`left${compactAlias}`) ||
+        search.compact.includes(`right${compactAlias}`) ||
+        search.compact.includes(`${compactAlias}left`) ||
+        search.compact.includes(`${compactAlias}right`)
+      );
+    }
+    return search.compact.includes(compactAlias);
+  });
+}
+
+export function detectPartRoleFromFilename(filename: string): PartRole {
+  const search = normalizedPartRoleSearchText(filename);
+  if (hasRoleAlias(search, ["iris", "pupil"])) return "iris";
+  if (hasRoleAlias(search, ["eyebrow", "brow"])) return "eyebrow";
+  if (hasRoleAlias(search, ["eye"])) return "eye";
+  if (hasRoleAlias(search, ["nose"])) return "nose";
+  if (hasRoleAlias(search, ["mouth", "viseme", "lip", "lips"])) return "mouth";
+  if (hasRoleAlias(search, ["hand"])) return "hand";
+  if (hasRoleAlias(search, ["forearm", "lowerarm", "lower arm", "lower-arm", "lower_arm"]))
+    return "lowerArm";
+  if (hasRoleAlias(search, ["bicep", "upperarm", "upper arm", "upper-arm", "upper_arm"]))
+    return "upperArm";
+  if (hasRoleAlias(search, ["arm", "upperlimb", "upper limb", "upper-limb", "upper_limb"]))
+    return "arm";
+  if (hasRoleAlias(search, ["foot", "feet"])) return "foot";
+  if (hasRoleAlias(search, ["shin", "calf", "lowerleg", "lower leg", "lower-leg", "lower_leg"]))
+    return "lowerLeg";
+  if (hasRoleAlias(search, ["thigh", "upperleg", "upper leg", "upper-leg", "upper_leg"]))
+    return "upperLeg";
+  if (hasRoleAlias(search, ["leg", "lowerlimb", "lower limb", "lower-limb", "lower_limb"]))
+    return "leg";
+  if (hasRoleAlias(search, ["head"])) return "head";
+  if (hasRoleAlias(search, ["body", "torso"])) return "body";
+  if (hasRoleAlias(search, ["hair"])) return "hair";
+  if (hasRoleAlias(search, ["hat", "glasses", "accessory"])) return "accessory";
+  return "custom";
+}
+
 export function defaultMotionBehaviorForRole(role: PartRole, viseme?: MouthViseme | string) {
   if (role === "mouth" || viseme) return "lipSync";
   if (role === "eye") return "blink";

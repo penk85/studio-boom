@@ -4,6 +4,7 @@ import {
   claimSharedPartsForAngles,
   findCharacterSlot,
   listCharacterSlots,
+  detectPartRoleFromFilename,
   normalizeCharacterSlots,
   pickActivePart,
   pickActivePartForSlot,
@@ -218,8 +219,12 @@ describe("normalizePartRole", () => {
       "nose",
       "mouth",
       "arm",
+      "upperArm",
+      "lowerArm",
       "hand",
       "leg",
+      "upperLeg",
+      "lowerLeg",
       "foot",
       "hair",
       "accessory",
@@ -254,6 +259,28 @@ describe("normalizePartRole", () => {
   it("maps unknown string → custom", () => {
     expect(normalizePartRole("totally-unknown")).toBe("custom");
     expect(normalizePartRole(undefined)).toBe("custom");
+  });
+});
+
+describe("detectPartRoleFromFilename", () => {
+  it("keeps segmented limb filenames distinct from whole-limb artwork", () => {
+    expect(detectPartRoleFromFilename("left_upper_leg.svg")).toBe("upperLeg");
+    expect(detectPartRoleFromFilename("right-lower-leg.svg")).toBe("lowerLeg");
+    expect(detectPartRoleFromFilename("leftUpperArm.svg")).toBe("upperArm");
+    expect(detectPartRoleFromFilename("right_lowerarm.svg")).toBe("lowerArm");
+    expect(detectPartRoleFromFilename("right_forearm_pose.svg")).toBe("lowerArm");
+  });
+
+  it("maps anatomical upper/lower limb names to whole arm and leg slots", () => {
+    expect(detectPartRoleFromFilename("left_upper_limb.svg")).toBe("arm");
+    expect(detectPartRoleFromFilename("rightLowerLimb.png")).toBe("leg");
+    expect(detectPartRoleFromFilename("character_body_upper_limb_left.svg")).toBe("arm");
+    expect(detectPartRoleFromFilename("character_body_lower_limb_right.svg")).toBe("leg");
+  });
+
+  it("still recognizes whole one-piece limbs", () => {
+    expect(detectPartRoleFromFilename("left_arm.svg")).toBe("arm");
+    expect(detectPartRoleFromFilename("rightleg.png")).toBe("leg");
   });
 });
 

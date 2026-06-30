@@ -286,4 +286,46 @@ describe("character runtime resolver", () => {
     expect(placement.pivotX).toBeCloseTo(370);
     expect(placement.pivotY).toBeCloseTo(230);
   });
+
+  it("keeps mouth variants at their authored offsets from the rest mouth", () => {
+    const rest = makePart("mouth", "mouth-rest-media", {
+      id: "mouth-rest",
+      slotId: "role:mouth",
+      viseme: "rest",
+      x: 210,
+      y: 260,
+      width: 90,
+      height: 42,
+      zIndex: 5,
+    });
+    const open = makePart("mouth", "mouth-a-media", {
+      id: "mouth-a",
+      slotId: "role:mouth",
+      viseme: "A",
+      x: 190,
+      y: 250,
+      width: 150,
+      height: 70,
+      zIndex: 5,
+    });
+    const character: CharacterPreset = {
+      ...createBlankCharacter("Mouth runtime actor"),
+      parts: [rest, open],
+    };
+    const runtime = buildCharacterRuntime({
+      ...character,
+      rig: buildDefaultRig(character),
+    });
+    const slot = runtime.slotById.get("role:mouth");
+    if (!slot) throw new Error("Expected mouth slot.");
+
+    const placement = runtimePartPlacement(slot, open, runtime, {
+      poseKey: "A",
+    });
+
+    expect(placement.x).toBeCloseTo(open.x);
+    expect(placement.y).toBeCloseTo(open.y);
+    expect(placement.pivotX).toBeCloseTo(open.pivot!.x);
+    expect(placement.pivotY).toBeCloseTo(open.pivot!.y);
+  });
 });

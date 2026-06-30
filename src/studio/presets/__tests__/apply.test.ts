@@ -440,6 +440,7 @@ describe("composeMotionsAt", () => {
 
   it("keeps bone-targeted motion on per-bone deltas without creating pose swaps", () => {
     const preset = makePreset({
+      region: "fullBody",
       tracks: [
         {
           target: "bone",

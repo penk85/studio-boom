@@ -971,6 +971,7 @@ function buildMouthSlot(
   host?: NestedHostContext,
 ): void {
   if (character.mouthRig && character.mouthStyle === "rig") {
+    const basePart = resolveRuntimeSlotPart(slot, runtime, "rest") ?? representativePart(slot);
     buildGeneratedMouthSlot(
       out,
       character,
@@ -980,6 +981,8 @@ function buildMouthSlot(
       scaleY,
       binding,
       rig,
+      undefined,
+      basePart,
     );
     return;
   }
@@ -1089,6 +1092,7 @@ function buildGeneratedMouthSlot(
   binding?: ResolvedSlotBinding,
   rig?: RuntimeRig,
   boundBoneId?: string,
+  basePart?: CharacterPart,
 ): void {
   const mouthRig = character.mouthRig;
   if (!mouthRig) return;
@@ -1103,9 +1107,18 @@ function buildGeneratedMouthSlot(
     tongue: `char-generated-mouth-${safeSlot}-tongue`,
   };
   const drawIndex = rig ? slotDrawIndex(rig, slotId, placement.zIndex) : placement.zIndex;
+  const targetPart = generatedMouthMotionTargetPart(slotId, placement);
+  const anchorPart = basePart ?? targetPart;
+  const anchorRegistration = registrationForPart(anchorPart);
+  const left = binding
+    ? binding.x - anchorRegistration.x + (targetPart.x - anchorPart.x)
+    : placement.x;
+  const top = binding
+    ? binding.y - anchorRegistration.y + (targetPart.y - anchorPart.y)
+    : placement.y;
   const style = styleString({
-    left: (binding?.x ?? placement.x) * scaleX,
-    top: (binding?.y ?? placement.y) * scaleY,
+    left: left * scaleX,
+    top: top * scaleY,
     width: placement.width * scaleX,
     height: placement.height * scaleY,
     "z-index": drawIndex,
@@ -1168,7 +1181,6 @@ function buildGeneratedMouthSlot(
     ),
   );
   out.html.push("</div>");
-  const targetPart = generatedMouthMotionTargetPart(slotId, placement);
   out.motionTargets.push({
     kind: "slot",
     acceptsSlotMotion: true,

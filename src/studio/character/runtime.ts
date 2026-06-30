@@ -159,8 +159,13 @@ export function runtimePartPlacement(
   options: RuntimePartPlacementOptions = {},
 ): RuntimePartPlacement {
   const binding = runtime.bindingBySlot.get(slot.id);
-  const basePart =
+  const requestedBasePart =
     options.basePart ?? resolveRuntimeSlotPart(slot, runtime, options.poseKey) ?? part;
+  const preservesAuthoredOffsets = slot.role === "eye" || slot.role === "mouth";
+  const basePart =
+    preservesAuthoredOffsets && binding
+      ? (representativePart(slot) ?? requestedBasePart)
+      : requestedBasePart;
   const worldByBone =
     options.worldByBone ??
     (options.activeVariants
@@ -177,21 +182,34 @@ export function runtimePartPlacement(
   const slotScaleX = binding?.scaleX ?? 1;
   const slotScaleY = binding?.scaleY ?? 1;
   const registration = registrationForPart(part);
+  const baseRegistration = registrationForPart(basePart);
   const pivotWorld = slotOrigin;
+  const placedX =
+    preservesAuthoredOffsets && binding
+      ? pivotWorld.x - baseRegistration.x + (part.x - basePart.x)
+      : pivotWorld.x - registration.x;
+  const placedY =
+    preservesAuthoredOffsets && binding
+      ? pivotWorld.y - baseRegistration.y + (part.y - basePart.y)
+      : pivotWorld.y - registration.y;
+  const placedPivotX =
+    preservesAuthoredOffsets && binding ? placedX + registration.x : pivotWorld.x;
+  const placedPivotY =
+    preservesAuthoredOffsets && binding ? placedY + registration.y : pivotWorld.y;
   const referencePart =
     binding && slot.role !== "eye" && slot.role !== "mouth"
       ? (representativePart(slot) ?? basePart)
       : undefined;
   const drawOrderIndex = runtime.angleRig.drawOrder.indexOf(slot.id);
   return {
-    x: pivotWorld.x - registration.x,
-    y: pivotWorld.y - registration.y,
-    pivotX: pivotWorld.x,
-    pivotY: pivotWorld.y,
+    x: placedX,
+    y: placedY,
+    pivotX: placedPivotX,
+    pivotY: placedPivotY,
     containerX: slotOrigin.x,
     containerY: slotOrigin.y,
-    offsetX: 0,
-    offsetY: 0,
+    offsetX: placedX - (pivotWorld.x - baseRegistration.x),
+    offsetY: placedY - (pivotWorld.y - baseRegistration.y),
     rotation: boneRotation + slotRotation + registration.rotation,
     scaleX: slotScaleX,
     scaleY: slotScaleY,

@@ -1,6 +1,8 @@
 // MotionPresetRecorder — visual pose-and-capture flow for reusable motion presets.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ChevronLeft,
+  ChevronRight,
   Eye,
   EyeOff,
   Lock,
@@ -16,12 +18,9 @@ import {
   Unlock,
 } from "lucide-react";
 import { db, getMediaUrl, uid } from "../db";
+import { useMediaUrl } from "../hooks/useMediaUrl";
 import { useStudio } from "../store";
-import {
-  buildCharacterCompositionHtml,
-  buildCharacterGsapScript,
-  characterAssetIds,
-} from "../character/composition";
+import { buildCharacterCompositionHtml, characterAssetIds } from "../character/composition";
 import { variantKeyForPart, variantLabelForPart } from "../character/character-utils";
 import { localAlphaBounds } from "../character/alpha-bounds";
 import { faceTurnMotionForPart } from "../character/face-turn";
@@ -54,6 +53,7 @@ import {
   type PartFrameTransform,
   type RuntimePartFrame,
 } from "../character/part-frame";
+import { matrixToCss } from "../character/geometry";
 import {
   angleRigJsonFromPreset,
   characterJsonFromPreset,
@@ -189,9 +189,17 @@ export function MotionPresetRecorder({
       defaultActionRegionForCategory(initialPreset?.category ?? initialCategory ?? "full-body"),
   );
   const [duration, setDuration] = useState(initialPreset?.duration ?? 1);
+  const initialRecorderKeyposes = useMemo(
+    () => initialKeyposesForPreset(initialPreset, runtime),
+    [initialPreset, runtime],
+  );
   const [time, setTime] = useState(0);
+  const [playbackTime, setPlaybackTime] = useState(0);
   const [keyposes, setKeyposes] = useState<RecordedKeypose[]>(() =>
-    initialKeyposesForPreset(initialPreset, runtime),
+    cloneKeyposes(initialRecorderKeyposes),
+  );
+  const [selectedKeyposeTime, setSelectedKeyposeTime] = useState<number | null>(
+    () => initialRecorderKeyposes[0]?.t ?? null,
   );
   const [overrides, setOverrides] = useState<Map<string, RecorderPartState>>(new Map());
   const [draftDirty, setDraftDirty] = useState(false);
@@ -200,8 +208,8 @@ export function MotionPresetRecorder({
   const [allowOutOfBounds, setAllowOutOfBounds] = useState<string[]>(
     () => initialPreset?.allowOutOfBounds ?? [],
   );
-  const [faceTurnX, setFaceTurnX] = useState(initialPreset?.keyposes?.[0]?.faceTurnX ?? 0);
-  const [faceTurnY, setFaceTurnY] = useState(initialPreset?.keyposes?.[0]?.faceTurnY ?? 0);
+  const [faceTurnX, setFaceTurnX] = useState(initialRecorderKeyposes[0]?.faceTurnX ?? 0);
+  const [faceTurnY, setFaceTurnY] = useState(initialRecorderKeyposes[0]?.faceTurnY ?? 0);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
   // Transient editor lock for this recording session — locked slots ignore canvas
   // clicks/drags (still selectable from the part list). Parts locked in the character
@@ -212,13 +220,15 @@ export function MotionPresetRecorder({
   // Dev-only visual debugger for variant anchors (bone pivots, anchor targets, resolution path).
   const [showAnchorDebug, setShowAnchorDebug] = useState(false);
   const [previewPlaying, setPreviewPlaying] = useState(false);
-  const [playbackPreset, setPlaybackPreset] = useState<MotionPreset | null>(null);
-  const [previewCompileRevision, setPreviewCompileRevision] = useState(0);
+  const [playbackCompileRevision, setPlaybackCompileRevision] = useState(0);
   const [selectPopover, setSelectPopover] = useState<SelectPopover | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [onionSkin, setOnionSkin] = useState<"off" | "previous" | "next" | "both">("off");
+  const [lastStampedTime, setLastStampedTime] = useState<number | null>(null);
   const wrapRef = useRef<HTMLElement>(null);
   const planeRef = useRef<HTMLDivElement>(null);
   const lastPickRef = useRef<DrillPick | null>(null);
+  const lastLoadedDraftRef = useRef<string | null>(null);
   const basePoses = useMemo(() => defaultPoseForCharacter(character), [character]);
   const characterJson = useMemo(() => characterJsonFromPreset(character), [character]);
   const activeAngleRig = useMemo(() => angleRigJsonFromPreset(character), [character]);
@@ -284,10 +294,13 @@ export function MotionPresetRecorder({
           converted.preset.region ?? defaultActionRegionForCategory(converted.preset.category),
         );
         setDuration(converted.preset.duration);
-        setKeyposes(cloneKeyposes(converted.preset.keyposes ?? []));
+        const nextKeyposes = initialKeyposesForPreset(converted.preset, runtime);
+        setKeyposes(nextKeyposes);
+        setSelectedKeyposeTime(nextKeyposes[0]?.t ?? null);
         setAllowOutOfBounds(converted.preset.allowOutOfBounds ?? []);
         setDraftDirty(false);
         setTime(0);
+        setPlaybackTime(0);
         setPreviewPlaying(false);
 
         return {
@@ -313,7 +326,7 @@ export function MotionPresetRecorder({
           source,
         }),
     }),
-    [activeAngleRig, characterJson],
+    [activeAngleRig, characterJson, runtime],
   );
   const aiAddon = useAiGeneratedArtifactAddon(motionAiAdapter, {
     initialRequest: "Create a forward walk cycle.",
@@ -345,7 +358,7 @@ export function MotionPresetRecorder({
       const maxTime = Math.max(0.1, duration);
       const dt = Math.max(0, (now - last) / 1000);
       last = now;
-      setTime((current) => {
+      setPlaybackTime((current) => {
         const next = current + dt;
         return next >= maxTime ? next % maxTime : next;
       });
@@ -357,69 +370,116 @@ export function MotionPresetRecorder({
 
   useEffect(() => {
     setTime((current) => Math.min(current, Math.max(0.1, duration)));
+    setPlaybackTime((current) => Math.min(current, Math.max(0.1, duration)));
   }, [duration]);
 
-  const keyposesForSampling = keyposes;
+  const stopCompiledPreview = useCallback(() => {
+    setPreviewPlaying(false);
+  }, []);
 
-  useEffect(() => {
-    if (previewPlaying) return;
-    const interp = sampleKeyposesAtTime(keyposesForSampling, time);
-    const next = new Map<string, RecorderPartState>();
-    for (const ov of interp.parts.values()) {
-      const slotId = slotIdForRecordedOverride(runtime, ov);
-      const slot = slotId ? runtime.slotById.get(slotId) : undefined;
-      if (!slot) continue;
-      const poseSwap = usesGeneratedMouth && slot.role === "mouth" ? undefined : ov.poseSwap;
-      const part = activePartForSlot(slot, poseSwap);
-      next.set(slot.id, {
-        ...defaultOverride(slot.id, part),
-        target: ov.target,
-        boneId: ov.boneId,
-        poseSwap,
-        dx: ov.dx ?? 0,
-        dy: ov.dy ?? 0,
-        scale: ov.scale ?? 1,
-        scaleX: ov.scaleX ?? 1,
-        scaleY: ov.scaleY ?? 1,
-        skewX: ov.skewX ?? 0,
-        skewY: ov.skewY ?? 0,
-        rotation: ov.rotation ?? 0,
-        originX: ov.originX ?? part?.anchorX ?? 0.5,
-        originY: ov.originY ?? part?.anchorY ?? 0.5,
-        opacity: ov.opacity ?? 1,
+  const resolveSampleToDraftState = useCallback(
+    (sample: ReturnType<typeof sampleKeyposesAtTime>) => {
+      const next = new Map<string, RecorderPartState>();
+      for (const ov of sample.parts.values()) {
+        const slotId = slotIdForRecordedOverride(runtime, ov);
+        const slot = slotId ? runtime.slotById.get(slotId) : undefined;
+        if (!slot) continue;
+        const poseSwap = usesGeneratedMouth && slot.role === "mouth" ? undefined : ov.poseSwap;
+        const part = activePartForSlot(slot, poseSwap);
+        next.set(slot.id, {
+          ...defaultOverride(slot.id, part),
+          target: ov.target,
+          boneId: ov.boneId,
+          poseSwap,
+          dx: ov.dx ?? 0,
+          dy: ov.dy ?? 0,
+          scale: ov.scale ?? 1,
+          scaleX: ov.scaleX ?? 1,
+          scaleY: ov.scaleY ?? 1,
+          skewX: ov.skewX ?? 0,
+          skewY: ov.skewY ?? 0,
+          rotation: ov.rotation ?? 0,
+          originX: ov.originX ?? part?.anchorX ?? 0.5,
+          originY: ov.originY ?? part?.anchorY ?? 0.5,
+          opacity: ov.opacity ?? 1,
+        });
+      }
+      const constrained = constrainRecorderOverrides({
+        character,
+        rig,
+        runtime,
+        slots,
+        overrides: next,
+        activePartForSlot,
+        basePoses,
+        constraintCtx,
+        allowOutOfBounds,
+        faceTurnX: sample.faceTurnX,
+        faceTurnY: sample.faceTurnY,
       });
-    }
-    const constrained = constrainRecorderOverrides({
+      return {
+        overrides: constrained,
+        faceTurnX: sample.faceTurnX,
+        faceTurnY: sample.faceTurnY,
+      };
+    },
+    [
+      activePartForSlot,
+      allowOutOfBounds,
+      basePoses,
       character,
+      constraintCtx,
       rig,
       runtime,
       slots,
-      overrides: next,
-      activePartForSlot,
-      basePoses,
-      constraintCtx,
-      allowOutOfBounds,
-      faceTurnX: interp.faceTurnX,
-      faceTurnY: interp.faceTurnY,
-    });
-    setOverrides((prev) => (recorderOverrideMapsEqual(prev, constrained) ? prev : constrained));
-    setFaceTurnX((prev) => (Object.is(prev, interp.faceTurnX) ? prev : interp.faceTurnX));
-    setFaceTurnY((prev) => (Object.is(prev, interp.faceTurnY) ? prev : interp.faceTurnY));
-    setDraftDirty(false);
-  }, [
-    activePartForSlot,
-    allowOutOfBounds,
-    basePoses,
-    character,
-    constraintCtx,
-    keyposesForSampling,
-    rig,
-    runtime,
-    slots,
-    time,
-    usesGeneratedMouth,
-    previewPlaying,
-  ]);
+      usesGeneratedMouth,
+    ],
+  );
+
+  const applySampleToDraft = useCallback(
+    (
+      sample: ReturnType<typeof sampleKeyposesAtTime>,
+      nextTime: number,
+      sourceKeypose?: RecordedKeypose | null,
+    ) => {
+      const draft = resolveSampleToDraftState(sample);
+      setOverrides((prev) =>
+        recorderOverrideMapsEqual(prev, draft.overrides) ? prev : draft.overrides,
+      );
+      setFaceTurnX(draft.faceTurnX);
+      setFaceTurnY(draft.faceTurnY);
+      setTime(Math.max(0, Math.min(duration, nextTime)));
+      setSelectedKeyposeTime(sourceKeypose?.t ?? null);
+      setDraftDirty(false);
+      lastLoadedDraftRef.current = sourceKeypose ? keyposeDraftSignature(sourceKeypose) : null;
+      stopCompiledPreview();
+    },
+    [duration, resolveSampleToDraftState, stopCompiledPreview],
+  );
+
+  const applyKeyposeToDraft = useCallback(
+    (keypose: RecordedKeypose) => {
+      applySampleToDraft(sampleKeyposesAtTime([keypose], keypose.t), keypose.t, keypose);
+    },
+    [applySampleToDraft],
+  );
+
+  const confirmDiscardDraft = useCallback(() => {
+    if (!draftDirty) return true;
+    return window.confirm(
+      "You have unstamped pose edits. Discard them and load a different keyframe?",
+    );
+  }, [draftDirty]);
+
+  useEffect(() => {
+    if (draftDirty) return;
+    const selected =
+      selectedKeyposeTime == null ? keyposes[0] : findKeyposeAt(keyposes, selectedKeyposeTime);
+    if (!selected) return;
+    const signature = keyposeDraftSignature(selected);
+    if (lastLoadedDraftRef.current === signature) return;
+    applyKeyposeToDraft(selected);
+  }, [applyKeyposeToDraft, draftDirty, keyposes, selectedKeyposeTime]);
 
   const displayScale = previewMode === "export" ? 1 : fitScale;
   const selectedSlot = slots.find((slot) => slot.id === selectedSlotId) ?? null;
@@ -499,28 +559,7 @@ export function MotionPresetRecorder({
     [keyposes],
   );
 
-  const keyposesForPlayback = useCallback(() => {
-    const currentParts = currentRecordedParts();
-    const hasDraft = draftDirty || currentParts.length > 0 || faceTurnX !== 0 || faceTurnY !== 0;
-    if (!hasDraft) return sortedKeyposes;
-    const existing = keyposes.find((k) => Math.abs(k.t - time) <= 0.001);
-    const draft: RecordedKeypose = {
-      t: round(time, 2),
-      parts: currentParts,
-      faceTurnX: faceTurnX === 0 ? undefined : faceTurnX,
-      faceTurnY: faceTurnY === 0 ? undefined : faceTurnY,
-      ease: existing?.ease ?? "easeInOut",
-      anticipation: existing?.anticipation,
-    };
-    return [
-      ...sortedKeyposes.filter((keypose) => Math.abs(keypose.t - draft.t) > 0.001),
-      draft,
-    ].sort((a, b) => a.t - b.t);
-  }, [currentRecordedParts, draftDirty, faceTurnX, faceTurnY, keyposes, sortedKeyposes, time]);
-
-  // Stable preset: committed keyposes only, no live overrides or face-turn.
-  // Controls srcDoc (DOM structure) — only rebuilds the iframe on keypose commits.
-  const stablePreviewPreset = useMemo(() => {
+  const playbackPreviewPreset = useMemo(() => {
     if (sortedKeyposes.length === 0) return null;
     return recorderPreviewPreset({
       name,
@@ -532,93 +571,72 @@ export function MotionPresetRecorder({
     });
   }, [allowOutOfBounds, category, duration, name, region, sortedKeyposes]);
 
-  // Edit preset: current overrides + face-turn at t=0.
-  // Used for GSAP script injection — changes every drag frame but never reloads the DOM.
-  const editPreviewPreset = useMemo(() => {
-    const currentParts = currentRecordedParts();
-    if (currentParts.length === 0 && faceTurnX === 0 && faceTurnY === 0) return null;
-    return recorderPreviewPreset({
-      name,
-      category,
-      region,
-      duration,
-      keyposes: [
-        {
-          t: 0,
-          parts: currentParts,
-          faceTurnX: faceTurnX === 0 ? undefined : faceTurnX,
-          faceTurnY: faceTurnY === 0 ? undefined : faceTurnY,
-          ease: "linear",
-        },
-      ],
-      allowOutOfBounds,
-    });
-  }, [
-    allowOutOfBounds,
-    category,
-    currentRecordedParts,
-    duration,
-    faceTurnX,
-    faceTurnY,
-    name,
-    region,
-  ]);
-
   const commitRecorderPreviewToHtml = useCallback(() => {
-    const playbackKeyposes = keyposesForPlayback();
-    const preset =
-      playbackKeyposes.length > 0
-        ? recorderPreviewPreset({
-            name,
-            category,
-            region,
-            duration,
-            keyposes: playbackKeyposes,
-            allowOutOfBounds,
-          })
-        : null;
-    setPlaybackPreset(preset);
-    setPreviewCompileRevision((revision) => revision + 1);
-    setTime(0);
+    setPlaybackCompileRevision((revision) => revision + 1);
+    setPlaybackTime(0);
     setPreviewPlaying(true);
-  }, [allowOutOfBounds, category, duration, keyposesForPlayback, name, region]);
-
-  const stopCompiledPreview = useCallback(() => {
-    setPreviewPlaying(false);
-    setPlaybackPreset(null);
   }, []);
 
-  const updateOverride = (slotId: string, patch: Partial<RecorderPartState>) => {
-    stopCompiledPreview();
-    setDraftDirty(true);
-    setOverrides((prev) => {
-      const next = new Map(prev);
-      const slot = slots.find((item) => item.id === slotId);
-      const cur = next.get(slotId);
-      const curPart = slot ? activePartForSlot(slot, cur?.poseSwap) : undefined;
-      const base = cur ?? defaultOverride(slotId, curPart);
-      const normalizedPatch =
-        slot?.role === "mouth" && usesGeneratedMouth && "poseSwap" in patch
-          ? { ...patch, poseSwap: undefined }
-          : patch;
-      const targetMeta = slot ? recorderMotionTargetForSlot(slot, runtime) : {};
-      const merged = { ...base, ...targetMeta, ...normalizedPatch };
-      next.set(slotId, merged);
-      return constrainRecorderOverrides({
-        character,
-        rig,
-        runtime,
-        slots,
-        overrides: next,
-        activePartForSlot,
-        basePoses,
-        constraintCtx,
-        allowOutOfBounds,
-        faceTurnX,
-        faceTurnY,
+  const refreshPlaybackPreview = useCallback((nextTime?: number) => {
+    setPreviewPlaying(false);
+    if (nextTime !== undefined) setPlaybackTime(Math.max(0, nextTime));
+    setPlaybackCompileRevision((revision) => revision + 1);
+  }, []);
+
+  const updateOverride = useCallback(
+    (slotId: string, patch: Partial<RecorderPartState>) => {
+      stopCompiledPreview();
+      setDraftDirty(true);
+      setOverrides((prev) => {
+        const next = new Map(prev);
+        const slot = slots.find((item) => item.id === slotId);
+        const cur = next.get(slotId);
+        const curPart = slot ? activePartForSlot(slot, cur?.poseSwap) : undefined;
+        const base = cur ?? defaultOverride(slotId, curPart);
+        const normalizedPatch =
+          slot?.role === "mouth" && usesGeneratedMouth && "poseSwap" in patch
+            ? { ...patch, poseSwap: undefined }
+            : patch;
+        const targetMeta = slot ? recorderMotionTargetForSlot(slot, runtime) : {};
+        const current = { ...base, ...targetMeta };
+        const merged = { ...current, ...normalizedPatch };
+        if (recorderOverridesEqual(current, merged)) return prev;
+        next.set(slotId, merged);
+        const constrained = constrainRecorderOverrides({
+          character,
+          rig,
+          runtime,
+          slots,
+          overrides: next,
+          activePartForSlot,
+          basePoses,
+          constraintCtx,
+          allowOutOfBounds,
+          faceTurnX,
+          faceTurnY,
+        });
+        return recorderOverrideMapsEqual(prev, constrained) ? prev : constrained;
       });
-    });
-  };
+    },
+    [
+      activePartForSlot,
+      allowOutOfBounds,
+      basePoses,
+      character,
+      constraintCtx,
+      faceTurnX,
+      faceTurnY,
+      rig,
+      runtime,
+      slots,
+      stopCompiledPreview,
+      usesGeneratedMouth,
+    ],
+  );
+  const queuedOverrideUpdate = useRafCoalescedCallback<{
+    slotId: string;
+    patch: Partial<RecorderPartState>;
+  }>(({ slotId, patch }) => updateOverride(slotId, patch));
 
   const clearOverride = (slotId: string) => {
     stopCompiledPreview();
@@ -702,12 +720,20 @@ export function MotionPresetRecorder({
     }
     const candidateIds = candidates.map((slot) => slot.id);
     const subjectId = resolveDragSubject(candidateIds, selectedSlotId) ?? selectedSlotId;
+    if (subjectId) e.preventDefault();
     const startX = e.clientX;
     const startY = e.clientY;
     const ox = subjectId ? (overrides.get(subjectId)?.dx ?? 0) : 0;
     const oy = subjectId ? (overrides.get(subjectId)?.dy ?? 0) : 0;
     const subjectTarget = subjectId ? runtimeMotionTargetForSlot(runtime, subjectId) : undefined;
     let dragging = false;
+    let lastPatch: Partial<RecorderPartState> | null = null;
+
+    const queuePatch = (patch: Partial<RecorderPartState>) => {
+      if (!subjectId || recorderPatchEqual(lastPatch, patch)) return;
+      lastPatch = patch;
+      queuedOverrideUpdate.queue({ slotId: subjectId, patch });
+    };
 
     const move = (ev: PointerEvent) => {
       if (!subjectId) return;
@@ -725,13 +751,18 @@ export function MotionPresetRecorder({
       const delta = subjectTarget
         ? canvasDeltaToMotionDelta(runtime, subjectTarget, canvasDelta, poseWorldByBone)
         : canvasDelta;
-      updateOverride(subjectId, {
+      queuePatch({
         dx: Math.round(ox + delta.x),
         dy: Math.round(oy + delta.y),
       });
     };
-    const up = () => {
-      if (dragging) return;
+    const up = (ev: PointerEvent | null) => {
+      if (dragging) {
+        if (ev) move(ev);
+        queuedOverrideUpdate.flush();
+        return;
+      }
+      queuedOverrideUpdate.cancel();
       const { id, nextPick } = resolveDrillSelection(candidateIds, lastPickRef.current, {
         x: startX,
         y: startY,
@@ -742,39 +773,148 @@ export function MotionPresetRecorder({
         setSelectPopover(null);
       }
     };
-    startWindowPointerDrag({ onMove: move, onEnd: up });
+    startWindowPointerDrag({ onMove: move, onEnd: up, onCancel: queuedOverrideUpdate.cancel });
   };
 
-  const captureKeypose = () => {
-    const existing = keyposes.find((k) => Math.abs(k.t - time) <= 0.001);
-    const kp: RecordedKeypose = {
-      t: round(time, 2),
+  const draftKeypose = useCallback(
+    (source?: RecordedKeypose | null): RecordedKeypose => ({
+      t: round(Math.max(0, Math.min(duration, time)), 2),
       parts: currentRecordedParts(),
       faceTurnX: faceTurnX === 0 ? undefined : faceTurnX,
       faceTurnY: faceTurnY === 0 ? undefined : faceTurnY,
-      ease: existing?.ease ?? "easeInOut",
-      anticipation: existing?.anticipation,
-    };
+      ease: source?.ease ?? "easeInOut",
+      anticipation: source?.anticipation,
+    }),
+    [currentRecordedParts, duration, faceTurnX, faceTurnY, time],
+  );
+
+  const stampKeypose = (mode: "new" | "update") => {
+    const selected =
+      selectedKeyposeTime == null ? null : findKeyposeAt(keyposes, selectedKeyposeTime);
+    if (mode === "update" && !selected) {
+      alert("Select a stamp before updating it.");
+      return;
+    }
+    const source = mode === "update" ? selected : undefined;
+    const kp = draftKeypose(source);
+    const targetCollision = findKeyposeAt(keyposes, kp.t);
+    const collisionIsSelected =
+      !!selected && !!targetCollision && Math.abs(targetCollision.t - selected.t) <= 0.001;
+    if (mode === "new" && targetCollision) {
+      alert(
+        `There is already a stamp at ${kp.t.toFixed(2)}s. Move the draft time to add a new stamp, or update the selected stamp.`,
+      );
+      return;
+    }
+    if (mode === "update" && targetCollision && !collisionIsSelected) {
+      alert(
+        `Another stamp already uses ${kp.t.toFixed(2)}s. Choose a different time before updating.`,
+      );
+      return;
+    }
     setKeyposes((prev) => {
-      const filtered = prev.filter((k) => Math.abs(k.t - kp.t) > 0.001);
+      const filtered = prev.filter((k) => {
+        if (mode === "update" && selected && Math.abs(k.t - selected.t) <= 0.001) return false;
+        return true;
+      });
       return [...filtered, kp].sort((a, b) => a.t - b.t);
     });
+    setSelectedKeyposeTime(kp.t);
     setDraftDirty(false);
+    setLastStampedTime(kp.t);
+    lastLoadedDraftRef.current = keyposeDraftSignature(kp);
+    refreshPlaybackPreview(kp.t);
   };
 
   const updateKeypose = (t: number, patch: Partial<RecordedKeypose>) => {
+    refreshPlaybackPreview();
     setKeyposes((prev) =>
       prev.map((kp) => (Math.abs(kp.t - t) <= 0.001 ? { ...kp, ...patch } : kp)),
     );
   };
 
-  const removeKeypose = (t: number) =>
+  const moveKeyposeTime = (from: number, nextTime: number) => {
+    const clamped = round(Math.max(0, Math.min(duration, nextTime)), 2);
+    const collision = keyposes.some(
+      (keypose) => Math.abs(keypose.t - from) > 0.001 && Math.abs(keypose.t - clamped) <= 0.001,
+    );
+    if (collision) {
+      alert(`Another stamp already uses ${clamped.toFixed(2)}s.`);
+      return;
+    }
+    refreshPlaybackPreview(clamped);
+    setKeyposes((prev) =>
+      prev
+        .map((kp) => (Math.abs(kp.t - from) <= 0.001 ? { ...kp, t: clamped } : kp))
+        .sort((a, b) => a.t - b.t),
+    );
+    if (selectedKeyposeTime != null && Math.abs(selectedKeyposeTime - from) <= 0.001) {
+      setSelectedKeyposeTime(clamped);
+      setTime(clamped);
+    }
+  };
+
+  const removeKeypose = (t: number) => {
+    refreshPlaybackPreview();
     setKeyposes((prev) => prev.filter((k) => Math.abs(k.t - t) > 0.001));
+    if (selectedKeyposeTime != null && Math.abs(selectedKeyposeTime - t) <= 0.001) {
+      setSelectedKeyposeTime(null);
+      setDraftDirty(false);
+    }
+  };
+
+  const selectKeypose = (keypose: RecordedKeypose) => {
+    if (!confirmDiscardDraft()) return;
+    applyKeyposeToDraft(keypose);
+  };
+
+  const selectAdjacentKeypose = (direction: -1 | 1) => {
+    const nextIndex = adjacentKeyposeIndex(sortedKeyposes, selectedKeyposeTime, time, direction);
+    if (nextIndex < 0) return;
+    const nextKeypose = sortedKeyposes[nextIndex];
+    if (nextKeypose) selectKeypose(nextKeypose);
+  };
+
+  const loadPlaybackFrameAsDraft = () => {
+    if (!confirmDiscardDraft()) return;
+    applySampleToDraft(sampleKeyposesAtTime(sortedKeyposes, playbackTime), playbackTime, null);
+    setDraftDirty(true);
+  };
+
+  const spaceKeyposesEvenly = () => {
+    if (keyposes.length < 2) return;
+    refreshPlaybackPreview();
+    setKeyposes((prev) => {
+      const sorted = cloneKeyposes(prev).sort((a, b) => a.t - b.t);
+      const step = duration / Math.max(1, sorted.length - 1);
+      return sorted.map((keypose, index) => ({ ...keypose, t: round(step * index, 2) }));
+    });
+    setSelectedKeyposeTime((current) => {
+      if (current == null) return current;
+      const index = sortedKeyposes.findIndex((keypose) => Math.abs(keypose.t - current) <= 0.001);
+      if (index < 0) return current;
+      return round((duration / Math.max(1, sortedKeyposes.length - 1)) * index, 2);
+    });
+  };
+
+  const requestClose = () => {
+    if (
+      !draftDirty ||
+      window.confirm("Discard unstamped pose edits and close the action editor?")
+    ) {
+      onClose();
+    }
+  };
 
   const save = async () => {
-    const playbackKeyposes = keyposesForPlayback();
-    if (playbackKeyposes.length === 0) {
-      alert("Capture at least one pose before saving.");
+    if (sortedKeyposes.length === 0) {
+      alert("Stamp at least one keyframe before saving.");
+      return;
+    }
+    if (
+      draftDirty &&
+      !window.confirm("Save the action without the current unstamped pose edits?")
+    ) {
       return;
     }
     const now = Date.now();
@@ -787,7 +927,7 @@ export function MotionPresetRecorder({
       duration: Math.max(0.1, duration),
       loop: initialPreset?.loop ?? false,
       tracks: [],
-      keyposes: cloneKeyposes(playbackKeyposes).sort((a, b) => a.t - b.t),
+      keyposes: cloneKeyposes(sortedKeyposes).sort((a, b) => a.t - b.t),
       allowOutOfBounds: allowOutOfBounds.length ? [...allowOutOfBounds] : undefined,
       builtin: false,
       createdAt: savingCopy ? now : (initialPreset?.createdAt ?? now),
@@ -798,6 +938,112 @@ export function MotionPresetRecorder({
     onSaved?.(preset);
     onClose();
   };
+
+  useEffect(() => {
+    if (!draftDirty) return;
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [draftDirty]);
+
+  const selectedKeyposeIndex =
+    selectedKeyposeTime == null
+      ? -1
+      : sortedKeyposes.findIndex((keypose) => Math.abs(keypose.t - selectedKeyposeTime) <= 0.001);
+  const previousStampIndex = adjacentKeyposeIndex(sortedKeyposes, selectedKeyposeTime, time, -1);
+  const nextStampIndex = adjacentKeyposeIndex(sortedKeyposes, selectedKeyposeTime, time, 1);
+  const previousOnionKeypose =
+    (onionSkin === "previous" || onionSkin === "both") && selectedKeyposeIndex > 0
+      ? sortedKeyposes[selectedKeyposeIndex - 1]
+      : null;
+  const nextOnionKeypose =
+    (onionSkin === "next" || onionSkin === "both") && selectedKeyposeIndex >= 0
+      ? (sortedKeyposes[selectedKeyposeIndex + 1] ?? null)
+      : null;
+  const previousOnionDraft = useMemo(
+    () =>
+      previousOnionKeypose
+        ? resolveSampleToDraftState(
+            sampleKeyposesAtTime([previousOnionKeypose], previousOnionKeypose.t),
+          )
+        : null,
+    [previousOnionKeypose, resolveSampleToDraftState],
+  );
+  const nextOnionDraft = useMemo(
+    () =>
+      nextOnionKeypose
+        ? resolveSampleToDraftState(sampleKeyposesAtTime([nextOnionKeypose], nextOnionKeypose.t))
+        : null,
+    [nextOnionKeypose, resolveSampleToDraftState],
+  );
+  const previousOnionVariants = useMemo(
+    () =>
+      previousOnionDraft
+        ? activeVariantsForRecorderOverrides(basePoses, previousOnionDraft.overrides)
+        : basePoses,
+    [basePoses, previousOnionDraft],
+  );
+  const nextOnionVariants = useMemo(
+    () =>
+      nextOnionDraft
+        ? activeVariantsForRecorderOverrides(basePoses, nextOnionDraft.overrides)
+        : basePoses,
+    [basePoses, nextOnionDraft],
+  );
+  const previousOnionWorldByBone = useMemo(
+    () => runtimeBoneWorldTransforms(runtime, previousOnionVariants),
+    [previousOnionVariants, runtime],
+  );
+  const nextOnionWorldByBone = useMemo(
+    () => runtimeBoneWorldTransforms(runtime, nextOnionVariants),
+    [nextOnionVariants, runtime],
+  );
+  const selectedSavedKeypose =
+    selectedKeyposeTime == null ? null : findKeyposeAt(sortedKeyposes, selectedKeyposeTime);
+  const selectedStampLabel =
+    selectedSavedKeypose && selectedKeyposeIndex >= 0 ? `Stamp ${selectedKeyposeIndex + 1}` : null;
+  const cleanSelectedStamp = !!selectedSavedKeypose && !draftDirty;
+  const draftTimeKeypose = findKeyposeAt(sortedKeyposes, time);
+  const draftTimeIsSelected =
+    !!draftTimeKeypose &&
+    !!selectedSavedKeypose &&
+    Math.abs(draftTimeKeypose.t - selectedSavedKeypose.t) <= 0.001;
+  const draftTimeKeyposeIndex = draftTimeKeypose
+    ? sortedKeyposes.findIndex((keypose) => Math.abs(keypose.t - draftTimeKeypose.t) <= 0.001)
+    : -1;
+  const draftTimeStampLabel =
+    draftTimeKeyposeIndex >= 0 ? `Stamp ${draftTimeKeyposeIndex + 1}` : "A stamp";
+  const primaryStampAction =
+    draftTimeKeypose && !draftTimeIsSelected
+      ? {
+          mode: null,
+          label: "Time already stamped",
+          title: `${draftTimeStampLabel} already uses ${time.toFixed(2)}s. Select that stamp or choose an empty time.`,
+        }
+      : selectedSavedKeypose && draftTimeIsSelected
+        ? draftDirty
+          ? {
+              mode: "update" as const,
+              label: `Update ${selectedStampLabel ?? "stamp"}`,
+              title: "Replace the selected stamp with this draft.",
+            }
+          : {
+              mode: null,
+              label: "No changes to update",
+              title: `Make a pose change before updating ${selectedStampLabel ?? "this stamp"}.`,
+            }
+        : {
+            mode: "new" as const,
+            label: "Stamp new",
+            title: "Add the draft as a new stamp.",
+          };
+  const playbackScale = Math.max(
+    0.12,
+    Math.min(displayScale, 320 / character.canvasWidth, 240 / character.canvasHeight),
+  );
 
   return (
     <GeneratedEditorShell
@@ -885,7 +1131,7 @@ export function MotionPresetRecorder({
             </button>
           )}
           <button
-            onClick={onClose}
+            onClick={requestClose}
             className="rounded border border-border px-2 py-1 text-xs hover:bg-panel"
           >
             Cancel
@@ -922,65 +1168,278 @@ export function MotionPresetRecorder({
         />
       }
       previewRef={wrapRef}
+      previewPaneClassName="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-stage-bg"
       onPreviewPointerDown={() => setSelectPopover(null)}
       previewPane={
         <>
-          <div
-            className="relative shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] outline outline-1 outline-border"
-            style={{
-              width: character.canvasWidth * displayScale,
-              height: character.canvasHeight * displayScale,
-              background: "oklch(0.12 0.015 270)",
-            }}
-          >
-            <div
-              ref={planeRef}
-              onPointerDown={handlePlanePointerDown}
-              className="absolute left-0 top-0 origin-top-left"
-              style={{
-                width: character.canvasWidth,
-                height: character.canvasHeight,
-                transform: `scale(${displayScale})`,
-              }}
+          <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(280px,360px)] gap-3 p-3">
+            <section
+              className={`flex min-w-0 flex-col overflow-hidden rounded border bg-panel/70 ${
+                cleanSelectedStamp ? "border-primary/70 ring-2 ring-primary/25" : "border-border"
+              }`}
             >
-              <RecorderHyperFramesPreview
-                character={character}
-                basePoses={basePoses}
-                preset={previewPlaying ? playbackPreset : stablePreviewPreset}
-                editPreset={previewPlaying ? null : editPreviewPreset}
-                compileRevision={previewCompileRevision}
-                time={time}
-              />
-              {!previewPlaying && selectedSlot && selectedPart && selectedOverride && (
-                <SelectionHandles
-                  slot={selectedSlot}
-                  override={selectedOverride}
-                  frame={recorderPartFrame(
-                    selectedSlot,
-                    selectedPart,
-                    selectedOverride,
-                    runtime,
-                    overrides,
-                    activePartForSlot,
-                    faceTurnX,
-                    faceTurnY,
-                    character.canvasWidth,
-                    character.canvasHeight,
-                    activeVariantsBySlot,
-                    poseWorldByBone,
+              <div className="flex items-center gap-2 border-b border-border px-3 py-2 text-xs">
+                <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+                  Pose editor
+                </span>
+                {selectedSavedKeypose && (
+                  <span
+                    className={`rounded border px-1.5 py-0.5 text-[10px] ${
+                      cleanSelectedStamp
+                        ? "border-primary/60 bg-primary/20 text-foreground"
+                        : "border-border bg-panel-2 text-muted-foreground"
+                    }`}
+                  >
+                    {selectedStampLabel ?? "Stamp"} · {selectedSavedKeypose.t.toFixed(2)}s
+                  </span>
+                )}
+                {draftDirty && (
+                  <span className="rounded bg-primary/25 px-1.5 py-0.5 text-[10px] text-foreground">
+                    unstamped
+                  </span>
+                )}
+                <div className="ml-auto flex items-center gap-1 text-[10px]">
+                  <button
+                    type="button"
+                    onClick={() => selectAdjacentKeypose(-1)}
+                    disabled={previousStampIndex < 0}
+                    className="flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-muted-foreground hover:bg-panel-2 disabled:opacity-40"
+                    title="Select previous stamp"
+                  >
+                    <ChevronLeft size={12} />
+                    Prev stamp
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => selectAdjacentKeypose(1)}
+                    disabled={nextStampIndex < 0}
+                    className="flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-muted-foreground hover:bg-panel-2 disabled:opacity-40"
+                    title="Select next stamp"
+                  >
+                    Next stamp
+                    <ChevronRight size={12} />
+                  </button>
+                  <select
+                    aria-label="Onion skin"
+                    value={onionSkin}
+                    onChange={(event) =>
+                      setOnionSkin(event.target.value as "off" | "previous" | "next" | "both")
+                    }
+                    className="rounded border border-border bg-input px-1.5 py-0.5 text-muted-foreground"
+                  >
+                    {(["off", "previous", "next", "both"] as const).map((mode) => (
+                      <option key={mode} value={mode}>
+                        Onion {mode === "off" ? "off" : mode}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid min-h-0 flex-1 place-items-center overflow-auto p-3">
+                <div
+                  className={`relative shadow-[0_20px_60px_-20px_rgba(0,0,0,0.8)] outline ${
+                    cleanSelectedStamp ? "outline-2 outline-primary/80" : "outline-1 outline-border"
+                  }`}
+                  style={{
+                    width: character.canvasWidth * displayScale,
+                    height: character.canvasHeight * displayScale,
+                    background: "oklch(0.12 0.015 270)",
+                  }}
+                >
+                  {cleanSelectedStamp && selectedSavedKeypose && (
+                    <div className="pointer-events-none absolute left-2 top-2 z-10 rounded border border-primary/70 bg-panel/90 px-2 py-1 text-[10px] font-medium text-foreground shadow">
+                      {selectedStampLabel} · {selectedSavedKeypose.t.toFixed(2)}s
+                    </div>
                   )}
-                  runtime={runtime}
-                  worldByBone={poseWorldByBone}
-                  scale={displayScale}
-                  planeRef={planeRef}
-                  onChange={(patch) => updateOverride(selectedOverride.slotId, patch)}
+                  <div
+                    ref={planeRef}
+                    onPointerDown={handlePlanePointerDown}
+                    className="absolute left-0 top-0 origin-top-left"
+                    style={{
+                      width: character.canvasWidth,
+                      height: character.canvasHeight,
+                      transform: `scale(${displayScale})`,
+                      touchAction: "none",
+                    }}
+                  >
+                    {previousOnionDraft && (
+                      <ReactPoseCanvas
+                        runtime={runtime}
+                        slots={slots}
+                        character={character}
+                        overrides={previousOnionDraft.overrides}
+                        activePartForSlot={activePartForSlot}
+                        activeVariantsBySlot={previousOnionVariants}
+                        poseWorldByBone={previousOnionWorldByBone}
+                        faceTurnX={previousOnionDraft.faceTurnX}
+                        faceTurnY={previousOnionDraft.faceTurnY}
+                        opacity={0.28}
+                        tint="previous"
+                      />
+                    )}
+                    {nextOnionDraft && (
+                      <ReactPoseCanvas
+                        runtime={runtime}
+                        slots={slots}
+                        character={character}
+                        overrides={nextOnionDraft.overrides}
+                        activePartForSlot={activePartForSlot}
+                        activeVariantsBySlot={nextOnionVariants}
+                        poseWorldByBone={nextOnionWorldByBone}
+                        faceTurnX={nextOnionDraft.faceTurnX}
+                        faceTurnY={nextOnionDraft.faceTurnY}
+                        opacity={0.22}
+                        tint="next"
+                      />
+                    )}
+                    <div className="pointer-events-none absolute inset-0 z-10">
+                      <ReactPoseCanvas
+                        runtime={runtime}
+                        slots={slots}
+                        character={character}
+                        overrides={overrides}
+                        activePartForSlot={activePartForSlot}
+                        activeVariantsBySlot={activeVariantsBySlot}
+                        poseWorldByBone={poseWorldByBone}
+                        faceTurnX={faceTurnX}
+                        faceTurnY={faceTurnY}
+                      />
+                    </div>
+                    {selectedSlot && selectedPart && selectedOverride && (
+                      <SelectionHandles
+                        slot={selectedSlot}
+                        override={selectedOverride}
+                        frame={recorderPartFrame(
+                          selectedSlot,
+                          selectedPart,
+                          selectedOverride,
+                          runtime,
+                          overrides,
+                          activePartForSlot,
+                          faceTurnX,
+                          faceTurnY,
+                          character.canvasWidth,
+                          character.canvasHeight,
+                          activeVariantsBySlot,
+                          poseWorldByBone,
+                        )}
+                        runtime={runtime}
+                        worldByBone={poseWorldByBone}
+                        scale={displayScale}
+                        planeRef={planeRef}
+                        onChange={(patch) => updateOverride(selectedOverride.slotId, patch)}
+                      />
+                    )}
+                    {import.meta.env.DEV && showAnchorDebug && (
+                      <AnchorDebugOverlay runtime={runtime} overrides={overrides} />
+                    )}
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="flex min-w-0 flex-col overflow-hidden rounded border border-border bg-panel/70">
+              <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2 text-xs">
+                <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+                  Playback
+                </span>
+                <span className="text-[10px] text-muted-foreground">stamped keyframes only</span>
+              </div>
+              <div className="grid min-h-0 flex-1 place-items-center overflow-hidden p-3">
+                <div
+                  className="relative outline outline-1 outline-border"
+                  style={{
+                    width: character.canvasWidth * playbackScale,
+                    height: character.canvasHeight * playbackScale,
+                    background: "oklch(0.12 0.015 270)",
+                  }}
+                >
+                  <div
+                    className="absolute left-0 top-0 origin-top-left"
+                    style={{
+                      width: character.canvasWidth,
+                      height: character.canvasHeight,
+                      transform: `scale(${playbackScale})`,
+                    }}
+                  >
+                    <RecorderHyperFramesPreview
+                      character={character}
+                      basePoses={basePoses}
+                      preset={playbackPreviewPreset}
+                      compileRevision={playbackCompileRevision}
+                      time={playbackTime}
+                      staleBehavior="blank"
+                      loadingLabel="Updating playback..."
+                    />
+                  </div>
+                </div>
+              </div>
+              <div className="space-y-2 border-t border-border p-3 text-xs">
+                <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                  <span>{playbackTime.toFixed(2)}s</span>
+                  <span>{duration.toFixed(2)}s</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={duration}
+                  step={0.02}
+                  value={playbackTime}
+                  onChange={(event) => {
+                    stopCompiledPreview();
+                    setPlaybackTime(Number(event.target.value));
+                  }}
+                  className="w-full"
                 />
-              )}
-              {import.meta.env.DEV && showAnchorDebug && (
-                <AnchorDebugOverlay runtime={runtime} overrides={overrides} />
-              )}
-            </div>
+                <div className="grid grid-cols-[1fr_auto] gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (previewPlaying) stopCompiledPreview();
+                      else commitRecorderPreviewToHtml();
+                    }}
+                    className="flex items-center justify-center gap-1 rounded border border-border bg-panel-2 px-2 py-1 hover:bg-panel"
+                  >
+                    {previewPlaying ? <Pause size={12} /> : <Play size={12} />}
+                    {previewPlaying ? "Pause" : "Play"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={commitRecorderPreviewToHtml}
+                    className="flex items-center justify-center rounded border border-border bg-panel-2 px-2 py-1 hover:bg-panel"
+                    title="Restart playback"
+                  >
+                    <SkipBack size={12} />
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={loadPlaybackFrameAsDraft}
+                  disabled={sortedKeyposes.length === 0}
+                  className="w-full rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:bg-panel-2 disabled:opacity-40"
+                >
+                  Load current playback frame as draft
+                </button>
+              </div>
+            </section>
           </div>
+
+          <KeyposeStrip
+            keyposes={sortedKeyposes}
+            selectedTime={selectedKeyposeTime}
+            duration={duration}
+            lastStampedTime={lastStampedTime}
+            onSelect={selectKeypose}
+            onRemove={removeKeypose}
+            onTimeChange={moveKeyposeTime}
+            onEaseChange={(keyposeTime, ease) => updateKeypose(keyposeTime, { ease })}
+            onAnticipationChange={(keyposeTime, anticipation) =>
+              updateKeypose(keyposeTime, { anticipation })
+            }
+            onSpaceEvenly={spaceKeyposesEvenly}
+          />
+
           {selectPopover && (
             <div
               className="fixed z-[60] min-w-36 rounded border border-border bg-panel p-1 text-xs shadow-xl"
@@ -1048,6 +1507,59 @@ export function MotionPresetRecorder({
           />
 
           <div className="mt-4 rounded border border-border bg-panel-2 p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+                Draft keyframe
+              </span>
+              <span className={draftDirty ? "text-primary" : "text-muted-foreground"}>
+                {draftDirty ? "unstamped" : "clean"}
+              </span>
+            </div>
+            <label className="grid grid-cols-[64px_1fr] items-center gap-2 text-[10px]">
+              <span className="text-muted-foreground">Time</span>
+              <input
+                type="number"
+                min={0}
+                max={duration}
+                step={0.01}
+                value={time}
+                onChange={(event) => {
+                  stopCompiledPreview();
+                  setTime(Math.max(0, Math.min(duration, Number(event.target.value) || 0)));
+                  setDraftDirty(true);
+                }}
+                className="w-full rounded border border-border bg-input px-1 py-0.5"
+              />
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={duration}
+              step={0.05}
+              value={time}
+              onChange={(event) => {
+                stopCompiledPreview();
+                setTime(Number(event.target.value));
+                setDraftDirty(true);
+              }}
+              className="mt-2 w-full"
+            />
+            <div className="mt-3">
+              <button
+                type="button"
+                onClick={() => {
+                  if (primaryStampAction.mode) stampKeypose(primaryStampAction.mode);
+                }}
+                disabled={!primaryStampAction.mode}
+                title={primaryStampAction.title}
+                className="w-full rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
+              >
+                {primaryStampAction.label}
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 rounded border border-border bg-panel-2 p-3">
             <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
               Face Turn
             </div>
@@ -1078,149 +1590,327 @@ export function MotionPresetRecorder({
               }}
             />
           </div>
-
-          <div className="mt-4 border-t border-border pt-3">
-            <div className="mb-1 flex items-center justify-between">
-              <span className="font-semibold uppercase tracking-wider text-muted-foreground">
-                Time
-              </span>
-              <span className="text-[10px] text-muted-foreground">
-                {time.toFixed(2)}s / {duration.toFixed(2)}s
-              </span>
-            </div>
-            <input
-              type="range"
-              min={0}
-              max={duration}
-              step={0.05}
-              value={time}
-              onChange={(e) => setTime(Number(e.target.value))}
-              className="w-full"
-            />
-            <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  if (previewPlaying) stopCompiledPreview();
-                  else commitRecorderPreviewToHtml();
-                }}
-                className="flex items-center justify-center gap-1 rounded border border-border bg-panel-2 px-2 py-1 text-xs hover:bg-panel"
-              >
-                {previewPlaying ? <Pause size={12} /> : <Play size={12} />}
-                {previewPlaying ? "Pause preview" : "Play preview"}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  commitRecorderPreviewToHtml();
-                }}
-                className="flex items-center justify-center rounded border border-border bg-panel-2 px-2 py-1 hover:bg-panel"
-                title="Restart preview"
-              >
-                <SkipBack size={12} />
-              </button>
-            </div>
-            <button
-              onClick={captureKeypose}
-              className="mt-2 w-full rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"
-            >
-              Capture pose at {time.toFixed(2)}s
-            </button>
-          </div>
-
-          <div className="mt-4">
-            <div className="mb-1 font-semibold uppercase tracking-wider text-muted-foreground">
-              Captured poses
-            </div>
-            {keyposes.length === 0 && (
-              <div className="rounded border border-dashed border-border p-2 text-center text-[10px] text-muted-foreground">
-                No poses yet.
-              </div>
-            )}
-            <ul className="space-y-1">
-              {keyposes.map((k) => (
-                <li
-                  key={k.t}
-                  className={`rounded border border-border p-2 ${
-                    Math.abs(k.t - time) < 0.05 ? "bg-primary/20" : "bg-panel-2"
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => setTime(k.t)} className="flex-1 text-left">
-                      {k.t.toFixed(2)}s · {k.parts.length} parts
-                    </button>
-                    <button
-                      onClick={() => removeKeypose(k.t)}
-                      className="text-[10px] text-destructive"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                  <select
-                    value={k.ease ?? "easeInOut"}
-                    onChange={(e) => updateKeypose(k.t, { ease: e.target.value })}
-                    className="mt-2 w-full rounded border border-border bg-input px-1 py-0.5 text-[10px]"
-                  >
-                    {EASE_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                  <details className="mt-2">
-                    <summary className="cursor-pointer text-[10px] text-muted-foreground">
-                      Anticipation
-                    </summary>
-                    <label className="mt-2 flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={!!k.anticipation}
-                        onChange={(e) =>
-                          updateKeypose(k.t, {
-                            anticipation: e.target.checked
-                              ? { amount: 0.25, duration: 0.12 }
-                              : undefined,
-                          })
-                        }
-                      />
-                      Enabled
-                    </label>
-                    {k.anticipation && (
-                      <div className="mt-2 grid grid-cols-2 gap-2">
-                        <NumberInput
-                          label="Amount"
-                          value={k.anticipation.amount}
-                          min={0}
-                          max={1}
-                          step={0.05}
-                          onChange={(value) =>
-                            updateKeypose(k.t, {
-                              anticipation: { ...k.anticipation!, amount: value },
-                            })
-                          }
-                        />
-                        <NumberInput
-                          label="Duration"
-                          value={k.anticipation.duration}
-                          min={0}
-                          max={duration}
-                          step={0.01}
-                          onChange={(value) =>
-                            updateKeypose(k.t, {
-                              anticipation: { ...k.anticipation!, duration: value },
-                            })
-                          }
-                        />
-                      </div>
-                    )}
-                  </details>
-                </li>
-              ))}
-            </ul>
-          </div>
         </>
       }
     />
+  );
+}
+
+function ReactPoseCanvas({
+  runtime,
+  slots,
+  character,
+  overrides,
+  activePartForSlot,
+  activeVariantsBySlot,
+  poseWorldByBone,
+  faceTurnX,
+  faceTurnY,
+  opacity = 1,
+  tint,
+}: {
+  runtime: CharacterRuntime;
+  slots: CharacterSlot[];
+  character: CharacterPreset;
+  overrides: Map<string, RecorderPartState>;
+  activePartForSlot: (slot: CharacterSlot, poseSwap?: string) => CharacterPart | undefined;
+  activeVariantsBySlot: Record<string, string>;
+  poseWorldByBone: CharacterRuntime["worldByBone"];
+  faceTurnX: number;
+  faceTurnY: number;
+  opacity?: number;
+  tint?: "previous" | "next";
+}) {
+  const layers = useMemo(
+    () =>
+      slots
+        .flatMap((slot) => {
+          const overrideFromMap = overrides.get(slot.id);
+          const part = activePartForSlot(slot, overrideFromMap?.poseSwap);
+          if (!part?.visible) return [];
+          const override = overrideFromMap ?? defaultOverride(slot.id, part);
+          const placement = recorderPartPlacement(
+            slot,
+            part,
+            runtime,
+            activeVariantsBySlot,
+            poseWorldByBone,
+          );
+          const frame = recorderPartFrame(
+            slot,
+            part,
+            override,
+            runtime,
+            overrides,
+            activePartForSlot,
+            faceTurnX,
+            faceTurnY,
+            character.canvasWidth,
+            character.canvasHeight,
+            activeVariantsBySlot,
+            poseWorldByBone,
+            placement,
+          );
+          return [{ slot, part, override, frame, drawOrder: placement.drawOrder }];
+        })
+        .sort((a, b) => a.drawOrder - b.drawOrder),
+    [
+      activePartForSlot,
+      activeVariantsBySlot,
+      character.canvasHeight,
+      character.canvasWidth,
+      faceTurnX,
+      faceTurnY,
+      overrides,
+      poseWorldByBone,
+      runtime,
+      slots,
+    ],
+  );
+
+  return (
+    <div
+      className="pointer-events-none absolute inset-0"
+      style={{
+        opacity,
+        filter: tint === "previous" ? "saturate(0.75) hue-rotate(155deg)" : undefined,
+      }}
+      aria-hidden={tint ? "true" : undefined}
+    >
+      {layers.map((layer, index) => (
+        <ReactPosePart
+          key={`${layer.slot.id}:${layer.part.id}`}
+          part={layer.part}
+          frame={layer.frame}
+          opacity={layer.override.opacity}
+          zIndex={index}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ReactPosePart({
+  part,
+  frame,
+  opacity,
+  zIndex,
+}: {
+  part: CharacterPart;
+  frame: RuntimePartFrame;
+  opacity: number;
+  zIndex: number;
+}) {
+  const url = useMediaUrl(part.mediaId);
+  const style = {
+    position: "absolute" as const,
+    display: "block" as const,
+    left: 0,
+    top: 0,
+    width: part.width,
+    height: part.height,
+    maxWidth: "none",
+    maxHeight: "none",
+    transform: matrixToCss(frame.matrix),
+    transformOrigin: "0 0",
+    opacity,
+    zIndex,
+    pointerEvents: "none" as const,
+    userSelect: "none" as const,
+  };
+
+  if (part.morph?.primaryPath) {
+    return (
+      <svg
+        viewBox={part.morph.viewBox ?? `0 0 ${part.width} ${part.height}`}
+        aria-hidden="true"
+        overflow="visible"
+        style={style}
+      >
+        <path
+          d={part.morph.primaryPath}
+          fill={part.morph.fill ?? "#733f43"}
+          stroke={part.morph.stroke}
+          strokeWidth={part.morph.strokeWidth}
+          strokeLinecap={part.morph.strokeLinecap as "round" | "butt" | "square" | undefined}
+          strokeLinejoin={part.morph.strokeLinejoin as "round" | "miter" | "bevel" | undefined}
+        />
+      </svg>
+    );
+  }
+
+  if (!url) return null;
+  return <img src={url} alt="" draggable={false} style={style} />;
+}
+
+function KeyposeStrip({
+  keyposes,
+  selectedTime,
+  duration,
+  lastStampedTime,
+  onSelect,
+  onRemove,
+  onTimeChange,
+  onEaseChange,
+  onAnticipationChange,
+  onSpaceEvenly,
+}: {
+  keyposes: RecordedKeypose[];
+  selectedTime: number | null;
+  duration: number;
+  lastStampedTime: number | null;
+  onSelect: (keypose: RecordedKeypose) => void;
+  onRemove: (time: number) => void;
+  onTimeChange: (from: number, nextTime: number) => void;
+  onEaseChange: (time: number, ease: string) => void;
+  onAnticipationChange: (time: number, anticipation: RecordedKeypose["anticipation"]) => void;
+  onSpaceEvenly: () => void;
+}) {
+  return (
+    <section className="border-t border-border bg-panel p-3">
+      <div className="mb-2 flex items-center justify-between gap-2 text-xs">
+        <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+          Keyframe stamps
+        </span>
+        <button
+          type="button"
+          onClick={onSpaceEvenly}
+          disabled={keyposes.length < 2}
+          className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:bg-panel-2 disabled:opacity-40"
+        >
+          Space evenly
+        </button>
+      </div>
+
+      {keyposes.length === 0 ? (
+        <div className="rounded border border-dashed border-border p-3 text-center text-[11px] text-muted-foreground">
+          Stamp poses to build this action.
+        </div>
+      ) : (
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {keyposes.map((keypose, index) => {
+            const selected = selectedTime != null && Math.abs(selectedTime - keypose.t) <= 0.001;
+            const stamped =
+              lastStampedTime != null && Math.abs(lastStampedTime - keypose.t) <= 0.001;
+            const next = keyposes[index + 1];
+            const span = next ? Math.max(0, next.t - keypose.t) : 0;
+            return (
+              <div key={`${keypose.t}:${index}`} className="flex shrink-0 items-center gap-2">
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => onSelect(keypose)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") onSelect(keypose);
+                  }}
+                  className={`group w-32 rounded border p-2 text-left transition ${
+                    selected
+                      ? "border-primary bg-primary/20 text-foreground"
+                      : "border-border bg-panel-2 text-muted-foreground hover:bg-panel"
+                  } ${stamped ? "ring-2 ring-primary/40" : ""}`}
+                >
+                  <div className="mb-1 aspect-video rounded border border-border bg-stage-bg">
+                    <div className="flex h-full items-center justify-center text-[10px] text-muted-foreground">
+                      {index + 1}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="font-medium text-foreground">{keypose.t.toFixed(2)}s</span>
+                    <span>{keypose.parts.length} parts</span>
+                  </div>
+                  <input
+                    type="number"
+                    min={0}
+                    max={duration}
+                    step={0.01}
+                    value={keypose.t}
+                    onClick={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => event.stopPropagation()}
+                    onChange={(event) => onTimeChange(keypose.t, Number(event.target.value) || 0)}
+                    className="mt-1 w-full rounded border border-border bg-input px-1 py-0.5 text-[10px]"
+                  />
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onRemove(keypose.t);
+                    }}
+                    className="mt-1 text-[10px] text-destructive"
+                  >
+                    Remove
+                  </button>
+                </div>
+
+                {next && (
+                  <div className="w-28 shrink-0 text-center text-[10px] text-muted-foreground">
+                    <div className="mb-1 h-px bg-border" />
+                    <select
+                      value={next.ease ?? "easeInOut"}
+                      onChange={(event) => onEaseChange(next.t, event.target.value)}
+                      className="w-full rounded border border-border bg-input px-1 py-0.5"
+                      title="Ease into the next keyframe"
+                    >
+                      {EASE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="mt-1">{span.toFixed(2)}s</div>
+                    <details className="mt-1 text-left">
+                      <summary className="cursor-pointer text-center">Anticipation</summary>
+                      <label className="mt-1 flex items-center justify-center gap-1">
+                        <input
+                          type="checkbox"
+                          checked={!!next.anticipation}
+                          onChange={(event) =>
+                            onAnticipationChange(
+                              next.t,
+                              event.target.checked ? { amount: 0.25, duration: 0.12 } : undefined,
+                            )
+                          }
+                        />
+                        Enabled
+                      </label>
+                      {next.anticipation && (
+                        <div className="mt-1 grid grid-cols-2 gap-1">
+                          <NumberInput
+                            label="Amount"
+                            value={next.anticipation.amount}
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            onChange={(value) =>
+                              onAnticipationChange(next.t, {
+                                ...next.anticipation!,
+                                amount: value,
+                              })
+                            }
+                          />
+                          <NumberInput
+                            label="Duration"
+                            value={next.anticipation.duration}
+                            min={0}
+                            max={duration}
+                            step={0.01}
+                            onChange={(value) =>
+                              onAnticipationChange(next.t, {
+                                ...next.anticipation!,
+                                duration: value,
+                              })
+                            }
+                          />
+                        </div>
+                      )}
+                    </details>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -1554,20 +2244,13 @@ function PropertyRow({
   );
 }
 
-// Extract the GSAP timeline setup script from a compiled composition HTML string.
-// The character timeline script is the inline <script> block that registers
-// window.__timelines[compositionId]. Using it directly guarantees the same
-// GSAP vars (effectiveBaseRotation, boneCarriesChildren, face-turn, etc.) as
-// the fully compiled animation — the single truth for both overlay and preview.
-// Inject the edit-preset GSAP script into the existing iframe without touching srcDoc.
-// Kills the old timeline, injects the new script (which creates the paused timeline
-// with the correct overrides), then seeks to `time`. No DOM reload = no flash.
-// editScript is the raw IIFE text from buildCharacterGsapScript — no HTML parsing needed.
-function applyEditScriptToIframe(
+// Playback preview is still the compiled HyperFrames timeline. The pose editor is
+// React-only draft UI, so this helper only seeks stamped playback; it never injects
+// editor state into GSAP.
+function seekRecorderPlaybackIframe(
   iframe: HTMLIFrameElement | null,
   compositionId: string,
   time: number,
-  editScript: string | null,
   attempts = 0,
   isCancelled: () => boolean = () => false,
 ): void {
@@ -1575,62 +2258,44 @@ function applyEditScriptToIframe(
   type TimelineEntry = {
     seek?: (t: number, suppressEvents?: boolean) => unknown;
     pause?: () => unknown;
-    kill?: () => void;
   };
   type RWin = Window & { __timelines?: Record<string, TimelineEntry> };
-  let win: RWin | null | undefined;
   let timeline: TimelineEntry | undefined;
   try {
-    win = iframe?.contentWindow as RWin;
+    const win = iframe?.contentWindow as RWin | undefined;
     timeline = win?.__timelines?.[compositionId];
   } catch {
-    win = null;
     timeline = undefined;
   }
   if (!timeline) {
     if (iframe && attempts < 30) {
       window.setTimeout(
-        () =>
-          applyEditScriptToIframe(
-            iframe,
-            compositionId,
-            time,
-            editScript,
-            attempts + 1,
-            isCancelled,
-          ),
+        () => seekRecorderPlaybackIframe(iframe, compositionId, time, attempts + 1, isCancelled),
         40,
       );
     }
     return;
   }
-  if (editScript) {
-    // Kill old timeline so GSAP releases element control before we rebuild.
-    timeline.kill?.();
-    const el = iframe!.contentDocument!.createElement("script");
-    el.textContent = editScript;
-    iframe!.contentDocument!.body.appendChild(el);
-    // Re-read the freshly registered timeline.
-    timeline = win?.__timelines?.[compositionId];
-  }
-  timeline?.pause?.();
-  timeline?.seek?.(Math.max(0, time), false);
+  timeline.pause?.();
+  timeline.seek?.(Math.max(0, time), false);
 }
 
 function RecorderHyperFramesPreview({
   character,
   basePoses,
   preset,
-  editPreset,
   compileRevision,
   time,
+  staleBehavior = "hold",
+  loadingLabel = "Loading character preview...",
 }: {
   character: CharacterPreset;
   basePoses: Record<string, string>;
   preset: MotionPreset | null;
-  editPreset: MotionPreset | null;
   compileRevision: number;
   time: number;
+  staleBehavior?: "hold" | "blank";
+  loadingLabel?: string;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const compositionId = "recorder_character_preview";
@@ -1667,76 +2332,51 @@ function RecorderHyperFramesPreview({
     });
   }, [basePoses, character, compositionId, preset]);
 
-  // Edit GSAP script: current override state (single t=0 keypose + face-turn).
-  // Built on every drag frame and injected into the live iframe — DOM never reloads.
-  // Uses buildCharacterGsapScript (not buildCharacterCompositionHtml) so no HTML
-  // serialization or DOMParser extraction is needed.
-  const editGsapScript = useMemo(() => {
-    if (!editPreset) return null;
-    const motionPresets = new Map([[editPreset.id, editPreset]]);
-    return buildCharacterGsapScript({
-      compositionId,
-      clipId: "recorder-character-preview-clip",
-      width: character.canvasWidth,
-      height: character.canvasHeight,
-      duration: Math.max(0.1, editPreset.duration),
-      character,
-      meta: {
-        characterId: character.id,
-        poses: basePoses,
-        autoBlink: false,
-        motions: [
-          {
-            id: "recorder-draft-motion",
-            presetId: editPreset.id,
-            offset: 0,
-            intensity: 1,
-            loop: false,
-            duration: editPreset.duration,
-          },
-        ],
-      },
-      motionPresets,
-    });
-  }, [basePoses, character, compositionId, editPreset]);
-
-  const [html, setHtml] = useState<string | null>(null);
-  const htmlKey = useMemo(() => (html ? recorderHtmlKey(html) : "pending"), [html]);
-  const iframeKey = useMemo(
-    () => `${htmlKey}:compile-${compileRevision}`,
-    [compileRevision, htmlKey],
+  const [resolvedPreview, setResolvedPreview] = useState<{
+    html: string;
+    compileRevision: number;
+    sourceKey: string;
+  } | null>(null);
+  const sourceKey = useMemo(
+    () => `${recorderHtmlKey(sourceHtml)}:compile-${compileRevision}`,
+    [compileRevision, sourceHtml],
   );
+  const resolvedIsCurrent = resolvedPreview?.sourceKey === sourceKey;
+  const visiblePreview = resolvedIsCurrent || staleBehavior === "hold" ? resolvedPreview : null;
+  const html = visiblePreview?.html ?? null;
+  const iframeKey = visiblePreview
+    ? `${visiblePreview.sourceKey}:${recorderHtmlKey(visiblePreview.html)}`
+    : "pending";
 
   useEffect(() => {
     let alive = true;
     // Keep the current iframe mounted while the next composition resolves, and bail when
-    // the resolved HTML is identical — resetting to null here (or updating on identical
-    // content) reloads the iframe every render and trips the update-depth guard.
+    // the resolved HTML and compile revision are identical. Updating the iframe key before
+    // the new srcDoc is resolved can briefly remount stale HTML, which makes playback feel
+    // like it needs a second start.
     void resolveRecorderPreviewAssetRefs(sourceHtml, character).then((resolved) => {
-      if (alive) setHtml((prev) => (prev === resolved ? prev : resolved));
+      if (!alive) return;
+      setResolvedPreview((prev) =>
+        prev?.html === resolved &&
+        prev.compileRevision === compileRevision &&
+        prev.sourceKey === sourceKey
+          ? prev
+          : { html: resolved, compileRevision, sourceKey },
+      );
     });
     return () => {
       alive = false;
     };
-  }, [character, sourceHtml]);
+  }, [character, compileRevision, sourceHtml, sourceKey]);
 
-  // Inject the edit GSAP script whenever the override state changes.
-  // When html changes (srcDoc reload), retry until the timeline is ready.
   useEffect(() => {
     if (!html) return;
     let alive = true;
-    applyEditScriptToIframe(
-      iframeRef.current,
-      compositionId,
-      time,
-      editGsapScript,
-      0,
-      () => !alive,
-    );
+    seekRecorderPlaybackIframe(iframeRef.current, compositionId, time, 0, () => !alive);
     return () => {
       alive = false;
     };
-  }, [compositionId, editGsapScript, html, time]);
+  }, [compositionId, html, time]);
 
   return (
     <>
@@ -1749,13 +2389,16 @@ function RecorderHyperFramesPreview({
           referrerPolicy="no-referrer"
           srcDoc={html}
           className="pointer-events-none absolute inset-0 block h-full w-full border-0 bg-transparent"
-          onLoad={() => {
-            applyEditScriptToIframe(iframeRef.current, compositionId, time, editGsapScript);
-          }}
+          onLoad={() => seekRecorderPlaybackIframe(iframeRef.current, compositionId, time)}
         />
       ) : (
         <div className="pointer-events-none absolute inset-0 grid place-items-center text-[11px] text-muted-foreground">
-          Loading character preview...
+          {loadingLabel}
+        </div>
+      )}
+      {html && !resolvedIsCurrent && (
+        <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/20 text-[11px] text-muted-foreground">
+          {loadingLabel}
         </div>
       )}
     </>
@@ -1785,6 +2428,75 @@ function recorderHtmlKey(html: string): string {
     hash = Math.imul(hash, 16777619);
   }
   return `${html.length}:${hash >>> 0}`;
+}
+
+interface RafCoalescedDispatcher<T> {
+  queue(value: T): void;
+  flush(): void;
+  cancel(): void;
+}
+
+function createRafCoalescedDispatcher<T>(apply: (value: T) => void): RafCoalescedDispatcher<T> {
+  let frame: number | null = null;
+  let queued: T | undefined;
+
+  const applyQueued = () => {
+    const value = queued;
+    queued = undefined;
+    if (value !== undefined) apply(value);
+  };
+
+  const cancelFrame = () => {
+    if (frame === null) return;
+    window.cancelAnimationFrame(frame);
+    frame = null;
+  };
+
+  return {
+    queue(value) {
+      queued = value;
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        applyQueued();
+      });
+    },
+    flush() {
+      cancelFrame();
+      applyQueued();
+    },
+    cancel() {
+      cancelFrame();
+      queued = undefined;
+    },
+  };
+}
+
+function useRafCoalescedCallback<T>(callback: (value: T) => void): RafCoalescedDispatcher<T> {
+  const callbackRef = useRef(callback);
+  callbackRef.current = callback;
+  const dispatcherRef = useRef<RafCoalescedDispatcher<T> | null>(null);
+
+  if (!dispatcherRef.current) {
+    dispatcherRef.current = createRafCoalescedDispatcher((value) => callbackRef.current(value));
+  }
+
+  useEffect(() => () => dispatcherRef.current?.cancel(), []);
+  return dispatcherRef.current;
+}
+
+function recorderPatchEqual(
+  a: Partial<RecorderPartState> | null,
+  b: Partial<RecorderPartState>,
+): boolean {
+  if (!a) return false;
+  const keys = new Set<keyof RecorderPartState>();
+  for (const key of Object.keys(a) as (keyof RecorderPartState)[]) keys.add(key);
+  for (const key of Object.keys(b) as (keyof RecorderPartState)[]) keys.add(key);
+  for (const key of keys) {
+    if (!Object.is(a[key], b[key])) return false;
+  }
+  return true;
 }
 
 /**
@@ -1909,6 +2621,7 @@ function SelectionHandles({
   onChange: (patch: Partial<RecorderPartState>) => void;
 }) {
   const target = runtimeMotionTargetForSlot(runtime, slot.id);
+  const queuedChange = useRafCoalescedCallback<Partial<RecorderPartState>>(onChange);
   const handleSize = 24 / Math.max(0.0001, scale);
   const gap = 18 / Math.max(0.0001, scale);
   const topEdge = {
@@ -1937,6 +2650,12 @@ function SelectionHandles({
     const sy = e.clientY;
     const ox = override.dx;
     const oy = override.dy;
+    let lastPatch: Partial<RecorderPartState> | null = null;
+    const queuePatch = (patch: Partial<RecorderPartState>) => {
+      if (recorderPatchEqual(lastPatch, patch)) return;
+      lastPatch = patch;
+      queuedChange.queue(patch);
+    };
     const move = (ev: PointerEvent) => {
       const delta = canvasDeltaToMotionDelta(
         runtime,
@@ -1947,12 +2666,19 @@ function SelectionHandles({
         },
         worldByBone,
       );
-      onChange({
+      queuePatch({
         dx: Math.round(ox + delta.x),
         dy: Math.round(oy + delta.y),
       });
     };
-    startWindowPointerDrag({ onMove: move });
+    startWindowPointerDrag({
+      onMove: move,
+      onEnd: (event) => {
+        if (event) move(event);
+        queuedChange.flush();
+      },
+      onCancel: queuedChange.cancel,
+    });
   };
 
   const startRotate = (e: React.PointerEvent) => {
@@ -1964,11 +2690,24 @@ function SelectionHandles({
     const pivotY = rect.top + frame.pivot.y * scale;
     const startAngle = Math.atan2(e.clientY - pivotY, e.clientX - pivotX) * (180 / Math.PI);
     const startRot = override.rotation;
+    let lastPatch: Partial<RecorderPartState> | null = null;
+    const queuePatch = (patch: Partial<RecorderPartState>) => {
+      if (recorderPatchEqual(lastPatch, patch)) return;
+      lastPatch = patch;
+      queuedChange.queue(patch);
+    };
     const move = (ev: PointerEvent) => {
       const angle = Math.atan2(ev.clientY - pivotY, ev.clientX - pivotX) * (180 / Math.PI);
-      onChange({ rotation: round(startRot + angle - startAngle, 1) });
+      queuePatch({ rotation: round(startRot + angle - startAngle, 1) });
     };
-    startWindowPointerDrag({ onMove: move });
+    startWindowPointerDrag({
+      onMove: move,
+      onEnd: (event) => {
+        if (event) move(event);
+        queuedChange.flush();
+      },
+      onCancel: queuedChange.cancel,
+    });
   };
 
   const startScale = (e: React.PointerEvent) => {
@@ -1980,12 +2719,25 @@ function SelectionHandles({
     const pivotY = rect.top + frame.pivot.y * scale;
     const startDist = Math.hypot(e.clientX - pivotX, e.clientY - pivotY);
     const startScaleValue = override.scale;
+    let lastPatch: Partial<RecorderPartState> | null = null;
+    const queuePatch = (patch: Partial<RecorderPartState>) => {
+      if (recorderPatchEqual(lastPatch, patch)) return;
+      lastPatch = patch;
+      queuedChange.queue(patch);
+    };
     const move = (ev: PointerEvent) => {
       const dist = Math.hypot(ev.clientX - pivotX, ev.clientY - pivotY);
       if (startDist < 1) return;
-      onChange({ scale: round(Math.max(0.1, startScaleValue * (dist / startDist)), 2) });
+      queuePatch({ scale: round(Math.max(0.1, startScaleValue * (dist / startDist)), 2) });
     };
-    startWindowPointerDrag({ onMove: move });
+    startWindowPointerDrag({
+      onMove: move,
+      onEnd: (event) => {
+        if (event) move(event);
+        queuedChange.flush();
+      },
+      onCancel: queuedChange.cancel,
+    });
   };
 
   return (
@@ -2123,9 +2875,25 @@ function initialKeyposesForPreset(
   preset: MotionPreset | undefined,
   runtime: CharacterRuntime,
 ): RecordedKeypose[] {
-  if (!preset) return [];
-  if (preset.keyposes?.length) return cloneKeyposes(preset.keyposes);
-  return keyposesFromTracks(preset, runtime);
+  if (!preset) return [initialRestKeypose()];
+  const keyposes = preset.keyposes?.length
+    ? cloneKeyposes(preset.keyposes)
+    : keyposesFromTracks(preset, runtime);
+  return ensureInitialRestKeypose(keyposes);
+}
+
+function initialRestKeypose(): RecordedKeypose {
+  return {
+    t: 0,
+    parts: [],
+  };
+}
+
+function ensureInitialRestKeypose(keyposes: RecordedKeypose[]): RecordedKeypose[] {
+  const sorted = cloneKeyposes(keyposes).sort((a, b) => a.t - b.t);
+  if (sorted.length === 0) return [initialRestKeypose()];
+  if (Math.abs(sorted[0].t) <= 0.001) return sorted;
+  return [initialRestKeypose(), ...sorted];
 }
 
 function customPresetName(name: string) {
@@ -2156,6 +2924,44 @@ function cloneKeyposes(keyposes: RecordedKeypose[]): RecordedKeypose[] {
     camera: keypose.camera ? { ...keypose.camera } : undefined,
     anticipation: keypose.anticipation ? { ...keypose.anticipation } : undefined,
   }));
+}
+
+function findKeyposeAt(keyposes: RecordedKeypose[], time: number) {
+  return keyposes.find((keypose) => Math.abs(keypose.t - time) <= 0.001) ?? null;
+}
+
+function adjacentKeyposeIndex(
+  keyposes: RecordedKeypose[],
+  selectedTime: number | null,
+  draftTime: number,
+  direction: -1 | 1,
+) {
+  if (keyposes.length === 0) return -1;
+  const currentIndex =
+    selectedTime == null
+      ? -1
+      : keyposes.findIndex((keypose) => Math.abs(keypose.t - selectedTime) <= 0.001);
+  if (currentIndex >= 0) {
+    const nextIndex = currentIndex + direction;
+    return nextIndex >= 0 && nextIndex < keyposes.length ? nextIndex : -1;
+  }
+  if (direction > 0) {
+    return keyposes.findIndex((keypose) => keypose.t > draftTime + 0.001);
+  }
+  for (let index = keyposes.length - 1; index >= 0; index -= 1) {
+    if (keyposes[index].t < draftTime - 0.001) return index;
+  }
+  return -1;
+}
+
+function keyposeDraftSignature(keypose: RecordedKeypose): string {
+  return JSON.stringify({
+    t: keypose.t,
+    parts: keypose.parts,
+    faceTurnX: keypose.faceTurnX,
+    faceTurnY: keypose.faceTurnY,
+    camera: keypose.camera,
+  });
 }
 
 function keyposesFromTracks(preset: MotionPreset, runtime: CharacterRuntime): RecordedKeypose[] {

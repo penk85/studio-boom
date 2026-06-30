@@ -917,6 +917,7 @@ describe("buildCharacterCompositionHtml", () => {
       id: "kick",
       name: "Kick",
       category: "gesture",
+      region: "lowerBody",
       duration: 1,
       loop: false,
       tracks: [
@@ -1100,6 +1101,7 @@ describe("buildCharacterCompositionHtml", () => {
       id: "cardflip",
       name: "Card Flip",
       category: "gesture",
+      region: "lowerBody",
       duration: 1,
       loop: false,
       tracks: [
@@ -1248,8 +1250,16 @@ describe("buildCharacterCompositionHtml", () => {
       motionPresets: new Map(),
     });
     const scene = extractScene(html);
+    const generatedStyle = html.match(
+      /<div id="[^"]*" data-character-slot="true" data-character-slot-id="role:mouth"[^>]*data-character-generated-mouth="true"[^>]*style="([^"]*)"/,
+    );
+    expect(generatedStyle).not.toBeNull();
+    const left = Number(generatedStyle![1].match(/left:([^p]+)px/)?.[1]);
+    const top = Number(generatedStyle![1].match(/top:([^p]+)px/)?.[1]);
 
     expect(html).toContain('data-character-generated-mouth="true"');
+    expect(left).toBeCloseTo(-32.5);
+    expect(top).toBeCloseTo(-15.5);
     expect(html).toContain("slotEvents");
     expect(html).not.toContain("mouthRigEvents");
     expect(

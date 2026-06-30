@@ -11,24 +11,33 @@ describe("MotionPresetRecorder source integration", () => {
     expect(source).toContain("buildCharacterCompositionHtml");
     expect(source).toContain("<RecorderHyperFramesPreview");
     expect(source).toContain("__timelines?");
-    expect(source).toContain("timeline?.seek?.(Math.max(0, time), false)");
+    expect(source).toContain("timeline.seek?.(Math.max(0, time), false)");
     expect(source).toContain("characterAssetIds(character)");
     expect(source).toContain('sandbox="allow-scripts allow-same-origin"');
-    expect(source).toContain("const [playbackPreset, setPlaybackPreset]");
+    expect(source).toContain("const [playbackTime, setPlaybackTime]");
+    expect(source).toContain("const playbackPreviewPreset = useMemo");
     expect(source).toContain("commitRecorderPreviewToHtml");
-    expect(source).toContain("setTime(0)");
-    // stablePreviewPreset drives srcDoc (DOM + committed GSAP); editPreviewPreset drives
-    // GSAP script injection so overrides/face-turn update without a DOM reload.
-    expect(source).toContain("const stablePreviewPreset = useMemo");
-    expect(source).toContain("const editPreviewPreset = useMemo");
-    expect(source).toContain("preset={previewPlaying ? playbackPreset : stablePreviewPreset}");
-    expect(source).toContain("editPreset={previewPlaying ? null : editPreviewPreset}");
-    // GSAP script injection: buildCharacterGsapScript produces the IIFE directly (no HTML
-    // serialization or DOMParser extraction), then applyEditScriptToIframe injects it.
-    expect(source).toContain("buildCharacterGsapScript");
-    expect(source).toContain("function applyEditScriptToIframe");
-    expect(source).toContain("timeline.kill?.()");
-    expect(source).toContain("timeline?.seek?.(Math.max(0, time), false)");
+    expect(source).toContain("setPlaybackTime(0)");
+    // Playback is compiled from stamped keyframes only. The pose editor is an
+    // editor-only React draft surface that stamps into the same keypose model.
+    expect(source).toContain("preset={playbackPreviewPreset}");
+    expect(source).toContain("function ReactPoseCanvas");
+    expect(source).toContain("function ReactPosePart");
+    expect(source).toContain("matrixToCss(frame.matrix)");
+    expect(source).toContain("useMediaUrl(part.mediaId)");
+    expect(source).toContain('maxWidth: "none"');
+    expect(source).toContain('maxHeight: "none"');
+    expect(source).toContain("function KeyposeStrip");
+    expect(source).toContain("beforeunload");
+    expect(source).toContain("Save the action without the current unstamped pose edits?");
+    // Playback seeking is allowed to seek the stamped HyperFrames timeline, but the
+    // pose editor must not inject or mutate GSAP live while dragging.
+    expect(source).toContain("function seekRecorderPlaybackIframe");
+    expect(source).toContain("timeline.seek?.(Math.max(0, time), false)");
+    expect(source).not.toContain("buildCharacterGsapScript");
+    expect(source).not.toContain("function applyEditScriptToIframe");
+    expect(source).not.toContain("data-recorder-live-script");
+    expect(source).not.toContain("forceEditScript");
     expect(source).toContain("GeneratedEditorShell");
     expect(source).toContain("AiAddonPromptPanel");
     expect(source).toContain("useAiGeneratedArtifactAddon");
@@ -36,17 +45,31 @@ describe("MotionPresetRecorder source integration", () => {
     expect(source).toContain("buildMotionRequestPrompt");
     expect(source).toContain("buildRepairPrompt");
     // The preview iframe is built once and seeked — it must not reload on identical
-    // composition HTML, otherwise the playhead loop trips React's update-depth guard.
-    expect(source).toContain("prev === resolved ? prev : resolved");
-    expect(source).toContain("const [previewCompileRevision, setPreviewCompileRevision]");
-    expect(source).toContain("setPreviewCompileRevision((revision) => revision + 1)");
+    // composition HTML or remount stale HTML while a new playback preview resolves.
+    expect(source).toContain("const [resolvedPreview, setResolvedPreview]");
+    expect(source).toContain("prev?.html === resolved");
+    expect(source).toContain("prev.compileRevision === compileRevision");
+    expect(source).toContain("prev.sourceKey === sourceKey");
+    expect(source).toContain("const [playbackCompileRevision, setPlaybackCompileRevision]");
+    expect(source).toContain("setPlaybackCompileRevision((revision) => revision + 1)");
+    expect(source).toContain('staleBehavior="blank"');
+    expect(source).toContain('loadingLabel="Updating playback..."');
+    expect(source).toContain("sourceKey");
     expect(source).toContain("function recorderHtmlKey");
     expect(source).toContain("key={iframeKey}");
+    expect(source).toContain("const primaryStampAction =");
+    expect(source).toContain("Time already stamped");
+    expect(source).toContain("No changes to update");
+    expect(source).toContain("const initialRecorderKeyposes = useMemo");
+    expect(source).toContain("function initialRestKeypose");
+    expect(source).toContain("function ensureInitialRestKeypose");
+    expect(source).toContain("return [initialRestKeypose(), ...sorted]");
+    expect(source).toContain("function RecorderHyperFramesPreview");
+    expect(source).toContain("selectAdjacentKeypose");
     expect(source).not.toContain("preset={draftPreviewPreset}");
     expect(source).not.toContain("function RiggedPosePreview");
     expect(source).not.toContain("applyRecorderEditPose");
     expect(source).not.toContain("editTargets=");
-    expect(source).not.toContain("useMediaUrl(part.mediaId)");
     expect(source).not.toContain("JSON.stringify(\n          buildMotionRequest");
   });
 
@@ -114,8 +137,8 @@ describe("MotionPresetRecorder source integration", () => {
   it("does not expose rig pivot editing in the motion editor", () => {
     const source = readFileSync(recorderPath, "utf8");
 
-    expect(source).toContain("!previewPlaying && selectedSlot && selectedPart && selectedOverride");
-    expect(source).toContain("if (previewPlaying) return;");
+    expect(source).toContain("selectedSlot && selectedPart && selectedOverride");
+    expect(source).toContain("stamped keyframes only");
     expect(source).not.toContain('title="Set pivot"');
     expect(source).not.toContain('label="Pivot X"');
     expect(source).not.toContain('label="Pivot Y"');

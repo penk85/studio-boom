@@ -37,6 +37,7 @@ import {
   defaultSlotIdForRole,
   defaultMotionBehaviorForRole,
   defaultVariantForSlotParts,
+  detectPartRoleFromFilename,
   findCharacterSlot,
   getPartSlotId,
   listCharacterSlots,
@@ -58,6 +59,7 @@ import {
   variantLabelForPart,
   type VariantKeySource,
 } from "./character-utils";
+import { inferCharacterSideFromText } from "./side-utils";
 import {
   anchorEntryForChild,
   anchorSourceForChild,
@@ -7372,44 +7374,11 @@ function fitAsset(width = 0, height = 0, canvasWidth: number, canvasHeight: numb
 }
 
 function detectRole(filename: string): PartRole {
-  const name = filename.toLowerCase();
-  if (name.includes("head")) return "head";
-  if (name.includes("body") || name.includes("torso")) return "body";
-  if (name.includes("iris") || name.includes("pupil")) return "iris";
-  if (name.includes("eye") && !name.includes("brow")) return "eye";
-  if (name.includes("brow") || name.includes("eyebrow")) return "eyebrow";
-  if (name.includes("nose")) return "nose";
-  if (name.includes("mouth") || name.includes("viseme") || name.includes("lip")) return "mouth";
-  if (name.includes("hand")) return "hand";
-  if (name.includes("forearm") || name.includes("lower arm") || name.includes("lower-arm"))
-    return "lowerArm";
-  if (name.includes("bicep") || name.includes("upper arm") || name.includes("upper-arm"))
-    return "upperArm";
-  if (name.includes("arm")) return "arm";
-  if (name.includes("foot") || name.includes("feet")) return "foot";
-  if (
-    name.includes("shin") ||
-    name.includes("calf") ||
-    name.includes("lower leg") ||
-    name.includes("lower-leg")
-  )
-    return "lowerLeg";
-  if (name.includes("thigh") || name.includes("upper leg") || name.includes("upper-leg"))
-    return "upperLeg";
-  if (name.includes("leg")) return "leg";
-  if (name.includes("hair")) return "hair";
-  if (name.includes("hat") || name.includes("glasses") || name.includes("accessory"))
-    return "accessory";
-  return "custom";
+  return detectPartRoleFromFilename(filename);
 }
 
 function detectSide(filename: string): CharacterPart["side"] {
-  const name = filename.toLowerCase();
-  if (/(^|[_\-\s])left|_l\b|-l\b/.test(name)) return "left";
-  if (/(^|[_\-\s])right|_r\b|-r\b/.test(name)) return "right";
-  if (name.includes("front")) return "front";
-  if (name.includes("back")) return "back";
-  return undefined;
+  return inferCharacterSideFromText(filename);
 }
 
 function detectViseme(filename: string): MouthViseme | undefined {
