@@ -960,6 +960,8 @@ function buildElementUpdates(patch: Partial<AnyClip>): Partial<StudioTimelineEle
   if (patch.zIndex !== undefined) updates.zIndex = patch.zIndex;
   if (patch.opacity !== undefined) updates.opacity = patch.opacity;
   if (patch.rotation !== undefined) updates.rotation = patch.rotation;
+  if (patch.scaleX !== undefined) updates.scaleX = patch.scaleX;
+  if (patch.scaleY !== undefined) updates.scaleY = patch.scaleY;
   if (patch.name !== undefined) updates.name = patch.name;
   if (patch.width !== undefined) updates.sourceWidth = patch.width;
   if (patch.height !== undefined) updates.sourceHeight = patch.height;

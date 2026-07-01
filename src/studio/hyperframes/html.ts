@@ -2,6 +2,8 @@ import { addElementToHtml, parseHtml, updateElementInHtml } from "@hyperframes/c
 import type { ParsedHtml, TimelineElement } from "@hyperframes/core";
 import {
   STUDIO_ROTATION_ATTR,
+  STUDIO_SCALE_X_ATTR,
+  STUDIO_SCALE_Y_ATTR,
   composeStudioTransform,
   hasStudioTransform,
   parseFiniteNumber,
@@ -13,6 +15,8 @@ export type StudioTimelineElement = TimelineElement & {
   sourceHeight?: number;
   renderTrackIndex?: number;
   rotation?: number;
+  scaleX?: number;
+  scaleY?: number;
   volume?: number;
   mediaStartTime?: number;
   sourceDuration?: number;
@@ -29,6 +33,8 @@ type StudioElementUpdates = Partial<StudioTimelineElement> & {
   sourceHeight?: number;
   renderTrackIndex?: number;
   rotation?: number;
+  scaleX?: number;
+  scaleY?: number;
   volume?: number;
   mediaStartTime?: number;
   sourceDuration?: number;
@@ -114,6 +120,9 @@ function patchStudioElementInHtml(
   setNumericAttr(el, "data-y", updates.y);
   setNumericAttr(el, "data-scale", updates.scale);
   setNumericAttr(el, STUDIO_ROTATION_ATTR, updates.rotation);
+  // Per-axis mirror sign; omit at the default of 1 to keep the HTML clean.
+  setFlipAttr(el, STUDIO_SCALE_X_ATTR, updates.scaleX);
+  setFlipAttr(el, STUDIO_SCALE_Y_ATTR, updates.scaleY);
   setNumericAttr(el, "data-opacity", updates.opacity);
   if ("volume" in updates && updates.volume !== undefined) {
     // Generator omits data-volume at the default of 1; mirror that on mutation.
@@ -226,6 +235,9 @@ function buildNativeFallbackElement(el: HTMLElement): TimelineElement | null {
     parseFiniteNumber(el.getAttribute("data-height")) ??
     0;
   const src = readNativeCompositionSrc(el) ?? el.getAttribute("src") ?? undefined;
+  // Transform fields through the ONE canonical reader (previously hand-rolled here, which is
+  // how this builder silently missed rotation + flip).
+  const transform = readStudioTransform(el);
 
   return {
     id: el.id,
@@ -237,9 +249,12 @@ function buildNativeFallbackElement(el: HTMLElement): TimelineElement | null {
       parseFiniteNumber(el.style.zIndex) ??
       parseFiniteNumber(el.getAttribute("data-track-index")) ??
       0,
-    x: parseFiniteNumber(el.getAttribute("data-x")) ?? 0,
-    y: parseFiniteNumber(el.getAttribute("data-y")) ?? 0,
-    scale: parseFiniteNumber(el.getAttribute("data-scale")) ?? 1,
+    x: transform.x,
+    y: transform.y,
+    scale: transform.scale,
+    scaleX: transform.scaleX,
+    scaleY: transform.scaleY,
+    rotation: transform.rotation,
     opacity: parseFiniteNumber(el.getAttribute("data-opacity")) ?? 1,
     sourceWidth,
     sourceHeight,
@@ -295,6 +310,8 @@ function patchElementFromNativeAttrs(element: TimelineElement, doc: Document): T
   const rotation =
     parseFiniteNumber(el.getAttribute(STUDIO_ROTATION_ATTR)) ??
     parseRotationFromInlineTransform(el.style.transform);
+  const scaleX = parseFiniteNumber(el.getAttribute(STUDIO_SCALE_X_ATTR));
+  const scaleY = parseFiniteNumber(el.getAttribute(STUDIO_SCALE_Y_ATTR));
   const sourceWidth =
     parseFiniteNumber(el.getAttribute("data-source-width")) ??
     parseFiniteNumber(el.getAttribute("data-width"));
@@ -321,6 +338,8 @@ function patchElementFromNativeAttrs(element: TimelineElement, doc: Document): T
     x: x ?? element.x,
     y: y ?? element.y,
     rotation: rotation ?? getElementRotation(element),
+    scaleX: scaleX ?? 1,
+    scaleY: scaleY ?? 1,
     sourceWidth: sourceWidth ?? getElementSourceWidth(element),
     sourceHeight: sourceHeight ?? getElementSourceHeight(element),
     fontSize: fontSize ?? getElementFontSize(element),
@@ -435,6 +454,13 @@ function getElementFitToBounds(element: TimelineElement): boolean | undefined {
 function setNumericAttr(el: Element, attr: string, value: number | undefined): void {
   if (value === undefined) return;
   el.setAttribute(attr, String(value));
+}
+
+/** Per-axis mirror sign: drop the attr at the default of 1, else persist (e.g. -1 for a flip). */
+function setFlipAttr(el: Element, attr: string, value: number | undefined): void {
+  if (value === undefined) return;
+  if (value === 1) el.removeAttribute(attr);
+  else el.setAttribute(attr, String(value));
 }
 
 function patchElementVisualStyle(el: HTMLElement, updates: StudioElementUpdates): void {

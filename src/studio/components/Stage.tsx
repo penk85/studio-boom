@@ -66,6 +66,8 @@ import {
   compositionPointToCss,
 } from "./stage-helpers";
 import { resolvePreviewHtml } from "../hyperframes/preview";
+import { liveApplyStagePatch, type StageTransformPatch } from "../hyperframes/stage-edit";
+import { StageMoveable } from "./StageMoveable";
 import {
   useSelectDrag,
   type MoveSession,
@@ -222,6 +224,10 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const [resolvedHtml, setResolvedHtml] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [drag, setDrag] = useState<StageDrag>(null);
+  // True while a react-moveable gesture is in flight. Treated like `drag` for freezing
+  // geometry and suspending measurement, so the moveable proxy never gets re-synced (and
+  // never jumps) mid-gesture.
+  const [moveableInteracting, setMoveableInteracting] = useState(false);
   const [renderedElementRect, setRenderedElementRect] = useState<DOMRect | null>(null);
   const [renderedClickRects, setRenderedClickRects] = useState<Map<string, DOMRect>>(new Map());
 
@@ -261,7 +267,8 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     // 0-size rect (while the browser repaints the iframe), which collapses geometry to
     // the letterboxed fallback for a frame and makes the selection chrome / motion
     // paths flicker. Reusing the pre-drag geometry also drops a forced reflow per frame.
-    if (drag && lastStageGeometryRef.current) return lastStageGeometryRef.current;
+    if ((drag || moveableInteracting) && lastStageGeometryRef.current)
+      return lastStageGeometryRef.current;
     if (!project || !stageShellRef.current) return null;
     const iframe = resolveIframe(playerRef.current);
     const iframeRect = iframe?.getBoundingClientRect();
@@ -306,6 +313,17 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     outlineRect && drag?.type === "rotate"
       ? getRotationPillStyle(outlineRect, previewRotation, stageShellRef.current)
       : null;
+  // react-moveable owns the selected clip's move/resize/rotate chrome for the base-property
+  // case (single unlocked clip, no keyframe selected, not playing). Its imperative control
+  // box replaces the hand-rolled handles below and removes the per-frame Stage re-render.
+  // Keyframe/motion-path editing still routes through the legacy handles for now.
+  const useMoveable =
+    !!stageEditableClip &&
+    !selectedClip?.locked &&
+    !selectedKeyframe &&
+    !isPlaying &&
+    !!outlineRect &&
+    !!stageGeometry;
   const activeDragKey = drag ? `${drag.pointerId}:${drag.clipId}` : null;
   const selectedKeyframeKey = selectedKeyframe
     ? `${selectedKeyframe.clipId}:${selectedKeyframe.keyframeId}:${selectedKeyframe.property}`
@@ -346,6 +364,26 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     dragDriverRef.current = "window";
     setDrag(null);
   }, []);
+
+  // The single entry point for a base-transform edit (move/resize/rotate/flip). Live-applies the
+  // patch through the one player-editing dispatch, and on `persist` commits the same values to
+  // rootHtml with reload suppressed (the element already shows them). Both the legacy drag handlers
+  // and the react-moveable overlay route through this, so preview and commit can never diverge.
+  // Keyframe-targeted edits keep their own paths for now (they need a real reload + scale mapping).
+  const applyStageEdit = useCallback(
+    (clipId: string, patch: StageTransformPatch, opts: { persist: boolean }) => {
+      const appliedLive = liveApplyStagePatch(
+        iframeRef.current,
+        clipId,
+        patch,
+        opts.persist ? "commit" : "preview",
+      );
+      if (!opts.persist) return;
+      if (appliedLive) suppressReloadRef.current = true;
+      updateClip(clipId, patch);
+    },
+    [iframeRef, updateClip],
+  );
 
   // ─── Move preview/commit (shared by the Move handle and canvas body-drag) ─────
   const previewMoveDrag = useCallback(
@@ -561,7 +599,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       setRenderedElementRect(null);
       return;
     }
-    if (drag) return;
+    if (drag || moveableInteracting) return;
 
     const clipId = stageEditableClip.id;
     const fallbackClip = activeHandleClip ?? stageEditableClip;
@@ -585,7 +623,15 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       stopped = true;
       window.clearInterval(interval);
     };
-  }, [activeHandleClip, drag, iframeRef, selectedKeyframe, stageEditableClip, resolvedHtml]);
+  }, [
+    activeHandleClip,
+    drag,
+    moveableInteracting,
+    iframeRef,
+    selectedKeyframe,
+    stageEditableClip,
+    resolvedHtml,
+  ]);
 
   const measureRenderedClickRects = useCallback(() => {
     if (!resolvedHtml) {
@@ -627,7 +673,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     // the hit-test overlay every 200ms, competing with the gesture for layout/paint while
     // hit-testing is already paused under pointer capture. It resumes (and re-measures)
     // once the drag commits and the iframe settles.
-    if (drag) return;
+    if (drag || moveableInteracting) return;
 
     let stopped = false;
     const measure = () => {
@@ -641,7 +687,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       window.cancelAnimationFrame(frame);
       window.clearInterval(interval);
     };
-  }, [drag, measureRenderedClickRects, resolvedHtml]);
+  }, [drag, moveableInteracting, measureRenderedClickRects, resolvedHtml]);
 
   useEffect(() => {
     if (!resolvedHtml || isPlaying) return;
@@ -1275,7 +1321,26 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       {snapGuides.length > 0 && stageGeometry && (
         <StageSnapGuideOverlay guides={snapGuides} geometry={stageGeometry} />
       )}
-      {outlineRect && (
+      {useMoveable && stageEditableClip && outlineRect && stageGeometry && (
+        <StageMoveable
+          key={stageEditableClip.id}
+          clip={{
+            id: stageEditableClip.id,
+            x: stageEditableClip.x,
+            y: stageEditableClip.y,
+            width: stageEditableClip.width,
+            height: stageEditableClip.height,
+            rotation: stageEditableClip.rotation,
+            scaleX: stageEditableClip.scaleX ?? 1,
+            scaleY: stageEditableClip.scaleY ?? 1,
+          }}
+          screenRect={outlineRect}
+          geometry={stageGeometry}
+          applyEdit={(patch, opts) => applyStageEdit(stageEditableClip.id, patch, opts)}
+          onInteractingChange={setMoveableInteracting}
+        />
+      )}
+      {outlineRect && !useMoveable && (
         <div
           data-stage-selection-overlay=""
           className="pointer-events-none absolute z-30 border border-primary/75"
@@ -1310,6 +1375,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         </div>
       )}
       {outlineRect &&
+        !useMoveable &&
         rotateHandleStyle &&
         stageEditableClip &&
         activeHandleClip &&
@@ -1339,6 +1405,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         </div>
       )}
       {outlineRect &&
+        !useMoveable &&
         moveHandleStyle &&
         stageEditableClip &&
         activeHandleClip &&

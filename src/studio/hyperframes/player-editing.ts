@@ -1,6 +1,8 @@
 import type { PlayerAPI } from "@hyperframes/core";
 import {
   STUDIO_ROTATION_ATTR,
+  STUDIO_SCALE_X_ATTR,
+  STUDIO_SCALE_Y_ATTR,
   composeStudioTransform,
   readStudioTransform,
   toGsapTransformVars,
@@ -85,6 +87,37 @@ export function commitElementRotation(
   rotation: number,
 ): boolean {
   return setElementRotationInPlayerDom(iframe, elementId, rotation, true);
+}
+
+export function commitElementFlip(
+  iframe: HTMLIFrameElement | null,
+  elementId: string,
+  scaleX: number,
+  scaleY: number,
+): boolean {
+  if (!iframe) return false;
+  try {
+    const win = iframe.contentWindow as PlayerWindow | null;
+    const element = iframe.contentDocument?.getElementById(elementId);
+    if (!element) return false;
+
+    element.setAttribute(STUDIO_SCALE_X_ATTR, String(scaleX));
+    element.setAttribute(STUDIO_SCALE_Y_ATTR, String(scaleY));
+
+    const transform = readStudioTransform(element, { scaleX, scaleY });
+    if (win?.gsap?.set) {
+      win.gsap.set(element, toGsapTransformVars(transform, ["scaleX", "scaleY"]));
+      return true;
+    }
+
+    const style = (element as HTMLElement).style;
+    if (!style) return false;
+    style.transform = composeStudioTransform(transform);
+    style.transformOrigin = style.transformOrigin || "center center";
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function callNativePositionPreview(

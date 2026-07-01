@@ -1067,6 +1067,10 @@ export interface EditorClip {
   width: number;
   height: number;
   rotation: number;
+  /** Per-axis mirror sign (1 or -1); default 1. Horizontal flip = -1. */
+  scaleX: number;
+  /** Per-axis mirror sign (1 or -1); default 1. Vertical flip = -1. */
+  scaleY: number;
   opacity: number;
   zIndex: number;
   /** Editor lock (per-clip OR inherited from a locked track). Excludes the clip from canvas hit-testing. */
@@ -1144,7 +1148,11 @@ export function deriveEditorClips(project: Project): EditorClip[] {
       mediaStartTime?: number;
       sourceDuration?: number;
     };
-    const studioEl = el as TimelineElement & { rotation?: number };
+    const studioEl = el as TimelineElement & {
+      rotation?: number;
+      scaleX?: number;
+      scaleY?: number;
+    };
     const textEl = el as {
       content?: string;
       color?: string;
@@ -1174,6 +1182,8 @@ export function deriveEditorClips(project: Project): EditorClip[] {
       width,
       height,
       rotation: studioEl.rotation ?? 0,
+      scaleX: studioEl.scaleX ?? 1,
+      scaleY: studioEl.scaleY ?? 1,
       opacity: el.opacity ?? 1,
       zIndex: el.zIndex,
       locked,
@@ -1218,6 +1228,10 @@ export interface BaseClip {
   width: number;
   height: number;
   rotation: number;
+  /** Per-axis mirror sign (1 or -1); default 1. Horizontal flip = -1. */
+  scaleX?: number;
+  /** Per-axis mirror sign (1 or -1); default 1. Vertical flip = -1. */
+  scaleY?: number;
   opacity: number;
   zIndex: number;
 }

@@ -1,5 +1,6 @@
 import type { EditorClip } from "../types";
 import type { PickedElement } from "@hyperframes/studio";
+import { readStudioTransform } from "../hyperframes/transform";
 
 export interface StageGeometry {
   rect: DOMRect;
@@ -309,8 +310,11 @@ export async function getRenderedPixelRect(
       return elementRect;
     }
 
+    const { scaleX, scaleY } = readStudioTransform(element);
     const pixelBounds = measureImagePixelBounds(image);
-    return pixelBounds ? pixelBoundsToRenderedRect(pixelBounds, elementRect) : elementRect;
+    return pixelBounds
+      ? pixelBoundsToRenderedRect(pixelBounds, elementRect, scaleX, scaleY)
+      : elementRect;
   } catch {
     return getRenderedElementRect(iframe, elementId);
   }
@@ -340,19 +344,37 @@ export async function getRenderedPixelCompositionRect(
       return fallbackRect;
     }
 
+    const { scaleX, scaleY } = readStudioTransform(element);
     const pixelBounds = measureImagePixelBounds(image);
-    return pixelBounds ? pixelBoundsToRenderedRect(pixelBounds, fallbackRect) : fallbackRect;
+    return pixelBounds
+      ? pixelBoundsToRenderedRect(pixelBounds, fallbackRect, scaleX, scaleY)
+      : fallbackRect;
   } catch {
     return fallbackRect;
   }
 }
 
-export function pixelBoundsToRenderedRect(bounds: PixelBounds, renderedRect: DOMRect): DOMRect {
-  const left = renderedRect.left + (bounds.x / bounds.sampleWidth) * renderedRect.width;
-  const top = renderedRect.top + (bounds.y / bounds.sampleHeight) * renderedRect.height;
-  const width = (bounds.width / bounds.sampleWidth) * renderedRect.width;
-  const height = (bounds.height / bounds.sampleHeight) * renderedRect.height;
-  return new DOMRect(left, top, width, height);
+export function pixelBoundsToRenderedRect(
+  bounds: PixelBounds,
+  renderedRect: DOMRect,
+  scaleX = 1,
+  scaleY = 1,
+): DOMRect {
+  const leftFrac = bounds.x / bounds.sampleWidth;
+  const topFrac = bounds.y / bounds.sampleHeight;
+  const widthFrac = bounds.width / bounds.sampleWidth;
+  const heightFrac = bounds.height / bounds.sampleHeight;
+  // The opaque bounds are measured from the natural (un-flipped) image, but a CSS flip mirrors
+  // that region within the element box. Mirror the offset to match the rendered object so the
+  // selection box / moveable proxy sits on the flipped pixels, not the un-flipped ones.
+  const xFrac = scaleX < 0 ? 1 - leftFrac - widthFrac : leftFrac;
+  const yFrac = scaleY < 0 ? 1 - topFrac - heightFrac : topFrac;
+  return new DOMRect(
+    renderedRect.left + xFrac * renderedRect.width,
+    renderedRect.top + yFrac * renderedRect.height,
+    widthFrac * renderedRect.width,
+    heightFrac * renderedRect.height,
+  );
 }
 
 export function resolvePickedClipId(

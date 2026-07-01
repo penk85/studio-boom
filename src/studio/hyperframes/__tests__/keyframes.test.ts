@@ -84,6 +84,40 @@ describe("native clip keyframes", () => {
     expect(html).not.toContain("display");
   });
 
+  it("composes a base flip into animated scale vars so a mirror survives a scale keyframe", () => {
+    const flippedRoot = `<!DOCTYPE html>
+<html data-composition-id="project-1" data-composition-duration="6">
+  <head>
+    <script>
+      window.__timelines = window.__timelines || {};
+      window.__timelines["project-1"] = { set() {}, to() {} };
+    </script>
+  </head>
+  <body>
+    <div id="stage" data-composition-id="project-1" data-start="0" data-duration="6">
+      <img
+        id="clip-1"
+        src="asset:image-1"
+        data-start="0"
+        data-duration="4"
+        data-track-index="1000"
+        data-x="100"
+        data-y="50"
+        data-scale-x="-1"
+      />
+    </div>
+  </body>
+</html>`;
+    const html = setClipKeyframesInRootHtml(flippedRoot, "clip-1", [
+      { id: "kf-scale", time: 2, properties: { scale: 2 }, ease: "none" },
+    ]);
+    // Base set and scale tween keep the horizontal mirror (scaleX negative) instead of
+    // resetting it to a positive uniform scale — this is the flip fix at the timeline layer.
+    expect(html).toMatch(/scaleX: -1\b/);
+    expect(html).toMatch(/scaleX: -2\b/);
+    expect(html).toMatch(/scaleY: 2\b/);
+  });
+
   it("keeps clip lifecycle script when no keyframes remain", () => {
     const withKeyframes = setClipKeyframesInRootHtml(rootHtml(), "clip-1", [
       { id: "kf-1", time: 0, properties: { opacity: 0.25 } },

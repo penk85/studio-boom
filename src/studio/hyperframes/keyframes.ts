@@ -1,5 +1,5 @@
 import type { Keyframe, KeyframeProperties } from "@hyperframes/core";
-import { parseFiniteNumber, STUDIO_ROTATION_ATTR } from "./transform";
+import { parseFiniteNumber, readStudioTransform } from "./transform";
 import {
   buildPositionPath,
   normalizePathStyle,
@@ -24,6 +24,9 @@ export interface ClipKeyframedState {
   x: number;
   y: number;
   scale: number;
+  /** Per-axis mirror sign (1 or -1); default 1. Composed into emitted scale vars so a flip survives. */
+  scaleX?: number;
+  scaleY?: number;
   rotation: number;
   opacity: number;
 }
@@ -1224,6 +1227,23 @@ function emitPositionSamples(
   return lines;
 }
 
+/**
+ * Compose the base per-axis mirror into an emitted uniform-scale var, so animating `scale` (or the
+ * base set that precedes it) preserves a flip instead of resetting scaleX/scaleY to +scale. Mirrors
+ * the composition in transform.ts's toGsapTransformVars. Carry-forward keeps the logical uniform
+ * `scale` (pre-flip); only the emitted gsap vars are composed.
+ */
+function withFlip(vars: Record<string, number>, base: ClipKeyframedState): Record<string, number> {
+  if (!("scale" in vars)) return vars;
+  const fx = base.scaleX ?? 1;
+  const fy = base.scaleY ?? 1;
+  if (fx === 1 && fy === 1) return vars;
+  const { scale, ...rest } = vars;
+  const sx = scale * fx;
+  const sy = scale * fy;
+  return sx === sy ? { ...rest, scale: sx } : { ...rest, scaleX: sx, scaleY: sy };
+}
+
 function compilePropertyKeyframes(args: {
   selector: string;
   clipStart: number;
@@ -1240,7 +1260,7 @@ function compilePropertyKeyframes(args: {
   if (!first) return lines;
 
   if (first.time > TIME_EPSILON) {
-    lines.push(formatSet(args.selector, baseVars, args.clipStart));
+    lines.push(formatSet(args.selector, withFlip(baseVars, args.base), args.clipStart));
   }
 
   for (const keyframe of args.keyframes) {
@@ -1248,9 +1268,9 @@ function compilePropertyKeyframes(args: {
     const position = args.clipStart + previousTime;
     const duration = Math.max(0, keyframe.time - previousTime);
     if (duration <= TIME_EPSILON) {
-      lines.push(formatSet(args.selector, nextVars, args.clipStart + keyframe.time));
+      lines.push(formatSet(args.selector, withFlip(nextVars, args.base), args.clipStart + keyframe.time));
     } else {
-      lines.push(formatTo(args.selector, nextVars, position, duration, keyframe.ease));
+      lines.push(formatTo(args.selector, withFlip(nextVars, args.base), position, duration, keyframe.ease));
     }
     previousTime = keyframe.time;
     previousVars = nextVars;
@@ -1393,11 +1413,17 @@ function checkpointIdsForMeta(step: ClipMotionStepMeta): string[] {
 }
 
 function readElementBaseState(el: HTMLElement): ClipKeyframedState {
+  // Transform fields come through the ONE canonical reader — no hand-rolled getAttribute here,
+  // so the timeline can't disagree with the rest of the app about a flip (or any future field).
+  const t = readStudioTransform(el);
   return {
-    x: parseFiniteNumber(el.getAttribute("data-x")) ?? 0,
-    y: parseFiniteNumber(el.getAttribute("data-y")) ?? 0,
-    scale: parseFiniteNumber(el.getAttribute("data-scale")) ?? 1,
-    rotation: parseFiniteNumber(el.getAttribute(STUDIO_ROTATION_ATTR)) ?? 0,
+    x: t.x,
+    y: t.y,
+    scale: t.scale,
+    scaleX: t.scaleX,
+    scaleY: t.scaleY,
+    rotation: t.rotation,
+    // Opacity is a non-transform visual field; it stays a local read (not part of transform.ts).
     opacity:
       parseFiniteNumber(el.getAttribute("data-opacity")) ??
       parseFiniteNumber(el.style.opacity) ??
