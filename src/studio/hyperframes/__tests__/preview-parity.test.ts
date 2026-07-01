@@ -3,11 +3,14 @@
 // proves the files the preview pipeline posts to the bundler are byte-identical to the
 // files export/render writes, so "what you edit" can't silently drift from "what renders".
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Project } from "../../types";
+import type { CharacterPreset, MediaAsset, MotionPreset, Project } from "../../types";
+import { createBlankCharacter, makePart } from "../../character/character-utils";
+import { buildCharacterCompositionHtml } from "../../character/composition";
 
 const mediaRows = vi.hoisted(() => new Map<string, Blob>());
 
 vi.mock("../../db", () => ({
+  uid: () => "test-uid",
   db: {
     mediaBlobs: {
       where: () => ({
@@ -60,6 +63,186 @@ function makeProject(rootHtml?: string): Project {
     editorMeta: {
       tracks: [{ id: "track-1", name: "Characters", kind: "character" }],
       clips: {},
+    },
+  };
+}
+
+function makePixiActor(): CharacterPreset {
+  return {
+    ...createBlankCharacter("Pixi parity actor"),
+    id: "pixi-actor",
+    parts: [
+      makePart("body", "body-media", {
+        id: "body-idle",
+        slotId: "role:body",
+        pose: "idle",
+        x: 100,
+        y: 120,
+        width: 220,
+        height: 360,
+        zIndex: 1,
+      }),
+      makePart("eye", "eye-open-media", {
+        id: "eye-open",
+        slotId: "slot:left-eye",
+        eyeState: "open",
+        side: "left",
+        x: 180,
+        y: 180,
+        width: 48,
+        height: 28,
+        zIndex: 4,
+      }),
+      makePart("eye", "eye-closed-media", {
+        id: "eye-closed",
+        slotId: "slot:left-eye",
+        eyeState: "closed",
+        side: "left",
+        x: 180,
+        y: 184,
+        width: 48,
+        height: 12,
+        zIndex: 4,
+      }),
+      makePart("mouth", "mouth-rest-media", {
+        id: "mouth-rest",
+        slotId: "role:mouth",
+        viseme: "rest",
+        x: 210,
+        y: 260,
+        width: 90,
+        height: 42,
+        zIndex: 5,
+      }),
+      makePart("mouth", "mouth-smile-media", {
+        id: "mouth-smile",
+        slotId: "role:mouth",
+        pose: "smile",
+        x: 200,
+        y: 252,
+        width: 120,
+        height: 52,
+        zIndex: 5,
+      }),
+    ],
+  };
+}
+
+function makePixiCharacterAssets(): MediaAsset[] {
+  return [
+    {
+      id: "body-media",
+      filename: "body.svg",
+      mimeType: "image/svg+xml",
+      kind: "image",
+    },
+    {
+      id: "eye-open-media",
+      filename: "eye-open.png",
+      mimeType: "image/png",
+      kind: "image",
+    },
+    {
+      id: "eye-closed-media",
+      filename: "eye-closed.png",
+      mimeType: "image/png",
+      kind: "image",
+    },
+    {
+      id: "mouth-rest-media",
+      filename: "mouth-rest.png",
+      mimeType: "image/png",
+      kind: "image",
+    },
+    {
+      id: "mouth-smile-media",
+      filename: "mouth-smile.png",
+      mimeType: "image/png",
+      kind: "image",
+    },
+  ];
+}
+
+function makePixiCharacterProject(): Project {
+  const assets = makePixiCharacterAssets();
+  const motionPreset: MotionPreset = {
+    id: "pixi-export-motion",
+    name: "Pixi export motion",
+    category: "gesture",
+    duration: 1,
+    loop: false,
+    tracks: [
+      {
+        partRole: "body",
+        slotId: "role:body",
+        keyframes: [
+          { t: 0, dx: 0, dy: 0, rotation: 0, ease: "linear" },
+          { t: 1, dx: 18, dy: -12, rotation: 8, ease: "linear" },
+        ],
+      },
+    ],
+    keyposes: [
+      {
+        t: 0.5,
+        parts: [{ partRole: "mouth", slotId: "role:mouth", poseSwap: "smile" }],
+      },
+    ],
+    createdAt: 0,
+    updatedAt: 0,
+  };
+  const compositionHtml = buildCharacterCompositionHtml({
+    compositionId: "comp_pixi-character",
+    clipId: "clip-pixi-character",
+    width: 300,
+    height: 450,
+    duration: 4,
+    character: makePixiActor(),
+    meta: {
+      characterId: "pixi-actor",
+      poses: {},
+      autoBlink: false,
+      motions: [{ id: "applied-pixi-motion", presetId: motionPreset.id, offset: 0, intensity: 1 }],
+    },
+    motionPresets: new Map([[motionPreset.id, motionPreset]]),
+    renderer: "pixi",
+    mediaAssets: new Map(assets.map((asset) => [asset.id, asset])),
+  });
+
+  return {
+    id: "project-pixi",
+    name: "Pixi Parity",
+    createdAt: 0,
+    updatedAt: 0,
+    hf: {
+      id: "project-pixi",
+      name: "Pixi Parity",
+      width: 300,
+      height: 450,
+      fps: 30,
+      duration: 4,
+      assets,
+      rootHtml: `<!DOCTYPE html>
+<html data-composition-id="project-pixi" data-composition-duration="4">
+<body>
+  <div id="stage" data-composition-id="project-pixi" data-start="0" data-duration="4" data-width="300" data-height="450">
+    <div id="clip-pixi-character" class="clip" data-type="composition" data-composition-id="comp_pixi-character" data-composition-src="compositions/comp_pixi-character.html" data-start="0" data-duration="4" data-track-index="0" data-width="300" data-height="450"></div>
+  </div>
+</body>
+</html>`,
+      compositionHtml: {
+        "comp_pixi-character": compositionHtml,
+      },
+    },
+    editorMeta: {
+      tracks: [{ id: "track-1", name: "Characters", kind: "character" }],
+      clips: {
+        "clip-pixi-character": {
+          kind: "composition",
+          compositionKind: "character",
+          compositionId: "comp_pixi-character",
+          character: { characterId: "pixi-actor", poses: {}, renderer: "pixi" },
+        },
+      },
     },
   };
 }
@@ -190,5 +373,52 @@ describe("preview ↔ export file parity", () => {
 
     expect(occurrences).toHaveLength(3);
     expect(resolved).not.toContain("../blob:");
+  });
+
+  it("stages Pixi character source identically for preview and export, mesh-free by default", async () => {
+    const { buildHyperframesProjectFiles } = await import("../../export/project-files");
+    const { bundlePreviewProject } = await import("../preview");
+    const project = makePixiCharacterProject();
+    for (const asset of project.hf.assets) {
+      mediaRows.set(asset.id, new Blob([asset.id], { type: asset.mimeType }));
+    }
+
+    const files = await buildHyperframesProjectFiles(project);
+    await bundlePreviewProject(project);
+
+    const textByPath = new Map(files.textFiles.map((file) => [file.path, file.contents]));
+    const composition = textByPath.get("compositions/comp_pixi-character.html") ?? "";
+    const postedText = new Map<string, string>();
+    for (const file of postedFiles) {
+      if (file.type === "text/html") postedText.set(file.name, await file.text());
+    }
+
+    expect(textByPath.get("index.html")).toContain(
+      'data-composition-src="compositions/comp_pixi-character.html"',
+    );
+    expect(files.textFiles.filter((file) => file.path === "pixi.min.js")).toHaveLength(1);
+    expect(composition).toContain('data-character-renderer="pixi"');
+    expect(composition).toContain('src="../pixi.min.js"');
+    expect(composition).toContain('"parser":"svg"');
+    expect(composition).toContain('"ref":"../assets/body-media.svg"');
+    expect(composition).toContain("new PIXI.Sprite");
+    expect(composition).toContain("window.__studioBoomPixiReady");
+    expect(composition).toContain('window.__timelines["comp_pixi-character"] = tl');
+    expect(composition).not.toContain("new PIXI.MeshPlane");
+    expect(composition).not.toContain('"kind":"mesh"');
+    expect(composition).not.toContain("asset:body-media");
+    expect(composition).not.toContain("pixijs.download");
+    expect(files.binaryFiles.map((file) => file.path).sort()).toEqual([
+      "assets/body-media.svg",
+      "assets/eye-closed-media.png",
+      "assets/eye-open-media.png",
+      "assets/mouth-rest-media.png",
+      "assets/mouth-smile-media.png",
+    ]);
+    for (const file of files.textFiles.filter((file) => file.mimeType === "text/html")) {
+      expect(postedText.get(file.path)).toBe(file.contents);
+    }
+    expect(postedFiles.map((file) => file.name)).toContain("pixi.min.js");
+    expect(postedFiles.map((file) => file.name)).toContain("assets/body-media.svg");
   });
 });
