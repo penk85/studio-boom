@@ -1,6 +1,7 @@
 import type {
   CharacterAngle,
   CharacterClipMeta,
+  MediaAsset,
   CharacterPart,
   CharacterPreset,
   PartRole,
@@ -26,7 +27,7 @@ import {
 
 export const CHARACTER_SCENE_ROOT_NODE_ID = "character-scene:root";
 
-export type CharacterSceneNodeKind = "root" | "bone" | "slot" | "sprite" | "vector";
+export type CharacterSceneNodeKind = "root" | "bone" | "slot" | "sprite" | "mesh" | "vector";
 
 export interface CharacterSceneFrame {
   /** Top-left position in the parent coordinate space, after output scaling. */
@@ -131,6 +132,24 @@ export interface CharacterSceneSpriteNode extends CharacterSceneNodeBase {
   placement: CharacterScenePlacement;
 }
 
+export interface CharacterSceneMeshNode extends CharacterSceneNodeBase {
+  kind: "mesh";
+  meshKind: "plane";
+  slotId: string;
+  partId: string;
+  role: PartRole;
+  mediaId: string;
+  assetId: string;
+  assetRef: string;
+  variantKey: string;
+  variantAliases: string[];
+  active: boolean;
+  verticesX: number;
+  verticesY: number;
+  stretchAxis: "x" | "y";
+  placement: CharacterScenePlacement;
+}
+
 export interface CharacterSceneVectorNode extends CharacterSceneNodeBase {
   kind: "vector";
   slotId: string;
@@ -154,6 +173,7 @@ export type CharacterSceneNode =
   | CharacterSceneBoneNode
   | CharacterSceneSlotNode
   | CharacterSceneSpriteNode
+  | CharacterSceneMeshNode
   | CharacterSceneVectorNode;
 
 export interface CharacterSceneMotionTarget {
@@ -169,7 +189,7 @@ export interface CharacterSceneAsset {
   id: string;
   ref: string;
   kind: "texture";
-  parser: "texture";
+  parser: "texture" | "svg";
   partIds: string[];
 }
 
@@ -198,6 +218,7 @@ export interface BuildCharacterSceneArgs {
   height?: number;
   angle?: CharacterAngle;
   runtime?: CharacterRuntime;
+  mediaAssets?: ReadonlyMap<string, Pick<MediaAsset, "filename" | "mimeType">>;
 }
 
 export function buildCharacterScene(args: BuildCharacterSceneArgs): CharacterSceneGraph {
@@ -284,6 +305,7 @@ export function buildCharacterScene(args: BuildCharacterSceneArgs): CharacterSce
       partNodeIds,
       motionTargetsBySlotId,
       assetsById,
+      mediaAssets: args.mediaAssets,
     });
   }
 
@@ -342,6 +364,7 @@ interface AddSlotSceneNodesArgs {
   partNodeIds: Record<string, string>;
   motionTargetsBySlotId: Record<string, CharacterSceneMotionTarget>;
   assetsById: Map<string, CharacterSceneAsset>;
+  mediaAssets?: ReadonlyMap<string, Pick<MediaAsset, "filename" | "mimeType">>;
 }
 
 function addSlotSceneNodes(args: AddSlotSceneNodesArgs): void {
@@ -359,6 +382,7 @@ function addSlotSceneNodes(args: AddSlotSceneNodesArgs): void {
     partNodeIds,
     motionTargetsBySlotId,
     assetsById,
+    mediaAssets,
   } = args;
   const visibleParts = slot.parts.filter((part) => part.visible);
   const activePart = resolveRuntimeSlotPart(slot, runtime, poses[slot.id]);
@@ -442,18 +466,33 @@ function addSlotSceneNodes(args: AddSlotSceneNodesArgs): void {
     for (const alias of variantAliasesForPart(part)) {
       (variantNodeIds[alias] ??= []).push(nodeId);
     }
-    if (partNode.kind === "sprite") {
+    if (isTexturedPartNode(partNode)) {
       const asset = assetsById.get(partNode.assetId) ?? {
         id: partNode.assetId,
         ref: partNode.assetRef,
         kind: "texture",
-        parser: "texture",
+        parser: sceneAssetParserForMedia(mediaAssets?.get(partNode.assetId)),
         partIds: [],
       };
       asset.partIds.push(part.id);
       assetsById.set(partNode.assetId, asset);
     }
   }
+}
+
+function isTexturedPartNode(
+  node: CharacterSceneSpriteNode | CharacterSceneMeshNode | CharacterSceneVectorNode,
+): node is CharacterSceneSpriteNode | CharacterSceneMeshNode {
+  return node.kind === "sprite" || node.kind === "mesh";
+}
+
+function sceneAssetParserForMedia(
+  asset: Pick<MediaAsset, "filename" | "mimeType"> | undefined,
+): CharacterSceneAsset["parser"] {
+  const mimeType = asset?.mimeType.trim().toLowerCase();
+  const filename = asset?.filename.trim().toLowerCase();
+  if (mimeType === "image/svg+xml" || filename?.endsWith(".svg")) return "svg";
+  return "texture";
 }
 
 function buildPartNode(args: {
@@ -468,7 +507,7 @@ function buildPartNode(args: {
   bindingPresent: boolean;
   scaleX: number;
   scaleY: number;
-}): CharacterSceneSpriteNode | CharacterSceneVectorNode {
+}): CharacterSceneSpriteNode | CharacterSceneMeshNode | CharacterSceneVectorNode {
   const {
     nodeId,
     slotNodeId,
@@ -522,12 +561,16 @@ function buildPartNode(args: {
     };
   }
 
-  return {
+  const textured = {
     ...base,
-    kind: "sprite",
     mediaId: part.mediaId,
     assetId: part.mediaId,
     assetRef: `asset:${part.mediaId}`,
+  };
+
+  return {
+    ...textured,
+    kind: "sprite",
   };
 }
 

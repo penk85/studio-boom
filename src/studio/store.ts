@@ -627,6 +627,7 @@ function rebuildCharacterCompositionInProject(
       meta: meta.character,
       renderer: meta.character.renderer,
       speeches: resolveSpeechesForBuild(meta.character, mediaAssets),
+      mediaAssets,
       motionPresets,
     });
   } catch (error) {
@@ -638,14 +639,18 @@ function rebuildCharacterCompositionInProject(
     });
     return project;
   }
-  let hf: HyperFramesProject = {
-    ...project.hf,
-    compositionHtml: {
-      ...project.hf.compositionHtml,
-      [meta.compositionId]: html,
-    },
-  };
+  let hf: HyperFramesProject =
+    project.hf.compositionHtml[meta.compositionId] === html
+      ? project.hf
+      : {
+          ...project.hf,
+          compositionHtml: {
+            ...project.hf.compositionHtml,
+            [meta.compositionId]: html,
+          },
+        };
   hf = registerCharacterAssets(hf, character, meta.character, mediaAssets);
+  if (hf === project.hf) return project;
   return { ...project, hf, updatedAt: Date.now() };
 }
 
@@ -1099,6 +1104,7 @@ interface StudioState {
   loadProject: (id: string) => Promise<void>;
   newProject: () => Promise<void>;
   saveProject: (expectedGeneration?: number) => Promise<void>;
+  refreshCharacterCompositions: (options?: ProjectMutationOptions) => Project | null;
 
   selectClip: (id: string | null) => void;
   setActiveScene: (sceneId: string | null) => void;
@@ -1444,6 +1450,22 @@ export const useStudio = create<StudioState>((set, get) => ({
     }
   },
 
+  refreshCharacterCompositions(options) {
+    const state = get();
+    if (!state.project) return null;
+    const project = rebuildCharacterCompositions(
+      state.project,
+      state.characters,
+      state.mediaAssets,
+      state.motionPresets,
+    );
+    if (project === state.project) return state.project;
+    if (options?.history !== false) get().checkpointHistory();
+    set({ project, tracks: project.editorMeta.tracks });
+    scheduleSave(get, set);
+    return project;
+  },
+
   selectClip(id) {
     set({
       selectedClipId: id,
@@ -1627,6 +1649,7 @@ export const useStudio = create<StudioState>((set, get) => ({
           meta: meta.character,
           renderer: meta.character.renderer,
           speeches: resolveSpeechesForBuild(meta.character, state.mediaAssets),
+          mediaAssets: state.mediaAssets,
           motionPresets: state.motionPresets,
         });
         hf = registerCharacterAssets(hf, character, meta.character, state.mediaAssets);

@@ -12,6 +12,7 @@ interface TopBarProps {
 export function TopBar({ onBackToProjects }: TopBarProps) {
   const project = useStudio((s) => s.project);
   const saveProject = useStudio((s) => s.saveProject);
+  const refreshCharacterCompositions = useStudio((s) => s.refreshCharacterCompositions);
   const undo = useStudio((s) => s.undo);
   const redo = useStudio((s) => s.redo);
   const canUndo = useStudio((s) => s.historyPast.length > 0);
@@ -118,8 +119,9 @@ export function TopBar({ onBackToProjects }: TopBarProps) {
             setRendering(true);
             setRenderError(null);
             try {
+              refreshCharacterCompositions({ history: false });
               await saveProject();
-              await renderProjectToMp4(project);
+              await renderProjectToMp4(useStudio.getState().project ?? project);
             } catch (error) {
               setRenderError(error instanceof Error ? error.message : String(error));
             } finally {

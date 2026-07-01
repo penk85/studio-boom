@@ -5,6 +5,7 @@ import type {
   CharacterPart,
   CharacterPreset,
   CharacterSlotRelation,
+  MediaAsset,
   MotionPreset,
   MouthPose,
   MouthViseme,
@@ -116,6 +117,7 @@ export interface BuildCharacterCompositionArgs {
    *  emits an `<audio>` at its start and contributes offset visemes to the mouth.
    *  When omitted, falls back to the legacy single `meta.lipSyncAudioId`. */
   speeches?: ResolvedSpeech[];
+  mediaAssets?: ReadonlyMap<string, Pick<MediaAsset, "filename" | "mimeType">>;
   /** @deprecated Legacy single-speech length; superseded by `speeches`. */
   speechDuration?: number;
 }
@@ -291,6 +293,7 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
         width,
         height,
         runtime,
+        mediaAssets: args.mediaAssets,
       }),
       timelineScene,
       audioSpeeches,

@@ -128,4 +128,67 @@ describe("preview ↔ export file parity", () => {
     expect(index).toContain('src="gsap.min.js"');
     expect(files.textFiles.some((file) => file.path === "gsap.min.js")).toBe(true);
   });
+
+  it("rewrites bundled preview runtime refs to dev-server runtime endpoints", async () => {
+    const { resolvePreviewRuntimeScriptRefs } = await import("../render-plugin");
+    const html = `<!DOCTYPE html>
+<html data-composition-id="project-1">
+  <head>
+    <script src="gsap.min.js"></script>
+  </head>
+  <body>
+    <script src="../pixi.min.js"></script>
+  </body>
+</html>`;
+
+    const resolved = resolvePreviewRuntimeScriptRefs(html);
+
+    expect(resolved).toContain('src="/api/hyperframes/runtime/gsap.min.js"');
+    expect(resolved).toContain('src="/api/hyperframes/runtime/pixi.min.js"');
+    expect(resolved).not.toContain('src="../pixi.min.js"');
+  });
+
+  it("rewrites bundled render runtime refs to packaged root-local runtimes", async () => {
+    const { resolveRenderRuntimeScriptRefs } = await import("../render-plugin");
+    const html = `<!DOCTYPE html>
+<html data-composition-id="project-1">
+  <head>
+    <script src="/api/hyperframes/runtime/gsap.min.js"></script>
+  </head>
+  <body>
+    <script src="../pixi.min.js"></script>
+  </body>
+</html>`;
+
+    const resolved = resolveRenderRuntimeScriptRefs(html);
+
+    expect(resolved).toContain('src="gsap.min.js"');
+    expect(resolved).toContain('src="pixi.min.js"');
+    expect(resolved).not.toContain("/api/hyperframes/runtime/");
+    expect(resolved).not.toContain('src="../pixi.min.js"');
+  });
+
+  it("resolves nested composition asset paths without corrupting blob URLs", async () => {
+    const { resolvePreviewAssetPaths } = await import("../preview");
+    const assets = [
+      { id: "image-1", filename: "image.png", mimeType: "image/png", kind: "image" },
+    ] satisfies Project["hf"]["assets"];
+    const blobUrl = "blob:http://127.0.0.1:8082/asset-1";
+    const html = `<!DOCTYPE html>
+<html data-composition-id="project-1">
+  <body>
+    <img src="assets/image-1.png">
+    <script>window.spriteUrl = "../assets/image-1.png";</script>
+    <script>window.assetUrl = "asset:image-1";</script>
+  </body>
+</html>`;
+
+    const resolved = resolvePreviewAssetPaths(html, assets, new Map([["image-1", blobUrl]]));
+    const occurrences = resolved.match(
+      new RegExp(blobUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"),
+    );
+
+    expect(occurrences).toHaveLength(3);
+    expect(resolved).not.toContain("../blob:");
+  });
 });

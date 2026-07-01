@@ -69,8 +69,8 @@ export function resolvePreviewAssetPaths(
     if (!url) continue;
     const ext = extFromAsset(asset.filename, asset.mimeType);
     resolved = resolved.replaceAll(`asset:${asset.id}`, url);
-    resolved = resolved.replaceAll(`assets/${asset.id}${ext}`, url);
     resolved = resolved.replaceAll(`../assets/${asset.id}${ext}`, url);
+    resolved = resolved.replaceAll(`assets/${asset.id}${ext}`, url);
   }
   return resolved;
 }

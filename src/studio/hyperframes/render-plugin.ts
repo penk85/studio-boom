@@ -23,6 +23,9 @@ type BundleToSingleHtml = (
   options?: { runtime?: "inline" | "external"; probeMediaDuration?: boolean },
 ) => Promise<string>;
 
+const GSAP_RUNTIME_FILENAME = "gsap.min.js";
+const PIXI_RUNTIME_FILENAME = "pixi.min.js";
+const PREVIEW_RUNTIME_ROUTE_PREFIX = "/api/hyperframes/runtime/";
 const RESULT_TTL_MS = 60 * 60 * 1000; // 1 hour
 const MAX_RESULTS = 32;
 const results = new Map<string, RenderResult>();
@@ -66,6 +69,11 @@ export function hyperframesRenderPlugin(options: HyperframesRenderPluginOptions 
 
           if (req.method === "POST" && pathname === "/api/hyperframes/preview-bundle") {
             await handlePreviewBundle(req, res);
+            return;
+          }
+
+          if (req.method === "GET" && pathname.startsWith(PREVIEW_RUNTIME_ROUTE_PREFIX)) {
+            await handlePreviewRuntime(pathname.slice(PREVIEW_RUNTIME_ROUTE_PREFIX.length), res);
             return;
           }
 
@@ -189,14 +197,95 @@ async function handlePreviewBundle(req: IncomingMessage, res: ServerResponse): P
   await assertProjectFilesNoTrackOverlaps(projectDir);
   const scaleHints = await readCompositionScaleHints(projectDir);
   const bundleToSingleHtml = await loadHyperframesBundler();
-  const html = applyCompositionScaleWrappers(
-    await bundleToSingleHtml(projectDir, { runtime: "inline" }),
-    scaleHints,
+  const html = resolvePreviewRuntimeScriptRefs(
+    applyCompositionScaleWrappers(
+      await bundleToSingleHtml(projectDir, { runtime: "inline" }),
+      scaleHints,
+    ),
   );
   assertInlineScriptSyntax(html);
   res.statusCode = 200;
   res.setHeader("Content-Type", "text/html");
   res.end(html);
+}
+
+async function handlePreviewRuntime(filename: string, res: ServerResponse): Promise<void> {
+  const runtimePath = previewRuntimeFilePath(filename);
+  if (!runtimePath) {
+    res.statusCode = 404;
+    res.setHeader("Content-Type", "text/plain");
+    res.end("Unknown HyperFrames preview runtime.");
+    return;
+  }
+
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "text/javascript; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache");
+  res.end(await readFile(runtimePath));
+}
+
+function previewRuntimeFilePath(filename: string): string | null {
+  const normalized = path.basename(filename.split(/[?#]/, 1)[0] ?? "");
+  if (normalized === GSAP_RUNTIME_FILENAME) {
+    return path.join(process.cwd(), "node_modules", "gsap", "dist", GSAP_RUNTIME_FILENAME);
+  }
+  if (normalized === PIXI_RUNTIME_FILENAME) {
+    return path.join(process.cwd(), "node_modules", "pixi.js", "dist", PIXI_RUNTIME_FILENAME);
+  }
+  return null;
+}
+
+export function resolvePreviewRuntimeScriptRefs(html: string): string {
+  return resolveRuntimeScriptRefs(html, (runtimeFilename) => {
+    return `${PREVIEW_RUNTIME_ROUTE_PREFIX}${runtimeFilename}`;
+  });
+}
+
+export function resolveRenderRuntimeScriptRefs(html: string): string {
+  return resolveRuntimeScriptRefs(html, (runtimeFilename) => runtimeFilename);
+}
+
+function resolveRuntimeScriptRefs(
+  html: string,
+  runtimeSrcForFilename: (runtimeFilename: string) => string,
+): string {
+  if (!html || !/<script\b/i.test(html)) return html;
+
+  const { document } = parseHTML(html);
+  let changed = false;
+  for (const script of Array.from(document.querySelectorAll<HTMLScriptElement>("script[src]"))) {
+    const runtimeFilename = runtimeFilenameFromSrc(script.getAttribute("src") ?? "");
+    if (!runtimeFilename) continue;
+    script.setAttribute("src", runtimeSrcForFilename(runtimeFilename));
+    changed = true;
+  }
+
+  return changed ? "<!DOCTYPE html>\n" + document.documentElement.outerHTML : html;
+}
+
+function runtimeFilenameFromSrc(src: string): string | null {
+  const value = src.trim().toLowerCase();
+  if (!value) return null;
+  if (value.includes("pixijs.download") && /\/pixi(?:\.min)?\.(?:m?js)/.test(value)) {
+    return PIXI_RUNTIME_FILENAME;
+  }
+  if (value.includes("cdn.jsdelivr.net/npm/pixi.js")) return PIXI_RUNTIME_FILENAME;
+  if (value.includes("unpkg.com/pixi.js")) return PIXI_RUNTIME_FILENAME;
+  if (/(?:^|\/)\.\.\/pixi(?:\.min)?\.(?:m?js)(?:[?#].*)?$/.test(value)) {
+    return PIXI_RUNTIME_FILENAME;
+  }
+  if (/(?:^|\/)pixi(?:\.min)?\.(?:m?js)(?:[?#].*)?$/.test(value)) {
+    return PIXI_RUNTIME_FILENAME;
+  }
+  if (value.includes("cdn.jsdelivr.net/npm/gsap@") && value.includes("/dist/gsap")) {
+    return GSAP_RUNTIME_FILENAME;
+  }
+  if (value.includes("unpkg.com/gsap@") && value.includes("/dist/gsap")) {
+    return GSAP_RUNTIME_FILENAME;
+  }
+  if (/(?:^|\/)\.\.\/gsap(?:\.min)?\.js(?:[?#].*)?$/.test(value)) return GSAP_RUNTIME_FILENAME;
+  if (/(?:^|\/)gsap(?:\.min)?\.js(?:[?#].*)?$/.test(value)) return GSAP_RUNTIME_FILENAME;
+  return null;
 }
 
 async function loadHyperframesBundler(): Promise<BundleToSingleHtml> {
@@ -247,9 +336,11 @@ async function handleRender(req: IncomingMessage, res: ServerResponse): Promise<
   await assertProjectFilesNoTrackOverlaps(projectDir);
   const scaleHints = await readCompositionScaleHints(projectDir);
   const bundleToSingleHtml = await loadHyperframesBundler();
-  const bundledHtml = applyCompositionScaleWrappers(
-    await bundleToSingleHtml(projectDir, { runtime: "inline" }),
-    scaleHints,
+  const bundledHtml = resolveRenderRuntimeScriptRefs(
+    applyCompositionScaleWrappers(
+      await bundleToSingleHtml(projectDir, { runtime: "inline" }),
+      scaleHints,
+    ),
   );
   assertInlineScriptSyntax(bundledHtml);
   await writeFile(path.join(projectDir, "index.html"), bundledHtml);
@@ -269,9 +360,11 @@ async function handleThumbnail(req: IncomingMessage, res: ServerResponse): Promi
   await assertProjectFilesNoTrackOverlaps(projectDir);
   const scaleHints = await readCompositionScaleHints(projectDir);
   const bundleToSingleHtml = await loadHyperframesBundler();
-  const bundledHtml = applyCompositionScaleWrappers(
-    await bundleToSingleHtml(projectDir, { runtime: "inline" }),
-    scaleHints,
+  const bundledHtml = resolveRenderRuntimeScriptRefs(
+    applyCompositionScaleWrappers(
+      await bundleToSingleHtml(projectDir, { runtime: "inline" }),
+      scaleHints,
+    ),
   );
   assertInlineScriptSyntax(bundledHtml);
   await writeFile(path.join(projectDir, "index.html"), bundledHtml);

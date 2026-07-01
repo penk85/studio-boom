@@ -199,13 +199,13 @@ function appendPixiCharacterScript(
     displayObject.rotation = toRadians(frame.rotation);
     displayObject.scale.set(frame.scaleX || 1, frame.scaleY || 1);
   };
-  const applySpriteFrame = function(sprite, frame, texture) {
+  const applyTexturedFrame = function(displayObject, frame, texture) {
     const sx = frame.width / Math.max(1, texture.width || frame.width || 1);
     const sy = frame.height / Math.max(1, texture.height || frame.height || 1);
-    sprite.position.set(frame.x + frame.originX, frame.y + frame.originY);
-    sprite.pivot.set(sx ? frame.originX / sx : frame.originX, sy ? frame.originY / sy : frame.originY);
-    sprite.rotation = toRadians(frame.rotation);
-    sprite.scale.set(sx * (frame.scaleX || 1), sy * (frame.scaleY || 1));
+    displayObject.position.set(frame.x + frame.originX, frame.y + frame.originY);
+    displayObject.pivot.set(sx ? frame.originX / sx : frame.originX, sy ? frame.originY / sy : frame.originY);
+    displayObject.rotation = toRadians(frame.rotation);
+    displayObject.scale.set(sx * (frame.scaleX || 1), sy * (frame.scaleY || 1));
   };
   const svgAttr = function(value) {
     return String(value == null ? "" : value)
@@ -234,8 +234,8 @@ function appendPixiCharacterScript(
       displayObject.visible = node.visible !== false;
       displayObject.alpha = node.opacity == null ? 1 : node.opacity;
       displayObject.zIndex = node.zIndex || 0;
-      if (node.kind === "sprite") {
-        applySpriteFrame(displayObject, node.frame, ctx.textures[node.assetId]);
+      if (node.kind === "sprite" || node.kind === "mesh") {
+        applyTexturedFrame(displayObject, node.frame, ctx.textures[node.assetId]);
       } else if (node.kind === "vector") {
         applyVectorFrame(displayObject, node.frame);
       } else {
@@ -336,6 +336,73 @@ function appendPixiCharacterScript(
     applyTargetVars(ctx, targetVarsAt(t));
     ctx.app.render();
   };
+  const state = { ctx: null, pendingTime: 0, readyResolve: null, readyReject: null };
+  const readyPromise = new Promise(function(resolve, reject) {
+    state.readyResolve = resolve;
+    state.readyReject = reject;
+  });
+  window.__studioBoomPixiReady = window.__studioBoomPixiReady || {};
+  window.__studioBoomPixiReady[S.compositionId] = readyPromise;
+  const installHyperframesReadinessGate = function() {
+    const w = window;
+    if (w.__studioBoomPixiHfGateInstalled) return;
+    w.__studioBoomPixiHfGateInstalled = true;
+    let hfValue = w.__hf;
+    const pixiReadyPromises = function() {
+      return Object.values(w.__studioBoomPixiReady || {}).filter(function(promise) {
+        return promise && typeof promise.then === "function";
+      });
+    };
+    const installOnHf = function(hf) {
+      if (!hf || hf.__studioBoomPixiReadyGate) return hf;
+      let released = false;
+      let durationValue = Number(hf.duration) || 0;
+      const originalSeek = typeof hf.seek === "function" ? hf.seek.bind(hf) : null;
+      Object.defineProperty(hf, "duration", {
+        configurable: true,
+        get: function() { return released ? durationValue : 0; },
+        set: function(value) { durationValue = Number(value) || 0; }
+      });
+      if (originalSeek) {
+        hf.seek = function(time) {
+          if (!released) return;
+          return originalSeek(time);
+        };
+      }
+      hf.__studioBoomPixiReadyGate = true;
+      Promise.all(pixiReadyPromises()).then(function() {
+        released = true;
+      }).catch(function(error) {
+        console.error(error);
+      });
+      return hf;
+    };
+    Object.defineProperty(w, "__hf", {
+      configurable: true,
+      get: function() { return hfValue; },
+      set: function(value) { hfValue = installOnHf(value); }
+    });
+    if (hfValue) hfValue = installOnHf(hfValue);
+  };
+  installHyperframesReadinessGate();
+  const renderIfReady = function(time) {
+    state.pendingTime = Math.max(0, Math.min(S.timelineScene.duration || S.duration, Number(time) || 0));
+    if (!state.ctx) return;
+    renderAt(state.ctx, state.pendingTime);
+  };
+  const tl = gsap.timeline({ paused: true });
+  tl.to({}, { duration: S.timelineScene.duration || S.duration }, 0);
+  const originalSeek = tl.seek;
+  tl.seek = function(time, suppressEvents) {
+    const result = originalSeek.call(this, time, suppressEvents);
+    renderIfReady(Number(time) || 0);
+    return result;
+  };
+  tl.eventCallback("onStart", function() { renderIfReady(tl.time()); });
+  tl.eventCallback("onUpdate", function() { renderIfReady(tl.time()); });
+  tl.eventCallback("onReverseComplete", function() { renderIfReady(0); });
+  window.__timelines = window.__timelines || {};
+  window.__timelines[${JSON.stringify(args.compositionId)}] = tl;
   const start = async function() {
     if (!window.PIXI) throw new Error("PixiJS runtime is required for character composition " + S.compositionId);
     const PIXI = window.PIXI;
@@ -365,7 +432,7 @@ function appendPixiCharacterScript(
     const nodes = {};
     Object.keys(S.scene.nodes).forEach(function(nodeId) {
       const node = S.scene.nodes[nodeId];
-      if (node.kind === "sprite") {
+      if (node.kind === "sprite" || node.kind === "mesh") {
         nodes[nodeId] = new PIXI.Sprite({ texture: textures[node.assetId] });
       } else if (node.kind === "vector") {
         nodes[nodeId] = new PIXI.Container();
@@ -386,25 +453,15 @@ function appendPixiCharacterScript(
       (parent || app.stage).addChild(displayObject);
     });
     const ctx = { app: app, nodes: nodes, textures: textures };
-    const tl = gsap.timeline({ paused: true });
-    tl.to({}, { duration: S.timelineScene.duration || S.duration }, 0);
-    const originalSeek = tl.seek;
-    tl.seek = function(time, suppressEvents) {
-      const result = originalSeek.call(this, time, suppressEvents);
-      renderAt(ctx, Number(time) || 0);
-      return result;
-    };
-    tl.eventCallback("onStart", function() { renderAt(ctx, tl.time()); });
-    tl.eventCallback("onUpdate", function() { renderAt(ctx, tl.time()); });
-    tl.eventCallback("onReverseComplete", function() { renderAt(ctx, 0); });
-    renderAt(ctx, 0);
+    state.ctx = ctx;
     window.__studioBoomPixiScenes = window.__studioBoomPixiScenes || {};
     window.__studioBoomPixiScenes[S.compositionId] = ctx;
-    window.__timelines = window.__timelines || {};
-    window.__timelines[${JSON.stringify(args.compositionId)}] = tl;
+    renderIfReady(state.pendingTime);
+    if (state.readyResolve) state.readyResolve(true);
   };
   start().catch(function(error) {
     console.error(error);
+    if (state.readyReject) state.readyReject(error);
     throw error;
   });
 })();`;

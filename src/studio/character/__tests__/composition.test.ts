@@ -127,6 +127,7 @@ function extractPixiPayload(html: string) {
   return JSON.parse(match![1]) as {
     scene: {
       nodes: Record<string, { kind: string; partId?: string }>;
+      assets: Array<{ id: string; parser: string; ref: string }>;
     };
     timelineScene: {
       initialTargets: Array<{ sceneNodeId?: string; vars: Record<string, number | string> }>;
@@ -256,13 +257,24 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).toContain("https://pixijs.download/release/pixi.min.js");
     expect(html).toContain("new PIXI.Application()");
     expect(html).toContain("PIXI.Assets.load");
+    expect(html).toContain("new PIXI.Sprite");
+    expect(html).not.toContain("new PIXI.MeshPlane");
     expect(html).toContain('"assetRef":"asset:body-media"');
     expect(html).toContain('window.__timelines["char_clip-1"] = tl');
+    expect(html).toContain("window.__studioBoomPixiReady");
+    expect(html).toContain("installHyperframesReadinessGate");
     expect(html).toContain("targetVarsAt");
     expect(html).toContain("showSceneNodeIds");
     expect(html).not.toContain("<img ");
+    expect(html.indexOf('window.__timelines["char_clip-1"] = tl')).toBeLessThan(
+      html.indexOf("const start = async function()"),
+    );
+    expect(html.indexOf("const tl = gsap.timeline")).toBeLessThan(
+      html.indexOf("await app.init"),
+    );
 
     const payload = extractPixiPayload(html);
+    expect(Object.values(payload.scene.nodes).some((node) => node.kind === "mesh")).toBe(false);
     const bodyMotionTargets = payload.timelineScene.motionSegments.flatMap((segment) =>
       segment.targets.filter((target) => target.sceneNodeId?.includes("role:body")),
     );
@@ -320,6 +332,34 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).toContain("new PIXI.Graphics()");
     expect(html).toContain("graphic.svg(svgForVectorNode(node))");
     expect(html).not.toContain('if (node.kind === "vector") return');
+  });
+
+  it("marks SVG character media with the Pixi SVG asset parser", () => {
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_clip-1",
+      clipId: "clip-1",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character: makeCharacter(),
+      meta: {
+        characterId: "char-1",
+        poses: {},
+        autoBlink: false,
+      },
+      motionPresets: new Map(),
+      renderer: "pixi",
+      mediaAssets: new Map([
+        ["body-media", { filename: "body.svg", mimeType: "image/svg+xml" }],
+        ["eye-open-media", { filename: "eye.png", mimeType: "image/png" }],
+      ]),
+    });
+    const payload = extractPixiPayload(html);
+    const bodyAsset = payload.scene.assets.find((asset) => asset.id === "body-media");
+    const eyeAsset = payload.scene.assets.find((asset) => asset.id === "eye-open-media");
+
+    expect(bodyAsset?.parser).toBe("svg");
+    expect(eyeAsset?.parser).toBe("texture");
   });
 
   it("keeps placed speech audio and lip-sync events in Pixi-backed character compositions", () => {

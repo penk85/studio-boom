@@ -27,10 +27,16 @@ describe("buildCharacterScene", () => {
     expect(scene.rootNodeId).toBe("character-scene:root");
 
     const armSlot = scene.nodes[scene.slotNodeIds["slot:right-arm"]] as CharacterSceneSlotNode;
+    const bodySlot = scene.nodes[scene.slotNodeIds["role:body"]] as CharacterSceneSlotNode;
     expect(armSlot.kind).toBe("slot");
     expect(armSlot.defaultVariantKey).toBe("bent");
     expect(armSlot.variantNodeIds.bent).toHaveLength(1);
     expect(armSlot.variantNodeIds.straight).toHaveLength(1);
+
+    const bodyNodeId = bodySlot.variantNodeIds[bodySlot.defaultVariantKey]?.[0];
+    expect(bodyNodeId).toBeDefined();
+    const body = scene.nodes[bodyNodeId!] as CharacterSceneSpriteNode;
+    expect(body.kind).toBe("sprite");
 
     const bentArm = scene.nodes[armSlot.variantNodeIds.bent[0]] as CharacterSceneSpriteNode;
     expect(bentArm.kind).toBe("sprite");

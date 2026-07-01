@@ -34,12 +34,19 @@ export function Studio({ onBackToProjects }: StudioProps) {
   const project = useStudio((s) => s.project);
   const undo = useStudio((s) => s.undo);
   const redo = useStudio((s) => s.redo);
+  const refreshCharacterCompositions = useStudio((s) => s.refreshCharacterCompositions);
   // useTimelinePlayer owns the single iframeRef that connects the player to
   // PlayerControls and usePlayerStore. Stage bridges this ref to the
   // <hyperframes-player> iframe; Timeline passes togglePlay/seek to PlayerControls.
   const { iframeRef, togglePlay, seek, onIframeLoad } = useTimelinePlayer();
   const [libraryOpen, setLibraryOpen] = usePersistentBoolean("studio-library-open", true);
   const [inspectorOpen, setInspectorOpen] = usePersistentBoolean("studio-inspector-open", true);
+  const projectId = project?.id ?? null;
+
+  useEffect(() => {
+    if (!projectId) return;
+    refreshCharacterCompositions({ history: false });
+  }, [projectId, refreshCharacterCompositions]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
