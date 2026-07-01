@@ -18,7 +18,9 @@ import {
   roundCompositionRect,
   roundRotationDegrees,
   scaleCompositionRectFromHandleRect,
+  snapGuideSignature,
   type StageGeometry,
+  type StageSnapGuide,
 } from "./stage-helpers";
 
 interface CompositionRect {
@@ -62,6 +64,10 @@ export interface StageMoveableProps {
   geometry: StageGeometry;
   /** The single edit entry point: live-applies the patch, and on persist commits it to rootHtml. */
   applyEdit: (patch: StageTransformPatch, opts: { persist: boolean }) => void;
+  /** Snap a proposed move against canvas + sibling edges. Omit to disable snapping. */
+  snapMove?: (rect: CompositionRect) => { x: number; y: number; guides: StageSnapGuide[] };
+  /** Report the active snap guides so Stage can draw them (empty = none). */
+  onSnapGuidesChange?: (guides: StageSnapGuide[]) => void;
   /** Fired true at gesture start / false at release, so Stage can hide legacy chrome + freeze geometry. */
   onInteractingChange?: (interacting: boolean) => void;
 }
@@ -71,10 +77,14 @@ export function StageMoveable({
   screenRect,
   geometry,
   applyEdit,
+  snapMove,
+  onSnapGuidesChange,
   onInteractingChange,
 }: StageMoveableProps) {
   const proxyRef = useRef<HTMLDivElement>(null);
   const moveableRef = useRef<Moveable>(null);
+  // Last guide signature we notified, so a stable (or empty) guide set doesn't setState per frame.
+  const guideSigRef = useRef<string>("");
   // The live patch for the in-flight gesture, committed verbatim on release — guarantees the
   // value the user sees mirrored is exactly the value stored (no drift).
   const pendingRef = useRef<StageTransformPatch | null>(null);
@@ -114,8 +124,16 @@ export function StageMoveable({
     const patch = pendingRef.current;
     pendingRef.current = null;
     interactingRef.current = false;
+    guideSigRef.current = "";
     onInteractingChange?.(false);
     if (patch) applyEdit(patch, { persist: true });
+  };
+  // Notify guides only when they change (keeps the no-snap common case setState-free per frame).
+  const notifyGuides = (guides: StageSnapGuide[]) => {
+    const sig = snapGuideSignature(guides);
+    if (sig === guideSigRef.current) return;
+    guideSigRef.current = sig;
+    onSnapGuidesChange?.(guides);
   };
 
   const flip = (axis: "h" | "v") => {
@@ -173,9 +191,25 @@ export function StageMoveable({
         throttleRotate={0}
         onDragStart={begin}
         onDrag={(e) => {
-          e.target.style.transform = e.transform;
-          const comp = pointerDeltaToComposition(e.beforeTranslate[0], e.beforeTranslate[1], geometry);
-          preview({ x: clip.x + comp.x, y: clip.y + comp.y });
+          const comp = pointerDeltaToComposition(
+            e.beforeTranslate[0],
+            e.beforeTranslate[1],
+            geometry,
+          );
+          const desired = {
+            x: clip.x + comp.x,
+            y: clip.y + comp.y,
+            width: clip.width,
+            height: clip.height,
+          };
+          const snapped = snapMove ? snapMove(desired) : { x: desired.x, y: desired.y, guides: [] };
+          // Drive the proxy from the SNAPPED delta (not moveable's raw transform) so the control box
+          // tracks the element when a snap nudges the position.
+          const sdx = (snapped.x - clip.x) / geometry.scaleX;
+          const sdy = (snapped.y - clip.y) / geometry.scaleY;
+          e.target.style.transform = `translate(${sdx}px, ${sdy}px) rotate(${clip.rotation}deg)`;
+          notifyGuides(snapped.guides);
+          preview({ x: snapped.x, y: snapped.y });
         }}
         onDragEnd={finish}
         onResizeStart={() => {

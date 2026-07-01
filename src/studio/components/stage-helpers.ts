@@ -1,6 +1,5 @@
 import type { EditorClip } from "../types";
 import type { PickedElement } from "@hyperframes/studio";
-import { readStudioTransform } from "../hyperframes/transform";
 
 export interface StageGeometry {
   rect: DOMRect;
@@ -278,6 +277,99 @@ export function compositionDomRectToCss(rect: DOMRect, geometry: StageGeometry) 
   };
 }
 
+export interface ScreenRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/** Axis-aligned overlap test. Touching edges (zero-area overlap) do not count as a hit. */
+export function rectsOverlap(a: ScreenRect, b: ScreenRect): boolean {
+  return (
+    a.left < b.left + b.width &&
+    a.left + a.width > b.left &&
+    a.top < b.top + b.height &&
+    a.top + a.height > b.top
+  );
+}
+
+/**
+ * The ids whose (axis-aligned) rect overlaps the marquee box. Rotated clips are tested against
+ * their unrotated composition box — a good-enough first pass that matches how react-selecto treats
+ * bounding rects; oriented-box precision can come later if it matters.
+ */
+export function marqueeHitIds(
+  box: ScreenRect,
+  targets: { id: string; rect: ScreenRect }[],
+): string[] {
+  return targets.filter((target) => rectsOverlap(box, target.rect)).map((target) => target.id);
+}
+
+/** A stable signature for a guide set, so callers can notify only when the guides actually change. */
+export function snapGuideSignature(guides: StageSnapGuide[]): string {
+  return guides.map((guide) => `${guide.axis}:${guide.position}:${guide.targetId}`).join("|");
+}
+
+/** Bounding box of a set of composition boxes (unrotated), or null when empty. */
+export function compositionGroupBounds(
+  clips: Pick<CompositionRect, "x" | "y" | "width" | "height">[],
+): CompositionRect | null {
+  if (clips.length === 0) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const clip of clips) {
+    minX = Math.min(minX, clip.x);
+    minY = Math.min(minY, clip.y);
+    maxX = Math.max(maxX, clip.x + clip.width);
+    maxY = Math.max(maxY, clip.y + clip.height);
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+/** Bounding-box center of a set of composition boxes (unrotated), or null when empty. */
+export function compositionGroupCenter(
+  clips: Pick<CompositionRect, "x" | "y" | "width" | "height">[],
+): { cx: number; cy: number } | null {
+  const bounds = compositionGroupBounds(clips);
+  if (!bounds) return null;
+  return { cx: bounds.x + bounds.width / 2, cy: bounds.y + bounds.height / 2 };
+}
+
+export interface GroupFlipClip extends CompositionRect {
+  scaleX: number;
+  scaleY: number;
+}
+
+/**
+ * Mirror one clip within a group flip: reflect its position across the group center on the flip
+ * axis and toggle that axis's mirror sign; the other axis passes through. Both x and y are always
+ * returned because the live-apply position path needs the pair, and both scale axes are returned
+ * because a flip commit resets any axis it isn't given. Per-clip rotation is intentionally left
+ * untouched — same deferred rotate+mirror stance as the single-clip flip.
+ */
+export function groupFlipPatch(
+  clip: GroupFlipClip,
+  axis: "h" | "v",
+  center: { cx: number; cy: number },
+): { x: number; y: number; scaleX: number; scaleY: number } {
+  return axis === "h"
+    ? {
+        x: 2 * center.cx - clip.x - clip.width,
+        y: clip.y,
+        scaleX: -clip.scaleX,
+        scaleY: clip.scaleY,
+      }
+    : {
+        x: clip.x,
+        y: 2 * center.cy - clip.y - clip.height,
+        scaleX: clip.scaleX,
+        scaleY: -clip.scaleY,
+      };
+}
+
 export function getRenderedElementRect(
   iframe: HTMLIFrameElement | null,
   elementId: string | null | undefined,
@@ -310,11 +402,8 @@ export async function getRenderedPixelRect(
       return elementRect;
     }
 
-    const { scaleX, scaleY } = readStudioTransform(element);
     const pixelBounds = measureImagePixelBounds(image);
-    return pixelBounds
-      ? pixelBoundsToRenderedRect(pixelBounds, elementRect, scaleX, scaleY)
-      : elementRect;
+    return pixelBounds ? pixelBoundsToRenderedRect(pixelBounds, elementRect) : elementRect;
   } catch {
     return getRenderedElementRect(iframe, elementId);
   }
@@ -344,37 +433,19 @@ export async function getRenderedPixelCompositionRect(
       return fallbackRect;
     }
 
-    const { scaleX, scaleY } = readStudioTransform(element);
     const pixelBounds = measureImagePixelBounds(image);
-    return pixelBounds
-      ? pixelBoundsToRenderedRect(pixelBounds, fallbackRect, scaleX, scaleY)
-      : fallbackRect;
+    return pixelBounds ? pixelBoundsToRenderedRect(pixelBounds, fallbackRect) : fallbackRect;
   } catch {
     return fallbackRect;
   }
 }
 
-export function pixelBoundsToRenderedRect(
-  bounds: PixelBounds,
-  renderedRect: DOMRect,
-  scaleX = 1,
-  scaleY = 1,
-): DOMRect {
-  const leftFrac = bounds.x / bounds.sampleWidth;
-  const topFrac = bounds.y / bounds.sampleHeight;
-  const widthFrac = bounds.width / bounds.sampleWidth;
-  const heightFrac = bounds.height / bounds.sampleHeight;
-  // The opaque bounds are measured from the natural (un-flipped) image, but a CSS flip mirrors
-  // that region within the element box. Mirror the offset to match the rendered object so the
-  // selection box / moveable proxy sits on the flipped pixels, not the un-flipped ones.
-  const xFrac = scaleX < 0 ? 1 - leftFrac - widthFrac : leftFrac;
-  const yFrac = scaleY < 0 ? 1 - topFrac - heightFrac : topFrac;
-  return new DOMRect(
-    renderedRect.left + xFrac * renderedRect.width,
-    renderedRect.top + yFrac * renderedRect.height,
-    widthFrac * renderedRect.width,
-    heightFrac * renderedRect.height,
-  );
+export function pixelBoundsToRenderedRect(bounds: PixelBounds, renderedRect: DOMRect): DOMRect {
+  const left = renderedRect.left + (bounds.x / bounds.sampleWidth) * renderedRect.width;
+  const top = renderedRect.top + (bounds.y / bounds.sampleHeight) * renderedRect.height;
+  const width = (bounds.width / bounds.sampleWidth) * renderedRect.width;
+  const height = (bounds.height / bounds.sampleHeight) * renderedRect.height;
+  return new DOMRect(left, top, width, height);
 }
 
 export function resolvePickedClipId(

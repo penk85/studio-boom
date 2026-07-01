@@ -19,6 +19,9 @@ export interface PointerEventLike {
   clientY: number;
   button: number;
   altKey: boolean;
+  shiftKey: boolean;
+  metaKey: boolean;
+  ctrlKey: boolean;
   pointerId: number;
   target: EventTarget | null;
   preventDefault(): void;
@@ -35,9 +38,16 @@ export interface SelectDragAdapter {
   /** Selectable ids under the pointer, ordered top→bottom. Locked ids must be excluded. */
   hitTest(down: PointerEventLike): string[];
   getSelectedId(): string | null;
-  selectId(id: string | null): void;
+  /** Resolve a click into a selection. `additive` is true when shift/⌘/ctrl is held (toggle). */
+  selectId(id: string | null, additive: boolean): void;
   /** Begin moving `id`. Return null to make this gesture select-only (no drag). */
   beginMove(id: string, down: PointerEventLike): MoveSession | null;
+  /**
+   * Begin a rubber-band (marquee) selection when a drag starts on empty space (no subject).
+   * `additive` is true when shift/⌘/ctrl is held (union with the current selection). Return null
+   * to leave empty-space drags as no-ops. Omit entirely to disable marquee for this substrate.
+   */
+  beginMarquee?(down: PointerEventLike, additive: boolean): MoveSession | null;
   /** Where pointermove/up are attached. Default `window`; the Stage returns the event's document. */
   eventRoot?(down: PointerEventLike): Document | Window;
   /** Capture the pointer once a drag actually starts (e.g. setPointerCapture across an iframe). */
@@ -68,6 +78,8 @@ export function useSelectDrag(adapter: SelectDragAdapter): (event: PointerEventL
     const startY = event.clientY;
     const pointerId = event.pointerId;
     const candidates = a.hitTest(event);
+    // Shift / ⌘ / Ctrl held → additive selection (toggle into the multi-selection).
+    const additive = event.shiftKey || event.metaKey || event.ctrlKey;
 
     // Alt-click defers to the adapter (candidate popover) — never a drag or drill.
     if (event.altKey && a.onAltPick) {
@@ -109,9 +121,18 @@ export function useSelectDrag(adapter: SelectDragAdapter): (event: PointerEventL
         }
         dragging = true;
         // Rule 3: selecting an unselected subject happens exactly once, at drag start —
-        // so selection never changes again mid-drag (rule 4).
-        if (subject && subject !== a.getSelectedId()) a.selectId(subject);
-        session = subject ? a.beginMove(subject, event) : null;
+        // so selection never changes again mid-drag (rule 4). A drag is a plain (non-additive)
+        // select of the subject.
+        if (subject && subject !== a.getSelectedId()) a.selectId(subject, false);
+        if (subject) {
+          session = a.beginMove(subject, event);
+        } else if (a.beginMarquee) {
+          // Empty-space drag becomes a rubber-band selection. Capture the pointer now — we
+          // couldn't at pointerdown because we didn't yet know this press would become a drag —
+          // so moves keep arriving even as the marquee sweeps over the embedded player iframe.
+          a.capturePointer?.(event, pointerId);
+          session = a.beginMarquee(event, additive);
+        }
       }
       session?.move(ev);
     }
@@ -123,8 +144,15 @@ export function useSelectDrag(adapter: SelectDragAdapter): (event: PointerEventL
         session?.end(ev);
         return;
       }
-      // A click (no drag): rule 1 — select the top element, drilling to the element
-      // underneath on a repeat click in the same spot; empty space clears the selection.
+      // Additive click (shift/⌘): toggle the top element into the selection; empty space is a
+      // no-op so the multi-selection survives. Never drills.
+      if (additive) {
+        const topId = candidates[0] ?? null;
+        if (topId) a.selectId(topId, true);
+        return;
+      }
+      // A plain click: rule 1 — select the top element, drilling to the element underneath on a
+      // repeat click in the same spot; empty space clears the selection.
       const { id, nextPick } = resolveDrillSelection(
         candidates,
         lastPickRef.current,
@@ -132,7 +160,7 @@ export function useSelectDrag(adapter: SelectDragAdapter): (event: PointerEventL
         a.drillRadius,
       );
       lastPickRef.current = nextPick;
-      a.selectId(id);
+      a.selectId(id, false);
     }
 
     root.addEventListener("pointermove", handleMove as EventListener);

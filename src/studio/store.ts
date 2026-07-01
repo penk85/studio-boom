@@ -1061,6 +1061,7 @@ type ModalState = null | { type: "character-editor"; characterId: string } | { t
 interface HistoryEntry {
   project: Project;
   selectedClipId: string | null;
+  selectedClipIds: string[];
   selectedKeyframe: ClipKeyframeSelection | null;
   activeSceneId: string | null;
 }
@@ -1084,7 +1085,10 @@ interface StudioState {
   motionPresets: Map<string, MotionPreset>;
   mediaAssets: Map<string, MediaAsset>;
 
+  /** The primary/active clip — drives the single-clip Inspector and legacy single-select UI. */
   selectedClipId: string | null;
+  /** The full multi-selection set (marquee / shift-click). Always contains selectedClipId when non-empty. */
+  selectedClipIds: string[];
   selectedKeyframe: ClipKeyframeSelection | null;
   /** Speech selected inside the character Speech inspector tab. */
   selectedSpeechId: string | null;
@@ -1107,6 +1111,12 @@ interface StudioState {
   refreshCharacterCompositions: (options?: ProjectMutationOptions) => Project | null;
 
   selectClip: (id: string | null) => void;
+  /** Replace the multi-selection with `ids`; the last id becomes the primary/active clip. */
+  selectClips: (ids: string[]) => void;
+  /** Add/remove a clip from the multi-selection (shift/⌘-click); it becomes primary when added. */
+  toggleClipInSelection: (id: string) => void;
+  /** Clear the whole selection. */
+  clearSelection: () => void;
   setActiveScene: (sceneId: string | null) => void;
   selectKeyframe: (selection: ClipKeyframeSelection | null) => void;
   /** Select a speech within the currently open character Speech tab. */
@@ -1318,6 +1328,7 @@ function createHistoryEntry(state: StudioState): HistoryEntry | null {
   return {
     project: cloneProject(state.project),
     selectedClipId: state.selectedClipId,
+    selectedClipIds: state.selectedClipIds,
     selectedKeyframe: state.selectedKeyframe,
     activeSceneId: state.activeSceneId,
   };
@@ -1338,6 +1349,7 @@ export const useStudio = create<StudioState>((set, get) => ({
   motionPresets: new Map(),
   mediaAssets: new Map(),
   selectedClipId: null,
+  selectedClipIds: [],
   selectedKeyframe: null,
   activeSceneId: null,
   selectedSpeechId: null,
@@ -1467,10 +1479,40 @@ export const useStudio = create<StudioState>((set, get) => ({
   },
 
   selectClip(id) {
+    // A plain select replaces the whole multi-selection with this single clip.
     set({
       selectedClipId: id,
+      selectedClipIds: id ? [id] : [],
       selectedKeyframe: null,
     });
+  },
+
+  selectClips(ids) {
+    const unique = Array.from(new Set(ids));
+    set({
+      selectedClipIds: unique,
+      selectedClipId: unique.length > 0 ? unique[unique.length - 1]! : null,
+      selectedKeyframe: null,
+    });
+  },
+
+  toggleClipInSelection(id) {
+    set((state) => {
+      const present = state.selectedClipIds.includes(id);
+      const nextIds = present
+        ? state.selectedClipIds.filter((clipId) => clipId !== id)
+        : [...state.selectedClipIds, id];
+      return {
+        selectedClipIds: nextIds,
+        // Primary follows the just-added clip, or falls back to the last remaining one.
+        selectedClipId: present ? (nextIds[nextIds.length - 1] ?? null) : id,
+        selectedKeyframe: null,
+      };
+    });
+  },
+
+  clearSelection() {
+    set({ selectedClipId: null, selectedClipIds: [], selectedKeyframe: null });
   },
 
   setActiveScene(sceneId) {
@@ -1479,6 +1521,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     set({
       activeSceneId: validSceneId,
       selectedClipId: null,
+      selectedClipIds: [],
       selectedKeyframe: null,
       selectedSpeechId: null,
     });
@@ -1526,6 +1569,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       tracks: project.editorMeta.tracks,
       activeSceneId: previous.activeSceneId,
       selectedClipId: previous.selectedClipId,
+      selectedClipIds: previous.selectedClipIds ?? (previous.selectedClipId ? [previous.selectedClipId] : []),
       selectedKeyframe: previous.selectedKeyframe,
       historyPast: state.historyPast.slice(0, -1),
       historyFuture: trimHistory([...state.historyFuture, current]),
@@ -1545,6 +1589,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       tracks: project.editorMeta.tracks,
       activeSceneId: next.activeSceneId,
       selectedClipId: next.selectedClipId,
+      selectedClipIds: next.selectedClipIds ?? (next.selectedClipId ? [next.selectedClipId] : []),
       selectedKeyframe: next.selectedKeyframe,
       historyPast: trimHistory([...state.historyPast, current]),
       historyFuture: state.historyFuture.slice(0, -1),

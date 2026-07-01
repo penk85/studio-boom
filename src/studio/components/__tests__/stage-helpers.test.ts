@@ -17,6 +17,12 @@ import {
   scaleCompositionRectFromHandleRect,
   snapCompositionRect,
   snapRotationDegrees,
+  rectsOverlap,
+  marqueeHitIds,
+  compositionGroupCenter,
+  compositionGroupBounds,
+  groupFlipPatch,
+  snapGuideSignature,
 } from "../stage-helpers";
 
 describe("stage helpers", () => {
@@ -341,5 +347,135 @@ describe("stage helpers", () => {
 
     expect(resolveTargetClipId(inner, new Set(["clip-9"]))).toBe("clip-9");
     iframe.remove();
+  });
+});
+
+describe("marquee selection hit-testing", () => {
+  const box = { left: 10, top: 10, width: 100, height: 100 };
+
+  it("overlaps rects that share area and rejects those that only touch or miss", () => {
+    expect(rectsOverlap(box, { left: 50, top: 50, width: 20, height: 20 })).toBe(true);
+    expect(rectsOverlap(box, { left: 100, top: 50, width: 20, height: 20 })).toBe(true);
+    // Edge-touching (zero-area overlap) is not a hit.
+    expect(rectsOverlap(box, { left: 110, top: 10, width: 20, height: 20 })).toBe(false);
+    // Fully outside.
+    expect(rectsOverlap(box, { left: 200, top: 200, width: 20, height: 20 })).toBe(false);
+  });
+
+  it("returns the ids of every target the band overlaps, preserving input order", () => {
+    const targets = [
+      { id: "a", rect: { left: 0, top: 0, width: 30, height: 30 } }, // overlaps
+      { id: "b", rect: { left: 500, top: 500, width: 30, height: 30 } }, // outside
+      { id: "c", rect: { left: 80, top: 80, width: 60, height: 60 } }, // overlaps
+    ];
+    expect(marqueeHitIds(box, targets)).toEqual(["a", "c"]);
+  });
+
+  it("selects nothing when the band is empty of targets", () => {
+    expect(
+      marqueeHitIds(box, [{ id: "z", rect: { left: 300, top: 300, width: 10, height: 10 } }]),
+    ).toEqual([]);
+  });
+});
+
+describe("group flip", () => {
+  it("computes the bounding-box center of a set of composition boxes", () => {
+    expect(
+      compositionGroupCenter([
+        { x: 0, y: 0, width: 100, height: 100 },
+        { x: 200, y: 100, width: 100, height: 100 },
+      ]),
+    ).toEqual({ cx: 150, cy: 100 });
+    expect(compositionGroupCenter([])).toBeNull();
+  });
+
+  it("mirrors a clip horizontally across the group center and toggles scaleX", () => {
+    // Group of two 100-wide clips at x=0 and x=200 → bbox [0,300], center cx=150.
+    const center = { cx: 150, cy: 100 };
+    // Left clip (x=0..100) reflects to the right edge (x=200..300); scaleX toggles, y/scaleY hold.
+    expect(
+      groupFlipPatch({ x: 0, y: 40, width: 100, height: 100, scaleX: 1, scaleY: 1 }, "h", center),
+    ).toEqual({ x: 200, y: 40, scaleX: -1, scaleY: 1 });
+    // An already-mirrored clip flips back to +1.
+    expect(
+      groupFlipPatch(
+        { x: 200, y: 40, width: 100, height: 100, scaleX: -1, scaleY: 1 },
+        "h",
+        center,
+      ),
+    ).toEqual({ x: 0, y: 40, scaleX: 1, scaleY: 1 });
+  });
+
+  it("mirrors a clip vertically across the group center and toggles scaleY", () => {
+    const center = { cx: 150, cy: 100 };
+    expect(
+      groupFlipPatch({ x: 30, y: 0, width: 100, height: 40, scaleX: 1, scaleY: 1 }, "v", center),
+    ).toEqual({ x: 30, y: 160, scaleX: 1, scaleY: -1 });
+  });
+
+  it("is an involution: flipping the same axis twice restores the original box", () => {
+    const center = { cx: 150, cy: 100 };
+    const original = { x: 20, y: 40, width: 80, height: 60, scaleX: 1, scaleY: 1 };
+    const once = groupFlipPatch(original, "h", center);
+    const twice = groupFlipPatch(
+      { ...once, width: original.width, height: original.height },
+      "h",
+      center,
+    );
+    expect(twice).toEqual({
+      x: original.x,
+      y: original.y,
+      scaleX: original.scaleX,
+      scaleY: original.scaleY,
+    });
+  });
+});
+
+describe("group snapping helpers", () => {
+  it("computes the bounding box of a set of composition boxes", () => {
+    expect(
+      compositionGroupBounds([
+        { x: 10, y: 20, width: 100, height: 40 },
+        { x: 200, y: 100, width: 50, height: 50 },
+      ]),
+    ).toEqual({ x: 10, y: 20, width: 240, height: 130 });
+    expect(compositionGroupBounds([])).toBeNull();
+  });
+
+  it("keeps compositionGroupCenter consistent with the bounds it derives from", () => {
+    const clips = [
+      { x: 10, y: 20, width: 100, height: 40 },
+      { x: 200, y: 100, width: 50, height: 50 },
+    ];
+    const bounds = compositionGroupBounds(clips)!;
+    expect(compositionGroupCenter(clips)).toEqual({
+      cx: bounds.x + bounds.width / 2,
+      cy: bounds.y + bounds.height / 2,
+    });
+  });
+
+  it("builds a stable, change-detecting signature for a guide set", () => {
+    const a = [
+      {
+        axis: "x" as const,
+        position: 100,
+        sourceAnchor: "start" as const,
+        targetAnchor: "start" as const,
+        targetId: "clip-1",
+      },
+    ];
+    const b = [
+      {
+        axis: "x" as const,
+        position: 100,
+        sourceAnchor: "center" as const,
+        targetAnchor: "end" as const,
+        targetId: "clip-1",
+      },
+    ];
+    // Only axis/position/targetId matter for identity — anchors don't change the signature.
+    expect(snapGuideSignature(a)).toBe(snapGuideSignature(b));
+    expect(snapGuideSignature([])).toBe("");
+    expect(snapGuideSignature(a)).not.toBe(snapGuideSignature([{ ...a[0]!, position: 101 }]));
   });
 });

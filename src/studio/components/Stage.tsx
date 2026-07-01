@@ -29,15 +29,7 @@ import {
 import { buildSceneEditingProject } from "../scenes";
 import { getKeyframesForProperty, sampleClipKeyframedState } from "../hyperframes/keyframes";
 import { buildPositionPath, type PositionCheckpoint } from "../hyperframes/motion-path";
-import {
-  commitElementRect,
-  commitElementPosition,
-  commitElementRotation,
-  hasPickerApi,
-  previewElementRect,
-  previewElementPosition,
-  previewElementRotation,
-} from "../hyperframes/player-editing";
+import { hasPickerApi } from "../hyperframes/player-editing";
 import {
   compositionDomRectToCss,
   compositionRectToCss,
@@ -64,10 +56,12 @@ import {
   type StageSnapTarget,
   type StageGeometry,
   compositionPointToCss,
+  marqueeHitIds,
 } from "./stage-helpers";
 import { resolvePreviewHtml } from "../hyperframes/preview";
 import { liveApplyStagePatch, type StageTransformPatch } from "../hyperframes/stage-edit";
 import { StageMoveable } from "./StageMoveable";
+import { StageGroupMoveable } from "./StageGroupMoveable";
 import {
   useSelectDrag,
   type MoveSession,
@@ -183,6 +177,9 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   );
   const selectClip = useStudio((s) => s.selectClip);
   const selectedClipId = useStudio((s) => s.selectedClipId);
+  const selectedClipIds = useStudio((s) => s.selectedClipIds);
+  const selectClips = useStudio((s) => s.selectClips);
+  const toggleClipInSelection = useStudio((s) => s.toggleClipInSelection);
   const selectedKeyframe = useStudio((s) => s.selectedKeyframe);
   const selectKeyframe = useStudio((s) => s.selectKeyframe);
   const updateClip = useStudio((s) => s.updateClip);
@@ -228,6 +225,19 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   // geometry and suspending measurement, so the moveable proxy never gets re-synced (and
   // never jumps) mid-gesture.
   const [moveableInteracting, setMoveableInteracting] = useState(false);
+  // The rubber-band rectangle (stage-shell-local px) while a marquee selection is in flight; null
+  // when idle. Rendered as editor-only chrome and used to freeze geometry / suspend the moveable
+  // control box for the duration of the sweep.
+  const [marquee, setMarquee] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  // Snap guides produced by a react-moveable drag (single or group). The legacy handle drag carries
+  // its own guides on the drag state; these cover the moveable-driven paths through the same
+  // StageSnapGuideOverlay so both interaction systems draw identical guides.
+  const [moveableSnapGuides, setMoveableSnapGuides] = useState<StageSnapGuide[]>([]);
   const [renderedElementRect, setRenderedElementRect] = useState<DOMRect | null>(null);
   const [renderedClickRects, setRenderedClickRects] = useState<Map<string, DOMRect>>(new Map());
 
@@ -240,6 +250,43 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const selectedClip = useMemo(
     () => clips.find((clip) => clip.id === selectedClipId) ?? null,
     [clips, selectedClipId],
+  );
+  // The multi-selection set is only authoritative when it actually contains the primary clip;
+  // otherwise a single-select action changed the primary and the set is stale, so fall back to
+  // just the primary. This keeps other selectedClipId writers correct without touching them all.
+  const effectiveSelectedIds = useMemo(() => {
+    if (selectedClipId && selectedClipIds.includes(selectedClipId)) return selectedClipIds;
+    return selectedClipId ? [selectedClipId] : [];
+  }, [selectedClipId, selectedClipIds]);
+  const multiSelected = effectiveSelectedIds.length > 1;
+  const multiSelectionTargets = useMemo(
+    () =>
+      multiSelected
+        ? stageClickTargets.filter((target) => effectiveSelectedIds.includes(target.id))
+        : [],
+    [multiSelected, stageClickTargets, effectiveSelectedIds],
+  );
+  // The transformable members of a multi-selection (locked / audio can't be moved as a group).
+  const groupMoveableClips = useMemo(
+    () =>
+      multiSelected
+        ? clips
+            .filter(
+              (clip) =>
+                effectiveSelectedIds.includes(clip.id) && !clip.locked && clip.kind !== "audio",
+            )
+            .map((clip) => ({
+              id: clip.id,
+              x: clip.x,
+              y: clip.y,
+              width: clip.width,
+              height: clip.height,
+              rotation: clip.rotation,
+              scaleX: clip.scaleX ?? 1,
+              scaleY: clip.scaleY ?? 1,
+            }))
+        : [],
+    [multiSelected, clips, effectiveSelectedIds],
   );
   const stageEditableClip = useMemo(() => getStageEditableClip(selectedClip), [selectedClip]);
   const selectedMotionEndpoint = useMemo(
@@ -267,7 +314,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     // 0-size rect (while the browser repaints the iframe), which collapses geometry to
     // the letterboxed fallback for a frame and makes the selection chrome / motion
     // paths flicker. Reusing the pre-drag geometry also drops a forced reflow per frame.
-    if ((drag || moveableInteracting) && lastStageGeometryRef.current)
+    if ((drag || moveableInteracting || marquee) && lastStageGeometryRef.current)
       return lastStageGeometryRef.current;
     if (!project || !stageShellRef.current) return null;
     const iframe = resolveIframe(playerRef.current);
@@ -285,7 +332,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     stageEditableClip && stageGeometry
       ? getStageMotionPaths(stageEditableClip, selectedKeyframe, stageGeometry, drag)
       : [];
-  const snapGuides = drag?.type === "move" ? drag.snapGuides : [];
+  const snapGuides = drag?.type === "move" ? drag.snapGuides : moveableSnapGuides;
   const outlineRect =
     stageEditableClip && outlinedClip && stageGeometry
       ? drag?.type === "resize" && drag.clipId === stageEditableClip.id
@@ -322,6 +369,8 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     !selectedClip?.locked &&
     !selectedKeyframe &&
     !isPlaying &&
+    !multiSelected &&
+    !marquee &&
     !!outlineRect &&
     !!stageGeometry;
   const activeDragKey = drag ? `${drag.pointerId}:${drag.clipId}` : null;
@@ -371,7 +420,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   // and the react-moveable overlay route through this, so preview and commit can never diverge.
   // Keyframe-targeted edits keep their own paths for now (they need a real reload + scale mapping).
   const applyStageEdit = useCallback(
-    (clipId: string, patch: StageTransformPatch, opts: { persist: boolean }) => {
+    (clipId: string, patch: StageTransformPatch, opts: { persist: boolean; history?: boolean }) => {
       const appliedLive = liveApplyStagePatch(
         iframeRef.current,
         clipId,
@@ -380,10 +429,68 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       );
       if (!opts.persist) return;
       if (appliedLive) suppressReloadRef.current = true;
-      updateClip(clipId, patch);
+      updateClip(clipId, patch, opts.history === undefined ? undefined : { history: opts.history });
     },
     [iframeRef, updateClip],
   );
+
+  // Snap a single clip's proposed move against canvas + sibling edges, reusing the exact targets and
+  // snapCompositionRect that the legacy handle drag uses — so react-moveable drags snap identically.
+  // Returns the snapped position plus the guides to draw. The guide side effect is left to the
+  // caller (StageMoveable) so this stays a pure query.
+  const snapClipMove = useCallback(
+    (clipId: string, rect: CompositionRect): { x: number; y: number; guides: StageSnapGuide[] } => {
+      if (!project || !stageGeometry) return { x: rect.x, y: rect.y, guides: [] };
+      const targets = buildMoveSnapTargets(clips, project.hf.width, project.hf.height, clipId);
+      const result = snapCompositionRect(
+        rect,
+        targets,
+        STAGE_SNAP_THRESHOLD_PX * Math.max(stageGeometry.scaleX, stageGeometry.scaleY),
+      );
+      return { x: result.rect.x, y: result.rect.y, guides: result.guides };
+    },
+    [clips, project, stageGeometry],
+  );
+
+  // Snap a whole group's move: snap the selection's bounding box against everything OUTSIDE the
+  // selection, and return the single delta to apply uniformly to every member (so the group stays
+  // rigid while its box snaps). Same targets/threshold as the single-clip path.
+  const snapGroupMove = useCallback(
+    (
+      selectedIds: string[],
+      bbox: CompositionRect,
+      rawDelta: { x: number; y: number },
+    ): { dx: number; dy: number; guides: StageSnapGuide[] } => {
+      if (!project || !stageGeometry) return { dx: rawDelta.x, dy: rawDelta.y, guides: [] };
+      const selected = new Set(selectedIds);
+      const targets = buildMoveSnapTargets(
+        clips.filter((clip) => !selected.has(clip.id)),
+        project.hf.width,
+        project.hf.height,
+        "",
+      );
+      const proposed = {
+        x: bbox.x + rawDelta.x,
+        y: bbox.y + rawDelta.y,
+        width: bbox.width,
+        height: bbox.height,
+      };
+      const result = snapCompositionRect(
+        proposed,
+        targets,
+        STAGE_SNAP_THRESHOLD_PX * Math.max(stageGeometry.scaleX, stageGeometry.scaleY),
+      );
+      return { dx: result.rect.x - bbox.x, dy: result.rect.y - bbox.y, guides: result.guides };
+    },
+    [clips, project, stageGeometry],
+  );
+
+  // Moveable gestures freeze geometry while in flight; on release we also drop any snap guides they
+  // drew, so a guide never lingers after the drag that produced it.
+  const handleMoveableInteractingChange = useCallback((interacting: boolean) => {
+    setMoveableInteracting(interacting);
+    if (!interacting) setMoveableSnapGuides([]);
+  }, []);
 
   // ─── Move preview/commit (shared by the Move handle and canvas body-drag) ─────
   const previewMoveDrag = useCallback(
@@ -396,7 +503,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       const preview = getMovePreview(currentDrag, delta, !event.altKey);
       const nextX = preview.previewX;
       const nextY = preview.previewY;
-      previewElementPosition(iframeRef.current, currentDrag.clipId, nextX, nextY);
+      applyStageEdit(currentDrag.clipId, { x: nextX, y: nextY }, { persist: false });
       queueDragPreview({
         ...currentDrag,
         previewX: nextX,
@@ -404,7 +511,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         snapGuides: preview.snapGuides,
       });
     },
-    [iframeRef, queueDragPreview],
+    [applyStageEdit, queueDragPreview],
   );
 
   const commitMoveDrag = useCallback(
@@ -417,12 +524,6 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       const preview = getMovePreview(currentDrag, delta, !event.altKey);
       const nextX = preview.previewX;
       const nextY = preview.previewY;
-      const appliedLive = commitElementPosition(
-        iframeRef.current,
-        currentDrag.clipId,
-        nextX,
-        nextY,
-      );
       // Prefer the drag's own keyframeId (set when starting from a path dot)
       // so we route correctly even if selectKeyframe hasn't propagated yet.
       const keyframeTarget = currentDrag.keyframeId
@@ -430,19 +531,26 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         : getStageKeyframeTarget(currentDrag.clipId, "position", selectedKeyframe, clips);
       const moved =
         Math.abs(nextX - currentDrag.startX) > 0.5 || Math.abs(nextY - currentDrag.startY) > 0.5;
+      // For a tap-to-select on a dot (no movement), skip the no-op commit so we don't pollute
+      // undo history.
       if (keyframeTarget) {
-        // For a tap-to-select on a dot (no movement), skip the no-op commit
-        // so we don't pollute undo history.
         if (moved) {
+          // Keyframe edits change the GSAP timeline and need a real reload — live-apply for
+          // instant feedback, but persist through updateClipKeyframe (not applyStageEdit).
+          liveApplyStagePatch(
+            iframeRef.current,
+            currentDrag.clipId,
+            { x: nextX, y: nextY },
+            "commit",
+          );
           updateClipKeyframe(keyframeTarget.selection, { x: nextX, y: nextY });
         }
       } else if (moved) {
-        if (appliedLive) suppressReloadRef.current = true;
-        updateClip(currentDrag.clipId, { x: nextX, y: nextY });
+        applyStageEdit(currentDrag.clipId, { x: nextX, y: nextY }, { persist: true });
       }
       clearDrag();
     },
-    [clearDrag, clips, iframeRef, selectedKeyframe, updateClip, updateClipKeyframe],
+    [applyStageEdit, clearDrag, clips, iframeRef, selectedKeyframe, updateClipKeyframe],
   );
 
   // ─── Figma-style canvas select/drag (project-wide model) ─────────────────────
@@ -507,8 +615,52 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         lockedClipIds.has(id),
       ),
     getSelectedId: () => selectedClipId,
-    selectId: (id) => selectClip(id),
+    selectId: (id, additive) => {
+      if (additive) {
+        if (id) toggleClipInSelection(id);
+      } else {
+        selectClip(id);
+      }
+    },
     beginMove: beginBodyMove,
+    beginMarquee: (down, additive) => {
+      const shell = stageShellRef.current;
+      const geometry = stageGeometry;
+      if (!shell || !geometry) return null;
+      const shellRect = shell.getBoundingClientRect();
+      const startX = down.clientX - shellRect.left;
+      const startY = down.clientY - shellRect.top;
+      // Snapshot the selectable clip rects (shell-local) once — clips don't move during a marquee,
+      // so the intersection set only depends on the sweeping band, not on live geometry. Locked
+      // clips are excluded to match click hit-testing (they can't be selected there either).
+      const targets = stageClickTargets
+        .filter((target) => !lockedClipIds.has(target.id))
+        .map((target) => ({
+          id: target.id,
+          rect: compositionRectToCss(target, geometry),
+        }));
+      // Additive marquee unions with the selection present when the sweep began.
+      const base = additive ? effectiveSelectedIds : [];
+      const apply = (clientX: number, clientY: number) => {
+        const curX = clientX - shellRect.left;
+        const curY = clientY - shellRect.top;
+        const box = {
+          left: Math.min(startX, curX),
+          top: Math.min(startY, curY),
+          width: Math.abs(curX - startX),
+          height: Math.abs(curY - startY),
+        };
+        setMarquee(box);
+        selectClips([...base, ...marqueeHitIds(box, targets)]);
+      };
+      return {
+        move: (ev) => apply(ev.clientX, ev.clientY),
+        end: (ev) => {
+          apply(ev.clientX, ev.clientY);
+          setMarquee(null);
+        },
+      };
+    },
     capturePointer: (down, pointerId) => {
       // Capture on the overlay element under the pointer (never the stage shell) so
       // pointermoves keep arriving even over the player iframe, while the synthesized
@@ -839,7 +991,11 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           event.clientY,
           event.shiftKey,
         );
-        previewElementRotation(iframeRef.current, currentDrag.clipId, preview.previewRotation);
+        applyStageEdit(
+          currentDrag.clipId,
+          { rotation: preview.previewRotation },
+          { persist: false },
+        );
         queueDragPreview({ ...currentDrag, ...preview });
         return;
       }
@@ -857,7 +1013,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       const localDelta = compositionDeltaToLocal(delta.x, delta.y, currentDrag.rotation);
       // Resize preserves aspect ratio by default; hold Shift to resize freely.
       const preview = getResizePreview(currentDrag, localDelta.x, localDelta.y, !event.shiftKey);
-      previewElementRect(iframeRef.current, currentDrag.clipId, preview.previewClip);
+      applyStageEdit(currentDrag.clipId, preview.previewClip, { persist: false });
       queueDragPreview({ ...currentDrag, ...preview });
     };
 
@@ -872,11 +1028,6 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           event.shiftKey,
         );
         const finalRotation = roundRotationDegrees(preview.previewRotation);
-        const appliedLive = commitElementRotation(
-          iframeRef.current,
-          currentDrag.clipId,
-          finalRotation,
-        );
         const keyframeTarget = getStageKeyframeTarget(
           currentDrag.clipId,
           "rotation",
@@ -884,10 +1035,15 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           clips,
         );
         if (keyframeTarget) {
+          liveApplyStagePatch(
+            iframeRef.current,
+            currentDrag.clipId,
+            { rotation: finalRotation },
+            "commit",
+          );
           updateClipKeyframe(keyframeTarget.selection, { rotation: finalRotation });
         } else {
-          if (appliedLive) suppressReloadRef.current = true;
-          updateClip(currentDrag.clipId, { rotation: finalRotation });
+          applyStageEdit(currentDrag.clipId, { rotation: finalRotation }, { persist: true });
         }
         setRenderedElementRect(null);
         clearDrag();
@@ -921,41 +1077,51 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         clips,
       );
       if (keyframeTarget) {
-        previewElementRect(iframeRef.current, currentDrag.clipId, finalClip);
+        // Keyframe resize maps the rect to a scale keyframe; live-apply the rect for feedback
+        // (non-persisting preview), then persist the scale keyframe.
+        liveApplyStagePatch(iframeRef.current, currentDrag.clipId, finalClip, "preview");
         updateClipKeyframe(keyframeTarget.selection, {
           scale: scaleForKeyframedResize(keyframeTarget.clip, finalClip),
         });
       } else {
-        const appliedLive = commitElementRect(iframeRef.current, currentDrag.clipId, finalClip);
-        if (appliedLive) suppressReloadRef.current = true;
-        updateClip(currentDrag.clipId, {
-          x: finalClip.x,
-          y: finalClip.y,
-          width: finalClip.width,
-          height: finalClip.height,
-        });
+        applyStageEdit(
+          currentDrag.clipId,
+          {
+            x: finalClip.x,
+            y: finalClip.y,
+            width: finalClip.width,
+            height: finalClip.height,
+          },
+          { persist: true },
+        );
       }
       setRenderedElementRect(null);
       clearDrag();
     };
 
     const restoreDrag = (currentDrag: NonNullable<StageDrag>) => {
+      // Revert the live element to its gesture-start transform (no store commit).
       if (currentDrag.type === "move") {
-        commitElementPosition(
+        liveApplyStagePatch(
           iframeRef.current,
           currentDrag.clipId,
-          currentDrag.startX,
-          currentDrag.startY,
+          { x: currentDrag.startX, y: currentDrag.startY },
+          "commit",
         );
         return;
       }
 
       if (currentDrag.type === "rotate") {
-        commitElementRotation(iframeRef.current, currentDrag.clipId, currentDrag.startRotation);
+        liveApplyStagePatch(
+          iframeRef.current,
+          currentDrag.clipId,
+          { rotation: currentDrag.startRotation },
+          "commit",
+        );
         return;
       }
 
-      commitElementRect(iframeRef.current, currentDrag.clipId, currentDrag.startClip);
+      liveApplyStagePatch(iframeRef.current, currentDrag.clipId, currentDrag.startClip, "commit");
     };
 
     const cancelKeyboardDrag = (event: KeyboardEvent) => {
@@ -984,6 +1150,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     };
   }, [
     activeDragKey,
+    applyStageEdit,
     clearDrag,
     clips,
     commitMoveDrag,
@@ -991,7 +1158,6 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     previewMoveDrag,
     queueDragPreview,
     selectedKeyframe,
-    updateClip,
     updateClipKeyframe,
   ]);
 
@@ -1234,8 +1400,8 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         : null;
       const nextX = Math.round((keyframedState?.x ?? currentClip.x) + delta.x);
       const nextY = Math.round((keyframedState?.y ?? currentClip.y) + delta.y);
-      const appliedLive = commitElementPosition(iframeRef.current, currentClip.id, nextX, nextY);
       if (keyframeTarget) {
+        liveApplyStagePatch(iframeRef.current, currentClip.id, { x: nextX, y: nextY }, "commit");
         updateClipKeyframe(keyframeTarget.selection, { x: nextX, y: nextY }, { history: false });
         const nextProject = useStudio.getState().project;
         const nextClip = nextProject
@@ -1243,8 +1409,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           : null;
         stageEditableClipRef.current = nextClip ?? currentClip;
       } else {
-        if (appliedLive) suppressReloadRef.current = true;
-        updateClip(currentClip.id, { x: nextX, y: nextY }, { history: false });
+        applyStageEdit(currentClip.id, { x: nextX, y: nextY }, { persist: true, history: false });
         stageEditableClipRef.current = { ...currentClip, x: nextX, y: nextY };
       }
       setRenderedElementRect(null);
@@ -1261,6 +1426,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       window.removeEventListener("keydown", handleKeyDown, true);
     };
   }, [
+    applyStageEdit,
     bringClipForward,
     bringClipToFront,
     checkpointHistory,
@@ -1268,7 +1434,6 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     selectClip,
     sendClipBackward,
     sendClipToBack,
-    updateClip,
     updateClipKeyframe,
   ]);
 
@@ -1277,7 +1442,11 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   return (
     <div
       ref={stageShellRef}
-      className="absolute inset-0 overflow-hidden bg-stage-bg"
+      // `isolate` gives the Stage its own stacking context so all its editor chrome stays
+      // contained here — react-moveable's control box paints at z-index 3000, which would
+      // otherwise escape to the root stacking context and punch through a full-screen modal
+      // (character editor / presets). Containment is the fix; nothing needs to "stand down".
+      className="absolute inset-0 isolate overflow-hidden bg-stage-bg"
       onClick={(e) => {
         if (e.target === e.currentTarget) selectClip(null);
       }}
@@ -1321,6 +1490,53 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       {snapGuides.length > 0 && stageGeometry && (
         <StageSnapGuideOverlay guides={snapGuides} geometry={stageGeometry} />
       )}
+      {stageGeometry &&
+        multiSelectionTargets.map((target) => {
+          const rect = compositionRectToCss(target, stageGeometry);
+          return (
+            <div
+              key={target.id}
+              data-stage-multi-selection=""
+              className="pointer-events-none absolute z-30 border border-primary/80"
+              style={{
+                left: rect.left,
+                top: rect.top,
+                width: Math.max(1, rect.width),
+                height: Math.max(1, rect.height),
+                transform: `rotate(${target.rotation}deg)`,
+                transformOrigin: "center center",
+              }}
+            />
+          );
+        })}
+      {marquee && (
+        <div
+          data-stage-marquee=""
+          className="pointer-events-none absolute z-40 border border-primary/70 bg-primary/10"
+          style={{
+            left: marquee.left,
+            top: marquee.top,
+            width: Math.max(1, marquee.width),
+            height: Math.max(1, marquee.height),
+          }}
+        />
+      )}
+      {multiSelected &&
+        stageGeometry &&
+        !selectedKeyframe &&
+        !isPlaying &&
+        !marquee &&
+        groupMoveableClips.length > 1 && (
+          <StageGroupMoveable
+            clips={groupMoveableClips}
+            geometry={stageGeometry}
+            applyEdit={applyStageEdit}
+            checkpoint={checkpointHistory}
+            snapGroupMove={snapGroupMove}
+            onSnapGuidesChange={setMoveableSnapGuides}
+            onInteractingChange={handleMoveableInteractingChange}
+          />
+        )}
       {useMoveable && stageEditableClip && outlineRect && stageGeometry && (
         <StageMoveable
           key={stageEditableClip.id}
@@ -1337,10 +1553,12 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
           screenRect={outlineRect}
           geometry={stageGeometry}
           applyEdit={(patch, opts) => applyStageEdit(stageEditableClip.id, patch, opts)}
-          onInteractingChange={setMoveableInteracting}
+          snapMove={(rect) => snapClipMove(stageEditableClip.id, rect)}
+          onSnapGuidesChange={setMoveableSnapGuides}
+          onInteractingChange={handleMoveableInteractingChange}
         />
       )}
-      {outlineRect && !useMoveable && (
+      {outlineRect && !useMoveable && !marquee && (
         <div
           data-stage-selection-overlay=""
           className="pointer-events-none absolute z-30 border border-primary/75"
@@ -1376,6 +1594,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       )}
       {outlineRect &&
         !useMoveable &&
+        !marquee &&
         rotateHandleStyle &&
         stageEditableClip &&
         activeHandleClip &&
@@ -1406,6 +1625,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       )}
       {outlineRect &&
         !useMoveable &&
+        !marquee &&
         moveHandleStyle &&
         stageEditableClip &&
         activeHandleClip &&

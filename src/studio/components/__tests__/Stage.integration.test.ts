@@ -24,23 +24,29 @@ describe("Stage HyperFrames Studio integration", () => {
   it("keeps stage interaction attached to the real player while drawing editor-only chrome", () => {
     const source = readFileSync(stagePath, "utf8");
 
-    expect(source).toContain('from "../hyperframes/player-editing"');
-    expect(source).toContain("previewElementPosition(iframeRef.current");
-    expect(source).toContain("commitElementPosition(iframeRef.current");
-    expect(source).toContain("previewElementRect(iframeRef.current");
-    expect(source).toContain("commitElementRect(iframeRef.current");
-    expect(source).toContain("previewElementRotation(iframeRef.current");
-    expect(source).toContain("commitElementRotation(iframeRef.current");
-    expect(source).toContain("updateClip(currentDrag.clipId, { x: nextX, y: nextY })");
-    expect(source).toContain("updateClip(currentDrag.clipId, { rotation: finalRotation })");
+    // Base transform edits (move/resize/rotate) route through the ONE stage-edit pipeline —
+    // no scattered player-editing calls, no direct updateClip for base transforms.
+    expect(source).toContain('from "../hyperframes/stage-edit"');
+    expect(source).toContain("liveApplyStagePatch(");
+    expect(source).toContain(
+      "applyStageEdit(currentDrag.clipId, { x: nextX, y: nextY }, { persist: false })",
+    );
+    expect(source).toContain(
+      "applyStageEdit(currentDrag.clipId, { rotation: finalRotation }, { persist: true })",
+    );
+    expect(source).toContain(
+      "applyStageEdit(currentClip.id, { x: nextX, y: nextY }, { persist: true, history: false })",
+    );
+    expect(source).not.toContain("previewElementPosition(iframeRef.current");
+    expect(source).not.toContain("commitElementPosition(iframeRef.current");
+    expect(source).not.toContain("commitElementRect(iframeRef.current");
+    expect(source).not.toContain("commitElementRotation(iframeRef.current");
+    // Keyframe edits still persist through updateClipKeyframe (they need a real reload).
     expect(source).toContain("updateClipKeyframe(");
     expect(source).toContain("getStageKeyframeTarget(");
     expect(source).toContain("getSelectedMotionEndpoint(");
     expect(source).toContain("scaleForKeyframedResize(");
     expect(source).toContain("keyboardNudgeDelta(");
-    expect(source).toContain(
-      "updateClip(currentClip.id, { x: nextX, y: nextY }, { history: false })",
-    );
     expect(source).toContain("nudgeCheckpointedRef");
     expect(source).toContain('window.addEventListener("keydown", handleKeyDown, true)');
     expect(source).toContain("event.stopImmediatePropagation()");
@@ -85,6 +91,26 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(source).toContain("getLayerShortcut(event)");
     expect(source).toContain("bringClipForward(currentClip.id)");
     expect(source).toContain("sendClipBackward(currentClip.id)");
+    // Rubber-band (marquee) selection reuses the one select/drag controller's empty-space drag
+    // branch and commits through selectClips — no second pointer/drag owner, no selecto.
+    expect(source).toContain("beginMarquee:");
+    expect(source).toContain("marqueeHitIds(box, targets)");
+    expect(source).toContain('data-stage-marquee=""');
+    expect(source).not.toContain('from "react-selecto"');
+    expect(source).not.toContain('from "selecto"');
+    // The Stage owns its own stacking context (`isolate`) so its chrome — react-moveable's
+    // z-3000 control box in particular — stays contained and can't punch through a full-screen
+    // modal. Containment, not a per-render stand-down flag.
+    expect(source).toContain("isolate");
+    expect(source).not.toContain("modalOpen");
+    // Snapping reuses the SAME buildMoveSnapTargets + snapCompositionRect as the legacy handle
+    // drag, wired into the moveable single + group paths through one shared guide overlay.
+    expect(source).toContain("buildMoveSnapTargets");
+    expect(source).toContain("snapCompositionRect(");
+    expect(source).toContain("snapMove={(rect) => snapClipMove(stageEditableClip.id, rect)}");
+    expect(source).toContain("snapGroupMove={snapGroupMove}");
+    expect(source).toContain("onSnapGuidesChange={setMoveableSnapGuides}");
+    expect(source).toContain('drag?.type === "move" ? drag.snapGuides : moveableSnapGuides');
   });
 
   it("stages srcdoc previews through the same HyperFrames project-file bundling contract", () => {
@@ -107,7 +133,7 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(pluginSource).toContain("await assertProjectFilesNoTrackOverlaps(projectDir)");
     expect(pluginSource).toContain('bundleToSingleHtml(projectDir, { runtime: "inline" })');
     expect(pluginSource).toContain("resolvePreviewRuntimeScriptRefs(");
-    expect(pluginSource).toContain('pathname.startsWith(PREVIEW_RUNTIME_ROUTE_PREFIX)');
+    expect(pluginSource).toContain("pathname.startsWith(PREVIEW_RUNTIME_ROUTE_PREFIX)");
     expect(pluginSource).not.toContain("assertNoTrackOverlaps(html);");
     expect(pluginSource).not.toContain("assertNoTrackOverlaps(bundledHtml);");
   });
