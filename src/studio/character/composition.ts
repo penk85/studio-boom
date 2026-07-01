@@ -1,6 +1,7 @@
 import { generateHyperframesHtml } from "@hyperframes/core";
 import type {
   CharacterClipMeta,
+  CharacterRenderer,
   CharacterPart,
   CharacterPreset,
   CharacterSlotRelation,
@@ -68,6 +69,19 @@ import {
 import { runtimeMotionTargetForSlot } from "./motion-targets";
 import { pinTransformInBoneSpace, registrationForPart } from "./registration";
 import { assertCharacterPinRigReadyForAngle } from "./rig-v2";
+import { buildPixiCharacterCompositionHtml } from "./pixi-composition";
+import {
+  buildCharacterScene,
+  characterSceneBoneNodeId,
+  characterScenePartNodeId,
+  characterSceneSlotNodeId,
+} from "./scene";
+import type {
+  CharacterTimelineScene,
+  CharacterTimelineSlotEvent,
+  CharacterTimelineTarget,
+  CharacterTimelineVars,
+} from "./timeline-scene";
 
 const VISEMES: MouthViseme[] = ["rest", "A", "E", "O", "U", "MBP", "FV", "L", "WQ", "Smile"];
 const MOTION_SAMPLE_FPS = 12;
@@ -86,7 +100,9 @@ interface NestedHostContext {
   placement: RuntimePartPlacement;
 }
 
-interface BuildCharacterCompositionArgs {
+export type CharacterCompositionRenderer = CharacterRenderer;
+
+export interface BuildCharacterCompositionArgs {
   compositionId: string;
   clipId: string;
   width: number;
@@ -95,6 +111,7 @@ interface BuildCharacterCompositionArgs {
   character: CharacterPreset;
   meta: CharacterClipMeta;
   motionPresets: Map<string, MotionPreset>;
+  renderer?: CharacterCompositionRenderer;
   /** Speeches placed on the character, resolved against their audio assets. Each
    *  emits an `<audio>` at its start and contributes offset visemes to the mouth.
    *  When omitted, falls back to the legacy single `meta.lipSyncAudioId`. */
@@ -157,6 +174,7 @@ interface SlotTimeline {
 interface VariantSlotRender {
   kind: "variant";
   variants: Record<string, string[]>;
+  sceneVariants?: Record<string, string[]>;
 }
 
 interface GeneratedMouthSlotRender {
@@ -181,21 +199,7 @@ interface GeneratedMouthTimelineVars {
   tongue: GsapVars;
 }
 
-interface GsapVars {
-  x?: number;
-  y?: number;
-  scale?: number;
-  scaleX?: number;
-  scaleY?: number;
-  skewX?: number;
-  skewY?: number;
-  rotation?: number;
-  rotationX?: number;
-  rotationY?: number;
-  transformPerspective?: number;
-  opacity?: number;
-  transformOrigin?: string;
-}
+type GsapVars = CharacterTimelineVars;
 
 interface PuppetDom {
   html: string[];
@@ -212,6 +216,7 @@ interface PuppetDom {
 interface BoneAnchorTimeline {
   parentSlotId: string;
   selector: string;
+  sceneNodeId: string;
   boneId: string;
   base: { left: number; top: number; rotation: number };
   /** Rest anchor under the initially active parent variant — the baked style left/top/rotate. */
@@ -245,6 +250,53 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
   const width = positiveNumber(args.width, 1);
   const height = positiveNumber(args.height, 1);
   const duration = positiveNumber(args.duration, 0.1);
+  if (args.renderer === "pixi") {
+    const runtime = buildCharacterRuntime(args.character);
+    const character = runtime.character;
+    assertCharacterPinRigReadyForAngle(character, runtime.angle);
+    const scaleX = width / Math.max(1, character.canvasWidth);
+    const scaleY = height / Math.max(1, character.canvasHeight);
+    const { audioSpeeches, combinedVisemes } = resolveSpeechTimeline(args, duration);
+    const effectiveMeta: CharacterClipMeta = {
+      ...args.meta,
+      visemes: [...combinedVisemes].sort((a, b) => a.t - b.t),
+    };
+    const dom = buildPuppetDom(character, runtime, effectiveMeta, scaleX, scaleY);
+    const timelineScene = buildCharacterTimelineScene({
+      compositionId: args.compositionId,
+      clipId: args.clipId,
+      duration,
+      scaleX,
+      scaleY,
+      meta: effectiveMeta,
+      motionPresets: args.motionPresets,
+      motionTargets: dom.motionTargets,
+      canvasWidth: character.canvasWidth,
+      canvasHeight: character.canvasHeight,
+      slotTimelines: dom.slotTimelines,
+      boneAnchorTimelines: dom.boneAnchorTimelines,
+      constraintContext: runtime.constraintContext,
+      activeAngle: runtime.angle,
+    });
+    return buildPixiCharacterCompositionHtml({
+      ...args,
+      width,
+      height,
+      duration,
+      character,
+      meta: effectiveMeta,
+      scene: buildCharacterScene({
+        character,
+        meta: effectiveMeta,
+        width,
+        height,
+        runtime,
+      }),
+      timelineScene,
+      audioSpeeches,
+    });
+  }
+
   const resolution = width >= height ? "landscape" : "portrait";
   const baseHtml = generateHyperframesHtml([], duration, {
     compositionId: args.compositionId,
@@ -527,12 +579,13 @@ function buildPuppetDom(
   }
 
   const generatedMouthBoneId = defaultGeneratedMouthBoneId(rig);
-  if (!hasMouthSlot && character.mouthRig && character.mouthStyle !== "images") {
+  const mouthRig = character.mouthRig;
+  if (!hasMouthSlot && mouthRig && character.mouthStyle !== "images") {
     appendCapturedSlotToBone(generatedMouthBoneId, () => {
       buildGeneratedMouthSlot(
         out,
         character,
-        character.mouthRig.placement,
+        mouthRig.placement,
         "role:mouth",
         scaleX,
         scaleY,
@@ -636,6 +689,7 @@ function buildBoneAnchorTimelines(
     out.push({
       parentSlotId,
       selector: `#${boneElementId(bone.id)}`,
+      sceneNodeId: characterSceneBoneNodeId(bone.id),
       boneId: bone.id,
       base,
       initial: (initialKey ? anchors[initialKey] : undefined) ?? base,
@@ -859,11 +913,12 @@ function parentSlotIdForRelation(
     return relation.parentRef.id;
   }
   if (relation.parentRef.type === "role") {
+    const parentRole = relation.parentRef.role;
+    const parentSide = relation.parentRef.side;
     return slots.find(
       (slot) =>
-        slot.role === relation.parentRef.role &&
-        (!relation.parentRef.side ||
-          slot.parts.some((part) => part.side === relation.parentRef.side)),
+        slot.role === parentRole &&
+        (!parentSide || slot.parts.some((part) => part.side === parentSide)),
     )?.id;
   }
   return undefined;
@@ -890,6 +945,7 @@ function buildEyeSlot(
 
   const containerId = slotContainerId(slot.id);
   const variantIds: Record<string, string[]> = {};
+  const variantSceneNodeIds: Record<string, string[]> = {};
   const variantParts: Record<string, CharacterPart> = {};
   const activeState =
     (anglePart ? variantKeyForPart(anglePart) : undefined) ??
@@ -910,8 +966,10 @@ function buildEyeSlot(
   );
   for (const { state, part } of variants) {
     const id = partElementId(slot.id, state, part.id);
+    const sceneNodeId = characterScenePartNodeId(slot.id, variantKeyForPart(part), part.id);
     for (const key of unique([state, ...variantAliasesForPart(part)])) {
       addVariantElement(variantIds, key, id);
+      addVariantElement(variantSceneNodeIds, key, sceneNodeId);
       variantParts[key] = part;
     }
     const children = renderNestedChildrenForPart(
@@ -953,6 +1011,7 @@ function buildEyeSlot(
     render: {
       kind: "variant",
       variants: variantIds,
+      sceneVariants: variantSceneNodeIds,
     },
   });
 }
@@ -995,6 +1054,7 @@ function buildMouthSlot(
 
   const containerId = slotContainerId(slot.id);
   const variants: Record<string, string[]> = {};
+  const sceneVariants: Record<string, string[]> = {};
   const variantParts: Record<string, CharacterPart> = {};
   const renderedIds = new Set<string>();
   out.html.push(
@@ -1014,8 +1074,10 @@ function buildMouthSlot(
     const part = visibleParts.find((candidate) => partMatchesVariant(candidate, viseme));
     if (!part) continue;
     const id = partElementId(slot.id, viseme, part.id);
+    const sceneNodeId = characterScenePartNodeId(slot.id, variantKeyForPart(part), part.id);
     for (const key of unique([viseme, ...variantAliasesForPart(part)])) {
       addVariantElement(variants, key, id);
+      addVariantElement(sceneVariants, key, sceneNodeId);
       variantParts[key] = part;
     }
     renderedIds.add(id);
@@ -1039,8 +1101,10 @@ function buildMouthSlot(
   for (const part of visibleParts) {
     const key = variantKeyForPart(part);
     const id = partElementId(slot.id, key, part.id);
+    const sceneNodeId = characterScenePartNodeId(slot.id, key, part.id);
     for (const alias of variantAliasesForPart(part)) {
       addVariantElement(variants, alias, id);
+      addVariantElement(sceneVariants, alias, sceneNodeId);
       variantParts[alias] = part;
     }
     if (renderedIds.has(id)) continue;
@@ -1076,6 +1140,7 @@ function buildMouthSlot(
     render: {
       kind: "variant",
       variants,
+      sceneVariants,
     },
   });
 }
@@ -1332,6 +1397,7 @@ function buildGenericSlot(
 
   const containerId = slotContainerId(slot.id);
   const variants: Record<string, string[]> = {};
+  const sceneVariants: Record<string, string[]> = {};
   const variantParts: Record<string, CharacterPart> = {};
   const activeKey = variantKeyForPart(activePart);
   // Bone-bound slots place every variant pivot-aligned: the displayed art's pivot rides the
@@ -1355,8 +1421,10 @@ function buildGenericSlot(
   for (const part of visibleParts) {
     const key = variantKeyForPart(part);
     const id = partElementId(slot.id, key, part.id);
+    const sceneNodeId = characterScenePartNodeId(slot.id, key, part.id);
     for (const alias of variantAliasesForPart(part)) {
       addVariantElement(variants, alias, id);
+      addVariantElement(sceneVariants, alias, sceneNodeId);
       variantParts[alias] = part;
     }
     const children = renderNestedChildrenForPart(
@@ -1394,6 +1462,7 @@ function buildGenericSlot(
     render: {
       kind: "variant",
       variants,
+      sceneVariants,
     },
   });
 }
@@ -1788,7 +1857,7 @@ type CharacterTimelineScriptArgs = {
   activeAngle: RuntimeRig["activeAngle"];
 };
 
-function buildCharacterTimelineScriptText(args: CharacterTimelineScriptArgs): string {
+function buildCharacterTimelineScene(args: CharacterTimelineScriptArgs): CharacterTimelineScene {
   const blinkWindows = blinkWindowsForClip({
     id: args.clipId,
     duration: args.duration,
@@ -1833,12 +1902,16 @@ function buildCharacterTimelineScriptText(args: CharacterTimelineScriptArgs): st
     ];
   });
 
-  const scene = {
+  return {
     duration: args.duration,
     initialTargets: frames[0]?.targets ?? [],
     motionSegments,
     slotEvents,
   };
+}
+
+function buildCharacterTimelineScriptText(args: CharacterTimelineScriptArgs): string {
+  const scene = buildCharacterTimelineScene(args);
   const sceneJson = safeJson(scene);
   return `(function(){
   const S = ${sceneJson};
@@ -2139,9 +2212,14 @@ function buildMotionFrame(
       if (delta.transformPerspective !== null)
         vars.transformPerspective = round(delta.transformPerspective, 3);
       if (delta.opacity !== null) vars.opacity = round(delta.opacity, 4);
-      return { selector: target.selector, vars };
+      return { selector: target.selector, sceneNodeId: sceneNodeIdForMotionTarget(target), vars };
     }),
   };
+}
+
+function sceneNodeIdForMotionTarget(target: MotionTarget): string {
+  if (target.kind === "bone" && target.boneId) return characterSceneBoneNodeId(target.boneId);
+  return characterSceneSlotNodeId(target.slotId);
 }
 
 const DEFAULT_THREE_D_PERSPECTIVE = 800;
@@ -2348,14 +2426,7 @@ function buildSlotEvents(
   slots: SlotTimeline[],
   boneAnchorTimelines: BoneAnchorTimeline[] = [],
 ) {
-  const events: Array<{
-    time: number;
-    slotId: string;
-    key: string;
-    variant?: { hide: string[]; show?: string[] };
-    boneAnchors?: Array<{ selector: string; left: number; top: number; rotation: number }>;
-    generatedMouth?: { duration: number; components: Record<string, GsapVars> };
-  }> = [];
+  const events: CharacterTimelineSlotEvent[] = [];
   const anchorsByParentSlot = new Map<string, BoneAnchorTimeline[]>();
   for (const entry of boneAnchorTimelines) {
     anchorsByParentSlot.set(entry.parentSlotId, [
@@ -2379,6 +2450,7 @@ function buildSlotEvents(
           const anchor = entry.anchors[key] ?? entry.base;
           return {
             selector: entry.selector,
+            sceneNodeId: entry.sceneNodeId,
             left: anchor.left,
             top: anchor.top,
             rotation: anchor.rotation,
@@ -2402,16 +2474,7 @@ function slotEventFor(
   key: string,
   time: number,
   nextTime: number | undefined,
-):
-  | {
-      time: number;
-      slotId: string;
-      key: string;
-      variant?: { hide: string[]; show?: string[] };
-      boneAnchors?: Array<{ selector: string; left: number; top: number; rotation: number }>;
-      generatedMouth?: { duration: number; components: Record<string, GsapVars> };
-    }
-  | undefined {
+): CharacterTimelineSlotEvent | undefined {
   if (slot.render.kind === "variant") {
     return {
       time,
@@ -2420,6 +2483,12 @@ function slotEventFor(
       variant: {
         hide: unique(Object.values(slot.render.variants).flat()),
         show: variantIdsForKey(slot.render, key),
+        hideSceneNodeIds: slot.render.sceneVariants
+          ? unique(Object.values(slot.render.sceneVariants).flat())
+          : undefined,
+        showSceneNodeIds: slot.render.sceneVariants
+          ? variantSceneNodeIdsForKey(slot.render, key)
+          : undefined,
       },
     };
   }
@@ -2447,6 +2516,16 @@ function variantIdsForKey(render: VariantSlotRender, key: string): string[] {
     render.variants[key] ??
     render.variants.rest ??
     render.variants[Object.keys(render.variants)[0]] ??
+    []
+  );
+}
+
+function variantSceneNodeIdsForKey(render: VariantSlotRender, key: string): string[] {
+  if (!render.sceneVariants) return [];
+  return (
+    render.sceneVariants[key] ??
+    render.sceneVariants.rest ??
+    render.sceneVariants[Object.keys(render.sceneVariants)[0]] ??
     []
   );
 }

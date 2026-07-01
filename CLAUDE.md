@@ -1,8 +1,13 @@
 # Studio Boom — Agent Instructions
 
-Studio Boom is a React editor shell for HyperFrames. React provides the editing UI.
-HyperFrames owns the film. The packages below are the implementation — read them
-before writing any code.
+Studio Boom is an editor for a canonical, render-ready movie document. Today the
+application shell is React and the durable movie source is `project.hf`
+(`rootHtml`, `compositionHtml`, and `assets`), but the load-bearing rule is source
+parity: editing, stage preview, playback, and MP4 export must all read and write
+the same canonical project source. UI state and renderer adapters may support
+authoring, but they must not become a second movie model or a late export compiler.
+
+The packages below are the implementation — read them before writing any code.
 
 ---
 
@@ -131,8 +136,9 @@ Project {
 }
 ```
 
-`rootHtml` and `compositionHtml` are the film. They are valid HyperFrames composition
-HTML, ready to pass directly to the player or stage directly for MP4 rendering.
+`rootHtml`, `compositionHtml`, and `assets` are the film. They must stay
+render-ready for preview, stage playback, and MP4 export without compiling from
+React state, `editorMeta`, or any other parallel UI model at export time.
 
 ### Edit flow
 
@@ -147,12 +153,13 @@ User action (add clip, drag, resize, rotate, nudge, reorder layers, change timin
 
 For live stage preview without reloading, use the local player-editing boundary.
 It tries `PlayerAPI` first, then falls back to updating the real element in the
-player iframe. Do not draw a React copy of the clip to fake movement, resize, or
-rotation. On release, commit through `updateClip`, which persists `x`/`y`,
-`width`/`height`, and base `rotation` into `rootHtml`. Width and height map to
-`TimelineElement` fields (`sourceWidth`/`sourceHeight`); base rotation is
-persisted by the Studio HTML boundary as `data-rotation` until
-`@hyperframes/core` exposes it as a native base element field.
+player iframe. Do not draw a UI copy of the clip to fake movement, resize, or
+rotation. On release, commit through the canonical project mutation boundary
+(`updateClip` for root clips), which persists render-affecting changes into
+`project.hf`. Width and height map to `TimelineElement` fields
+(`sourceWidth`/`sourceHeight`); base rotation is persisted by the Studio HTML
+boundary as `data-rotation` until `@hyperframes/core` exposes it as a native base
+element field.
 
 Visual layer order is `EditorClip.zIndex` persisted into `rootHtml` as CSS
 `z-index` by the Studio HTML boundary. Editor timeline tracks and lanes stay in
@@ -164,7 +171,7 @@ Visual layer order is `EditorClip.zIndex` persisted into `rootHtml` as CSS
 complete HTML to `<hyperframes-player srcdoc>`. It must bridge the web component's
 inner iframe to the single `useTimelinePlayer()` ref with `resolveIframe` from
 `@hyperframes/studio`. This keeps playback, picking, and source sync attached to
-the real HyperFrames iframe. React does not redraw the film.
+the real render-ready project source. The editor UI does not redraw the film.
 
 Do not use a `blob:` URL as the player's `src`: `@hyperframes/player` appends
 shader query params to `src`, which changes object URLs and can make the iframe
@@ -177,16 +184,17 @@ dedicated shader test composition and the standard preview/export path is stable
 `useElementPicker(iframeRef)` handles click-to-select inside the iframe. Its
 `onSyncFiles` callback commits any in-iframe edits back to `rootHtml`.
 
-React overlays are allowed only as editor chrome: selection outlines, resize
-handles, move controls, labels, and other non-rendered affordances. They must not
-draw duplicate media/content or become a second preview renderer. The selected and
-edited object remains the real HyperFrames element inside the player iframe.
-Stage drag/resize/rotate/nudge should preview through the player-editing boundary
-and commit through `updateClip`. The rotate handle uses the selected visible
-bounds center as its editor pivot and persists only base `rotation`, not
-animation keyframes. Selection chrome may rotate with the selected clip, but it
-must remain editor-only chrome. Visual layer shortcuts should mutate canonical
-`rootHtml` layer fields, not reorder React-rendered previews.
+Editor overlays are allowed only as chrome: selection outlines, resize handles,
+move controls, labels, and other non-rendered affordances. They must not draw
+duplicate media/content or become a second preview renderer. The selected and
+edited object remains the real renderable element or composition data represented
+inside `project.hf`. Stage drag/resize/rotate/nudge should preview through the
+player-editing boundary and commit through canonical project mutations such as
+`updateClip`. The rotate handle uses the selected visible bounds center as its
+editor pivot and persists only base `rotation`, not animation keyframes.
+Selection chrome may rotate with the selected clip, but it must remain
+editor-only chrome. Visual layer shortcuts should mutate canonical `rootHtml`
+layer fields, not reorder UI-rendered previews.
 
 Undo/redo restores stored `Project` snapshots, including `project.hf` and
 `editorMeta`. It must not reconstruct output from React UI state. Interactive
@@ -238,11 +246,16 @@ The current persisted names still include `MotionPreset`, `AppliedMotion`, and
 `character.motions`; treat those as legacy internal names for Action/Expression
 data until a mechanical schema rename is done.
 
-The generated character source must contain explicit puppet DOM, stable
-`data-character-*` attrs, `asset:<id>` media refs, base transforms/pivots, and a
-finite paused GSAP timeline registered on `window.__timelines[compositionId]`.
-Character source is generated from rig tools for v1; generic composition source
-editing is for non-character compositions.
+The generated character source must contain explicit renderable character data:
+stable node identity, `asset:<id>` media refs, base transforms/pivots, and a
+finite paused timeline registered on `window.__timelines[compositionId]` (or the
+equivalent seekable composition contract supported by the player). The current
+v1 implementation emits puppet DOM with stable `data-character-*` attrs; a canvas
+or WebGL renderer is valid only if it lives inside the generated character
+composition, is driven by the same seek/playback path, and is staged/exported
+from the same `project.hf.compositionHtml[compositionId]` source. Character
+source is generated from rig tools for v1; generic composition source editing is
+for non-character compositions.
 
 ### Export
 
@@ -255,7 +268,9 @@ compositionHtml   → compositions/<id>.html  (one file per entry)
 assets[]          → fetch blob from Dexie → assets/<id>.<ext>
 ```
 
-No serialization. No conversion. The HTML strings are already the output.
+No serialization from UI state. No late conversion from a separate renderer
+model. Export may stage files, copy assets, rewrite file paths, and package local
+runtimes, but the stored `project.hf` strings/assets are already the output.
 
 ### `editorMeta`
 
@@ -313,7 +328,10 @@ ClipEditorMeta {
 - Never persist old timing/layer attributes (`data-end`, `data-layer`) as the
   canonical format. Normalize to `data-duration`, `data-track-index`, etc.
   `data-name` is allowed for clip labels.
-- Never call `generateHyperframesHtml` with a shadow element list derived from React
+- Preview, stage playback, and MP4 export must consume the same canonical
+  `project.hf` source. If a feature works only in an editor-only renderer or only
+  in an export-only compiler, it violates the source-parity rule.
+- Never call `generateHyperframesHtml` with a shadow element list derived from UI
   state. The source of truth is `rootHtml`.
 - Never create a second `useTimelinePlayer()` call. It is called once in `Studio.tsx`
   and the returned `iframeRef` / `togglePlay` / `seek` are passed as props.

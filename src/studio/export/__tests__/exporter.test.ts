@@ -90,4 +90,36 @@ describe("resolvePackagedRuntimeRefs", () => {
     expect(resolved).not.toContain('src="gsap.min.js"');
     expect(resolved).toContain("gsap.timeline");
   });
+
+  it("rewrites root Pixi CDN scripts to the packaged local runtime", () => {
+    const html = `<!DOCTYPE html>
+<html>
+  <head>
+    <script src="https://pixijs.download/release/pixi.min.js"></script>
+  </head>
+  <body></body>
+</html>`;
+
+    const resolved = resolvePackagedRuntimeRefs(html, { gsap: "root", pixi: "root" });
+
+    expect(resolved).toContain('src="pixi.min.js"');
+    expect(resolved).not.toContain("pixijs.download");
+  });
+
+  it("rewrites sub-composition Pixi scripts relative to the compositions folder", () => {
+    const html = `<!DOCTYPE html>
+<html>
+  <head>
+    <script src="pixi.min.js"></script>
+  </head>
+  <body>
+    <script>window.PIXI;</script>
+  </body>
+</html>`;
+
+    const resolved = resolvePackagedRuntimeRefs(html, { gsap: "omit", pixi: "composition" });
+
+    expect(resolved).toContain('src="../pixi.min.js"');
+    expect(resolved).toContain("window.PIXI");
+  });
 });

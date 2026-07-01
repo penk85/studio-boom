@@ -6,6 +6,9 @@ import type { HFAsset, Project } from "../types";
 import { validateHfProject } from "../hyperframes/validate";
 import { normalizeNativeHyperframesHtml } from "../hyperframes/native";
 
+const GSAP_RUNTIME_FILENAME = "gsap.min.js";
+const PIXI_RUNTIME_FILENAME = "pixi.min.js";
+
 export interface HyperframesTextFile {
   path: string;
   contents: string;
@@ -61,7 +64,7 @@ export function resolvePackagedAssetRefs(
 
 export function resolvePackagedRuntimeRefs(
   html: string,
-  options: { gsap: "root" | "omit" },
+  options: { gsap: "root" | "omit"; pixi?: "root" | "composition" | "omit" },
 ): string {
   if (!html) return html;
 
@@ -80,11 +83,21 @@ export function resolvePackagedRuntimeRefs(
       script.remove();
       continue;
     }
+    if (isPixiScriptSrc(src)) {
+      if (options.pixi === "omit") {
+        script.remove();
+      } else if (options.pixi === "root") {
+        script.setAttribute("src", PIXI_RUNTIME_FILENAME);
+      } else if (options.pixi === "composition") {
+        script.setAttribute("src", `../${PIXI_RUNTIME_FILENAME}`);
+      }
+      continue;
+    }
     if (!isGsapScriptSrc(src)) continue;
     if (options.gsap === "omit") {
       script.remove();
     } else {
-      script.setAttribute("src", "gsap.min.js");
+      script.setAttribute("src", GSAP_RUNTIME_FILENAME);
     }
   }
 
@@ -102,18 +115,23 @@ export async function buildHyperframesProjectFiles(
   for (const asset of hf.assets) {
     mediaExtMap.set(asset.id, extFromAsset(asset.filename, asset.mimeType));
   }
+  const usesPixiRuntime = projectUsesPixiRuntime(project);
 
   const assetIds = hf.assets.map((asset) => asset.id);
   const mediaBlobs =
     assetIds.length > 0 ? await db.mediaBlobs.where("id").anyOf(assetIds).toArray() : [];
   const blobMap = new Map(mediaBlobs.map((row) => [row.id, row.blob]));
   assertExportBlobsPresent(hf.assets, blobMap);
+  const pixiRuntimeRaw = usesPixiRuntime ? await loadPixiRuntimeRaw() : null;
 
   const compositionTextFiles: HyperframesTextFile[] = Object.entries(hf.compositionHtml).map(
     ([id, html]) => ({
       path: `compositions/${id}.html`,
       contents: resolvePackagedAssetRefs(
-        resolvePackagedRuntimeRefs(normalizeNativeHyperframesHtml(html), { gsap: "omit" }),
+        resolvePackagedRuntimeRefs(normalizeNativeHyperframesHtml(html), {
+          gsap: "omit",
+          pixi: "composition",
+        }),
         hf.assets,
         "../assets",
       ),
@@ -128,14 +146,17 @@ export async function buildHyperframesProjectFiles(
         contents: resolvePackagedAssetRefs(
           resolvePackagedRuntimeRefs(
             normalizeNativeHyperframesHtml(hf.rootHtml, { width: hf.width, height: hf.height }),
-            { gsap: "root" },
+            { gsap: "root", pixi: "root" },
           ),
           hf.assets,
           "assets",
         ),
         mimeType: "text/html",
       },
-      { path: "gsap.min.js", contents: gsapRaw, mimeType: "text/javascript" },
+      { path: GSAP_RUNTIME_FILENAME, contents: gsapRaw, mimeType: "text/javascript" },
+      ...(pixiRuntimeRaw
+        ? [{ path: PIXI_RUNTIME_FILENAME, contents: pixiRuntimeRaw, mimeType: "text/javascript" }]
+        : []),
       ...compositionTextFiles,
     ],
     binaryFiles: hf.assets.map((asset) => {
@@ -174,6 +195,15 @@ function isGsapScriptSrc(src: string): boolean {
   return /(?:^|\/)gsap(?:\.min)?\.js(?:[?#].*)?$/.test(value);
 }
 
+function isPixiScriptSrc(src: string): boolean {
+  const value = src.trim().toLowerCase();
+  if (!value) return false;
+  if (value.includes("pixijs.download") && /\/pixi(?:\.min)?\.(?:m?js)/.test(value)) return true;
+  if (value.includes("cdn.jsdelivr.net/npm/pixi.js")) return true;
+  if (value.includes("unpkg.com/pixi.js")) return true;
+  return /(?:^|\/)pixi(?:\.min)?\.(?:m?js)(?:[?#].*)?$/.test(value);
+}
+
 function isHyperframesRuntimeScriptSrc(src: string): boolean {
   const value = src.trim().toLowerCase();
   return /(?:^|\/)hyperframes?-runtime(?:\.min)?\.js(?:[?#].*)?$/.test(value);
@@ -181,7 +211,7 @@ function isHyperframesRuntimeScriptSrc(src: string): boolean {
 
 function resolvePackagedRuntimeRefsFallback(
   html: string,
-  options: { gsap: "root" | "omit" },
+  options: { gsap: "root" | "omit"; pixi?: "root" | "composition" | "omit" },
 ): string {
   const withoutFonts = html.replace(
     /<link\b(?=[^>]*\bhref=["'][^"']*fonts\.(?:googleapis|gstatic)\.com[^"']*["'])[^>]*>\s*/gi,
@@ -191,8 +221,43 @@ function resolvePackagedRuntimeRefsFallback(
     /<script\b(?=[^>]*\bsrc=["'][^"']*hyperframes?-runtime(?:\.min)?\.js(?:[?#][^"']*)?["'])[^>]*>\s*<\/script>/gi,
     "",
   );
-  return withoutHyperframesRuntime.replace(
+  const pixiSrc =
+    options.pixi === "root"
+      ? PIXI_RUNTIME_FILENAME
+      : options.pixi === "composition"
+        ? `../${PIXI_RUNTIME_FILENAME}`
+        : "";
+  const withPixi = withoutHyperframesRuntime.replace(
+    /<script\b([^>]*?)\bsrc=["']([^"']*(?:pixijs\.download[^"']*\/pixi(?:\.min)?\.(?:m?js)|cdn\.jsdelivr\.net\/npm\/pixi\.js[^"']*|unpkg\.com\/pixi\.js[^"']*|(?:^|\/)pixi(?:\.min)?\.(?:m?js))[^"']*)["']([^>]*)>\s*<\/script>/gi,
+    options.pixi === "omit" ? "" : pixiSrc ? `<script$1src="${pixiSrc}"$3></script>` : "$&",
+  );
+  return withPixi.replace(
     /<script\b([^>]*?)\bsrc=["']([^"']*(?:cdn\.jsdelivr\.net\/npm\/gsap@[^"']*\/dist\/gsap|unpkg\.com\/gsap@[^"']*\/dist\/gsap|(?:^|\/)gsap(?:\.min)?\.js)[^"']*)["']([^>]*)>\s*<\/script>/gi,
-    options.gsap === "omit" ? "" : '<script$1src="gsap.min.js"$3></script>',
+    options.gsap === "omit" ? "" : `<script$1src="${GSAP_RUNTIME_FILENAME}"$3></script>`,
+  );
+}
+
+async function loadPixiRuntimeRaw(): Promise<string> {
+  const runtime = await import("../../../node_modules/pixi.js/dist/pixi.min.js?raw");
+  return runtime.default;
+}
+
+function projectUsesPixiRuntime(project: Project): boolean {
+  return (
+    hasPixiRuntimeRef(project.hf.rootHtml) ||
+    Object.values(project.hf.compositionHtml).some((html) => hasPixiRuntimeRef(html))
+  );
+}
+
+function hasPixiRuntimeRef(html: string): boolean {
+  if (!html) return false;
+  if (typeof DOMParser === "undefined") {
+    return /<script\b[^>]*\bsrc=["'][^"']*(?:pixijs\.download[^"']*\/pixi(?:\.min)?\.(?:m?js)|cdn\.jsdelivr\.net\/npm\/pixi\.js[^"']*|unpkg\.com\/pixi\.js[^"']*|(?:^|\/)pixi(?:\.min)?\.(?:m?js))/i.test(
+      html,
+    );
+  }
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  return Array.from(doc.querySelectorAll<HTMLScriptElement>("script[src]")).some((script) =>
+    isPixiScriptSrc(script.getAttribute("src") ?? ""),
   );
 }

@@ -48,21 +48,22 @@ Not implemented yet:
 
 ## Architectural Context
 
-Studio Boom must preserve this flow:
+Studio Boom must preserve this source-parity flow:
 
 ```text
-React editor chrome
-  edits real HyperFrames elements
+Editor chrome and AI assistance
+  edit real renderable project elements or composition data
 
 project.hf.rootHtml
 project.hf.compositionHtml
 project.hf.assets
-  are the movie and export source of truth
+  are the durable movie document used by editing, preview, stage playback, and export
 ```
 
-Do not add a second preview/export renderer. Do not generate movie output from
-React state. All AI output must become canonical HyperFrames HTML stored in
-`project.hf`.
+Do not add a second preview/export source of truth. Do not generate movie output
+from React/UI state or an AI draft model at export time. All AI output must become
+canonical, render-ready `project.hf` source before it is considered part of the
+movie.
 
 HyperFrames core clip types are:
 
@@ -145,7 +146,7 @@ Prompt pack must include:
 - Required data attributes.
 - Timeline registration rules.
 - Studio Boom architectural rules.
-- Source-of-truth rule: output must become `project.hf`.
+- Source-parity rule: output must become canonical, render-ready `project.hf`.
 - Asset rules:
   - prefer existing `asset:<id>` references
   - no remote images by default
@@ -238,14 +239,15 @@ Future UI:
 
 - Expand a composition clip to reveal internal clips/timeline.
 - Double-click or enter a composition to edit `compositionHtml[compositionId]`.
-- Stage edits manipulate real elements in the active composition.
+- Stage edits manipulate real renderable elements or composition data in the
+  active composition.
 - Character speech audio and lip-sync already live inside character compositions.
   Keep that model when nested composition editing arrives.
 
 Acceptance criteria:
 
 - Composition editing uses the same source-of-truth rules as root editing.
-- No nested React preview renderer is introduced.
+- No nested editor-only preview source of truth is introduced.
 - Existing native character composition clips keep working inside the nested
   composition editing model.
 

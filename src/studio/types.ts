@@ -942,9 +942,13 @@ export interface CharacterSpeech {
   duration?: number;
 }
 
+export type CharacterRenderer = "dom" | "pixi";
+
 export interface CharacterClipMeta {
   characterId: ID;
   poses: Record<string, string>;
+  /** Renderer used by the generated character sub-composition. Defaults to DOM. */
+  renderer?: CharacterRenderer;
   motions?: AppliedMotion[];
   /** Speech clips placed along the character's duration (canonical). */
   speeches?: CharacterSpeech[];

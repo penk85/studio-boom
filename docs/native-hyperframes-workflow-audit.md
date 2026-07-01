@@ -63,11 +63,11 @@ movie. `editorMeta` is editor-only intent and UI state.
 
 ## Guardrails
 
-- MP4 staging must never construct render output from React state or `editorMeta`.
+- MP4 staging must never construct render output from React/UI state or `editorMeta`.
 - Preview and MP4 render must consume the same `project.hf` source.
-- React may draw editor chrome over the Stage, but it must not draw duplicate
-  media or content. The selected/edited object remains the real HyperFrames
-  element.
+- The editor may draw chrome over the Stage, but it must not draw duplicate media
+  or content. The selected/edited object remains the real renderable element or
+  composition data represented in `project.hf`.
 - New root or sub-compositions may use `generateHyperframesHtml`.
 - Ordinary clip edits should use `addElementToHtml`, `updateElementInHtml`, and
   `removeElementFromHtml` against canonical stored HTML, not
@@ -80,7 +80,7 @@ movie. `editorMeta` is editor-only intent and UI state.
   track/lane metadata must not become the render stack; layer shortcuts and
   controls should update canonical `rootHtml` z-index values.
 - Undo/redo should restore canonical `Project` snapshots and must not rebuild
-  render output from React-only state.
+  render output from UI-only state.
 - Same-track overlap validation should run per staged project file before
   bundling. Root clips and internal sub-composition clips may reuse track indexes
   because they live in separate HyperFrames composition files.

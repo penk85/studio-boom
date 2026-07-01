@@ -1186,10 +1186,34 @@ describe("createBlankProject", () => {
       character: {
         characterId: "character-source-1",
         autoBlink: false,
+        renderer: "dom",
       },
     });
     expect(useStudio.getState().project!.hf.compositionHtml["char_character-1"]).toContain(
       'window.__timelines["char_character-1"]',
+    );
+    expect(useStudio.getState().project!.hf.compositionHtml["char_character-1"]).not.toContain(
+      'data-character-renderer="pixi"',
+    );
+
+    useStudio.getState().updateClip(clip.id, {
+      character: {
+        ...useStudio.getState().project!.editorMeta.clips[clip.id].character!,
+        renderer: "pixi",
+      },
+    } as Partial<CompositionClip>);
+
+    const pixiClip = currentEditingClips().find((c) => c.id === clip.id);
+    expect(pixiClip).toMatchObject({
+      character: {
+        renderer: "pixi",
+      },
+    });
+    expect(useStudio.getState().project!.hf.compositionHtml["char_character-1"]).toContain(
+      'data-character-renderer="pixi"',
+    );
+    expect(useStudio.getState().project!.hf.compositionHtml["char_character-1"]).toContain(
+      "https://pixijs.download/release/pixi.min.js",
     );
   });
 

@@ -10,26 +10,31 @@ or nested composition timeline work, also read
 The important rule is:
 
 ```text
-React is for editing the movie.
-HyperFrames-style output is the movie.
+One canonical render-ready project source drives editing, stage preview, playback,
+and MP4 export.
+
+No UI layer, renderer adapter, or export step may reinterpret separate state into
+the movie.
 ```
 
 Protect this flow:
 
 ```text
 editorMeta
-  editable creative intent
+  editable creative intent and UI affordance metadata only
 
 boundary helpers
-  mutate canonical HyperFrames HTML and rebuild native sub-compositions where needed
+  mutate canonical project source and rebuild native renderable compositions where needed
 
 project.hf
-  preview and export source of truth
+  rootHtml, compositionHtml, and assets are the durable movie document used by
+  preview, stage playback, and export
 ```
 
-Do not add a second preview/export renderer, and do not make export a late compiler
-from React UI state into HyperFrames.
+Do not add a second preview/export source of truth, and do not make export a late
+compiler from React/UI state into renderable `project.hf` output.
 
-React editor chrome is allowed for selection outlines, handles, and controls, but
-it must not draw duplicate media or preview content. Stage edits should manipulate
-the real HyperFrames element and persist through `project.hf.rootHtml`.
+Editor chrome is allowed for selection outlines, handles, and controls, but it
+must not draw duplicate media or preview content. Stage and nested-composition
+edits should manipulate the real renderable project element or composition data
+and persist through `project.hf.rootHtml` / `project.hf.compositionHtml`.

@@ -556,6 +556,7 @@ function normalizeCharacterClipMeta(meta: CharacterClipMeta): CharacterClipMeta 
   return {
     ...meta,
     poses: meta.poses ?? {},
+    renderer: meta.renderer === "pixi" ? "pixi" : "dom",
   };
 }
 
@@ -624,6 +625,7 @@ function rebuildCharacterCompositionInProject(
       height: clip.height || project.hf.height,
       character,
       meta: meta.character,
+      renderer: meta.character.renderer,
       speeches: resolveSpeechesForBuild(meta.character, mediaAssets),
       motionPresets,
     });
@@ -1621,6 +1623,7 @@ export const useStudio = create<StudioState>((set, get) => ({
           height: compositionClip.height || currentProject.hf.height,
           character,
           meta: meta.character,
+          renderer: meta.character.renderer,
           speeches: resolveSpeechesForBuild(meta.character, state.mediaAssets),
           motionPresets: state.motionPresets,
         });

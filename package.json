@@ -39,6 +39,7 @@
     "gsap": "^3.15.0",
     "hyperframes": "^0.5.3",
     "lucide-react": "^0.575.0",
+    "pixi.js": "^8.19.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-resizable-panels": "^4.6.5",

@@ -108,6 +108,7 @@ describe("buildHyperframesProjectFiles", () => {
       'src="../assets/image-1.png"',
     );
     expect(textByPath.get("compositions/comp_char-1.html")).not.toContain("hyperframe-runtime.js");
+    expect(files.textFiles.map((file) => file.path)).not.toContain("pixi.min.js");
     expect(files.binaryFiles.map((file) => file.path)).toEqual(["assets/image-1.png"]);
   });
 
@@ -136,5 +137,23 @@ describe("buildHyperframesProjectFiles", () => {
     expect(doc.querySelector('meta[name="viewport"]')?.getAttribute("content")).toBe(
       "width=1080, height=1920",
     );
+  });
+
+  it("stages Pixi once when a render-ready character sub-composition references it", async () => {
+    mediaRows.set("image-1", new Blob(["png"], { type: "image/png" }));
+    const { buildHyperframesProjectFiles } = await import("../project-files");
+    const project = makeProject();
+    project.hf.compositionHtml["comp_char-1"] = project.hf.compositionHtml["comp_char-1"].replace(
+      "</body>",
+      `<script src="https://pixijs.download/release/pixi.min.js"></script>
+</body>`,
+    );
+
+    const files = await buildHyperframesProjectFiles(project);
+    const textByPath = new Map(files.textFiles.map((file) => [file.path, file.contents]));
+
+    expect(files.textFiles.filter((file) => file.path === "pixi.min.js")).toHaveLength(1);
+    expect(textByPath.get("compositions/comp_char-1.html")).toContain('src="../pixi.min.js"');
+    expect(textByPath.get("compositions/comp_char-1.html")).not.toContain("pixijs.download");
   });
 });

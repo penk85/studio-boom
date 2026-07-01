@@ -121,6 +121,27 @@ function extractScene(html: string) {
   };
 }
 
+function extractPixiPayload(html: string) {
+  const match = html.match(/const S = (\{.*?\});\n\s+const toRadians/s);
+  expect(match).not.toBeNull();
+  return JSON.parse(match![1]) as {
+    scene: {
+      nodes: Record<string, { kind: string; partId?: string }>;
+    };
+    timelineScene: {
+      initialTargets: Array<{ sceneNodeId?: string; vars: Record<string, number | string> }>;
+      motionSegments: Array<{
+        targets: Array<{ sceneNodeId?: string; vars: Record<string, number | string> }>;
+      }>;
+      slotEvents: Array<{
+        slotId: string;
+        key: string;
+        variant?: { showSceneNodeIds?: string[]; hideSceneNodeIds?: string[] };
+      }>;
+    };
+  };
+}
+
 function eventShowsVariant(event: { variant?: { show?: string[] } }, value: string) {
   return (event.variant?.show ?? []).some((id) => id.includes(value));
 }
@@ -159,6 +180,190 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).toContain('tl.eventCallback("onStart"');
     expect(html).not.toMatch(/repeat\s*:\s*-1/);
     expect(html).not.toMatch(/\basync\b/);
+  });
+
+  it("can generate a Pixi-backed render-ready character composition from the scene graph", () => {
+    const transformPreset: MotionPreset = {
+      id: "pixi-body-motion",
+      name: "Pixi body motion",
+      category: "gesture",
+      duration: 1,
+      loop: false,
+      tracks: [
+        {
+          partRole: "body",
+          slotId: "role:body",
+          keyframes: [
+            { t: 0, dx: 0, rotation: 0, ease: "linear" },
+            { t: 1, dx: 24, rotation: 12, ease: "linear" },
+          ],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const variantPreset: MotionPreset = {
+      id: "pixi-mouth-variant",
+      name: "Pixi mouth variant",
+      category: "expression",
+      duration: 1,
+      loop: false,
+      tracks: [],
+      keyposes: [
+        {
+          t: 0,
+          parts: [{ partRole: "mouth", slotId: "role:mouth", poseSwap: "raspberry" }],
+        },
+        {
+          t: 1,
+          parts: [{ partRole: "mouth", slotId: "role:mouth", poseSwap: "raspberry" }],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_clip-1",
+      clipId: "clip-1",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character: makeCharacter(),
+      meta: {
+        characterId: "char-1",
+        poses: {},
+        autoBlink: false,
+        motions: [
+          { id: "applied-pixi-body", presetId: transformPreset.id, offset: 0, intensity: 1 },
+          { id: "applied-pixi-mouth", presetId: variantPreset.id, offset: 0, intensity: 1 },
+        ],
+      },
+      motionPresets: new Map([
+        [transformPreset.id, transformPreset],
+        [variantPreset.id, variantPreset],
+      ]),
+      renderer: "pixi",
+    });
+    const validation = validateCompositionSourceHtml(html, {
+      compositionId: "char_clip-1",
+      duration: 4,
+      width: 300,
+      height: 450,
+    });
+
+    expect(validation.ok).toBe(true);
+    expect(html).toContain('data-character-renderer="pixi"');
+    expect(html).toContain("https://pixijs.download/release/pixi.min.js");
+    expect(html).toContain("new PIXI.Application()");
+    expect(html).toContain("PIXI.Assets.load");
+    expect(html).toContain('"assetRef":"asset:body-media"');
+    expect(html).toContain('window.__timelines["char_clip-1"] = tl');
+    expect(html).toContain("targetVarsAt");
+    expect(html).toContain("showSceneNodeIds");
+    expect(html).not.toContain("<img ");
+
+    const payload = extractPixiPayload(html);
+    const bodyMotionTargets = payload.timelineScene.motionSegments.flatMap((segment) =>
+      segment.targets.filter((target) => target.sceneNodeId?.includes("role:body")),
+    );
+    const mouthVariantEvent = payload.timelineScene.slotEvents.find(
+      (event) => event.slotId === "role:mouth" && event.key === "raspberry",
+    );
+
+    expect(bodyMotionTargets.some((target) => Number(target.vars.x) > 0)).toBe(true);
+    expect(bodyMotionTargets.every((target) => target.sceneNodeId)).toBe(true);
+    expect(
+      mouthVariantEvent?.variant?.showSceneNodeIds?.some((id) => id.includes("raspberry")),
+    ).toBe(true);
+  });
+
+  it("renders vector/morph character parts in the Pixi scene instead of dropping them", () => {
+    const base = makeCharacter();
+    const character: CharacterPreset = {
+      ...base,
+      parts: base.parts.map((part) =>
+        part.id === "mouth-rest"
+          ? {
+              ...part,
+              morph: {
+                primaryPath: "M10 20 Q45 40 80 20 Q45 60 10 20Z",
+                viewBox: "0 0 90 42",
+                fill: "#733f43",
+                stroke: "#2a1012",
+                strokeWidth: "2",
+              },
+            }
+          : part,
+      ),
+    };
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_clip-1",
+      clipId: "clip-1",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character,
+      meta: {
+        characterId: "char-1",
+        poses: {},
+        autoBlink: false,
+      },
+      motionPresets: new Map(),
+      renderer: "pixi",
+    });
+    const payload = extractPixiPayload(html);
+    const vectorNode = Object.values(payload.scene.nodes).find(
+      (node) => node.kind === "vector" && node.partId === "mouth-rest",
+    );
+
+    expect(vectorNode).toBeDefined();
+    expect(html).toContain("new PIXI.Graphics()");
+    expect(html).toContain("graphic.svg(svgForVectorNode(node))");
+    expect(html).not.toContain('if (node.kind === "vector") return');
+  });
+
+  it("keeps placed speech audio and lip-sync events in Pixi-backed character compositions", () => {
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_clip-1",
+      clipId: "clip-1",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character: makeCharacter(),
+      meta: {
+        characterId: "char-1",
+        poses: {},
+        autoBlink: false,
+      },
+      motionPresets: new Map(),
+      renderer: "pixi",
+      speeches: [
+        {
+          audioId: "voice-pixi",
+          start: 0.5,
+          duration: 1.5,
+          volume: 0.4,
+          mediaStartTime: 0.25,
+          visemes: [{ t: 0.5, v: "A" }],
+        },
+      ],
+    });
+
+    expect(html).toContain('data-character-renderer="pixi"');
+    expect(html).toContain('data-character-speech="true"');
+    expect(html).toContain('data-start="0.5"');
+    expect(html).toContain('data-duration="1.5"');
+    expect(html).toContain('data-volume="0.4"');
+    expect(html).toContain('data-media-start="0.25"');
+    expect(html).toContain('src="asset:voice-pixi"');
+
+    const payload = extractPixiPayload(html);
+    const lipSyncEvent = payload.timelineScene.slotEvents.find(
+      (event) => event.slotId === "role:mouth" && event.key === "A",
+    );
+    expect(lipSyncEvent?.variant?.showSceneNodeIds?.some((id) => id.includes("mouth-a"))).toBe(
+      true,
+    );
   });
 
   it("repairs a stale cross-side hand attachment before generating the puppet DOM", () => {

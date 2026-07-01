@@ -437,18 +437,37 @@ function CharacterMotionTab({
   return (
     <>
       <PanelSection title="Character" icon={Sparkles}>
-        <SwitchRow
-          label="Auto blink"
-          checked={characterClip.character.autoBlink !== false}
-          onChange={(checked) =>
-            onUpdate({
-              character: {
-                ...characterClip.character,
-                autoBlink: checked,
-              },
-            } as Partial<CompositionClip>)
-          }
-        />
+        <div className="space-y-2">
+          <Field label="Renderer">
+            <select
+              value={characterClip.character.renderer ?? "dom"}
+              onChange={(event) =>
+                onUpdate({
+                  character: {
+                    ...characterClip.character,
+                    renderer: event.target.value as "dom" | "pixi",
+                  },
+                } as Partial<CompositionClip>)
+              }
+              className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
+            >
+              <option value="dom">DOM</option>
+              <option value="pixi">Pixi</option>
+            </select>
+          </Field>
+          <SwitchRow
+            label="Auto blink"
+            checked={characterClip.character.autoBlink !== false}
+            onChange={(checked) =>
+              onUpdate({
+                character: {
+                  ...characterClip.character,
+                  autoBlink: checked,
+                },
+              } as Partial<CompositionClip>)
+            }
+          />
+        </div>
       </PanelSection>
       {character && <CharacterRigPresetPanel character={character} />}
       {character && <MotionPanel clip={characterClip} character={character} />}

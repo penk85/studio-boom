@@ -50,6 +50,34 @@ describe("stage helpers", () => {
     expect(geometry.rect.height).toBe(540);
   });
 
+  it("freeze & ghost: the on-screen ghost maps back to the exact committed value (no drift)", () => {
+    const geometry = { rect: new DOMRect(20, 30, 960, 540), scaleX: 2, scaleY: 2 };
+
+    // The composition value that gets committed to rootHtml on release.
+    const committed = { x: 400, y: 200, width: 300, height: 150 };
+
+    // The ghost overlay renders that value on screen through the same helper the commit
+    // path uses to derive geometry. Inverting the mapping must return the committed value
+    // exactly — i.e. what the user SEES is what gets SAVED.
+    const ghostCss = compositionRectToCss(committed, geometry);
+    const recovered = {
+      x: (ghostCss.left - geometry.rect.left) * geometry.scaleX,
+      y: (ghostCss.top - geometry.rect.top) * geometry.scaleY,
+      width: ghostCss.width * geometry.scaleX,
+      height: ghostCss.height * geometry.scaleY,
+    };
+    expect(recovered).toEqual(committed);
+
+    // A drag of D screen px commits exactly D*scale composition px — the same delta the
+    // ghost moved by — so the frozen element never jumps on release.
+    const screenDelta = { x: 24, y: -12 };
+    const compDelta = pointerDeltaToComposition(screenDelta.x, screenDelta.y, geometry);
+    expect(compDelta).toEqual({ x: 48, y: -24 });
+    expect({ x: compDelta.x / geometry.scaleX, y: compDelta.y / geometry.scaleY }).toEqual(
+      screenDelta,
+    );
+  });
+
   it("converts pointer deltas and composition rects through stage scale", () => {
     const geometry = {
       rect: new DOMRect(20, 30, 960, 540),

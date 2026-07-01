@@ -7,25 +7,26 @@
 
 ## Summary
 
-Studio Boom characters are specialized HyperFrames sub-compositions. The canonical
-character document is the native HyperFrames HTML stored in:
+Studio Boom characters are specialized renderable sub-compositions. The canonical
+character document is the generated composition source stored in:
 
 ```text
 project.hf.compositionHtml[characterCompositionId]
 ```
 
-That document owns the puppet DOM, bone groups, slot elements, angle metadata,
-motion metadata, reach/host constraints, asset references, styles, and finite paused
-GSAP timeline. React is the editor shell around that document. It reads the
-document for inspectors and overlays, then writes back through typed character
-commands.
+That document owns the renderable character scene: current v1 puppet DOM and
+stable `data-character-*` metadata, future renderer-specific scene data when
+needed, bone groups, slot identity, angle metadata, motion metadata, reach/host
+constraints, asset references, styles, and a finite paused/seekable timeline. The
+editor reads the document for inspectors and overlays, then writes back through
+typed character commands.
 
 JSON remains important, but it is not the living model. Character JSON, angle rig
 JSON, Action/Expression JSON, and AI suggestion JSON are portable exchange formats:
 
 ```text
-HyperFrames character document
-  source of truth for preview/export/editing
+Character composition document
+  source of truth for editing, preview, playback, and export
 
 Character commands
   typed authoring operations that update the document
@@ -37,18 +38,19 @@ JSON artifacts
 The invariant is the same as the rest of Studio Boom:
 
 ```text
-React edits the movie.
-HyperFrames HTML is the movie.
+Editor and AI commands mutate the canonical movie document.
+project.hf composition source is the movie.
 ```
 
 ## Core Model
 
 ### Character Document
 
-The character document is native HyperFrames composition HTML. It must contain:
+The character document is generated, render-ready composition source. It must contain:
 
 ```text
-explicit puppet DOM
+explicit renderable character data
+  current v1 puppet DOM where applicable
   data-character-bone
   data-character-slot
   data-character-bound-bone-id
@@ -63,9 +65,9 @@ stable editor-readable metadata
   depth and draw order
 
 timeline data
-  finite paused GSAP timeline
+  finite paused/seekable timeline
   registered window.__timelines[compositionId]
-  slot events and motion events expressed against real DOM targets
+  slot events and motion events expressed against real render targets
 
 asset refs
   asset:<id> references for library media
@@ -128,24 +130,24 @@ AI JSON
 
 ## Goals
 
-- Make the HyperFrames character sub-composition the source of truth for character
+- Make the generated character sub-composition the source of truth for character
   authoring, preview, and export.
 - Give Character Builder and the Action/Expression editor the same real document surface, not two
-  renderers.
+  sources of truth.
 - Make character Action/Expression data readable, copyable, and AI-friendly through JSON
   import/export artifacts.
 - Keep every JSON artifact easy to identify by filename and top-level `kind`.
 - Support first-class custom slots such as umbrellas, tails, wings, props, clothing,
   and alternate face features.
 - Treat each angle as its own concrete rig while preserving shared character identity.
-- Preserve HyperFrames compatibility: HTML is the editable document and
-  preview/export source.
+- Preserve render compatibility: `project.hf.compositionHtml[compositionId]` is
+  the editable document and preview/export source.
 
 ## Non-Goals
 
-- No second preview/export renderer.
+- No second preview/export source of truth.
 - No long-lived parallel character state that must later be compiled to
-  HyperFrames HTML.
+  renderable `project.hf` output.
 - No full mesh deformation in this cleanup pass.
 - No animated angle interpolation in this cleanup pass.
 - No direct provider/API-specific AI automation in the character runtime.
