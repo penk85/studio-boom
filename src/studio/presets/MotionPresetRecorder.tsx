@@ -2300,7 +2300,7 @@ function RecorderHyperFramesPreview({
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const compositionId = "recorder_character_preview";
 
-  // Stable HTML: DOM structure + committed motion. Controls srcDoc.
+  // Stable HTML: Pixi character composition source + committed motion. Controls srcDoc.
   // Only changes when the character, base poses, or committed keyposes change.
   const sourceHtml = useMemo(() => {
     const motionPresets = preset ? new Map([[preset.id, preset]]) : new Map<string, MotionPreset>();

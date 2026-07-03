@@ -118,10 +118,8 @@ movie. `editorMeta` is editor-only intent and UI state.
   Expressions, speech/lip-sync, save/reload, stage playback, and MP4 export using
   the same stored character composition source.
 - Pixi-first character cleanup (renderer removal done July 2026). Remaining:
-  extract the renderer-neutral motion-target/slot-timeline computation out of
-  `buildPuppetDom` so it stops emitting unstaged legacy DOM strings; migrate the
-  character editor panel and the Action/Expression recorder preview to a
-  persistent Pixi app fed by the same scene graph (the recorder currently
+  migrate the character editor panel and the Action/Expression recorder preview
+  to a persistent Pixi app fed by the same scene graph (the recorder currently
   rebuilds a full Pixi composition srcDoc per committed draft edit); reintroduce
   typed character document commands as renderer-neutral scene-graph operations
   when an editor consumer needs them (the DOM executor was deleted).

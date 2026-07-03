@@ -269,11 +269,10 @@ source and keep playing until their clip rebuilds as Pixi.
 The legacy generated/fallback mouth rig (`character.mouthRig`,
 `mouthStyle: "rig"`) is retired: it existed only as puppet DOM. Characters that
 still reference it build without that mouth (one console warning); mouth image or
-SVG parts restore the mouth and drive lip sync. `buildPuppetDom` still computes
-the renderer-neutral motion targets/slot timelines and emits now-unstaged legacy
-DOM strings; extracting the data-only builder is a pending cleanup. Typed
-character document commands should return as renderer-neutral scene-graph
-operations when an editor consumer needs them.
+SVG parts restore the mouth and drive lip sync. Character composition generation
+now builds renderer-neutral timeline inputs directly; it no longer emits
+unstaged legacy DOM strings. Typed character document commands should return as
+renderer-neutral scene-graph operations when an editor consumer needs them.
 
 Do not emit Pixi mesh primitives by default. `MeshPlane` caused an export-capture
 failure when the render environment lacked the mesh render pipe. Mesh/stretch-limb
