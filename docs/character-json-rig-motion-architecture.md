@@ -14,12 +14,15 @@ character document is the generated composition source stored in:
 project.hf.compositionHtml[characterCompositionId]
 ```
 
-That document owns the renderable character scene: current v1 puppet DOM and
-stable `data-character-*` metadata, future renderer-specific scene data when
-needed, bone groups, slot identity, angle metadata, motion metadata, reach/host
-constraints, asset references, styles, and a finite paused/seekable timeline. The
-editor reads the document for inspectors and overlays, then writes back through
-typed character commands.
+That document owns the renderable character scene. Current validated character
+rendering is Pixi-backed: the document carries renderer-neutral
+`CharacterSceneGraph` / `CharacterTimelineScene` data plus Pixi composition code,
+asset references, slot identity, angle metadata, motion metadata, reach/host
+constraints, and a finite paused/seekable timeline. The legacy DOM puppet
+renderer was removed; Pixi is the only character renderer. The editor reads the
+document for inspectors and overlays; typed character commands return as
+renderer-neutral scene-graph operations when an editor consumer needs them (the
+DOM command executor was deleted with the DOM renderer).
 
 JSON remains important, but it is not the living model. Character JSON, angle rig
 JSON, Action/Expression JSON, and AI suggestion JSON are portable exchange formats:
@@ -50,11 +53,9 @@ The character document is generated, render-ready composition source. It must co
 
 ```text
 explicit renderable character data
-  current v1 puppet DOM where applicable
-  data-character-bone
-  data-character-slot
-  data-character-bound-bone-id
-  data-character-host-slot-id / data-character-host-bone-id where relevant
+  renderer-neutral CharacterSceneGraph
+  renderer-neutral CharacterTimelineScene
+  Pixi scene setup
 
 stable editor-readable metadata
   character id/name
@@ -142,13 +143,16 @@ AI JSON
 - Treat each angle as its own concrete rig while preserving shared character identity.
 - Preserve render compatibility: `project.hf.compositionHtml[compositionId]` is
   the editable document and preview/export source.
+- Treat Pixi as a renderer for canonical rig intent, not a replacement for bones,
+  sockets/pins, slots, variants, poses, Actions, Expressions, or speech.
 
 ## Non-Goals
 
 - No second preview/export source of truth.
 - No long-lived parallel character state that must later be compiled to
   renderable `project.hf` output.
-- No full mesh deformation in this cleanup pass.
+- No full mesh deformation in this cleanup pass. Pixi mesh primitives are not
+  emitted by default until preview/export parity coverage proves them safe.
 - No animated angle interpolation in this cleanup pass.
 - No direct provider/API-specific AI automation in the character runtime.
 
@@ -291,7 +295,7 @@ angle-specific drawings, variants, sockets, and motion limits under it.
   "suggestedFilename": "marisol.character.json",
   "id": "character:marisol",
   "name": "Marisol",
-  "description": "Friendly presenter puppet",
+  "description": "Friendly presenter character",
   "defaultAngle": "front",
   "angles": ["front", "3qL", "3qR", "sideL", "sideR"],
   "semanticBones": [
@@ -790,13 +794,14 @@ type CharacterCommand =
   | { type: "commitMotion"; motion: MotionJson };
 ```
 
-Commands are allowed to edit DOM attrs, style blocks, and editor-readable metadata
-inside the character composition, but they must preserve valid HyperFrames HTML and
-a finite paused timeline.
+Commands are a future direction, not a current implementation: the DOM command
+executor was removed with the DOM renderer. When reintroduced, commands must
+target the renderer-neutral scene/timeline payload consumed by Pixi and preserve
+valid HyperFrames HTML plus a finite paused timeline.
 
 ## Action / Expression Editor Runtime Contract
 
-The Action/Expression editor must not maintain a flat private puppet renderer.
+The Action/Expression editor must not maintain a flat private character renderer.
 
 It should author against a draft copy of the real HyperFrames character document:
 
@@ -817,8 +822,10 @@ The editor may use React overlays for:
 - reach/mask visualization,
 - JSON validation messages.
 
-It must not draw a second copy of the puppet. The character body parts in the
-editor should come from the same HyperFrames DOM shape used by Stage and export.
+It must not draw a second copy of the character. In Pixi mode, character body
+parts come from the same generated Pixi scene inside the HyperFrames character
+composition used by Stage and export. React may draw editor-only overlays for
+selection, handles, and diagnostics, but those overlays are not render content.
 
 ## Character Document Lint
 
@@ -922,6 +929,9 @@ The incorrect shape double-counts once the head is nested under the body.
   draw order.
 - Action/Expression JSON validates target resolution, keyframe values, variants,
   regions, and per-action bounds overrides.
+- Pixi character source stages identically for preview and export, packages local
+  Pixi runtime/assets, registers a synchronous timeline, and stays mesh-free by
+  default.
 - A semantic Action resolves correctly for `front` and fails with a clear message
   for an unmapped side angle.
 - Built-in Jump moves the head exactly once through parent inheritance.
@@ -945,7 +955,7 @@ The incorrect shape double-counts once the head is nested under the body.
 6. Convert built-in presets to parent-relative bone/slot tracks.
 7. Add per-track or per-target `allowOutOfBounds` UI in the Action/Expression editor.
 8. Keep mesh/deformation extensions behind the same character document command
-   contract.
+   contract and preview/export parity tests.
 
 ## Variant Anchors and the Action-Constraint Boundary (implemented June 2026)
 

@@ -60,14 +60,20 @@ describe("CharacterEditor source integration", () => {
     expect(source).not.toContain("allParts={doc.parts}");
   });
 
-  it("keeps body map slots separate from active-angle artwork", () => {
+  it("consolidates the parts rail into one list with per-slot variant upload", () => {
     const source = readFileSync(editorPath, "utf8");
 
-    expect(source).toContain('<Accordion title="Body map" defaultOpen>');
-    expect(source).toContain("function BodyMapPanel");
+    // One rail: the layer list plus a single add-part menu; the legacy
+    // structure/body-map/upload panels are gone.
+    expect(source).toContain("function AddPartMenu");
     expect(source).toContain("listCharacterSlots(doc, { includeEmpty: true })");
     expect(source).toContain("withUpdatedCharacterSlot");
-    expect(source).toContain("label={`Upload ${selectedSlot.name}`}");
+    expect(source).toContain("const armPartImport");
+    expect(source).toContain("onAddVariant");
+    expect(source).not.toContain("function BodyMapPanel");
+    expect(source).not.toContain("function UploadSlots");
+    expect(source).not.toContain("function StructureEditor");
+    expect(source).not.toContain("roleEnabledByManifest");
   });
 
   it("uses authored bounds for editor art bounds and host clamping", () => {
@@ -112,8 +118,8 @@ describe("CharacterEditor source integration", () => {
     expect(source).toContain("group-hover:opacity-100");
     expect(source).toContain("setShowAnchors(false)");
     expect(source).toContain("showAnchors && !focusEditing");
-    expect(source).toContain("matchesSlotDefinition(part, slot)");
-    expect(source).toContain("defaultSlotIdForDefinition(slot)");
+    expect(source).toContain("matchesSlotDefinition(part, def)");
+    expect(source).toContain("defaultSlotIdForDefinition(def)");
     expect(source).toContain("defaultSlotIdForRole(role, undefined, side)");
     expect(source).toContain("semanticSlotChanged");
     expect(source).toContain("slotLabelForRoleSide(nextRole, nextSide)");

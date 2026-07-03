@@ -45,10 +45,6 @@ export interface CharacterTimelineSlotEvent {
     showSceneNodeIds?: string[];
   };
   boneAnchors?: CharacterTimelineBoneAnchor[];
-  generatedMouth?: {
-    duration: number;
-    components: Record<string, CharacterTimelineVars>;
-  };
 }
 
 export interface CharacterTimelineScene {

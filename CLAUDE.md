@@ -205,7 +205,7 @@ then call mutation actions with history disabled until the interaction ends.
 
 Characters are first-class HyperFrames composition clips. A root character clip
 uses `kind: "composition"` and `compositionKind: "character"` with a
-`compositionId`; the renderable puppet rig lives in
+`compositionId`; the renderable character rig lives in
 `project.hf.compositionHtml[compositionId]`.
 
 Reusable library identity stays in nested metadata:
@@ -249,13 +249,36 @@ data until a mechanical schema rename is done.
 The generated character source must contain explicit renderable character data:
 stable node identity, `asset:<id>` media refs, base transforms/pivots, and a
 finite paused timeline registered on `window.__timelines[compositionId]` (or the
-equivalent seekable composition contract supported by the player). The current
-v1 implementation emits puppet DOM with stable `data-character-*` attrs; a canvas
-or WebGL renderer is valid only if it lives inside the generated character
-composition, is driven by the same seek/playback path, and is staged/exported
-from the same `project.hf.compositionHtml[compositionId]` source. Character
-source is generated from rig tools for v1; generic composition source editing is
-for non-character compositions.
+equivalent seekable composition contract supported by the player).
+
+Current status (July 2026): Pixi-backed character compositions are the validated
+renderer baseline. The generated source carries renderer-neutral
+`CharacterSceneGraph` / `CharacterTimelineScene` data, initializes Pixi inside the
+character HyperFrames composition, loads assets through `PIXI.Assets.load`, renders
+textured parts as `Sprite` leaves and morph paths as vector/Graphics nodes, and
+registers a synchronous HyperFrames timeline plus a Pixi readiness gate. Preview
+and MP4 export stage this same stored composition source.
+
+Pixi is the only character renderer. The DOM puppet renderer, the per-clip
+`character.renderer` switch (a legacy saved value is stripped on save), the
+Inspector render-engine control, and the DOM character-document command boundary
+(`applyCharacterDocumentCommand`, `src/studio/character-document/`) were removed
+in July 2026. Old projects' stored DOM compositions remain valid HyperFrames
+source and keep playing until their clip rebuilds as Pixi.
+
+The legacy generated/fallback mouth rig (`character.mouthRig`,
+`mouthStyle: "rig"`) is retired: it existed only as puppet DOM. Characters that
+still reference it build without that mouth (one console warning); mouth image or
+SVG parts restore the mouth and drive lip sync. `buildPuppetDom` still computes
+the renderer-neutral motion targets/slot timelines and emits now-unstaged legacy
+DOM strings; extracting the data-only builder is a pending cleanup. Typed
+character document commands should return as renderer-neutral scene-graph
+operations when an editor consumer needs them.
+
+Do not emit Pixi mesh primitives by default. `MeshPlane` caused an export-capture
+failure when the render environment lacked the mesh render pipe. Mesh/stretch-limb
+features must return only behind dedicated preview/export parity coverage and must
+still live inside canonical `project.hf.compositionHtml`.
 
 ### Export
 
@@ -317,7 +340,10 @@ ClipEditorMeta {
 | `src/studio/hyperframes/native.ts`               | Native HTML normalization boundary for root/stage/viewport metadata and export parity                                                          |
 | `src/studio/hyperframes/player-editing.ts`       | Live player edit boundary for real iframe elements during stage manipulation                                                                   |
 | `src/studio/hyperframes/root-composition.ts`     | Root composition creation and root metadata updates                                                                                            |
-| `src/studio/character/composition.ts`            | Native character composition builder for puppet DOM, speech audio, visemes, blink, and Action/Expression timelines                             |
+| `src/studio/character/composition.ts`            | Character composition entry point; builds the Pixi-backed HyperFrames character source                                                         |
+| `src/studio/character/scene.ts`                  | Renderer-neutral character scene graph: bones, slots, parts, assets, pivots, placements, and motion targets                                    |
+| `src/studio/character/timeline-scene.ts`         | Renderer-neutral character timeline payload consumed by Pixi composition source                                                                |
+| `src/studio/character/pixi-composition.ts`       | Pixi-backed character composition builder; registers a synchronous HyperFrames timeline and Pixi readiness gate                                |
 | `src/studio/presets/action-terminology.ts`       | Shared Action/Expression labels, lanes, regions, exclusivity, and role-to-region rules                                                         |
 | `docs/ai-generated-hyperframes-clips-roadmap.md` | Roadmap for AI-generated clips, source-visible custom HyperFrames blocks, native text/composition clip support, and nested composition editing |
 
@@ -331,6 +357,8 @@ ClipEditorMeta {
 - Preview, stage playback, and MP4 export must consume the same canonical
   `project.hf` source. If a feature works only in an editor-only renderer or only
   in an export-only compiler, it violates the source-parity rule.
+- Pixi character rendering is allowed only as generated HyperFrames composition
+  source. Do not add a separate canvas preview path backed by React/editor state.
 - Never call `generateHyperframesHtml` with a shadow element list derived from UI
   state. The source of truth is `rootHtml`.
 - Never create a second `useTimelinePlayer()` call. It is called once in `Studio.tsx`

@@ -523,9 +523,17 @@ function buildPartNode(args: {
   } = args;
   const partRegistration = registrationForPart(part);
   const baseRegistration = registrationForPart(activePart);
-  const offset = bindingPresent
-    ? pivotAlignedPartOffset(activePart, anchorPartForVariant(slot.parts, variantKey) ?? part, part)
-    : { x: part.x - activePart.x, y: part.y - activePart.y };
+  // Eyes and mouths are face builders, not joint attachments: their variants sit
+  // at authored canvas offsets and must never be pivot-aligned onto a socket.
+  const faceSlot = slot.role === "eye" || slot.role === "mouth";
+  const offset =
+    bindingPresent && !faceSlot
+      ? pivotAlignedPartOffset(
+          activePart,
+          anchorPartForVariant(slot.parts, variantKey) ?? part,
+          part,
+        )
+      : { x: part.x - activePart.x, y: part.y - activePart.y };
   const base = {
     id: nodeId,
     parentId: slotNodeId,

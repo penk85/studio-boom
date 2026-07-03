@@ -325,6 +325,10 @@ function appendPixiCharacterScript(
       else displayObject.scale.y *= scale;
       if (typeof vars.skewX === "number") displayObject.skew.x = toRadians(vars.skewX);
       if (typeof vars.skewY === "number") displayObject.skew.y = toRadians(vars.skewY);
+      // Pixi has no CSS perspective, so 3D turn vars flatten to an orthographic
+      // cos() squash; without this, head/face turn motions would not move at all.
+      if (typeof vars.rotationY === "number") displayObject.scale.x *= Math.cos(toRadians(vars.rotationY));
+      if (typeof vars.rotationX === "number") displayObject.scale.y *= Math.cos(toRadians(vars.rotationX));
       if (typeof vars.rotation === "number") displayObject.rotation = toRadians(vars.rotation);
       if (typeof vars.opacity === "number") displayObject.alpha = vars.opacity;
     });

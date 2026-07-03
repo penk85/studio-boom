@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { EYE_PRESETS, MOUTH_PRESETS, generatePresetBlob } from "./presets";
 import { clamp } from "./mouth-morph";
 import {
@@ -26,6 +26,7 @@ import {
   Trash2,
   Unlock,
   Undo2,
+  Plus,
   Upload,
 } from "lucide-react";
 import { db, importMediaFile, uid } from "../db";
@@ -44,9 +45,7 @@ import {
   makePart,
   normalizeCharacterSlots,
   normalizePartVariant,
-  normalizePartManifest,
   partMatchesVariant,
-  roleEnabledByManifest,
   roleLabel,
   slotLabelForRoleSide,
   withUpdatedCharacterSlot,
@@ -59,6 +58,7 @@ import {
   variantLabelForPart,
   type VariantKeySource,
 } from "./character-utils";
+import Moveable from "react-moveable";
 import { inferCharacterSideFromText } from "./side-utils";
 import {
   anchorEntryForChild,
@@ -77,6 +77,9 @@ import {
   type VariantKeyIssue,
   type VariantPreviewShift,
 } from "./variant-pairing";
+import { planVariantAlign, type VariantAlignPlan } from "./variant-align";
+import { smartImportPlacement } from "./placement-guide";
+import { planMirrorSlot, type MirrorSlotPlan } from "./mirror-parts";
 import { parentSlotIdForBone } from "./motion-constraints";
 import {
   applyPosePreset,
@@ -124,7 +127,6 @@ import type {
   ID,
   MouthViseme,
   PartMotionBehavior,
-  PartManifest,
   PartRole,
 } from "../types";
 import {
@@ -511,6 +513,11 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   const [addAngleMenuOpen, setAddAngleMenuOpen] = useState(false);
   const [pendingDeleteAngle, setPendingDeleteAngle] = useState<CharacterAngle | null>(null);
   const [showAnchors, setShowAnchors] = useState(false);
+  // One shared file picker for every "+" in the Parts rail. The armed options
+  // carry slot/role/side, and smartImportPlacement drops the art in the right
+  // spot (aligned with the slot's art, or into its body zone).
+  const partImportInputRef = useRef<HTMLInputElement>(null);
+  const pendingImportRef = useRef<ImportOptions | null>(null);
   const variantShift = useMemo<VariantPreviewShift>(
     () =>
       doc ? variantPreviewDeltas(doc, variantPreview) : { parts: new Map(), bones: new Map() },
@@ -1122,6 +1129,22 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       const alphaBounds = await measureAlphaBoundsFromBlob(file, asset.width, asset.height);
       const id = uid();
       const label = options.label ?? asset.name;
+      const slotId = options.slotId ?? slotIdForImport(role, label, viseme, id, side);
+      // Correct assembly by default: new variants land sized/centered on the
+      // slot's current art, first art for a slot lands in its guide zone, and
+      // an explicit placement (or no match) keeps today's behavior.
+      const smartPlacement = options.placement
+        ? null
+        : smartImportPlacement({
+            slotParts: partsInSlot(slotId),
+            role,
+            side,
+            artWidth: asset.width ?? 0,
+            artHeight: asset.height ?? 0,
+            alphaBounds,
+            canvasWidth: doc.canvasWidth,
+            canvasHeight: doc.canvasHeight,
+          });
       const variantKey =
         options.variantKey?.trim() || viseme || eyeState || detectVariantKey(file.name, role, side);
       const variant = variantKey
@@ -1134,7 +1157,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       const part = makePart(role, asset.id, {
         id,
         name: label,
-        slotId: options.slotId ?? slotIdForImport(role, label, viseme, id, side),
+        slotId,
         slotName: label,
         side,
         variant,
@@ -1144,12 +1167,26 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         // Each angle owns its drawings: new art belongs to the angle it was uploaded into.
         angleIds: [normalizeCharacterRig(doc).activeAngle],
         ...fitted,
+        ...(smartPlacement
+          ? {
+              x: smartPlacement.x,
+              y: smartPlacement.y,
+              width: smartPlacement.width,
+              height: smartPlacement.height,
+            }
+          : {}),
         ...options.placement,
         zIndex: options.zIndex ?? maxZ(doc.parts) + 1,
         motionBehavior: defaultMotionBehaviorForRole(role, viseme),
       });
       addPart(part);
-      setStatus(`${file.name} added`);
+      setStatus(
+        smartPlacement?.mode === "variant"
+          ? `${file.name} added — aligned with the slot's current art`
+          : smartPlacement?.mode === "zone"
+            ? `${file.name} added — placed in the ${roleLabel(role)} guide zone`
+            : `${file.name} added`,
+      );
     } catch (err) {
       setStatus(err instanceof Error ? err.message : "Could not import SVG.");
     }
@@ -1438,7 +1475,6 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
   // Each angle owns its drawings: the canvas and layer list show only the active angle's parts.
   const resolvedEditorRuntime = editorRuntime!;
-  const manifest = normalizePartManifest(doc.manifest);
   const editorActiveAngle = resolvedEditorRuntime.angle;
   const editorAngleParts = orderedParts.filter((part) =>
     partAvailableForAngle(part, editorActiveAngle),
@@ -1447,9 +1483,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     preview?.targetRole === "head"
       ? editorAngleParts.find((part) => part.id === preview.targetPartId)
       : undefined;
-  const visibleEditorParts = editorAngleParts.filter((part) =>
-    roleEnabledByManifest(part.role, manifest),
-  );
+  const visibleEditorParts = editorAngleParts;
   const selectedEditorPart = selectedPart
     ? visibleEditorParts.find((part) => part.id === selectedPart.id)
     : null;
@@ -1606,6 +1640,71 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         updatedAt: Date.now(),
       });
     });
+  };
+
+  // Snap the selected variant's art onto the slot's default variant by aligning
+  // visible-pixel centers. Variant swaps (blinks, visemes) render at authored
+  // offsets, so misaligned imports show up offset from the character until the
+  // author fixes them — this is the one-click fix. Moves every layer of the
+  // variant by the same delta in a single undo step.
+  const selectedAlignPlan = selectedPart
+    ? planVariantAlign(partsInSlot(getPartSlotId(selectedPart)), selectedPart)
+    : null;
+
+  const armPartImport = (options: ImportOptions) => {
+    pendingImportRef.current = options;
+    partImportInputRef.current?.click();
+  };
+
+  // Duplicate a sided slot's layers to the other side with mirrored placement,
+  // pivots, pins, and motion bounds (the art itself is not flipped — parts have
+  // no flip transform yet). One undo step; the mirrored slot gets selected.
+  const mirrorPlanForSlot = (slotId: ID): MirrorSlotPlan =>
+    planMirrorSlot({
+      docParts: doc.parts,
+      slotId,
+      angle: currentAngle(),
+      canvasWidth: doc.canvasWidth,
+      makeId: uid,
+    });
+  const mirrorSlotToOtherSide = (slotId: ID) => {
+    const plan = mirrorPlanForSlot(slotId);
+    if (!plan.ok) return;
+    pushUndoSnapshot();
+    setDoc((d) => {
+      if (!d) return d;
+      return withRig({
+        ...d,
+        parts: [...d.parts, ...plan.newParts.map((part) => normalizePartPatch(part, part))],
+        updatedAt: Date.now(),
+      });
+    });
+    setStatus(
+      `Mirrored ${plan.newParts.length} layer${plan.newParts.length === 1 ? "" : "s"} to the ${plan.targetSide} side`,
+    );
+    selectSlot(plan.targetSlotId);
+  };
+  const alignSelectedVariantArt = () => {
+    const plan = selectedAlignPlan;
+    if (!doc || !selectedPart || !plan || plan.aligned) return;
+    const ids = new Set(plan.moveIds);
+    pushUndoSnapshot();
+    setDoc((d) => {
+      if (!d) return d;
+      return withRig({
+        ...d,
+        parts: d.parts.map((part) => {
+          if (!ids.has(part.id)) return part;
+          const x = Math.round(part.x + plan.dx);
+          const y = Math.round(part.y + plan.dy);
+          return normalizePartPatch({ ...part, x, y }, { x, y });
+        }),
+        updatedAt: Date.now(),
+      });
+    });
+    setStatus(
+      `Aligned "${variantLabelForPart(selectedPart)}" with "${variantLabelForPart(plan.referencePart)}"`,
+    );
   };
 
   // Set each given part's allowed-area to a padded box/ellipse of its own art (one undo
@@ -2790,39 +2889,19 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       </div>
 
       <div className="flex min-h-0 flex-1">
-        <aside className="w-72 shrink-0 overflow-auto border-r border-border bg-panel p-3 text-xs">
-          <Accordion title="Body parts" defaultOpen={doc.parts.length === 0}>
-            <StructureEditor
-              manifest={manifest}
-              onChange={(nextManifest) => updateDoc({ manifest: nextManifest })}
-            />
-          </Accordion>
-          <Accordion title="Body map" defaultOpen>
-            <BodyMapPanel
-              doc={doc}
-              manifest={manifest}
-              activeAngle={editorActiveAngle}
-              selectedSlotId={selectedSlotId}
-              onSelectSlot={selectSlot}
-              onAddSlot={(slot) => {
-                updateSlotRecord(slot.id, slot);
-                setSelectedPartId(null);
-                setSelectedSlotId(slot.id);
-              }}
-              onUpdateSlot={updateSlotRecord}
-            />
-          </Accordion>
-          <Accordion title="Artwork" defaultOpen>
-            <UploadSlots
-              onImport={importSvg}
-              parts={doc.parts}
-              slots={doc.slots ?? []}
-              manifest={manifest}
-              canvasWidth={doc.canvasWidth}
-              canvasHeight={doc.canvasHeight}
-              activeAngle={editorActiveAngle}
-              selectedSlotId={selectedSlotId}
-            />
+        <aside className="flex w-72 shrink-0 flex-col border-r border-border bg-panel text-xs">
+          <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2">
+            <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+              Parts
+            </span>
+            <span
+              className="rounded-full border border-border px-2 py-0.5 text-[9px] text-muted-foreground"
+              title="Each angle has its own drawings — new artwork goes into this view"
+            >
+              {ANGLE_LABELS[editorActiveAngle]}
+            </span>
+          </div>
+          <div className="flex-1 overflow-auto p-3">
             <LayerList
               parts={orderedParts.filter((part) => partAvailableForAngle(part, editorActiveAngle))}
               slots={doc.slots ?? []}
@@ -2838,8 +2917,35 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               onToggleSlotLocked={toggleSlotLocked}
               onNudgeSlotZ={nudgeSlotZ}
               onRemoveSlot={removeSlot}
+              onAddVariant={(group) =>
+                armPartImport({
+                  slotId: group.slotId,
+                  role: group.role,
+                  side: group.side,
+                  label: group.name,
+                })
+              }
             />
-          </Accordion>
+            <AddPartMenu
+              doc={doc}
+              activeAngle={editorActiveAngle}
+              onPickImport={armPartImport}
+              onImport={importSvg}
+            />
+          </div>
+          <input
+            ref={partImportInputRef}
+            className="hidden"
+            type="file"
+            accept=".svg,image/svg+xml"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              const options = pendingImportRef.current;
+              pendingImportRef.current = null;
+              if (file) void importSvg(file, options ?? {});
+              e.currentTarget.value = "";
+            }}
+          />
         </aside>
 
         <main
@@ -2927,27 +3033,6 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   onStartAnchorDrag={startAnchorDrag}
                 />
               )}
-              {selectedEditorPart && !focusEditing && (
-                <PartControlsOverlay
-                  part={selectedEditorPart}
-                  canvasWidth={doc.canvasWidth}
-                  canvasHeight={doc.canvasHeight}
-                  scale={scale}
-                  boundsMode={boundsMode}
-                  onBoundsModeChange={setBoundsMode}
-                  preview={preview}
-                  previewParentPart={previewParentPart}
-                  allParts={editorAngleParts}
-                  runtime={resolvedEditorRuntime}
-                  shift={partShift(selectedEditorPart)}
-                  placement={runtimePlacementForPart(selectedEditorPart)}
-                  onBeginChange={() => {
-                    setInteracting(true);
-                    pushUndoSnapshot();
-                  }}
-                  onChange={(patch) => updatePart(selectedEditorPart.id, patch, { history: false })}
-                />
-              )}
               {selectedSlotId &&
                 selectedSlotBounds &&
                 !focusEditing &&
@@ -2999,77 +3084,96 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                 })()}
             </div>
           </div>
+          {selectedEditorPart && !focusEditing && (
+            <CharacterPartMoveable
+              part={selectedEditorPart}
+              previewTransform={partPreviewTransform(selectedEditorPart)}
+              canvasRef={canvasRef}
+              wrapRef={wrapRef}
+              scale={scale}
+              onBegin={() => {
+                setInteracting(true);
+                pushUndoSnapshot();
+              }}
+              onPatch={(patch) => updatePart(selectedEditorPart.id, patch, { history: false })}
+              onEnd={() => setInteracting(false)}
+            />
+          )}
           <div className="pointer-events-none absolute bottom-2 right-3 rounded bg-panel/80 px-2 py-1 text-[10px] text-muted-foreground">
             {doc.canvasWidth}×{doc.canvasHeight} · {Math.round(scale * 100)}%
           </div>
-          {editorPhase !== "build" && (
-            <div className="absolute bottom-2 left-3 flex gap-1">
-              <button
-                type="button"
-                aria-pressed={showBones}
-                onClick={toggleBones}
-                className={`flex items-center gap-1 rounded border bg-panel/90 px-2 py-1 text-[10px] ${
-                  showBones ? "border-primary text-primary" : "border-border text-muted-foreground"
-                }`}
-                title={
-                  showBones
-                    ? "Hide the skeleton"
-                    : "Show the skeleton — calibrate joints or move joints with art"
-                }
-              >
-                {showBones ? <Eye size={11} /> : <EyeOff size={11} />}
-                Bones
-              </button>
-              {showBones && (
-                <div
-                  role="group"
-                  aria-label="Bone drag mode"
-                  className="flex overflow-hidden rounded border border-border bg-panel/90 text-[10px]"
+          <div className="absolute bottom-2 left-3 flex gap-1">
+            {editorPhase !== "build" && (
+              <>
+                <button
+                  type="button"
+                  aria-pressed={showBones}
+                  onClick={toggleBones}
+                  className={`flex items-center gap-1 rounded border bg-panel/90 px-2 py-1 text-[10px] ${
+                    showBones
+                      ? "border-primary text-primary"
+                      : "border-border text-muted-foreground"
+                  }`}
+                  title={
+                    showBones
+                      ? "Hide the skeleton"
+                      : "Show the skeleton — calibrate joints or move joints with art"
+                  }
                 >
-                  <button
-                    type="button"
-                    aria-pressed={boneDragMode === "calibrate"}
-                    onClick={() => setBoneDragMode("calibrate")}
-                    className={`px-2 py-1 ${
-                      boneDragMode === "calibrate"
-                        ? "bg-primary/15 text-primary"
-                        : "text-muted-foreground hover:text-foreground"
-                    }`}
-                    title="Drag bones onto the artwork while images stay pinned"
+                  {showBones ? <Eye size={11} /> : <EyeOff size={11} />}
+                  Bones
+                </button>
+                {showBones && (
+                  <div
+                    role="group"
+                    aria-label="Bone drag mode"
+                    className="flex overflow-hidden rounded border border-border bg-panel/90 text-[10px]"
                   >
-                    Calibrate
-                  </button>
-                  <button
-                    type="button"
-                    aria-pressed={boneDragMode === "moveArt"}
-                    onClick={() => setBoneDragMode("moveArt")}
-                    className={`border-l border-border px-2 py-1 ${
-                      boneDragMode === "moveArt"
-                        ? "bg-primary/15 text-primary"
-                        : "text-muted-foreground hover:text-foreground"
-                    }`}
-                    title="Drag the joint and attached artwork together"
-                  >
-                    Move art
-                  </button>
-                </div>
-              )}
-              <button
-                type="button"
-                aria-pressed={showAnchors}
-                onClick={() => setShowAnchors((shown) => !shown)}
-                className={`flex items-center gap-1 rounded border bg-panel/90 px-2 py-1 text-[10px] ${
-                  showAnchors
-                    ? "border-primary text-primary"
-                    : "border-border text-muted-foreground"
-                }`}
-                title="Show where each child re-anchors per parent variant"
-              >
-                {showAnchors ? <Eye size={11} /> : <EyeOff size={11} />}
-                Anchors
-              </button>
-            </div>
-          )}
+                    <button
+                      type="button"
+                      aria-pressed={boneDragMode === "calibrate"}
+                      onClick={() => setBoneDragMode("calibrate")}
+                      className={`px-2 py-1 ${
+                        boneDragMode === "calibrate"
+                          ? "bg-primary/15 text-primary"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                      title="Drag bones onto the artwork while images stay pinned"
+                    >
+                      Calibrate
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={boneDragMode === "moveArt"}
+                      onClick={() => setBoneDragMode("moveArt")}
+                      className={`border-l border-border px-2 py-1 ${
+                        boneDragMode === "moveArt"
+                          ? "bg-primary/15 text-primary"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                      title="Drag the joint and attached artwork together"
+                    >
+                      Move art
+                    </button>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  aria-pressed={showAnchors}
+                  onClick={() => setShowAnchors((shown) => !shown)}
+                  className={`flex items-center gap-1 rounded border bg-panel/90 px-2 py-1 text-[10px] ${
+                    showAnchors
+                      ? "border-primary text-primary"
+                      : "border-border text-muted-foreground"
+                  }`}
+                  title="Show where each child re-anchors per parent variant"
+                >
+                  {showAnchors ? <Eye size={11} /> : <EyeOff size={11} />}
+                  Anchors
+                </button>
+              </>
+            )}
+          </div>
           {modeBanner && (
             <div
               role="status"
@@ -3283,6 +3387,9 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   keyIssues={variantKeyIssues}
                   phase={editorPhase}
                   onSwitchPhase={switchPhase}
+                  onImport={importSvg}
+                  mirrorPlan={mirrorPlanForSlot(selectedSlotId)}
+                  onMirror={() => mirrorSlotToOtherSide(selectedSlotId)}
                   previewedKey={variantPreview[selectedSlotId]}
                   variantPreview={variantPreview}
                   pinPlacement={pinPlacement}
@@ -3314,6 +3421,8 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   onSwitchPhase={switchPhase}
                   onSelectSlot={selectSlot}
                   variantPreview={variantPreview}
+                  alignPlan={selectedAlignPlan}
+                  onAlignVariant={alignSelectedVariantArt}
                   anchorDragContext={
                     selectedPart ? anchorDragContextForSlot(getPartSlotId(selectedPart)) : null
                   }
@@ -3354,481 +3463,111 @@ interface ImportOptions {
   zIndex?: number;
 }
 
-const STRUCTURE_OPTIONS: Array<{ key: keyof PartManifest; label: string }> = [
-  { key: "hasHead", label: "Head" },
-  { key: "hasBody", label: "Body" },
-  { key: "hasArms", label: "Arms" },
-  { key: "hasHands", label: "Hands" },
-  { key: "hasLegs", label: "Legs" },
-  { key: "hasFeet", label: "Feet" },
-  { key: "hasEyes", label: "Eyes" },
-  { key: "hasIrises", label: "Irises" },
-  { key: "hasBrows", label: "Eyebrows" },
-  { key: "hasNose", label: "Nose" },
-  { key: "hasMouth", label: "Mouth" },
-  { key: "hasHair", label: "Hair" },
-  { key: "hasAccessories", label: "Accessories" },
-];
-
-function StructureEditor({
-  manifest,
-  onChange,
-}: {
-  manifest: PartManifest;
-  onChange: (manifest: PartManifest) => void;
-}) {
-  return (
-    <div className="mb-3 rounded border border-border bg-panel-2 p-2">
-      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-        Character Structure
-      </div>
-      <div className="grid grid-cols-2 gap-1">
-        {STRUCTURE_OPTIONS.map((item) => (
-          <label key={item.key} className="flex items-center gap-1.5 text-[11px]">
-            <input
-              type="checkbox"
-              checked={manifest[item.key]}
-              onChange={(e) => onChange({ ...manifest, [item.key]: e.target.checked })}
-            />
-            {item.label}
-          </label>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function BodyMapPanel({
+/**
+ * The single entry point for new artwork: pick which body part you are adding,
+ * then choose its image — it lands in that part's zone automatically. Replaces
+ * the old structure checklist, body map, and per-part upload grids. Preset
+ * mouths live here too so a character gets a full talking mouth without
+ * drawing ten shapes.
+ */
+function AddPartMenu({
   doc,
-  manifest,
   activeAngle,
-  selectedSlotId,
-  onSelectSlot,
-  onAddSlot,
-  onUpdateSlot,
+  onPickImport,
+  onImport,
 }: {
   doc: CharacterPreset;
-  manifest: PartManifest;
   activeAngle: CharacterAngle;
-  selectedSlotId: ID | null;
-  onSelectSlot: (slotId: ID) => void;
-  onAddSlot: (slot: CharacterSlot) => void;
-  onUpdateSlot: (slotId: ID, patch: Partial<CharacterSlot>) => void;
-}) {
-  const slots = listCharacterSlots(doc, { includeEmpty: true }).filter((slot) =>
-    roleEnabledByManifest(slot.role, manifest),
-  );
-  const selectedSlot = selectedSlotId
-    ? slots.find((slot) => slot.id === selectedSlotId)
-    : undefined;
-  const missingSlots = SLOT_DEFS.filter((slot) => {
-    if (!roleEnabledByManifest(slot.role, manifest)) return false;
-    return !slots.some((candidate) => matchesSlotDefinition(candidate, slot));
-  });
-
-  return (
-    <div className="space-y-2">
-      <div className="text-[10px] leading-snug text-muted-foreground">
-        Stable slots are shared by the character. Artwork inside a slot remains angle-specific
-        unless an uploaded drawing is marked shared.
-      </div>
-      <div className="space-y-1">
-        {slots.length === 0 ? (
-          <div className="rounded border border-dashed border-border px-2 py-3 text-center text-[11px] text-muted-foreground">
-            Add planned slots, then upload artwork for {ANGLE_LABELS[activeAngle]}.
-          </div>
-        ) : (
-          slots.map((slot) => {
-            const activeArtCount = slot.parts.filter((part) =>
-              partAvailableForAngle(part, activeAngle),
-            ).length;
-            return (
-              <button
-                key={slot.id}
-                type="button"
-                onClick={() => onSelectSlot(slot.id)}
-                className={`w-full rounded border px-2 py-1.5 text-left ${
-                  selectedSlotId === slot.id
-                    ? "border-primary bg-primary/15 text-foreground"
-                    : "border-border bg-background/50 text-muted-foreground hover:bg-panel"
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="min-w-0 truncate font-medium text-foreground">{slot.name}</span>
-                  <span className="shrink-0 rounded-full border border-border px-1.5 py-0.5 text-[9px]">
-                    {activeArtCount || "no"} art
-                  </span>
-                </div>
-                <div className="mt-0.5 flex items-center gap-1 text-[9px]">
-                  <span>{roleLabel(slot.role)}</span>
-                  {slot.side && (
-                    <>
-                      <span>·</span>
-                      <span>{slot.side}</span>
-                    </>
-                  )}
-                </div>
-              </button>
-            );
-          })
-        )}
-      </div>
-      {selectedSlot && (
-        <div className="rounded border border-border bg-background/40 p-2">
-          <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Selected slot
-          </div>
-          <div className="grid gap-2">
-            <Field label="Name">
-              <input
-                value={selectedSlot.name}
-                onChange={(e) => onUpdateSlot(selectedSlot.id, { name: e.target.value })}
-                className="w-full rounded border border-border bg-background px-2 py-1"
-              />
-            </Field>
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Role">
-                <select
-                  value={selectedSlot.role}
-                  onChange={(e) =>
-                    onUpdateSlot(selectedSlot.id, { role: e.target.value as PartRole })
-                  }
-                  className="w-full rounded border border-border bg-background px-2 py-1"
-                >
-                  {ROLE_OPTIONS.map((role) => (
-                    <option key={role} value={role}>
-                      {roleLabel(role)}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Side">
-                <select
-                  value={selectedSlot.side ?? ""}
-                  onChange={(e) =>
-                    onUpdateSlot(selectedSlot.id, {
-                      side: (e.target.value || undefined) as CharacterPart["side"] | undefined,
-                    })
-                  }
-                  className="w-full rounded border border-border bg-background px-2 py-1"
-                >
-                  {SLOT_SIDE_OPTIONS.map((option) => (
-                    <option key={option.value || "none"} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            </div>
-          </div>
-        </div>
-      )}
-      {missingSlots.length > 0 && (
-        <div>
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Add planned slot
-          </div>
-          <div className="flex flex-wrap gap-1">
-            {missingSlots.map((slot, index) => {
-              const id = defaultSlotIdForDefinition(slot);
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() =>
-                    onAddSlot({
-                      id,
-                      name: slot.label,
-                      role: slot.role,
-                      side: slot.side,
-                      sortOrder: index,
-                    })
-                  }
-                  className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-panel hover:text-foreground"
-                >
-                  {slot.label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function UploadSlots({
-  onImport,
-  parts,
-  slots,
-  manifest,
-  canvasWidth,
-  canvasHeight,
-  activeAngle,
-  selectedSlotId,
-}: {
+  onPickImport: (options: ImportOptions) => void;
   onImport: (file: File, options?: ImportOptions) => void;
-  parts: CharacterPart[];
-  slots: CharacterSlot[];
-  manifest: PartManifest;
-  canvasWidth: number;
-  canvasHeight: number;
-  activeAngle: CharacterAngle;
-  selectedSlotId: ID | null;
 }) {
-  const [customSlotName, setCustomSlotName] = useState("");
-  const [variantSlotId, setVariantSlotId] = useState("");
-  const [variantKey, setVariantKey] = useState("");
-  const [variantName, setVariantName] = useState("");
-  const normalizedCustomName = customSlotName.trim();
-  const customSlotId = normalizedCustomName ? `custom:${slug(normalizedCustomName)}` : "";
-  const variantSlots = listCharacterSlots(
-    { parts, slots },
-    { angle: activeAngle, includeEmpty: false },
+  const [open, setOpen] = useState(false);
+  const [customName, setCustomName] = useState("");
+  const [showMouthPresets, setShowMouthPresets] = useState(false);
+  const slotRecords = listCharacterSlots(doc, { includeEmpty: true });
+  const missingDefs = SLOT_DEFS.filter(
+    (def) =>
+      !doc.parts.some(
+        (part) => matchesSlotDefinition(part, def) && partAvailableForAngle(part, activeAngle),
+      ),
   );
-  const bodySlots = listCharacterSlots({ parts, slots }, { includeEmpty: true });
-  const selectedSlot = selectedSlotId
-    ? bodySlots.find((slot) => slot.id === selectedSlotId)
-    : undefined;
-  const selectedVariantSlot = variantSlots.find((slot) => slot.id === variantSlotId);
-  const normalizedVariantKey = variantKey.trim();
+  const pick = (def: SlotDefinition) => {
+    const slotRecord = slotRecords.find((slot) => matchesSlotDefinition(slot, def));
+    setOpen(false);
+    onPickImport({
+      role: def.role,
+      side: def.side,
+      label: def.label,
+      slotId: slotRecord?.id ?? defaultSlotIdForDefinition(def),
+    });
+  };
+  const pickCustom = () => {
+    const name = customName.trim();
+    if (!name) return;
+    setCustomName("");
+    setOpen(false);
+    onPickImport({ role: "custom", label: name, slotId: `custom:${slug(name)}` });
+  };
+
   return (
-    <div className="space-y-3">
-      <div>
-        <div className="font-semibold uppercase tracking-wider text-muted-foreground">
-          SVG Parts
-        </div>
-        <div className="mt-1 text-[11px] text-muted-foreground">
-          Drop SVGs on the canvas or upload into a slot.
-        </div>
-        <div className="mt-1 rounded border border-primary/40 bg-primary/10 px-2 py-1 text-[11px] text-primary">
-          Uploading into: {ANGLE_LABELS[activeAngle]} — each angle has its own drawings.
-        </div>
-      </div>
-      {selectedSlot && (
-        <div className="rounded border border-primary/30 bg-primary/10 p-2">
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-primary">
-            Selected slot
-          </div>
-          <SlotUpload
-            label={`Upload ${selectedSlot.name}`}
-            compact
-            filled={selectedSlot.parts.some((part) => partAvailableForAngle(part, activeAngle))}
-            onUpload={(file) =>
-              onImport(file, {
-                role: selectedSlot.role,
-                side: selectedSlot.side,
-                label: selectedSlot.name,
-                slotId: selectedSlot.id,
-              })
-            }
-          />
-        </div>
-      )}
-      <div className="grid grid-cols-2 gap-2">
-        {SLOT_DEFS.filter(
-          (slot) =>
-            slot.role !== "eye" &&
-            slot.role !== "iris" &&
-            roleEnabledByManifest(slot.role, manifest),
-        ).map((slot) => {
-          const existingSlot = bodySlots.find((candidate) =>
-            matchesSlotDefinition(candidate, slot),
-          );
-          const slotId = existingSlot?.id ?? defaultSlotIdForDefinition(slot);
-          const filled = parts.some(
-            (part) => matchesSlotDefinition(part, slot) && partAvailableForAngle(part, activeAngle),
-          );
-          return (
-            <SlotUpload
-              key={`${slot.label}-${slot.role}`}
-              label={slot.label}
-              filled={filled}
-              onUpload={(file) =>
-                onImport(file, {
-                  role: slot.role,
-                  side: slot.side,
-                  label: slot.label,
-                  slotId,
-                })
-              }
-            />
-          );
-        })}
-      </div>
-      <div className="rounded border border-border bg-panel-2 p-2">
-        <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-          Add variant to existing slot
-        </div>
-        <div className="mb-2 text-[10px] leading-snug text-muted-foreground">
-          Use this for alternate images of the same animatable part, like hand open/fist/point.
-        </div>
-        <div className="grid gap-2">
-          <select
-            value={variantSlotId}
-            onChange={(e) => setVariantSlotId(e.target.value)}
-            aria-label="Variant slot"
-            className="min-w-0 rounded border border-border bg-background px-2 py-1"
-          >
-            <option value="">Choose slot</option>
-            {variantSlots.map((slot) => (
-              <option key={slot.id} value={slot.id}>
-                {slot.name}
-              </option>
+    <div className="mt-2 space-y-2">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className={`flex w-full items-center justify-center gap-1 rounded border border-dashed px-2 py-2 ${
+          open
+            ? "border-primary text-primary"
+            : "border-border text-muted-foreground hover:border-primary/60 hover:text-foreground"
+        }`}
+        title="Add a body part — pick what it is, then choose its image"
+      >
+        <Plus size={13} />
+        Add part
+      </button>
+      {open && (
+        <>
+          <div className="flex flex-wrap gap-1">
+            {missingDefs.map((def) => (
+              <button
+                key={`${def.role}:${def.side ?? "center"}`}
+                type="button"
+                onClick={() => pick(def)}
+                className="rounded border border-border px-1.5 py-1 text-[10px] text-muted-foreground hover:bg-panel hover:text-foreground"
+              >
+                {def.label}
+              </button>
             ))}
-          </select>
-          <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
+          </div>
+          <div className="flex items-center gap-1">
             <input
-              value={variantKey}
-              onChange={(e) => setVariantKey(e.target.value)}
-              aria-label="Variant key"
-              placeholder="fist"
-              className="min-w-0 rounded border border-border bg-background px-2 py-1"
-            />
-            <input
-              value={variantName}
-              onChange={(e) => setVariantName(e.target.value)}
-              aria-label="Variant label"
-              placeholder="Fist"
-              className="min-w-0 rounded border border-border bg-background px-2 py-1"
-            />
-            <SlotUpload
-              label="Upload"
-              compact
-              disabled={!selectedVariantSlot || !normalizedVariantKey}
-              filled={Boolean(
-                selectedVariantSlot &&
-                normalizedVariantKey &&
-                selectedVariantSlot.parts.some((part) =>
-                  partMatchesVariant(part, normalizedVariantKey),
-                ),
-              )}
-              onUpload={(file) => {
-                if (!selectedVariantSlot || !normalizedVariantKey) return;
-                const representative = selectedVariantSlot.parts[0];
-                onImport(file, {
-                  role: selectedVariantSlot.role,
-                  side: selectedVariantSlot.side ?? representative?.side,
-                  label: selectedVariantSlot.name,
-                  slotId: selectedVariantSlot.id,
-                  variantKey: normalizedVariantKey,
-                  variantLabel: variantName.trim() || normalizedVariantKey,
-                  variantKind: defaultVariantKindForRole(
-                    selectedVariantSlot.role,
-                    undefined,
-                    undefined,
-                  ),
-                  zIndex: representative?.zIndex,
-                });
+              value={customName}
+              onChange={(e) => setCustomName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") pickCustom();
               }}
+              placeholder="Custom part name…"
+              className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1"
             />
+            <button
+              type="button"
+              onClick={pickCustom}
+              disabled={!customName.trim()}
+              className="rounded border border-border p-1.5 text-muted-foreground hover:text-foreground disabled:opacity-50"
+              title="Add the custom part, then choose its image"
+            >
+              <Plus size={13} />
+            </button>
           </div>
-        </div>
-      </div>
-      <div className="rounded border border-border bg-panel-2 p-2">
-        <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-          Named custom slot
-        </div>
-        <div className="mb-2 text-[10px] leading-snug text-muted-foreground">
-          Use this for props, tails, wings, clothing, or any part outside the base human schema. The
-          name becomes the slot id used in character JSON and AI motion prompts.
-        </div>
-        <div className="grid grid-cols-[1fr_auto] gap-2">
-          <input
-            value={customSlotName}
-            onChange={(e) => setCustomSlotName(e.target.value)}
-            aria-label="Custom slot name"
-            placeholder=""
-            className="min-w-0 rounded border border-border bg-background px-2 py-1"
-          />
-          <SlotUpload
-            label="Upload"
-            compact
-            filled={!!customSlotId && parts.some((p) => getPartSlotId(p) === customSlotId)}
-            onUpload={(file) => {
-              const label = normalizedCustomName || file.name.replace(/\.svg$/i, "");
-              onImport(file, {
-                role: "custom",
-                label,
-                slotId: `custom:${slug(label)}`,
-              });
-            }}
-          />
-        </div>
-      </div>
-      {manifest.hasEyes && (
-        <div className="rounded border border-border bg-panel-2 p-2">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="font-semibold uppercase tracking-wider text-muted-foreground">
-              Eye States
-            </span>
-            <span className="text-[10px] text-muted-foreground">(optional)</span>
-          </div>
-          <EyePresetSelector
-            onImport={onImport}
-            canvasWidth={canvasWidth}
-            canvasHeight={canvasHeight}
-          />
-          {manifest.hasIrises && (
-            <>
-              <div className="mb-2 text-[10px] text-muted-foreground">Upload iris artwork:</div>
-              <div className="mb-3 grid grid-cols-2 gap-1.5">
-                {(["left", "right"] as const).map((side) => {
-                  const label = `${side === "left" ? "Left" : "Right"} Iris`;
-                  return (
-                    <SlotUpload
-                      key={`${side}-iris`}
-                      compact
-                      label={label}
-                      filled={parts.some((p) => p.role === "iris" && p.side === side)}
-                      onUpload={(file) =>
-                        onImport(file, {
-                          role: "iris",
-                          side,
-                          label,
-                          slotId: `slot:${side}-iris`,
-                          zIndex: 55,
-                        })
-                      }
-                    />
-                  );
-                })}
-              </div>
-            </>
-          )}
-          <div className="text-[10px] text-muted-foreground mb-2">
-            Or upload eye state variants:
-          </div>
-          <div className="grid grid-cols-2 gap-1.5">
-            {(["left", "right"] as const).flatMap((side) =>
-              EYE_STATES.map((eyeState) => {
-                const label = `${side === "left" ? "Left" : "Right"} ${eyeState}`;
-                return (
-                  <SlotUpload
-                    key={`${side}-${eyeState}`}
-                    compact
-                    label={label}
-                    filled={parts.some(
-                      (p) => p.role === "eye" && p.side === side && p.eyeState === eyeState,
-                    )}
-                    onUpload={(file) =>
-                      onImport(file, {
-                        role: "eye",
-                        side,
-                        eyeState,
-                        label,
-                        slotId: `slot:${side}-eye`,
-                        zIndex: 50,
-                      })
-                    }
-                  />
-                );
-              }),
-            )}
-          </div>
-        </div>
+          <button
+            type="button"
+            onClick={() => setShowMouthPresets((current) => !current)}
+            className="w-full rounded border border-border px-2 py-1 text-left text-[10px] text-muted-foreground hover:text-foreground"
+          >
+            {showMouthPresets ? "Hide mouth presets" : "Talking mouth from a preset…"}
+          </button>
+          {showMouthPresets && <MouthPresetSelector onImport={onImport} />}
+        </>
       )}
-      {manifest.hasMouth && <MouthShapeSetup parts={parts} onImport={onImport} />}
     </div>
   );
 }
@@ -3882,46 +3621,6 @@ function SlotUpload({
   );
 }
 
-function MouthShapeSetup({
-  parts,
-  onImport,
-}: {
-  parts: CharacterPart[];
-  onImport: (file: File, options?: ImportOptions) => void;
-}) {
-  return (
-    <div className="rounded border border-border bg-panel-2 p-2">
-      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-        Mouth Shapes
-      </div>
-      <MouthPresetSelector onImport={onImport} />
-      <div className="mb-2 text-[10px] text-muted-foreground">Or upload mouth shape variants:</div>
-      <div className="grid grid-cols-2 gap-1.5">
-        {MOUTH_VISEMES.map((viseme) => {
-          const part = parts.find((p) => p.role === "mouth" && p.viseme === viseme);
-          return (
-            <SlotUpload
-              key={viseme}
-              compact
-              label={viseme}
-              filled={Boolean(part)}
-              onUpload={(file) =>
-                onImport(file, {
-                  role: "mouth",
-                  viseme,
-                  label: `Mouth ${viseme}`,
-                  slotId: "role:mouth",
-                  zIndex: 60,
-                })
-              }
-            />
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 const VISEME_ORDER: MouthViseme[] = ["rest", "A", "E", "O", "U", "MBP", "FV", "L", "WQ", "Smile"];
 const EYE_STATE_ORDER: EyeState[] = ["open", "half", "closed", "wink"];
 
@@ -3959,6 +3658,7 @@ function LayerPartRow({
   onSelect,
   onChange,
   onRemove,
+  onAddVariant,
 }: {
   part: CharacterPart;
   selected: boolean;
@@ -3969,6 +3669,8 @@ function LayerPartRow({
   onSelect: () => void;
   onChange: (patch: Partial<CharacterPart>) => void;
   onRemove: () => void;
+  /** Upload another variant image into this part's slot. */
+  onAddVariant?: () => void;
 }) {
   const thumbUrl = useMediaUrl(part.mediaId);
   return (
@@ -3994,6 +3696,18 @@ function LayerPartRow({
           <span className="ml-1 text-[10px] text-muted-foreground">{roleLabel(part.role)}</span>
         )}
       </span>
+      {onAddVariant && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onAddVariant();
+          }}
+          className="rounded p-1 text-muted-foreground hover:text-foreground"
+          title="Add a variant image to this part — it lands aligned with the current art"
+        >
+          <Plus size={14} />
+        </button>
+      )}
       <button
         onClick={(e) => {
           e.stopPropagation();
@@ -4065,6 +3779,7 @@ function LayerList({
   onToggleSlotLocked,
   onNudgeSlotZ,
   onRemoveSlot,
+  onAddVariant,
 }: {
   parts: CharacterPart[];
   slots: CharacterSlot[];
@@ -4080,6 +3795,13 @@ function LayerList({
   onToggleSlotLocked: (slotId: ID) => void;
   onNudgeSlotZ: (slotId: ID, delta: number) => void;
   onRemoveSlot: (slotId: ID) => void;
+  /** Upload another variant image into this slot (auto-placed on its art). */
+  onAddVariant: (group: {
+    slotId: ID;
+    role: PartRole;
+    side?: CharacterPart["side"];
+    name: string;
+  }) => void;
 }) {
   const [expanded, setExpanded] = useState<Set<ID>>(new Set());
 
@@ -4139,6 +3861,7 @@ function LayerList({
             onSelect={() => onSelect(part.id)}
             onChange={(patch) => onChange(part.id, patch)}
             onRemove={() => onRemove(part.id)}
+            onAddVariant={() => onAddVariant(group)}
           />
           {children}
         </div>
@@ -4175,6 +3898,16 @@ function LayerList({
               {group.slotParts.length} variants
             </span>
           </span>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onAddVariant(group);
+            }}
+            className="rounded p-1 text-muted-foreground hover:text-foreground"
+            title="Add a variant image to this part — it lands aligned with the current art"
+          >
+            <Plus size={14} />
+          </button>
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -4252,14 +3985,7 @@ function LayerList({
     );
   };
 
-  return (
-    <div className="mt-4">
-      <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
-        Layers
-      </div>
-      <div className="space-y-1">{roots.map((group) => renderLayerGroup(group))}</div>
-    </div>
-  );
+  return <div className="space-y-1">{roots.map((group) => renderLayerGroup(group))}</div>;
 }
 
 function parentSlotIdForEditorRelation(
@@ -4296,6 +4022,8 @@ function Inspector({
   onSwitchPhase,
   onSelectSlot,
   variantPreview,
+  alignPlan,
+  onAlignVariant,
   anchorDragContext,
   pinPlacement,
   onPreviewVariant,
@@ -4320,6 +4048,9 @@ function Inspector({
   onSwitchPhase: (phase: "build" | "rig" | "pose") => void;
   onSelectSlot: (slotId: ID) => void;
   variantPreview: Record<ID, string>;
+  /** Snap plan for aligning this variant's art onto the slot's default variant. */
+  alignPlan: VariantAlignPlan | null;
+  onAlignVariant: () => void;
   /** Set when dragging this part on the canvas would pin its anchor (parent variant previewed). */
   anchorDragContext: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
   pinPlacement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
@@ -4456,6 +4187,28 @@ function Inspector({
                 <Trash2 size={14} />
               </button>
             </div>
+            {alignPlan && (
+              <div className="mb-3 rounded border border-border bg-background/60 p-2 text-[11px] leading-snug text-muted-foreground">
+                <div>
+                  Swaps in for{" "}
+                  <span className="text-foreground">
+                    {variantLabelForPart(alignPlan.referencePart)}
+                  </span>{" "}
+                  — the other variants stay visible as ghosts while this one is selected.
+                </div>
+                <button
+                  type="button"
+                  onClick={onAlignVariant}
+                  disabled={alignPlan.aligned}
+                  className="mt-1.5 w-full rounded border border-border bg-panel px-2 py-1 text-foreground hover:bg-panel-2 disabled:cursor-default disabled:opacity-60"
+                  title="Move this variant's artwork so its visible pixels center on the default variant's"
+                >
+                  {alignPlan.aligned
+                    ? "Art centers are aligned"
+                    : `Align art with "${variantLabelForPart(alignPlan.referencePart)}"`}
+                </button>
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-2">
               <Field label="Role">
@@ -4948,35 +4701,6 @@ function CanvasSection({
 }
 
 /** Simple collapsible section used to fold setup-time tools out of the way. */
-function Accordion({
-  title,
-  defaultOpen = false,
-  children,
-}: {
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <section className="mb-3 rounded border border-border bg-panel-2 p-2">
-      <button
-        type="button"
-        onClick={() => setOpen((prev) => !prev)}
-        className="flex w-full items-center justify-between text-left font-semibold uppercase tracking-wider text-muted-foreground"
-      >
-        {title}
-        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-      </button>
-      {open && <div className="mt-2">{children}</div>}
-    </section>
-  );
-}
-
-/**
- * Rig-phase skeleton card: the selected bone's transform, per-angle slot binding, and the
- * reset-to-default escape hatch. Bones are selected by clicking them on the canvas.
- */
 function SkeletonCard({
   doc,
   selectedBoneId,
@@ -6259,6 +5983,9 @@ function GroupInspector({
   keyIssues,
   phase,
   onSwitchPhase,
+  onImport,
+  mirrorPlan,
+  onMirror,
   previewedKey,
   variantPreview,
   pinPlacement,
@@ -6286,6 +6013,9 @@ function GroupInspector({
   keyIssues: Map<ID, VariantKeyIssue[]>;
   phase: "build" | "rig" | "pose";
   onSwitchPhase: (phase: "build" | "rig" | "pose") => void;
+  onImport: (file: File, options?: ImportOptions) => void;
+  mirrorPlan: MirrorSlotPlan;
+  onMirror: () => void;
   previewedKey?: string;
   variantPreview: Record<ID, string>;
   pinPlacement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
@@ -6316,6 +6046,37 @@ function GroupInspector({
   const role = slot?.role ?? parts[0]?.role ?? "custom";
   const side = slot?.side ?? parts.find((part) => part.side)?.side;
   const isMouth = role === "mouth";
+  // The canonical shape set for this slot, with upload targets for the gaps —
+  // lip sync needs every viseme, blinking needs open + closed.
+  const expectedVariantSpecs: Array<{ key: string; options: ImportOptions }> =
+    role === "mouth"
+      ? VISEME_ORDER.map((viseme) => ({
+          key: viseme,
+          options: {
+            role,
+            viseme,
+            slotId,
+            side,
+            label: `Mouth ${viseme}`,
+            zIndex: parts[0]?.zIndex,
+          },
+        }))
+      : role === "eye"
+        ? EYE_STATE_ORDER.map((state) => ({
+            key: state,
+            options: {
+              role,
+              eyeState: state,
+              slotId,
+              side,
+              label: `${name} ${state}`,
+              zIndex: parts[0]?.zIndex,
+            },
+          }))
+        : [];
+  const missingExpectedVariants = expectedVariantSpecs.filter(
+    ({ key }) => !parts.some((part) => partMatchesVariant(part, key)),
+  );
   const averageRotation =
     parts.length > 0
       ? Math.round(parts.reduce((sum, part) => sum + part.rotation, 0) / parts.length)
@@ -6517,6 +6278,44 @@ function GroupInspector({
             />
           ))}
         </div>
+        {missingExpectedVariants.length > 0 && (
+          <>
+            <div className="mb-1 mt-2 text-[10px] text-muted-foreground">
+              {role === "mouth"
+                ? "Missing mouth shapes — upload to complete lip sync:"
+                : "Missing eye states — open and closed drive blinking:"}
+            </div>
+            <div className="grid grid-cols-2 gap-1.5">
+              {missingExpectedVariants.map(({ key, options }) => (
+                <SlotUpload
+                  key={key}
+                  compact
+                  label={key}
+                  filled={false}
+                  onUpload={(file) => onImport(file, options)}
+                />
+              ))}
+            </div>
+          </>
+        )}
+        {(mirrorPlan.ok || mirrorPlan.reason === "occupied") && (
+          <button
+            type="button"
+            onClick={onMirror}
+            disabled={!mirrorPlan.ok}
+            className="mt-2 w-full rounded border border-border bg-background px-2 py-1 text-left text-[10px] text-foreground hover:bg-panel disabled:cursor-default disabled:opacity-60"
+            title={
+              mirrorPlan.ok
+                ? "Duplicate every layer of this slot to the other side with mirrored placement, pivots, and pins. The artwork itself is not flipped."
+                : "The other side already has artwork."
+            }
+          >
+            ⇄{" "}
+            {mirrorPlan.ok
+              ? `Mirror to ${mirrorPlan.targetSide} side`
+              : `Other side already has artwork`}
+          </button>
+        )}
       </section>
       {phase === "rig" && (
         <VariantAnchorSection
@@ -6573,8 +6372,9 @@ function PartLayer({
   dimmed?: boolean;
   blurred?: boolean;
   /**
-   * A sibling variant of this slot is selected: render this variant as a faint blurred ghost
-   * for spatial context instead of hiding it (or stacking the default at full opacity).
+   * A sibling variant of this slot is selected: render this variant as a crisp faint ghost
+   * so the selected variant can be aligned against it (instead of hiding it, or stacking
+   * the default at full opacity).
    */
   ghosted?: boolean;
   preview: PreviewState | null;
@@ -6607,9 +6407,10 @@ function PartLayer({
   const baseOpacity = part.visible ? previewTransform.opacity : 0.28;
   // In movement-range focus mode, fade everything except the layer being edited. While the
   // active layer is being edited, the others get a slight blur (and a touch of fade) instead.
-  // Ghosted sibling variants render faint and blurred purely for spatial context.
+  // Ghosted sibling variants stay crisp (no blur) so misaligned variant art can be
+  // aligned against them by eye.
   const opacity = ghost
-    ? baseOpacity * 0.16
+    ? baseOpacity * 0.35
     : dimmed
       ? baseOpacity * 0.12
       : blurred
@@ -6629,7 +6430,7 @@ function PartLayer({
           height: part.height,
           zIndex: placement?.drawOrder ?? part.zIndex,
           opacity,
-          filter: ghost ? "blur(1.5px)" : blurred && !dimmed ? "blur(2px)" : undefined,
+          filter: !ghost && blurred && !dimmed ? "blur(2px)" : undefined,
           transition: "filter 120ms ease",
           pointerEvents: "none",
           transform: `rotate(${part.rotation + previewTransform.rotation}deg) scale(${previewTransform.scale}, ${previewTransform.scaleY ?? previewTransform.scale})`,
@@ -6647,257 +6448,6 @@ function PartLayer({
       </div>
     </>
   );
-}
-
-function PartControlsOverlay({
-  part,
-  canvasWidth,
-  canvasHeight,
-  scale,
-  boundsMode,
-  onBoundsModeChange,
-  preview,
-  previewParentPart,
-  allParts,
-  runtime,
-  shift,
-  placement,
-  onBeginChange,
-  onChange,
-}: {
-  part: CharacterPart;
-  canvasWidth: number;
-  canvasHeight: number;
-  scale: number;
-  boundsMode: EditorBoundsMode;
-  onBoundsModeChange: (mode: EditorBoundsMode) => void;
-  preview: PreviewState | null;
-  previewParentPart?: CharacterPart;
-  allParts: CharacterPart[];
-  runtime: CharacterRuntime;
-  /** Variant-preview re-anchor offset/rotation — the chrome must sit where the art is drawn. */
-  shift?: { dx: number; dy: number; rotation?: number };
-  /** Resolved registration/pin placement keeps chrome on the generated character position. */
-  placement?: RuntimePartPlacement;
-  onBeginChange: () => void;
-  onChange: (patch: Partial<CharacterPart>) => void;
-}) {
-  const baseTransform = previewDelta(part, preview, previewParentPart, allParts, runtime);
-  const previewTransform = composeEditorPartTransform(part, baseTransform, shift, placement);
-  const pivot = pivotForPart(part);
-  const selection = editorSelectionBounds(part, boundsMode);
-  const control = editorControlBounds(part, scale, boundsMode);
-  const alpha = localAlphaBounds(part);
-  const viewportScale = Math.max(0.0001, scale);
-  const handleSize = 14 / viewportScale;
-  const rotateSize = 24 / viewportScale;
-  const toggleSize = 22 / viewportScale;
-  const pivotSize = 10 / viewportScale;
-  const margin = 12 / viewportScale;
-  const selectionQuad = rectCorners(selection).map((point) =>
-    partLocalPointToCanvas(part, point, previewTransform),
-  );
-  const alphaQuad = rectCorners(alpha).map((point) =>
-    partLocalPointToCanvas(part, point, previewTransform),
-  );
-  const localHandlePositions = controlHandlePositions(
-    part,
-    control,
-    previewTransform,
-    canvasWidth,
-    canvasHeight,
-    margin,
-  );
-  const handlePositions = Object.fromEntries(
-    Object.entries(localHandlePositions).map(([corner, point]) => [
-      corner,
-      partLocalPointToCanvas(part, point, previewTransform),
-    ]),
-  ) as Record<ResizeCorner, { x: number; y: number }>;
-  const rotatePosition = partLocalPointToCanvas(
-    part,
-    rotateHandlePosition(part, control, previewTransform, canvasWidth, canvasHeight, margin),
-    previewTransform,
-  );
-  const togglePosition = partLocalPointToCanvas(
-    part,
-    clampLocalPointToCanvas(
-      part,
-      { x: control.x - margin * 1.8, y: control.y - margin * 1.8 },
-      previewTransform,
-      canvasWidth,
-      canvasHeight,
-      margin,
-    ),
-    previewTransform,
-  );
-  const pivotLocal = { x: pivot.x - part.x, y: pivot.y - part.y };
-  const pivotCanvas = partLocalPointToCanvas(part, pivotLocal, previewTransform);
-
-  const resize = (corner: ResizeCorner) => (e: React.PointerEvent<HTMLButtonElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.button !== 0) return;
-    onBeginChange();
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const move = (ev: PointerEvent) => {
-      const delta = pointerDeltaToPartLocalDelta(
-        ev.clientX - startX,
-        ev.clientY - startY,
-        scale,
-        part,
-        previewTransform,
-      );
-      onChange(resizePartFromLocalBounds(part, selection, corner, delta.x, delta.y));
-    };
-    startWindowPointerDrag({ onMove: move });
-  };
-
-  const rotate = (e: React.PointerEvent<HTMLButtonElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.button !== 0) return;
-    onBeginChange();
-    const canvas = e.currentTarget.closest("[data-editor-canvas]") as HTMLDivElement | null;
-    const rect = canvas?.getBoundingClientRect();
-    if (!rect) return;
-    const pivotScreen = {
-      x: rect.left + pivotCanvas.x * scale,
-      y: rect.top + pivotCanvas.y * scale,
-    };
-    const startAngle = Math.atan2(e.clientY - pivotScreen.y, e.clientX - pivotScreen.x);
-    const baseRotation = part.rotation;
-    const move = (ev: PointerEvent) => {
-      const nextAngle = Math.atan2(ev.clientY - pivotScreen.y, ev.clientX - pivotScreen.x);
-      const deltaDeg = ((nextAngle - startAngle) * 180) / Math.PI;
-      onChange({ rotation: Math.round(baseRotation + deltaDeg) });
-    };
-    startWindowPointerDrag({ onMove: move });
-  };
-
-  return (
-    <div className="pointer-events-none absolute inset-0 select-none" style={{ zIndex: 10000 }}>
-      <svg className="absolute inset-0 h-full w-full overflow-visible" aria-hidden="true">
-        <polygon
-          points={selectionQuad.map((point) => `${point.x},${point.y}`).join(" ")}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={1 / viewportScale}
-          className="text-primary"
-        />
-        {boundsMode === "frame" && part.alphaBounds && (
-          <polygon
-            points={alphaQuad.map((point) => `${point.x},${point.y}`).join(" ")}
-            fill="none"
-            stroke="currentColor"
-            strokeDasharray={`${4 / viewportScale} ${3 / viewportScale}`}
-            strokeWidth={1 / viewportScale}
-            className="text-primary/60"
-          />
-        )}
-      </svg>
-      {(["nw", "ne", "sw", "se"] as ResizeCorner[]).map((corner) => (
-        <button
-          key={corner}
-          type="button"
-          aria-label={`Resize ${part.name} from ${corner}`}
-          onPointerDown={resize(corner)}
-          className={`pointer-events-auto absolute rounded-sm border border-background bg-primary shadow-[0_1px_4px_rgba(0,0,0,0.35)] ${resizeCursor(corner)}`}
-          style={{
-            left: handlePositions[corner].x,
-            top: handlePositions[corner].y,
-            width: handleSize,
-            height: handleSize,
-            transform: "translate(-50%, -50%)",
-          }}
-        />
-      ))}
-      <button
-        type="button"
-        aria-label={`Rotate ${part.name}`}
-        onPointerDown={rotate}
-        className="pointer-events-auto absolute flex items-center justify-center rounded-full border border-background bg-primary text-primary-foreground shadow-[0_1px_5px_rgba(0,0,0,0.35)]"
-        style={{
-          left: rotatePosition.x,
-          top: rotatePosition.y,
-          width: rotateSize,
-          height: rotateSize,
-          transform: "translate(-50%, -50%)",
-        }}
-      >
-        <RotateCw size={Math.max(10, rotateSize * 0.55)} strokeWidth={2.25} />
-      </button>
-      <button
-        type="button"
-        aria-label={
-          boundsMode === "frame"
-            ? `Use visible art bounds for ${part.name}`
-            : `Use full registration bounds for ${part.name}`
-        }
-        onPointerDown={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          onBoundsModeChange(boundsMode === "frame" ? "art" : "frame");
-        }}
-        className="pointer-events-auto absolute flex items-center justify-center rounded border border-background bg-panel text-foreground shadow-[0_1px_5px_rgba(0,0,0,0.35)]"
-        style={{
-          left: togglePosition.x,
-          top: togglePosition.y,
-          width: toggleSize,
-          height: toggleSize,
-          transform: "translate(-50%, -50%)",
-        }}
-        title={boundsMode === "frame" ? "Switch to art bounds" : "Switch to full frame bounds"}
-      >
-        {boundsMode === "frame" ? (
-          <Minimize2 size={Math.max(10, toggleSize * 0.55)} />
-        ) : (
-          <Maximize2 size={Math.max(10, toggleSize * 0.55)} />
-        )}
-      </button>
-      <div
-        className="absolute rounded-full border-2 border-primary bg-background"
-        style={{
-          left: pivotCanvas.x,
-          top: pivotCanvas.y,
-          width: Math.max(8, pivotSize),
-          height: Math.max(8, pivotSize),
-          transform: "translate(-50%, -50%)",
-          boxShadow: "0 0 0 1px rgba(255,255,255,0.45)",
-        }}
-      />
-    </div>
-  );
-}
-
-function canvasPointToPartLocal(
-  part: CharacterPart,
-  canvasPoint: { x: number; y: number },
-  previewTransform: ReturnType<typeof previewDelta>,
-) {
-  return transformPoint(invertMatrix(editorPartMatrix(part, previewTransform)), canvasPoint);
-}
-
-function partLocalPointToCanvas(
-  part: CharacterPart,
-  localPoint: { x: number; y: number },
-  previewTransform: ReturnType<typeof previewDelta>,
-) {
-  return transformPoint(editorPartMatrix(part, previewTransform), localPoint);
-}
-
-function pointerDeltaToPartLocalDelta(
-  screenDx: number,
-  screenDy: number,
-  viewportScale: number,
-  part: CharacterPart,
-  previewTransform: ReturnType<typeof previewDelta>,
-) {
-  return transformVector(invertMatrix(editorPartMatrix(part, previewTransform)), {
-    x: screenDx / Math.max(0.0001, viewportScale),
-    y: screenDy / Math.max(0.0001, viewportScale),
-  });
 }
 
 function editorPartMatrix(part: CharacterPart, previewTransform: ReturnType<typeof previewDelta>) {
@@ -6920,115 +6470,141 @@ function editorPartMatrix(part: CharacterPart, previewTransform: ReturnType<type
   );
 }
 
-function controlHandlePositions(
+function canvasPointToPartLocal(
   part: CharacterPart,
-  control: ReturnType<typeof editorControlBounds>,
+  canvasPoint: { x: number; y: number },
   previewTransform: ReturnType<typeof previewDelta>,
-  canvasWidth: number,
-  canvasHeight: number,
-  margin: number,
-): Record<ResizeCorner, { x: number; y: number }> {
-  const clampLocal = (point: { x: number; y: number }) =>
-    clampLocalPointToCanvas(part, point, previewTransform, canvasWidth, canvasHeight, margin);
-  return {
-    nw: clampLocal({ x: control.x, y: control.y }),
-    ne: clampLocal({ x: control.x + control.width, y: control.y }),
-    sw: clampLocal({ x: control.x, y: control.y + control.height }),
-    se: clampLocal({ x: control.x + control.width, y: control.y + control.height }),
-  };
+) {
+  return transformPoint(invertMatrix(editorPartMatrix(part, previewTransform)), canvasPoint);
 }
 
-function rotateHandlePosition(
+function partLocalPointToCanvas(
   part: CharacterPart,
-  control: ReturnType<typeof editorControlBounds>,
+  localPoint: { x: number; y: number },
   previewTransform: ReturnType<typeof previewDelta>,
-  canvasWidth: number,
-  canvasHeight: number,
-  margin: number,
 ) {
-  const gap = margin * 2.4;
-  const candidates = [
-    { x: control.x + control.width / 2, y: control.y - gap },
-    { x: control.x + control.width / 2, y: control.y + control.height + gap },
-    { x: control.x - gap, y: control.y + control.height / 2 },
-    { x: control.x + control.width + gap, y: control.y + control.height / 2 },
-  ];
-  const best =
-    candidates
-      .map((localPoint) => {
-        const canvasPoint = partLocalPointToCanvas(part, localPoint, previewTransform);
-        const overflow =
-          Math.max(0, margin - canvasPoint.x) +
-          Math.max(0, canvasPoint.x - (canvasWidth - margin)) +
-          Math.max(0, margin - canvasPoint.y) +
-          Math.max(0, canvasPoint.y - (canvasHeight - margin));
-        const breathingRoom = Math.min(
-          Math.abs(canvasPoint.x - margin),
-          Math.abs(canvasWidth - margin - canvasPoint.x),
-          Math.abs(canvasPoint.y - margin),
-          Math.abs(canvasHeight - margin - canvasPoint.y),
-        );
-        return { localPoint, overflow, breathingRoom };
-      })
-      .sort((a, b) => a.overflow - b.overflow || b.breathingRoom - a.breathingRoom)[0]
-      ?.localPoint ?? candidates[0];
-
-  return clampLocalPointToCanvas(part, best, previewTransform, canvasWidth, canvasHeight, margin);
+  return transformPoint(editorPartMatrix(part, previewTransform), localPoint);
 }
 
 function resizeCursor(corner: ResizeCorner) {
   return corner === "nw" || corner === "se" ? "cursor-nwse-resize" : "cursor-nesw-resize";
 }
 
-function clampLocalPointToCanvas(
-  part: CharacterPart,
-  localPoint: { x: number; y: number },
-  previewTransform: ReturnType<typeof previewDelta>,
-  canvasWidth: number,
-  canvasHeight: number,
-  margin: number,
-) {
-  const canvasPoint = partLocalPointToCanvas(part, localPoint, previewTransform);
-  const clampedCanvasPoint = {
-    x: clamp(canvasPoint.x, margin, canvasWidth - margin),
-    y: clamp(canvasPoint.y, margin, canvasHeight - margin),
+/**
+ * react-moveable chrome for the selected part — the same control box the Stage
+ * uses. A screen-space proxy tracks the part's rendered frame (preview shifts
+ * included); moveable drives the proxy, and every gesture converts back to
+ * canvas units through one patch path: one undo snapshot at gesture start,
+ * history-off part patches while it runs.
+ */
+function CharacterPartMoveable({
+  part,
+  previewTransform,
+  canvasRef,
+  wrapRef,
+  scale,
+  onBegin,
+  onPatch,
+  onEnd,
+}: {
+  part: CharacterPart;
+  previewTransform: EditorPartTransform;
+  canvasRef: React.RefObject<HTMLDivElement | null>;
+  wrapRef: React.RefObject<HTMLDivElement | null>;
+  scale: number;
+  onBegin: () => void;
+  onPatch: (patch: Partial<CharacterPart>) => void;
+  onEnd: () => void;
+}) {
+  const proxyRef = useRef<HTMLDivElement>(null);
+  const moveableRef = useRef<Moveable>(null);
+  const interactingRef = useRef(false);
+  const startRef = useRef({ x: part.x, y: part.y, width: part.width, height: part.height });
+  const viewScale = Math.max(0.0001, scale);
+  const pivot = pivotForPart(part);
+  const renderedRotation = part.rotation + previewTransform.rotation;
+
+  // Keep the proxy glued to the part's rendered box whenever the part, preview,
+  // zoom, or layout change — skipped mid-gesture so moveable owns the transform.
+  useLayoutEffect(() => {
+    const proxy = proxyRef.current;
+    const canvas = canvasRef.current;
+    const wrap = wrapRef.current;
+    if (!proxy || !canvas || !wrap || interactingRef.current) return;
+    const canvasBox = canvas.getBoundingClientRect();
+    const wrapBox = wrap.getBoundingClientRect();
+    const left = canvasBox.left - wrapBox.left + (part.x + previewTransform.dx) * viewScale;
+    const top = canvasBox.top - wrapBox.top + (part.y + previewTransform.dy) * viewScale;
+    proxy.style.left = `${left}px`;
+    proxy.style.top = `${top}px`;
+    proxy.style.width = `${Math.max(1, part.width * viewScale)}px`;
+    proxy.style.height = `${Math.max(1, part.height * viewScale)}px`;
+    proxy.style.transformOrigin = `${(pivot.x - part.x) * viewScale}px ${(pivot.y - part.y) * viewScale}px`;
+    proxy.style.transform = `rotate(${renderedRotation}deg)`;
+    moveableRef.current?.updateRect();
+  });
+
+  const begin = () => {
+    interactingRef.current = true;
+    startRef.current = { x: part.x, y: part.y, width: part.width, height: part.height };
+    onBegin();
   };
-  return canvasPointToPartLocal(part, clampedCanvasPoint, previewTransform);
-}
-
-function resizePartFromLocalBounds(
-  part: CharacterPart,
-  bounds: { x: number; y: number; width: number; height: number },
-  corner: ResizeCorner,
-  dx: number,
-  dy: number,
-): Partial<CharacterPart> {
-  const fractionX = bounds.x / Math.max(1, part.width);
-  const fractionY = bounds.y / Math.max(1, part.height);
-  const fractionWidth = bounds.width / Math.max(1, part.width);
-  const fractionHeight = bounds.height / Math.max(1, part.height);
-
-  const visibleLeft = part.x + bounds.x;
-  const visibleTop = part.y + bounds.y;
-  const visibleRight = visibleLeft + bounds.width;
-  const visibleBottom = visibleTop + bounds.height;
-
-  const nextVisibleLeft = corner.includes("w") ? visibleLeft + dx : visibleLeft;
-  const nextVisibleTop = corner.includes("n") ? visibleTop + dy : visibleTop;
-  const nextVisibleRight = corner.includes("e") ? visibleRight + dx : visibleRight;
-  const nextVisibleBottom = corner.includes("s") ? visibleBottom + dy : visibleBottom;
-
-  const nextVisibleWidth = Math.max(4, nextVisibleRight - nextVisibleLeft);
-  const nextVisibleHeight = Math.max(4, nextVisibleBottom - nextVisibleTop);
-  const width = Math.max(8, nextVisibleWidth / Math.max(0.0001, fractionWidth));
-  const height = Math.max(8, nextVisibleHeight / Math.max(0.0001, fractionHeight));
-
-  return {
-    x: Math.round(nextVisibleLeft - fractionX * width),
-    y: Math.round(nextVisibleTop - fractionY * height),
-    width: Math.round(width),
-    height: Math.round(height),
+  const finish = () => {
+    interactingRef.current = false;
+    onEnd();
   };
+
+  return (
+    <>
+      <div
+        ref={proxyRef}
+        data-character-part-proxy=""
+        className="absolute left-0 top-0"
+        style={{ pointerEvents: "auto" }}
+      />
+      <Moveable
+        ref={moveableRef}
+        target={proxyRef}
+        draggable
+        resizable
+        rotatable
+        origin={false}
+        throttleDrag={0}
+        throttleResize={0}
+        throttleRotate={0}
+        onDragStart={begin}
+        onDrag={(e) => {
+          e.target.style.transform = `translate(${e.beforeTranslate[0]}px, ${e.beforeTranslate[1]}px) rotate(${renderedRotation}deg)`;
+          onPatch({
+            x: Math.round(startRef.current.x + e.beforeTranslate[0] / viewScale),
+            y: Math.round(startRef.current.y + e.beforeTranslate[1] / viewScale),
+          });
+        }}
+        onDragEnd={finish}
+        onResizeStart={begin}
+        onResize={(e) => {
+          e.target.style.width = `${e.width}px`;
+          e.target.style.height = `${e.height}px`;
+          e.target.style.transform = e.transform;
+          onPatch({
+            x: Math.round(startRef.current.x + e.drag.beforeTranslate[0] / viewScale),
+            y: Math.round(startRef.current.y + e.drag.beforeTranslate[1] / viewScale),
+            width: Math.max(1, Math.round(e.width / viewScale)),
+            height: Math.max(1, Math.round(e.height / viewScale)),
+          });
+        }}
+        onResizeEnd={finish}
+        onRotateStart={begin}
+        onRotate={(e) => {
+          e.target.style.transform = e.transform;
+          onPatch({
+            rotation: Math.round((e.rotation - previewTransform.rotation) * 10) / 10,
+          });
+        }}
+        onRotateEnd={finish}
+      />
+    </>
+  );
 }
 
 function BoundsOverlay({ bounds, zIndex }: { bounds: CharacterPartBounds; zIndex: number }) {

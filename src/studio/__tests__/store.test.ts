@@ -1186,128 +1186,31 @@ describe("createBlankProject", () => {
       character: {
         characterId: "character-source-1",
         autoBlink: false,
-        renderer: "dom",
       },
     });
     expect(useStudio.getState().project!.hf.compositionHtml["char_character-1"]).toContain(
       'window.__timelines["char_character-1"]',
     );
-    expect(useStudio.getState().project!.hf.compositionHtml["char_character-1"]).not.toContain(
-      'data-character-renderer="pixi"',
-    );
-
-    useStudio.getState().updateClip(clip.id, {
-      character: {
-        ...useStudio.getState().project!.editorMeta.clips[clip.id].character!,
-        renderer: "pixi",
-      },
-    } as Partial<CompositionClip>);
-
-    const pixiClip = currentEditingClips().find((c) => c.id === clip.id);
-    expect(pixiClip).toMatchObject({
-      character: {
-        renderer: "pixi",
-      },
-    });
     expect(useStudio.getState().project!.hf.compositionHtml["char_character-1"]).toContain(
       'data-character-renderer="pixi"',
     );
     expect(useStudio.getState().project!.hf.compositionHtml["char_character-1"]).toContain(
       "https://pixijs.download/release/pixi.min.js",
     );
-  });
 
-  it("applies character document commands to canonical sub-composition HTML", () => {
-    const project = createBlankProject("Character document command");
-    const body = makeMediaAsset("body-a", "Body");
-    const head = makeMediaAsset("head-a", "Head");
-    const hand = makeMediaAsset("hand-a", "Hand");
-    const character = {
-      ...createBlankCharacter("Actor"),
-      id: "character-document-source-1",
-      parts: [
-        makePart("body", body.id, {
-          id: "part-body",
-          slotId: "role:body",
-          x: 90,
-          y: 150,
-          width: 160,
-          height: 240,
-          zIndex: 1,
-        }),
-        makePart("head", head.id, {
-          id: "part-head",
-          slotId: "role:head",
-          x: 112,
-          y: 70,
-          width: 120,
-          height: 100,
-          zIndex: 2,
-        }),
-        makePart("hand", hand.id, {
-          id: "part-hand",
-          slotId: "slot:right-hand",
-          side: "right",
-          x: 250,
-          y: 250,
-          width: 60,
-          height: 70,
-          zIndex: 3,
-        }),
-      ],
-    };
-    useStudio.setState({
-      project,
-      tracks: project.editorMeta.tracks,
-      characters: new Map([[character.id, character]]),
-      mediaAssets: new Map([
-        [body.id, body],
-        [head.id, head],
-        [hand.id, hand],
-      ]),
-    });
-
-    useStudio.getState().addClip({
-      id: "character-document-clip",
-      kind: "composition",
-      compositionKind: "character",
+    // A legacy saved "dom" renderer choice is stripped and stays on Pixi output.
+    useStudio.getState().updateClip(clip.id, {
       character: {
-        characterId: character.id,
-        poses: {},
-        autoBlink: false,
+        ...useStudio.getState().project!.editorMeta.clips[clip.id].character!,
+        renderer: "dom",
       },
-      name: "Actor",
-      trackIndex: 0,
-      start: 0,
-      duration: 4,
-      x: 10,
-      y: 20,
-      width: 300,
-      height: 450,
-      rotation: 0,
-      opacity: 1,
-      zIndex: 0,
-    });
+    } as Partial<CompositionClip>);
 
-    useStudio.getState().applyCharacterDocumentCommand(character.id, {
-      type: "setSlotBinding",
-      slotId: "slot:right-hand",
-      boneId: "bone:role:head",
-      x: 7,
-      y: 9,
-      rotation: -8,
-      scaleX: 1,
-      scaleY: 1,
-      depth: 2,
-    });
-
-    const html =
-      useStudio.getState().project!.hf.compositionHtml["char_character-document-clip"] ?? "";
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    const handSlot = doc.querySelector('[data-character-slot-id="slot:right-hand"]');
-    expect(handSlot?.getAttribute("data-character-bound-bone-id")).toBe("bone:role:head");
-    expect(handSlot?.parentElement?.getAttribute("data-character-bone-id")).toBe("bone:role:head");
-    expect(handSlot?.getAttribute("data-character-depth")).toBe("2");
+    const migrated = useStudio.getState().project!.editorMeta.clips[clip.id].character!;
+    expect(migrated.renderer).toBeUndefined();
+    expect(useStudio.getState().project!.hf.compositionHtml["char_character-1"]).toContain(
+      'data-character-renderer="pixi"',
+    );
   });
 
   it("prunes stale generated speech audio when character lip sync changes or clears", () => {
@@ -1967,7 +1870,8 @@ describe("Studio cache sync", () => {
     const state = useStudio.getState();
     const newCompHtml = state.project!.hf.compositionHtml[compId];
     expect(newCompHtml).not.toBe(before);
-    expect(newCompHtml).toContain('data-character-part-id="part-b"');
+    // Default Pixi output carries the new part as a scene node + asset ref.
+    expect(newCompHtml).toContain('"partId":"part-b"');
     expect(newCompHtml).toContain("asset:asset-b");
     expect(state.project!.hf.assets.map((asset) => asset.id)).toEqual(
       expect.arrayContaining([mediaA.id, mediaB.id]),

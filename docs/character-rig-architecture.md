@@ -19,6 +19,35 @@ The key architectural idea is:
 conceptual joint. The socket is the stored attachment data. The variant can override how
 that body part behaves.**
 
+## Current Renderer Status (July 2026)
+
+Pixi-backed character compositions are the current validated renderer baseline
+for Studio Boom characters. This does **not** replace the rig vocabulary in this
+document. Bones, sockets/pins, slots, variants, poses, Actions, Expressions, and
+speech remain canonical authoring concepts; Pixi is the renderer that consumes
+that intent through a renderer-neutral scene graph.
+
+The current flow is:
+
+```text
+CharacterPreset + angle rig + clip meta
+  -> CharacterSceneGraph + CharacterTimelineScene
+  -> Pixi-backed HyperFrames character composition
+  -> project.hf.compositionHtml[compositionId]
+```
+
+Pixi is the only character renderer (July 2026): the DOM puppet renderer, the
+per-clip renderer switch, and the DOM character-document command boundary were
+removed. Stored DOM compositions in old saves stay playable until their clips
+rebuild. The legacy generated/fallback mouth rig is retired — characters that
+still reference it build without that mouth until they get mouth image or SVG
+parts. Do not reintroduce DOM-only rig semantics; the rig concepts defined here
+are renderer-neutral and remain canonical.
+
+Mesh/stretch-limb deformation is not part of the baseline renderer yet. Textured
+parts render as sprites by default, and mesh work must stay behind dedicated
+preview/export parity tests.
+
 ## 1. Angle
 
 An **angle** means a full view of the character, such as front, side, three-quarter, back.

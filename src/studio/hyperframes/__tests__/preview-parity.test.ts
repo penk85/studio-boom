@@ -204,7 +204,6 @@ function makePixiCharacterProject(): Project {
       motions: [{ id: "applied-pixi-motion", presetId: motionPreset.id, offset: 0, intensity: 1 }],
     },
     motionPresets: new Map([[motionPreset.id, motionPreset]]),
-    renderer: "pixi",
     mediaAssets: new Map(assets.map((asset) => [asset.id, asset])),
   });
 

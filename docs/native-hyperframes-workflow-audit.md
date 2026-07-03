@@ -38,8 +38,25 @@ movie. `editorMeta` is editor-only intent and UI state.
   and persists visual clip layer order as CSS `z-index` in `rootHtml`.
 - Root composition boundary: `root-composition.ts` owns new root composition creation and direct root metadata updates without rebuilding the whole composition.
 - Character composition builder: `character/composition.ts` generates native
-  HyperFrames sub-composition HTML for Studio Boom puppet rigs. Root character
+  HyperFrames sub-composition HTML for Studio Boom character rigs. Root character
   clips are regular composition clips with `compositionKind: "character"`.
+- Pixi character renderer boundary: Pixi is the only character renderer. It
+  lives inside `project.hf.compositionHtml[compositionId]`, receives
+  renderer-neutral `CharacterSceneGraph` / `CharacterTimelineScene` payloads,
+  registers a synchronous HyperFrames timeline, and uses a readiness gate so
+  capture does not seek before assets/app initialization complete. 3D turn vars
+  (`rotationX`/`rotationY`) flatten to an orthographic cos() squash in the Pixi
+  runtime. The DOM puppet renderer, per-clip renderer switch, and DOM
+  character-document command executor were removed (July 2026); legacy saved
+  `character.renderer` values are stripped on save, and stored DOM compositions
+  stay playable until rebuilt. The retired generated/fallback mouth rig is
+  skipped with a console warning; mouth image/SVG parts restore the mouth.
+- Character deformation boundary: textured Pixi character parts render as
+  `Sprite` leaves by default; morph/vector parts render through Pixi Graphics.
+  Mesh primitives are not emitted by default because `MeshPlane` failed in the
+  HyperFrames export capture path when the Pixi mesh pipe was unavailable.
+  Stretch-limb/mesh work should return only behind dedicated preview/export
+  parity coverage.
 - Character document direction: character authoring should move toward the
   HyperFrames-first document model in `docs/character-json-rig-motion-architecture.md`.
   The character sub-composition HTML is the editable document; JSON artifacts are
@@ -97,6 +114,17 @@ movie. `editorMeta` is editor-only intent and UI state.
   picker/property-panel attempt interfered with root clip selection and was
   backed out.
 - Prompt pack and validation feedback for external AI workflows.
+- Pixi character workflow validation: keep exercising pose swaps, Actions,
+  Expressions, speech/lip-sync, save/reload, stage playback, and MP4 export using
+  the same stored character composition source.
+- Pixi-first character cleanup (renderer removal done July 2026). Remaining:
+  extract the renderer-neutral motion-target/slot-timeline computation out of
+  `buildPuppetDom` so it stops emitting unstaged legacy DOM strings; migrate the
+  character editor panel and the Action/Expression recorder preview to a
+  persistent Pixi app fed by the same scene graph (the recorder currently
+  rebuilds a full Pixi composition srcDoc per committed draft edit); reintroduce
+  typed character document commands as renderer-neutral scene-graph operations
+  when an editor consumer needs them (the DOM executor was deleted).
 - Editable HyperFrames clip-set import after custom block import is stable.
 - Runtime script cleanup: audit whether `hyperframe-runtime.js` stripping should
   happen during ZIP import as canonical source normalization, stay only at

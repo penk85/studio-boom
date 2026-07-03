@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { validateCompositionSourceHtml } from "../../hyperframes/composition-source";
 import type { CharacterClipMeta, CharacterPreset, MotionPreset } from "../../types";
 import { createBlankCharacter, makePart } from "../character-utils";
@@ -103,21 +103,46 @@ function build(
   });
 }
 
-function extractScene(html: string) {
-  const match = html.match(/const S = (\{.*?\});\n\s+const tl/s);
-  expect(match).not.toBeNull();
-  return JSON.parse(match![1]) as {
-    initialTargets: Array<{ selector: string; vars: Record<string, number | string> }>;
-    motionSegments: Array<{
-      targets: Array<{ selector: string; vars: Record<string, number | string> }>;
-    }>;
-    slotEvents: Array<{
-      slotId: string;
-      key: string;
-      variant?: { show?: string[] };
-      boneAnchors?: Array<{ selector: string; left: number; top: number }>;
-      generatedMouth?: { components: Record<string, unknown> };
-    }>;
+interface PayloadSceneNode {
+  kind: string;
+  parentId?: string;
+  childIds: string[];
+  slotId?: string;
+  boneId?: string;
+  partId?: string;
+  role?: string;
+  depth?: number;
+  drawOrder?: number;
+  active?: boolean;
+  visible?: boolean;
+  opacity?: number;
+  zIndex?: number;
+  variantKey?: string;
+  variantAliases?: string[];
+  assetId?: string;
+  assetRef?: string;
+  frame: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    originX: number;
+    originY: number;
+    rotation: number;
+    scaleX: number;
+    scaleY: number;
+  };
+  placement?: {
+    x: number;
+    y: number;
+    pivotX: number;
+    pivotY: number;
+    rotation: number;
+    drawOrder: number;
+  };
+  variantAnchors?: {
+    initial: { x: number; y: number; rotation: number };
+    anchors: Record<string, { x: number; y: number; rotation: number }>;
   };
 }
 
@@ -126,21 +151,65 @@ function extractPixiPayload(html: string) {
   expect(match).not.toBeNull();
   return JSON.parse(match![1]) as {
     scene: {
-      nodes: Record<string, { kind: string; partId?: string }>;
-      assets: Array<{ id: string; parser: string; ref: string }>;
+      angle: string;
+      output: { width: number; height: number; scaleX: number; scaleY: number };
+      nodes: Record<string, PayloadSceneNode>;
+      boneNodeIds: Record<string, string>;
+      slotNodeIds: Record<string, string>;
+      partNodeIds: Record<string, string>;
+      boneAnchorTracks: Record<
+        string,
+        {
+          boneId: string;
+          parentSlotId: string;
+          base: { x: number; y: number; rotation: number };
+          initial: { x: number; y: number; rotation: number };
+          anchors: Record<string, { x: number; y: number; rotation: number }>;
+        }
+      >;
+      assets: Array<{ id: string; parser: string; ref: string; partIds: string[] }>;
     };
     timelineScene: {
-      initialTargets: Array<{ sceneNodeId?: string; vars: Record<string, number | string> }>;
+      duration: number;
+      initialTargets: Array<{
+        selector: string;
+        sceneNodeId?: string;
+        vars: Record<string, number | string>;
+      }>;
       motionSegments: Array<{
-        targets: Array<{ sceneNodeId?: string; vars: Record<string, number | string> }>;
+        start: number;
+        duration: number;
+        targets: Array<{
+          selector: string;
+          sceneNodeId?: string;
+          vars: Record<string, number | string>;
+        }>;
       }>;
       slotEvents: Array<{
+        time: number;
         slotId: string;
         key: string;
-        variant?: { showSceneNodeIds?: string[]; hideSceneNodeIds?: string[] };
+        variant?: {
+          show?: string[];
+          hide?: string[];
+          showSceneNodeIds?: string[];
+          hideSceneNodeIds?: string[];
+        };
+        boneAnchors?: Array<{
+          selector: string;
+          sceneNodeId?: string;
+          left: number;
+          top: number;
+          rotation: number;
+        }>;
       }>;
     };
   };
+}
+
+/** The renderer-neutral timeline payload (same data the retired DOM script consumed). */
+function extractScene(html: string) {
+  return extractPixiPayload(html).timelineScene;
 }
 
 function eventShowsVariant(event: { variant?: { show?: string[] } }, value: string) {
@@ -152,7 +221,7 @@ function cssNumber(value: number) {
 }
 
 describe("buildCharacterCompositionHtml", () => {
-  it("generates explicit puppet DOM, asset refs, dimensions, and timeline registration", () => {
+  it("generates explicit Pixi character source, asset refs, dimensions, and timeline registration", () => {
     const html = build();
     const validation = validateCompositionSourceHtml(html, {
       compositionId: "char_clip-1",
@@ -166,21 +235,22 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).toContain('data-width="300"');
     expect(html).toContain('data-height="450"');
     expect(html).toContain('data-character-root="true"');
-    expect(html).toContain('data-character-slot-id="role:body"');
-    expect(html).toContain('data-character-part-id="body-idle"');
-    expect(html).toContain('src="asset:body-media"');
-    expect(html).toContain('src="asset:eye-open-media"');
+    expect(html).toContain('data-character-renderer="pixi"');
+    expect(html).toContain('"assetRef":"asset:body-media"');
+    expect(html).toContain('"assetRef":"asset:eye-open-media"');
     expect(html).toContain('window.__timelines["char_clip-1"]');
     // The duration anchor is load-bearing: the hyperframes runtime clamps a
     // composition clip's visibility window to min(data-duration, timeline.duration()),
     // so the character timeline must span the full composition duration.
-    expect(html).toContain("tl.to({}, { duration: S.duration }, 0);");
-    expect(html).toContain("const resetInitialState = function()");
+    expect(html).toContain("tl.to({}, { duration: S.timelineScene.duration || S.duration }, 0);");
     expect(html).toContain("const originalSeek = tl.seek;");
     expect(html).toContain("tl.seek = function(time, suppressEvents)");
     expect(html).toContain('tl.eventCallback("onStart"');
     expect(html).not.toMatch(/repeat\s*:\s*-1/);
-    expect(html).not.toMatch(/\basync\b/);
+
+    const payload = extractPixiPayload(html);
+    expect(payload.scene.slotNodeIds["role:body"]).toBeTruthy();
+    expect(payload.scene.partNodeIds["body-idle"]).toBeTruthy();
   });
 
   it("can generate a Pixi-backed render-ready character composition from the scene graph", () => {
@@ -243,7 +313,6 @@ describe("buildCharacterCompositionHtml", () => {
         [transformPreset.id, transformPreset],
         [variantPreset.id, variantPreset],
       ]),
-      renderer: "pixi",
     });
     const validation = validateCompositionSourceHtml(html, {
       compositionId: "char_clip-1",
@@ -269,9 +338,7 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html.indexOf('window.__timelines["char_clip-1"] = tl')).toBeLessThan(
       html.indexOf("const start = async function()"),
     );
-    expect(html.indexOf("const tl = gsap.timeline")).toBeLessThan(
-      html.indexOf("await app.init"),
-    );
+    expect(html.indexOf("const tl = gsap.timeline")).toBeLessThan(html.indexOf("await app.init"));
 
     const payload = extractPixiPayload(html);
     expect(Object.values(payload.scene.nodes).some((node) => node.kind === "mesh")).toBe(false);
@@ -321,7 +388,6 @@ describe("buildCharacterCompositionHtml", () => {
         autoBlink: false,
       },
       motionPresets: new Map(),
-      renderer: "pixi",
     });
     const payload = extractPixiPayload(html);
     const vectorNode = Object.values(payload.scene.nodes).find(
@@ -348,7 +414,6 @@ describe("buildCharacterCompositionHtml", () => {
         autoBlink: false,
       },
       motionPresets: new Map(),
-      renderer: "pixi",
       mediaAssets: new Map([
         ["body-media", { filename: "body.svg", mimeType: "image/svg+xml" }],
         ["eye-open-media", { filename: "eye.png", mimeType: "image/png" }],
@@ -376,7 +441,6 @@ describe("buildCharacterCompositionHtml", () => {
         autoBlink: false,
       },
       motionPresets: new Map(),
-      renderer: "pixi",
       speeches: [
         {
           audioId: "voice-pixi",
@@ -406,7 +470,171 @@ describe("buildCharacterCompositionHtml", () => {
     );
   });
 
-  it("repairs a stale cross-side hand attachment before generating the puppet DOM", () => {
+  it("ignores a legacy generated mouth rig and lets mouth parts drive lip sync", () => {
+    const character = {
+      ...makeCharacter(),
+      mouthStyle: "rig" as const,
+      mouthRig: createDefaultMouthRig("natural", {
+        x: 190,
+        y: 250,
+        width: 150,
+        height: 70,
+        zIndex: 5,
+      }),
+    };
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_mouth_rig_pixi",
+      clipId: "clip-mouth-rig-pixi",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character,
+      meta: {
+        characterId: "char-1",
+        poses: {},
+        autoBlink: false,
+        visemes: [{ t: 0.3, v: "A" }],
+      },
+      motionPresets: new Map(),
+    });
+    const validation = validateCompositionSourceHtml(html, {
+      compositionId: "char_mouth_rig_pixi",
+      duration: 4,
+      width: 300,
+      height: 450,
+    });
+
+    // The generated mouth rig existed only as puppet DOM and is retired; the
+    // character's real mouth parts take over viseme swaps.
+    expect(validation.ok).toBe(true);
+    expect(html).toContain('data-character-renderer="pixi"');
+    expect(html).not.toContain("generatedMouth");
+    const scene = extractScene(html);
+    const visemeEvent = scene.slotEvents.find(
+      (event) => event.slotId === "role:mouth" && event.key === "A",
+    );
+    expect(visemeEvent?.variant?.showSceneNodeIds?.some((id) => id.includes("mouth-a"))).toBe(true);
+  });
+
+  it("warns and builds without a mouth when only the legacy generated rig exists", () => {
+    const character = {
+      ...makeCharacter(),
+      parts: makeCharacter().parts.filter((part) => part.role !== "mouth"),
+      mouthStyle: "rig" as const,
+      mouthRig: createDefaultMouthRig("natural", {
+        x: 190,
+        y: 250,
+        width: 150,
+        height: 70,
+        zIndex: 5,
+      }),
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const html = buildCharacterCompositionHtml({
+        compositionId: "char_mouth_rig_only",
+        clipId: "clip-mouth-rig-only",
+        width: 300,
+        height: 450,
+        duration: 4,
+        character,
+        meta: {
+          characterId: "char-1",
+          poses: {},
+          autoBlink: false,
+          visemes: [{ t: 0.3, v: "A" }],
+        },
+        motionPresets: new Map(),
+      });
+      expect(html).toContain('data-character-renderer="pixi"');
+      expect(extractScene(html).slotEvents.some((event) => event.slotId.includes("mouth"))).toBe(
+        false,
+      );
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("generated mouth rig"));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("applies 3D turn vars as a 2.5D squash in the Pixi runtime", () => {
+    const character = {
+      ...createBlankCharacter("Flipper"),
+      id: "flipper-pixi",
+      parts: [
+        makePart("body", "body-media", {
+          id: "body",
+          slotId: "role:body",
+          x: 100,
+          y: 120,
+          width: 180,
+          height: 260,
+          zIndex: 1,
+        }),
+        makePart("leg", "leg-media", {
+          id: "left-leg",
+          slotId: "slot:left-leg",
+          side: "left",
+          x: 120,
+          y: 350,
+          width: 44,
+          height: 140,
+          zIndex: 0,
+        }),
+      ],
+    };
+    const preset: MotionPreset = {
+      id: "cardflip",
+      name: "Card Flip",
+      category: "gesture",
+      region: "lowerBody",
+      duration: 1,
+      loop: false,
+      tracks: [
+        {
+          target: "bone",
+          boneId: "bone:slot:left-leg",
+          partRole: "leg",
+          keyframes: [
+            { t: 0, rotationY: 0, transformPerspective: 800, ease: "linear" },
+            { t: 1, rotationY: 360, transformPerspective: 800, ease: "linear" },
+          ],
+        },
+      ],
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_cardflip_pixi",
+      clipId: "clip-cardflip-pixi",
+      width: 300,
+      height: 450,
+      duration: 2,
+      character,
+      meta: {
+        characterId: "flipper-pixi",
+        poses: {},
+        autoBlink: false,
+        motions: [{ id: "applied-flip", presetId: "cardflip", offset: 0, intensity: 1 }],
+      },
+      motionPresets: new Map([["cardflip", preset]]),
+    });
+
+    // The runtime maps rotationX/rotationY to a cos() squash; without it the
+    // 3D turn vars would be silently dropped and the flip would not move.
+    expect(html).toContain("Math.cos(toRadians(vars.rotationY))");
+    expect(html).toContain("Math.cos(toRadians(vars.rotationX))");
+
+    const payload = extractPixiPayload(html);
+    const turnTargets = [
+      ...payload.timelineScene.initialTargets,
+      ...payload.timelineScene.motionSegments.flatMap((segment) => segment.targets),
+    ].filter((target) => typeof target.vars.rotationY === "number");
+    expect(turnTargets.length).toBeGreaterThan(0);
+    expect(turnTargets.every((target) => target.sceneNodeId)).toBe(true);
+    expect(turnTargets.some((target) => target.vars.rotationY === 360)).toBe(true);
+  });
+
+  it("repairs a stale cross-side hand attachment before generating the character scene", () => {
     const character: CharacterPreset = {
       ...createBlankCharacter("Cross-side repair"),
       id: "cross-side-repair",
@@ -476,11 +704,10 @@ describe("buildCharacterCompositionHtml", () => {
         angles: { ...rig.angles, front: staleFront },
       },
     });
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    const handBone = doc.querySelector('[data-character-bone-id="bone:slot:right-hand"]');
-    const parentBone = handBone?.parentElement?.getAttribute("data-character-bone-id");
+    const payload = extractPixiPayload(html);
+    const handBoneNode = payload.scene.nodes[payload.scene.boneNodeIds["bone:slot:right-hand"]];
 
-    expect(parentBone).toBe("bone:slot:right-arm");
+    expect(handBoneNode?.parentId).toBe(payload.scene.boneNodeIds["bone:slot:right-arm"]);
   });
 
   it("nests iris slots inside the open eye variant", () => {
@@ -555,12 +782,18 @@ describe("buildCharacterCompositionHtml", () => {
       motionPresets: new Map(),
     });
 
-    const openIndex = html.indexOf('data-character-part-id="eye-open"');
-    const irisIndex = html.indexOf('data-character-slot-id="slot:left-iris"');
-    const closedIndex = html.indexOf('data-character-part-id="eye-closed"');
-    expect(openIndex).toBeGreaterThan(-1);
-    expect(irisIndex).toBeGreaterThan(openIndex);
-    expect(closedIndex).toBeGreaterThan(irisIndex);
+    const payload = extractPixiPayload(html);
+    const irisBoneId = payload.scene.boneNodeIds["bone:slot:left-iris"];
+    const eyeBoneId = payload.scene.boneNodeIds["bone:slot:left-eye"];
+    expect(payload.scene.nodes[irisBoneId]?.parentId).toBe(eyeBoneId);
+    expect(payload.scene.nodes[payload.scene.slotNodeIds["slot:left-iris"]]?.parentId).toBe(
+      irisBoneId,
+    );
+    // The nested guarantee: the iris re-anchors whenever the eye variant swaps.
+    const eyeEvent = payload.timelineScene.slotEvents.find(
+      (event) => event.slotId === "slot:left-eye",
+    );
+    expect(eyeEvent?.boneAnchors?.some((anchor) => anchor.sceneNodeId === irisBoneId)).toBe(true);
   });
 
   it("positions nested child slots from runtime socket placement, not raw art offsets", () => {
@@ -652,14 +885,21 @@ describe("buildCharacterCompositionHtml", () => {
       },
       motionPresets: new Map(),
     });
-    const nestedSlot = html.match(
-      /<div[^>]*data-character-slot-id="slot:left-iris"[^>]*style="([^"]+)"/,
-    )?.[1];
+    const payload = extractPixiPayload(html);
+    const irisNode = payload.scene.nodes[payload.scene.partNodeIds["left-iris"]];
+    const eyeNode = payload.scene.nodes[payload.scene.partNodeIds["eye-open"]];
 
-    expect(nestedSlot).toContain(`left:${expectedLeft}px`);
-    expect(nestedSlot).toContain(`top:${expectedTop}px`);
-    expect(nestedSlot).not.toContain("left:12px");
-    expect(nestedSlot).not.toContain("top:4px");
+    // Scene placement follows the moved socket binding, not the raw art offset.
+    expect(irisNode?.placement?.x).toBeCloseTo(irisPlacement.x, 3);
+    expect(irisNode?.placement?.y).toBeCloseTo(irisPlacement.y, 3);
+    expect((irisNode?.placement?.x ?? 0) - (eyeNode?.placement?.x ?? 0)).toBeCloseTo(
+      Number(expectedLeft),
+      3,
+    );
+    expect((irisNode?.placement?.y ?? 0) - (eyeNode?.placement?.y ?? 0)).toBeCloseTo(
+      Number(expectedTop),
+      3,
+    );
   });
 
   it("keeps nested iris slot motion on the iris target in compiled playback", () => {
@@ -905,12 +1145,24 @@ describe("buildCharacterCompositionHtml", () => {
       motionPresets: new Map(),
     });
 
-    const restIndex = html.indexOf('data-character-part-id="mouth-rest"');
-    const aIndex = html.indexOf('data-character-part-id="mouth-a"');
-    const tongueIndex = html.indexOf('data-character-slot-id="slot:tongue"');
-    expect(restIndex).toBeGreaterThan(-1);
-    expect(aIndex).toBeGreaterThan(restIndex);
-    expect(tongueIndex).toBeGreaterThan(aIndex);
+    const payload = extractPixiPayload(html);
+    const tongueBoneId = payload.scene.boneNodeIds["bone:slot:tongue"];
+    expect(payload.scene.nodes[tongueBoneId]?.parentId).toBe(
+      payload.scene.boneNodeIds["bone:role:mouth"],
+    );
+    expect(payload.scene.nodes[payload.scene.slotNodeIds["slot:tongue"]]?.parentId).toBe(
+      tongueBoneId,
+    );
+    // Parent variant swaps re-anchor the nested child.
+    const mouthEvents = payload.timelineScene.slotEvents.filter(
+      (event) => event.slotId === "role:mouth",
+    );
+    expect(mouthEvents.length).toBeGreaterThan(0);
+    expect(
+      mouthEvents.every((event) =>
+        event.boneAnchors?.some((anchor) => anchor.sceneNodeId === tongueBoneId),
+      ),
+    ).toBe(true);
   });
 
   it("emits nested rig, host, depth, angle, and draw-order metadata", () => {
@@ -986,18 +1238,17 @@ describe("buildCharacterCompositionHtml", () => {
       motionPresets: new Map(),
     });
 
-    expect(html).toContain('data-character-rig-version="2"');
     expect(html).toContain('data-character-angle="3qL"');
-    expect(html).toContain('data-character-bone="true"');
-    expect(html).toContain('data-character-bone-id="bone:role:head"');
-    expect(html).toContain('data-character-parent-bone-id="bone:role:body"');
-    expect(html).toContain('data-character-slot-id="slot:left-eye"');
-    expect(html).toContain('data-character-bound-bone-id="bone:slot:left-eye"');
-    expect(html).toContain('data-character-host-slot-id="role:head"');
-    expect(html).toContain('data-character-host-bone-id="bone:role:head"');
-    expect(html).toContain('data-character-host-mode="insideHostMask"');
-    expect(html).toContain('data-character-depth="7"');
-    expect(html).toContain('data-character-draw-order-index="');
+    const payload = extractPixiPayload(html);
+    expect(payload.scene.angle).toBe("3qL");
+    const headBone = payload.scene.nodes[payload.scene.boneNodeIds["bone:role:head"]];
+    expect(headBone?.parentId).toBe(payload.scene.boneNodeIds["bone:role:body"]);
+    const eyeSlot = payload.scene.nodes[payload.scene.slotNodeIds["slot:left-eye"]];
+    expect(eyeSlot?.boneId).toBe("bone:slot:left-eye");
+    expect(eyeSlot?.parentId).toBe(payload.scene.boneNodeIds["bone:slot:left-eye"]);
+    // The 3qL angle override drives the bound depth (host masks are a Pixi roadmap item).
+    expect(eyeSlot?.depth).toBe(7);
+    expect(typeof eyeSlot?.drawOrder).toBe("number");
   });
 
   it("uses an active angle part override for slot variants", () => {
@@ -1057,7 +1308,7 @@ describe("buildCharacterCompositionHtml", () => {
     const scene = extractScene(html);
 
     expect(scene.slotEvents.some((event) => eventShowsVariant(event, "3qL"))).toBe(true);
-    expect(html).toContain('src="asset:body-3ql-media"');
+    expect(html).toContain('"assetRef":"asset:body-3ql-media"');
   });
 
   it("renders active-angle images while preserving shared slot art", () => {
@@ -1117,12 +1368,12 @@ describe("buildCharacterCompositionHtml", () => {
       motionPresets: new Map(),
     });
 
-    expect(html).toContain('src="asset:body-side-media"');
-    expect(html).not.toContain('src="asset:body-front-media"');
-    expect(html).toContain('src="asset:shared-hand-media"');
+    expect(html).toContain('"assetRef":"asset:body-side-media"');
+    expect(html).not.toContain('"assetRef":"asset:body-front-media"');
+    expect(html).toContain('"assetRef":"asset:shared-hand-media"');
   });
 
-  it("targets bone groups for bone-aware motion while descendants inherit through DOM nesting", () => {
+  it("targets bone groups for bone-aware motion while descendants inherit through scene nesting", () => {
     const character = {
       ...createBlankCharacter("Walker"),
       id: "walker-char",
@@ -1194,21 +1445,19 @@ describe("buildCharacterCompositionHtml", () => {
       },
       motionPresets: new Map([["kick", preset]]),
     });
-    const scene = extractScene(html);
-    const legBoneIndex = html.indexOf('data-character-bone-id="bone:slot:left-leg"');
-    const footSlotIndex = html.indexOf('data-character-slot-id="slot:left-foot"');
-    const animatedSelectors = scene.motionSegments.flatMap((segment) =>
-      segment.targets.map((target) => target.selector),
+    const payload = extractPixiPayload(html);
+    const legBoneId = payload.scene.boneNodeIds["bone:slot:left-leg"];
+    const footBoneId = payload.scene.boneNodeIds["bone:slot:left-foot"];
+    const animatedNodeIds = payload.timelineScene.motionSegments.flatMap((segment) =>
+      segment.targets.map((target) => target.sceneNodeId),
     );
 
-    expect(legBoneIndex).toBeGreaterThan(-1);
-    expect(footSlotIndex).toBeGreaterThan(legBoneIndex);
-    expect(
-      animatedSelectors.some((selector) => selector.includes("char-bone-bone-slot-left-leg")),
-    ).toBe(true);
-    expect(
-      animatedSelectors.some((selector) => selector.includes("char-slot-slot-left-foot")),
-    ).toBe(false);
+    // The foot inherits the kick through scene-graph nesting under the leg bone,
+    // so motion targets only the leg bone node.
+    expect(payload.scene.nodes[footBoneId]?.parentId).toBe(legBoneId);
+    expect(animatedNodeIds).toContain(legBoneId);
+    expect(animatedNodeIds).not.toContain(footBoneId);
+    expect(animatedNodeIds).not.toContain(payload.scene.slotNodeIds["slot:left-foot"]);
   });
 
   it("locks child bone translation when compiled motion also animates an ancestor bone", () => {
@@ -1389,7 +1638,7 @@ describe("buildCharacterCompositionHtml", () => {
     expect(allTargets.some((target) => target.vars.rotationY === 360)).toBe(true);
   });
 
-  it("keeps generated DOM ids unique when slot ids sanitize to the same text", () => {
+  it("keeps generated ids unique when slot ids sanitize to the same text", () => {
     const character = {
       ...createBlankCharacter("Actor"),
       id: "char-collision",
@@ -1426,11 +1675,26 @@ describe("buildCharacterCompositionHtml", () => {
       },
       motionPresets: new Map(),
     });
-    const ids = Array.from(html.matchAll(/\sid="([^"]+)"/g), (match) => match[1]);
+    const payload = extractPixiPayload(html);
 
-    expect(new Set(ids).size).toBe(ids.length);
-    expect(html).toContain('data-character-slot-id="slot:body"');
-    expect(html).toContain('data-character-slot-id="slot-body"');
+    // The runtime canonicalizes "slot:body" to the body role slot; both slots
+    // must exist as distinct scene nodes with disjoint generated id pools.
+    expect(payload.scene.slotNodeIds["role:body"]).toBeTruthy();
+    expect(payload.scene.slotNodeIds["slot-body"]).toBeTruthy();
+    const partNodeIds = Object.values(payload.scene.partNodeIds);
+    expect(new Set(partNodeIds).size).toBe(partNodeIds.length);
+    const idsBySlot = new Map<string, Set<string>>();
+    for (const event of payload.timelineScene.slotEvents) {
+      const set = idsBySlot.get(event.slotId) ?? new Set<string>();
+      for (const id of [...(event.variant?.hide ?? []), ...(event.variant?.show ?? [])])
+        set.add(id);
+      idsBySlot.set(event.slotId, set);
+    }
+    const colonIds = idsBySlot.get("role:body") ?? new Set<string>();
+    const hyphenIds = idsBySlot.get("slot-body") ?? new Set<string>();
+    expect(colonIds.size).toBeGreaterThan(0);
+    expect(hyphenIds.size).toBeGreaterThan(0);
+    for (const id of colonIds) expect(hyphenIds.has(id)).toBe(false);
   });
 
   it("uses mouth variants by default when a generated rig also exists", () => {
@@ -1459,57 +1723,13 @@ describe("buildCharacterCompositionHtml", () => {
       motionPresets: new Map(),
     });
     const scene = extractScene(html);
+    const payload = extractPixiPayload(html);
 
-    expect(html).toContain('data-character-part-id="mouth-rest"');
-    expect(html).not.toContain('data-character-generated-mouth="true"');
+    expect(payload.scene.partNodeIds["mouth-rest"]).toBeTruthy();
+    expect(html).not.toContain("generatedMouth");
     expect(scene.slotEvents.some((event) => event.slotId === "role:mouth" && event.variant)).toBe(
       true,
     );
-  });
-
-  it("renders an explicit generated mouth rig through the same slot event stream", () => {
-    const character = {
-      ...makeCharacter(),
-      mouthStyle: "rig" as const,
-      mouthRig: createDefaultMouthRig("natural", {
-        x: 190,
-        y: 250,
-        width: 150,
-        height: 70,
-        zIndex: 5,
-      }),
-    };
-    const html = buildCharacterCompositionHtml({
-      compositionId: "char_mouth_rig",
-      clipId: "clip-mouth-rig",
-      width: 300,
-      height: 450,
-      duration: 4,
-      character,
-      meta: {
-        characterId: "char-1",
-        poses: {},
-        autoBlink: false,
-        visemes: [{ t: 0.3, v: "A" }],
-      },
-      motionPresets: new Map(),
-    });
-    const scene = extractScene(html);
-    const generatedStyle = html.match(
-      /<div id="[^"]*" data-character-slot="true" data-character-slot-id="role:mouth"[^>]*data-character-generated-mouth="true"[^>]*style="([^"]*)"/,
-    );
-    expect(generatedStyle).not.toBeNull();
-    const left = Number(generatedStyle![1].match(/left:([^p]+)px/)?.[1]);
-    const top = Number(generatedStyle![1].match(/top:([^p]+)px/)?.[1]);
-
-    expect(html).toContain('data-character-generated-mouth="true"');
-    expect(left).toBeCloseTo(-32.5);
-    expect(top).toBeCloseTo(-15.5);
-    expect(html).toContain("slotEvents");
-    expect(html).not.toContain("mouthRigEvents");
-    expect(
-      scene.slotEvents.some((event) => event.slotId === "role:mouth" && event.generatedMouth),
-    ).toBe(true);
   });
 
   it("serializes speech audio, viseme swaps, and finite applied motion data", () => {
@@ -1737,7 +1957,7 @@ describe("buildCharacterCompositionHtml", () => {
       target.selector.includes("role-mouth"),
     );
 
-    expect(html).toContain('data-character-part-id="mouth-raspberry"');
+    expect(extractPixiPayload(html).scene.partNodeIds["mouth-raspberry"]).toBeTruthy();
     expect(scene.slotEvents.some((event) => eventShowsVariant(event, "raspberry"))).toBe(true);
     expect(mouthTarget?.vars.transformOrigin).toBe("61.111% 59.524%");
   });
@@ -1804,8 +2024,10 @@ describe("buildCharacterCompositionHtml", () => {
     );
     const scene = extractScene(html);
 
-    expect(html).toContain('data-character-variant="fist"');
-    expect(html).toContain('data-character-variant-kind="handShape"');
+    const fistNode = Object.values(extractPixiPayload(html).scene.nodes).find(
+      (node) => node.variantKey === "fist",
+    );
+    expect(fistNode).toBeTruthy();
     expect(scene.slotEvents.some((event) => eventShowsVariant(event, "fist"))).toBe(true);
   });
 
@@ -2000,28 +2222,18 @@ describe("parent variant bone anchors", () => {
     updatedAt: 0,
   };
 
-  function handBoneTag(html: string): string {
-    const match = html.match(/<div id="char-bone-bone-slot-right-hand[^"]*"[^>]*>/);
-    expect(match).not.toBeNull();
-    return match![0];
-  }
-
-  it("emits scaled variant anchors on the child bone element", () => {
+  it("emits scaled variant anchors on the child bone track", () => {
     const html = build({ autoBlink: false }, new Map(), makeVariantArmCharacter());
-    const bone = handBoneTag(html);
-    expect(bone).toContain("data-character-variant-anchors=");
-    const attr = bone.match(/data-character-variant-anchors="([^"]+)"/);
-    const parsed = JSON.parse(attr![1].replace(/&quot;/g, '"')) as {
-      base: { left: number; top: number };
-      anchors: Record<string, { left: number; top: number }>;
-    };
-    expect(parsed.base).toEqual({ left: 5, top: 87.5, rotation: 0 });
-    expect(parsed.anchors.bent).toEqual({ left: 40, top: 30, rotation: 0 });
+    const payload = extractPixiPayload(html);
+    const track = payload.scene.boneAnchorTracks["bone:slot:right-hand"];
+    expect(track?.base).toEqual({ x: 5, y: 87.5, rotation: 0 });
+    expect(track?.anchors.bent).toEqual({ x: 40, y: 30, rotation: 0 });
     // Aliases of the bent arm part resolve to the same anchor.
-    expect(parsed.anchors["arm-bent"]).toEqual({ left: 40, top: 30, rotation: 0 });
-    // The straight (representative) variant needs no entry — base applies.
-    expect(bone).toContain("left:5px");
-    expect(bone).toContain("top:87.5px");
+    expect(track?.anchors["arm-bent"]).toEqual({ x: 40, y: 30, rotation: 0 });
+    // The straight (representative) variant needs no entry — the bone rests at base.
+    const boneNode = payload.scene.nodes[payload.scene.boneNodeIds["bone:slot:right-hand"]];
+    expect(boneNode?.frame.x).toBe(5);
+    expect(boneNode?.frame.y).toBe(87.5);
   });
 
   it("bakes the initial bone anchor from the placed pose", () => {
@@ -2030,9 +2242,12 @@ describe("parent variant bone anchors", () => {
       new Map(),
       makeVariantArmCharacter(),
     );
-    const bone = handBoneTag(html);
-    expect(bone).toContain("left:40px");
-    expect(bone).toContain("top:30px");
+    const payload = extractPixiPayload(html);
+    const track = payload.scene.boneAnchorTracks["bone:slot:right-hand"];
+    expect(track?.initial).toEqual({ x: 40, y: 30, rotation: 0 });
+    const boneNode = payload.scene.nodes[payload.scene.boneNodeIds["bone:slot:right-hand"]];
+    expect(boneNode?.frame.x).toBe(40);
+    expect(boneNode?.frame.y).toBe(30);
   });
 
   it("re-anchors the hand bone through variant slot events when a motion bends the arm", () => {
@@ -2075,28 +2290,28 @@ describe("pivot-aligned variant placement", () => {
   // Canvas 600x900 rendered at 300x450 → scale 0.5. The contract under test: in a bone-bound
   // variant slot, the DISPLAYED art's pivot rides the joint (and therefore any pinned socket),
   // regardless of which variant is showing or where it was drawn on the canvas.
-  function tagStyle(html: string, pattern: RegExp): string {
-    const match = html.match(pattern);
-    expect(match, `no element matching ${pattern}`).not.toBeNull();
-    return match![0].match(/style="([^"]*)"/)![1];
-  }
-
-  function leftTop(style: string): { left: number; top: number } {
-    const left = style.match(/left:(-?[\d.]+)px/);
-    const top = style.match(/top:(-?[\d.]+)px/);
-    expect(left, `no left in ${style}`).not.toBeNull();
-    expect(top, `no top in ${style}`).not.toBeNull();
-    return { left: Number(left![1]), top: Number(top![1]) };
-  }
-
-  function elementPos(html: string, idPrefix: string): { left: number; top: number } {
-    return leftTop(tagStyle(html, new RegExp(`<div id="${idPrefix}[^"]*"[^>]*>`)));
-  }
-
   function partPos(html: string, partId: string): { left: number; top: number } {
-    return leftTop(
-      tagStyle(html, new RegExp(`<[a-z]+ [^>]*data-character-part-id="${partId}"[^>]*>`)),
-    );
+    const payload = extractPixiPayload(html);
+    const node = payload.scene.nodes[payload.scene.partNodeIds[partId]];
+    expect(node, `no scene node for part ${partId}`).toBeTruthy();
+    return { left: node!.frame.x, top: node!.frame.y };
+  }
+
+  /** World-space top-left of a part by summing frame offsets up the scene chain. */
+  function chainLeftTop(html: string, partId: string): { left: number; top: number } {
+    const payload = extractPixiPayload(html);
+    let id: string | undefined = payload.scene.partNodeIds[partId];
+    expect(id, `no scene node for part ${partId}`).toBeTruthy();
+    let left = 0;
+    let top = 0;
+    while (id) {
+      const node: PayloadSceneNode | undefined = payload.scene.nodes[id];
+      if (!node) break;
+      left += node.frame.x;
+      top += node.frame.y;
+      id = node.parentId;
+    }
+    return { left, top };
   }
 
   it("lands the displayed non-rep variant's pivot exactly on the pinned socket", () => {
@@ -2115,19 +2330,11 @@ describe("pivot-aligned variant placement", () => {
       new Map(),
       character,
     );
-    const body = elementPos(html, "char-bone-bone-role-body");
-    const arm = elementPos(html, "char-bone-bone-slot-right-arm");
-    const handBone = elementPos(html, "char-bone-bone-slot-right-hand");
-    const container = elementPos(html, "char-slot-slot-right-hand");
-    const art = partPos(html, "hand-bent");
+    const art = chainLeftTop(html, "hand-bent");
     // hand-bent pivot (370,230) − authored xy (360,220) = (10,10), scaled by 0.5.
     const pivotInArt = { x: 5, y: 5 };
-    expect(body.left + arm.left + handBone.left + container.left + art.left + pivotInArt.x).toBe(
-      socket.x * 0.5,
-    );
-    expect(body.top + arm.top + handBone.top + container.top + art.top + pivotInArt.y).toBe(
-      socket.y * 0.5,
-    );
+    expect(art.left + pivotInArt.x).toBe(socket.x * 0.5);
+    expect(art.top + pivotInArt.y).toBe(socket.y * 0.5);
   });
 
   it("rides a non-rep variant chosen at rest on the representative's joint instead of floating at its drawn spot", () => {
@@ -2142,12 +2349,9 @@ describe("pivot-aligned variant placement", () => {
     // pivotAligned offset = pivotLocal(straight)(10,5) − pivotLocal(bent)(10,10) = (0,−5) × 0.5.
     expect(art).toEqual({ left: 0, top: 0 });
     // Full chain lands the displayed pivot on the straight wrist pivot (300,345) × 0.5.
-    const body = elementPos(html, "char-bone-bone-role-body");
-    const arm = elementPos(html, "char-bone-bone-slot-right-arm");
-    const handBone = elementPos(html, "char-bone-bone-slot-right-hand");
-    const container = elementPos(html, "char-slot-slot-right-hand");
-    expect(body.left + arm.left + handBone.left + container.left + art.left + 5).toBe(150);
-    expect(body.top + arm.top + handBone.top + container.top + art.top + 5).toBe(172.5);
+    const world = chainLeftTop(html, "hand-bent");
+    expect(world.left + 5).toBe(150);
+    expect(world.top + 5).toBe(172.5);
   });
 
   it("keeps the representative group at its authored position (byte-stable placement)", () => {
@@ -2370,7 +2574,7 @@ describe("variant rotation limits in compiled playback", () => {
         new Map(),
         character,
       );
-      expect(html).not.toContain("data-character-variant-anchors=");
+      expect(Object.keys(extractPixiPayload(html).scene.boneAnchorTracks)).toEqual([]);
       expect(warnings.filter((entry) => entry.includes("fallback anchor"))).toEqual([]);
     } finally {
       console.warn = originalWarn;
@@ -2402,8 +2606,9 @@ describe("anchor rotation in compiled playback", () => {
       new Map(),
       rotatedSocketCharacter(),
     );
-    const bone = html.match(/<div id="char-bone-bone-slot-right-hand[^"]*"[^>]*>/)![0];
-    expect(bone).toContain("rotate(-35deg)");
+    const payload = extractPixiPayload(html);
+    const boneNode = payload.scene.nodes[payload.scene.boneNodeIds["bone:slot:right-hand"]];
+    expect(boneNode?.frame.rotation).toBe(-35);
   });
 
   it("carries rotation through variant slot events", () => {
@@ -2437,7 +2642,7 @@ describe("anchor rotation in compiled playback", () => {
       entry.selector.startsWith("#char-bone-bone-slot-right-hand"),
     ) as { rotation?: number } | undefined;
     expect(anchor?.rotation).toBe(-35);
-    expect(html).toContain("rotation: anchor.rotation");
+    expect(html).toContain("toRadians(anchor.rotation)");
   });
 });
 
@@ -2475,10 +2680,10 @@ describe("per-angle artwork in compiled output", () => {
       meta: { characterId: character.id, poses: {}, autoBlink: false },
       motionPresets: new Map(),
     });
-    expect(html).toContain('src="asset:side-body-media"');
+    expect(html).toContain('"assetRef":"asset:side-body-media"');
     // Front drawings must not stack into the side view's render/export.
-    expect(html).not.toContain('src="asset:body-media"');
-    expect(html).not.toContain('src="asset:arm-straight-media"');
-    expect(html).not.toContain('src="asset:hand-straight-media"');
+    expect(html).not.toContain('"assetRef":"asset:body-media"');
+    expect(html).not.toContain('"assetRef":"asset:arm-straight-media"');
+    expect(html).not.toContain('"assetRef":"asset:hand-straight-media"');
   });
 });

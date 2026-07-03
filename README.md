@@ -4,15 +4,19 @@ Studio Boom is a local-first visual studio for making animated, HTML-based video
 HyperFrames.
 
 The goal is simple: let a human build a movie visually while keeping the movie source
-as real HyperFrames HTML the whole time. You can upload media, build puppet-style
-characters, add text and custom HyperFrames blocks, generate or import character
-speech, edit clips on a timeline, preview the real project, and render an MP4.
+as canonical, render-ready HyperFrames project source the whole time. You can upload
+media, build rigged characters, add text and custom HyperFrames blocks, generate or
+import character speech, edit clips on a timeline, preview the real project, and
+render an MP4.
 
 The core rule:
 
 ```text
-React is for editing the movie.
-HyperFrames is the movie.
+One canonical project source drives editing, stage preview, playback, and MP4 export.
+
+project.hf.rootHtml
+project.hf.compositionHtml
+project.hf.assets
 ```
 
 The product rule:
@@ -23,7 +27,7 @@ Do not recreate working HyperFrames editor mechanics inside Studio Boom.
 ```
 
 Studio Boom does not wait until export to convert React state into a video. The
-project you edit is already a HyperFrames project:
+project you edit is already the renderable movie document:
 
 ```text
 project.hf.rootHtml
@@ -52,8 +56,19 @@ Working now:
 - Stage selection, drag, resize, rotate, layer ordering, and keyboard nudging on the
   real HyperFrames iframe element.
 - Undo/redo for project edits.
-- Layered puppet character builder with parts, variants, eyes, brows, mouth shapes,
-  generated mouth rigs, parallax, auto-blink, and motion behavior metadata.
+- Layered character builder with parts, variants, eyes, brows, mouth shapes,
+  parallax, auto-blink, and motion behavior metadata.
+- Guided character assembly: one Parts rail (layer list with a per-part "+" to
+  add variant artwork, and a single add-part menu), imports that auto-place —
+  new variants size and center onto the slot's existing art, first art lands in
+  its body region — plus per-slot missing-shape upload chips (visemes, eye
+  states), sibling-variant ghosts with one-click art alignment,
+  mirror-to-other-side for sided slots, and the same react-moveable selection
+  box as the stage for moving, resizing, and rotating parts.
+- Pixi-backed character rendering inside generated HyperFrames character
+  sub-compositions. Preview and MP4 export use the same stored character source.
+- Export-parity regression coverage for Pixi character source, local Pixi runtime
+  packaging, image/SVG asset refs, and the current mesh-free default render path.
 - Character Actions and Expressions:
   - reusable body actions, facial expressions, head turns, and camera cues
   - separate timeline subtracks for Actions, Expressions, and Voice/lip sync
@@ -76,6 +91,12 @@ Still in progress:
 - The UI around custom blocks and source editing is intentionally minimal.
 - Nested composition timeline editing is not built yet.
 - Crop, mirror, richer keyframe editing, and shader transition support are deferred.
+- Full mesh/stretch-limb deformation is deferred until it has dedicated
+  preview/export parity coverage. Current Pixi character parts render as sprites
+  or vector nodes by default.
+- The character editor panel still previews with its own React/DOM drawing; the
+  planned follow-up is a persistent Pixi app in the panel fed by the same
+  character scene graph.
 - Local backup/restore for the IndexedDB database still needs a product flow.
 - There is no hosted backend, team sync, or cloud account.
 
@@ -128,9 +149,15 @@ and forced alignment will show an error until the key is configured.
 
 ## Characters
 
-Characters are layered image rigs stored as HyperFrames composition clips. A root
+Characters are layered rigs stored as HyperFrames composition clips. A root
 timeline character clip points to one character sub-composition in
 `project.hf.compositionHtml`.
+
+The current validated character render path is Pixi inside that generated
+HyperFrames sub-composition. The rig vocabulary stays renderer-neutral:
+bones, sockets/pins, slots, variants, poses, Actions, Expressions, and speech
+describe character intent. Pixi is the renderer for that intent, not a second
+movie model.
 
 A character can include:
 
@@ -147,6 +174,12 @@ A character can include:
 
 The old static bake pipeline has been removed. Character tools now author native
 HyperFrames sub-composition source directly.
+
+Pixi is the only character renderer; the legacy DOM puppet renderer was removed.
+New character rendering work targets the renderer-neutral character scene graph
+and Pixi composition builder while preserving the same `project.hf`
+source-parity rule. Characters that still reference the retired generated mouth
+rig build without that mouth until they get mouth image or SVG parts.
 
 ## Speech And Lip Sync
 
@@ -281,6 +314,7 @@ npm ci            # reproducible install from package-lock.json
 - `@hyperframes/studio` - timeline player hooks and controls
 - `@hyperframes/player` - Stage preview web component
 - HyperFrames CLI - MP4 rendering
+- PixiJS - current character renderer inside HyperFrames sub-compositions
 - GSAP - animation timelines inside composition HTML
 - Tailwind CSS - styling
 - ElevenLabs - optional speech generation and forced alignment

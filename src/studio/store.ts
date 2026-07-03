@@ -75,12 +75,6 @@ import {
   type ResolvedSpeech,
 } from "./character/composition";
 import { CharacterPinRigError } from "./character/rig-v2";
-import {
-  applyCharacterCommand,
-  lintCharacterDocument,
-  type CharacterCommand,
-  type CharacterDocumentLintResult,
-} from "./character-document";
 
 // ─── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -553,10 +547,12 @@ function assertValidCompositionSourceHtml(
 }
 
 function normalizeCharacterClipMeta(meta: CharacterClipMeta): CharacterClipMeta {
+  // `renderer` was the DOM→Pixi migration switch; Pixi is the only character
+  // renderer now, so the legacy field is stripped from saved meta.
+  const { renderer: _legacyRenderer, ...rest } = meta;
   return {
-    ...meta,
+    ...rest,
     poses: meta.poses ?? {},
-    renderer: meta.renderer === "pixi" ? "pixi" : "dom",
   };
 }
 
@@ -615,6 +611,7 @@ function rebuildCharacterCompositionInProject(
   const character = characters.get(meta.character.characterId);
   if (!character) return project;
 
+  const characterMeta = normalizeCharacterClipMeta(meta.character);
   let html: string;
   try {
     html = buildCharacterCompositionHtml({
@@ -624,9 +621,8 @@ function rebuildCharacterCompositionInProject(
       width: clip.width || project.hf.width,
       height: clip.height || project.hf.height,
       character,
-      meta: meta.character,
-      renderer: meta.character.renderer,
-      speeches: resolveSpeechesForBuild(meta.character, mediaAssets),
+      meta: characterMeta,
+      speeches: resolveSpeechesForBuild(characterMeta, mediaAssets),
       mediaAssets,
       motionPresets,
     });
@@ -1243,11 +1239,6 @@ interface StudioState {
     html: string,
     options?: ProjectMutationOptions,
   ) => void;
-  applyCharacterDocumentCommand: (
-    characterId: string,
-    command: CharacterCommand,
-    options?: ProjectMutationOptions,
-  ) => void;
   repairTimelineLanes: () => boolean;
 
   addMediaToTimeline: (asset: MediaAsset, trackIndex?: number, insertAtTime?: number) => void;
@@ -1282,10 +1273,6 @@ const scheduleSave = (get: () => StudioState, set: (partial: Partial<StudioState
     void get().saveProject(generation);
   }, 500);
 };
-
-function characterDocumentLintMessage(result: CharacterDocumentLintResult): string {
-  return result.errors.map((issue) => `- ${issue.path}: ${issue.message}`).join("\n");
-}
 
 function applyClipLayerMove(
   id: string,
@@ -1569,7 +1556,8 @@ export const useStudio = create<StudioState>((set, get) => ({
       tracks: project.editorMeta.tracks,
       activeSceneId: previous.activeSceneId,
       selectedClipId: previous.selectedClipId,
-      selectedClipIds: previous.selectedClipIds ?? (previous.selectedClipId ? [previous.selectedClipId] : []),
+      selectedClipIds:
+        previous.selectedClipIds ?? (previous.selectedClipId ? [previous.selectedClipId] : []),
       selectedKeyframe: previous.selectedKeyframe,
       historyPast: state.historyPast.slice(0, -1),
       historyFuture: trimHistory([...state.historyFuture, current]),
@@ -1692,7 +1680,6 @@ export const useStudio = create<StudioState>((set, get) => ({
           height: compositionClip.height || currentProject.hf.height,
           character,
           meta: meta.character,
-          renderer: meta.character.renderer,
           speeches: resolveSpeechesForBuild(meta.character, state.mediaAssets),
           mediaAssets: state.mediaAssets,
           motionPresets: state.motionPresets,
@@ -2818,66 +2805,6 @@ export const useStudio = create<StudioState>((set, get) => ({
         updatedAt: Date.now(),
       },
     });
-    scheduleSave(get, set);
-  },
-
-  applyCharacterDocumentCommand(characterId, command, options) {
-    const state = get();
-    const p = state.project;
-    if (!p) return;
-
-    const characterClipIds = Object.entries(p.editorMeta.clips)
-      .filter(([, meta]) => isCharacterMeta(meta) && meta.character.characterId === characterId)
-      .map(([clipId]) => clipId);
-    if (characterClipIds.length === 0) return;
-
-    let nextProject = p;
-    let compositionHtml = { ...p.hf.compositionHtml };
-    let changed = false;
-
-    for (const clipId of characterClipIds) {
-      const meta = nextProject.editorMeta.clips[clipId];
-      if (!isCharacterMeta(meta)) continue;
-      let html = compositionHtml[meta.compositionId];
-      if (!html) {
-        nextProject = rebuildCharacterCompositionInProject(
-          nextProject,
-          clipId,
-          state.characters,
-          state.mediaAssets,
-          state.motionPresets,
-        );
-        compositionHtml = { ...nextProject.hf.compositionHtml };
-        html = compositionHtml[meta.compositionId];
-      }
-      if (!html) continue;
-
-      const updated = applyCharacterCommand(html, command);
-      const lint = lintCharacterDocument(updated);
-      if (!lint.ok) {
-        throw new Error(
-          `Character document command produced invalid HTML:\n${characterDocumentLintMessage(
-            lint,
-          )}`,
-        );
-      }
-      if (updated !== html) {
-        compositionHtml[meta.compositionId] = updated;
-        changed = true;
-      }
-    }
-
-    if (!changed && nextProject === p) return;
-    if (options?.history !== false) get().checkpointHistory();
-    const project: Project = {
-      ...nextProject,
-      hf: {
-        ...nextProject.hf,
-        compositionHtml,
-      },
-      updatedAt: Date.now(),
-    };
-    set({ project, tracks: project.editorMeta.tracks });
     scheduleSave(get, set);
   },
 

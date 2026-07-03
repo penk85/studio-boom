@@ -266,7 +266,6 @@ function CharactersTab() {
         characterId,
         // Characters start in their default pose — a non-pose doesn't make sense.
         poses: character ? defaultPoseForCharacter(character) : {},
-        renderer: "dom",
         autoBlink: true,
       },
       name,

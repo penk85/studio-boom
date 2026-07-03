@@ -1,20 +1,15 @@
-import { generateHyperframesHtml } from "@hyperframes/core";
 import type {
   CharacterClipMeta,
-  CharacterRenderer,
   CharacterPart,
   CharacterPreset,
   CharacterSlotRelation,
   MediaAsset,
   MotionPreset,
-  MouthPose,
   MouthViseme,
   PartRole,
   VisemeEntry,
 } from "../types";
 import { characterSpeeches } from "../types";
-import { validateCompositionSourceHtml } from "../hyperframes/composition-source";
-import { normalizeNativeHyperframesHtml } from "../hyperframes/native";
 import {
   composeMotionsAt,
   deltaForBone,
@@ -40,13 +35,6 @@ import {
   eyeVariantsForSlot,
   resolveEyeState,
 } from "./eye-state";
-import {
-  MOUTH_VIEWBOX,
-  RIG_STYLES,
-  VISEME_POSES,
-  poseToTransforms,
-  type RigTransforms,
-} from "./mouth-libraries";
 import {
   representativePart,
   resolveSlotBinding,
@@ -101,8 +89,6 @@ interface NestedHostContext {
   placement: RuntimePartPlacement;
 }
 
-export type CharacterCompositionRenderer = CharacterRenderer;
-
 export interface BuildCharacterCompositionArgs {
   compositionId: string;
   clipId: string;
@@ -112,7 +98,6 @@ export interface BuildCharacterCompositionArgs {
   character: CharacterPreset;
   meta: CharacterClipMeta;
   motionPresets: Map<string, MotionPreset>;
-  renderer?: CharacterCompositionRenderer;
   /** Speeches placed on the character, resolved against their audio assets. Each
    *  emits an `<audio>` at its start and contributes offset visemes to the mouth.
    *  When omitted, falls back to the legacy single `meta.lipSyncAudioId`. */
@@ -179,27 +164,7 @@ interface VariantSlotRender {
   sceneVariants?: Record<string, string[]>;
 }
 
-interface GeneratedMouthSlotRender {
-  kind: "generatedMouth";
-  componentIds: {
-    upperLip: string;
-    lowerLip: string;
-    interior: string;
-    teeth: string;
-    tongue: string;
-  };
-  visemeVars: Partial<Record<MouthViseme, GeneratedMouthTimelineVars>>;
-}
-
-type SlotRenderStrategy = VariantSlotRender | GeneratedMouthSlotRender;
-
-interface GeneratedMouthTimelineVars {
-  upperLip: GsapVars;
-  lowerLip: GsapVars;
-  interior: GsapVars;
-  teeth: GsapVars;
-  tongue: GsapVars;
-}
+type SlotRenderStrategy = VariantSlotRender;
 
 type GsapVars = CharacterTimelineVars;
 
@@ -252,101 +217,18 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
   const width = positiveNumber(args.width, 1);
   const height = positiveNumber(args.height, 1);
   const duration = positiveNumber(args.duration, 0.1);
-  if (args.renderer === "pixi") {
-    const runtime = buildCharacterRuntime(args.character);
-    const character = runtime.character;
-    assertCharacterPinRigReadyForAngle(character, runtime.angle);
-    const scaleX = width / Math.max(1, character.canvasWidth);
-    const scaleY = height / Math.max(1, character.canvasHeight);
-    const { audioSpeeches, combinedVisemes } = resolveSpeechTimeline(args, duration);
-    const effectiveMeta: CharacterClipMeta = {
-      ...args.meta,
-      visemes: [...combinedVisemes].sort((a, b) => a.t - b.t),
-    };
-    const dom = buildPuppetDom(character, runtime, effectiveMeta, scaleX, scaleY);
-    const timelineScene = buildCharacterTimelineScene({
-      compositionId: args.compositionId,
-      clipId: args.clipId,
-      duration,
-      scaleX,
-      scaleY,
-      meta: effectiveMeta,
-      motionPresets: args.motionPresets,
-      motionTargets: dom.motionTargets,
-      canvasWidth: character.canvasWidth,
-      canvasHeight: character.canvasHeight,
-      slotTimelines: dom.slotTimelines,
-      boneAnchorTimelines: dom.boneAnchorTimelines,
-      constraintContext: runtime.constraintContext,
-      activeAngle: runtime.angle,
-    });
-    return buildPixiCharacterCompositionHtml({
-      ...args,
-      width,
-      height,
-      duration,
-      character,
-      meta: effectiveMeta,
-      scene: buildCharacterScene({
-        character,
-        meta: effectiveMeta,
-        width,
-        height,
-        runtime,
-        mediaAssets: args.mediaAssets,
-      }),
-      timelineScene,
-      audioSpeeches,
-    });
-  }
-
-  const resolution = width >= height ? "landscape" : "portrait";
-  const baseHtml = generateHyperframesHtml([], duration, {
-    compositionId: args.compositionId,
-    resolution,
-    includeStyles: true,
-    includeScripts: true,
-  });
-
-  const doc = parseCompositionBase(baseHtml, args.compositionId, duration, width, height);
-  const stage = ensureStage(doc, args.compositionId, duration, width, height);
-  const scaleX = width / Math.max(1, args.character.canvasWidth);
-  const scaleY = height / Math.max(1, args.character.canvasHeight);
   const runtime = buildCharacterRuntime(args.character);
   const character = runtime.character;
   assertCharacterPinRigReadyForAngle(character, runtime.angle);
-  const characterRig = runtime.rig;
-  const dom = buildPuppetDom(character, runtime, args.meta, scaleX, scaleY);
-
-  stage.innerHTML = "";
-  stage.insertAdjacentHTML("beforeend", dom.html.join("\n"));
-
-  // Each speech becomes its own <audio> at its start (clamped to the clip), and
-  // contributes its visemes offset by that start to a combined mouth track.
+  const scaleX = width / Math.max(1, character.canvasWidth);
+  const scaleY = height / Math.max(1, character.canvasHeight);
   const { audioSpeeches, combinedVisemes } = resolveSpeechTimeline(args, duration);
-  audioSpeeches.forEach((speech, index) => {
-    // Each speech is its own timeline clip on its own track lane (HyperFrames
-    // assigns a distinct data-track-index per clip).
-    stage.insertAdjacentHTML(
-      "beforeend",
-      buildSpeechAudio(
-        `${args.compositionId}-speech-${index}`,
-        speech.audioId,
-        speech.start,
-        speech.duration,
-        index,
-        speech.volume,
-        speech.mediaStart,
-      ),
-    );
-  });
   const effectiveMeta: CharacterClipMeta = {
     ...args.meta,
     visemes: [...combinedVisemes].sort((a, b) => a.t - b.t),
   };
-
-  appendCharacterStyles(doc);
-  appendCharacterTimelineScript(doc, {
+  const dom = buildPuppetDom(character, runtime, effectiveMeta, scaleX, scaleY);
+  const timelineScene = buildCharacterTimelineScene({
     compositionId: args.compositionId,
     clipId: args.clipId,
     duration,
@@ -355,137 +237,31 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
     meta: effectiveMeta,
     motionPresets: args.motionPresets,
     motionTargets: dom.motionTargets,
-    canvasWidth: args.character.canvasWidth,
-    canvasHeight: args.character.canvasHeight,
+    canvasWidth: character.canvasWidth,
+    canvasHeight: character.canvasHeight,
     slotTimelines: dom.slotTimelines,
     boneAnchorTimelines: dom.boneAnchorTimelines,
     constraintContext: runtime.constraintContext,
     activeAngle: runtime.angle,
   });
-
-  const normalized = normalizeNativeHyperframesHtml(
-    "<!DOCTYPE html>\n" + doc.documentElement.outerHTML,
-    {
-      width,
-      height,
-    },
-  );
-  const validation = validateCompositionSourceHtml(normalized, {
-    compositionId: args.compositionId,
-    duration,
+  return buildPixiCharacterCompositionHtml({
+    ...args,
     width,
     height,
+    duration,
+    character,
+    meta: effectiveMeta,
+    scene: buildCharacterScene({
+      character,
+      meta: effectiveMeta,
+      width,
+      height,
+      runtime,
+      mediaAssets: args.mediaAssets,
+    }),
+    timelineScene,
+    audioSpeeches,
   });
-  if (!validation.ok || !validation.html) {
-    throw new Error(
-      `Generated character composition is invalid:\n${validation.errors
-        .map((error) => `- ${error}`)
-        .join("\n")}`,
-    );
-  }
-  return validation.html;
-}
-
-function parseCompositionBase(
-  html: string,
-  compositionId: string,
-  duration: number,
-  width: number,
-  height: number,
-): Document {
-  if (typeof DOMParser === "undefined") {
-    throw new Error("DOMParser is required to build character compositions.");
-  }
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  const root = doc.documentElement;
-  root.setAttribute("data-composition-id", compositionId);
-  root.setAttribute("data-composition-duration", String(duration));
-  root.setAttribute("data-composition-width", String(width));
-  root.setAttribute("data-composition-height", String(height));
-  root.setAttribute("data-width", String(width));
-  root.setAttribute("data-height", String(height));
-  root.setAttribute("data-resolution", width >= height ? "landscape" : "portrait");
-  if (doc.body) {
-    doc.body.style.margin = "0";
-    doc.body.style.overflow = "hidden";
-    doc.body.style.background = "transparent";
-  }
-  return doc;
-}
-
-function ensureStage(
-  doc: Document,
-  compositionId: string,
-  duration: number,
-  width: number,
-  height: number,
-): HTMLElement {
-  let stage = doc.getElementById("stage") as HTMLElement | null;
-  if (!stage) {
-    stage = doc.createElement("div");
-    stage.id = "stage";
-    doc.body?.appendChild(stage);
-  }
-  stage.setAttribute("data-composition-id", compositionId);
-  stage.setAttribute("data-start", "0");
-  stage.setAttribute("data-duration", String(duration));
-  stage.setAttribute("data-width", String(width));
-  stage.setAttribute("data-height", String(height));
-  stage.removeAttribute("data-track-index");
-  stage.style.position = "relative";
-  stage.style.width = `${width}px`;
-  stage.style.height = `${height}px`;
-  stage.style.overflow = "hidden";
-  stage.style.background = "transparent";
-  return stage;
-}
-
-function appendCharacterStyles(doc: Document): void {
-  const style = doc.createElement("style");
-  style.textContent = `
-[data-character-root] {
-  position: absolute;
-  inset: 0;
-  overflow: visible;
-  pointer-events: none;
-}
-[data-character-bone] {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 0;
-  height: 0;
-  overflow: visible;
-  pointer-events: none;
-  transform-origin: 0 0;
-  will-change: transform;
-}
-[data-character-slot] {
-  position: absolute;
-  overflow: visible;
-  pointer-events: none;
-  will-change: transform, opacity;
-}
-[data-character-part] {
-  position: absolute;
-  display: block;
-  pointer-events: none;
-  user-select: none;
-  max-width: none;
-  max-height: none;
-  will-change: transform, opacity;
-}
-[data-character-generated-mouth-component] {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 100%;
-  height: 100%;
-  overflow: visible;
-  transform-origin: 50% 50%;
-  will-change: transform, opacity;
-}`;
-  doc.head?.appendChild(style);
 }
 
 function buildPuppetDom(
@@ -522,15 +298,6 @@ function buildPuppetDom(
   const slotTargets: MotionTarget[] = [];
 
   const slots = runtime.slots;
-  // True when the slot loop already handles the mouth: either via visible image parts in a
-  // rig-bound slot, or via rig-style SVG generation (buildSlotByRole path for mouthStyle:"rig").
-  // Also counts visible image parts on unbound slots so they suppress the fallback mouth too.
-  const hasMouthSlot =
-    slots.some(
-      (slot) =>
-        slot.role === "mouth" &&
-        (slot.parts.some((p) => p.visible) || character.mouthStyle === "rig"),
-    ) || character.parts.some((part) => part.role === "mouth" && part.visible);
   const appendCapturedSlotToBone = (boneId: string, render: () => void): MotionTarget[] => {
     const beforeHtml = out.html.length;
     const beforeTargets = out.motionTargets.length;
@@ -581,31 +348,21 @@ function buildPuppetDom(
     });
   }
 
-  const generatedMouthBoneId = defaultGeneratedMouthBoneId(rig);
-  const mouthRig = character.mouthRig;
-  if (!hasMouthSlot && mouthRig && character.mouthStyle !== "images") {
-    appendCapturedSlotToBone(generatedMouthBoneId, () => {
-      buildGeneratedMouthSlot(
-        out,
-        character,
-        mouthRig.placement,
-        "role:mouth",
-        scaleX,
-        scaleY,
-        undefined,
-        rig,
-        generatedMouthBoneId,
-      );
-    });
-  } else if (
-    !hasMouthSlot &&
-    !character.mouthRig &&
-    character.mouthStyle === "rig" &&
-    character.fallbackMouth
-  ) {
-    appendCapturedSlotToBone(generatedMouthBoneId, () => {
-      buildFallbackMouthRig(out, character, scaleX, scaleY, generatedMouthBoneId);
-    });
+  const hasVisibleMouthParts = character.parts.some(
+    (part) => part.role === "mouth" && part.visible,
+  );
+  const losesGeneratedMouth =
+    !hasVisibleMouthParts &&
+    ((character.mouthStyle === "rig" && !!(character.mouthRig || character.fallbackMouth)) ||
+      (!!character.mouthRig && character.mouthStyle !== "images"));
+  if (losesGeneratedMouth) {
+    // The generated/fallback mouth rig was DOM-renderer-only and is retired.
+    // Legacy characters keep building, minus that mouth, until they get real
+    // mouth image/SVG parts.
+    console.warn(
+      `Character "${character.name}" still references the legacy generated mouth rig; ` +
+        "it is no longer rendered. Add mouth image or SVG parts to restore the mouth.",
+    );
   }
 
   out.boneAnchorTimelines = buildBoneAnchorTimelines(
@@ -700,14 +457,6 @@ function buildBoneAnchorTimelines(
     });
   }
   return out;
-}
-
-function defaultGeneratedMouthBoneId(rig: RuntimeRig): string {
-  return (
-    rig.bones.find((bone) => bone.role === "head")?.id ??
-    rig.bones.find((bone) => bone.role === "body")?.id ??
-    "bone:root"
-  );
 }
 
 function renderBoneTree(
@@ -1032,23 +781,6 @@ function buildMouthSlot(
   nestedChildrenByParentSlotId: Map<string, NestedSlotChild[]>,
   host?: NestedHostContext,
 ): void {
-  if (character.mouthRig && character.mouthStyle === "rig") {
-    const basePart = resolveRuntimeSlotPart(slot, runtime, "rest") ?? representativePart(slot);
-    buildGeneratedMouthSlot(
-      out,
-      character,
-      character.mouthRig.placement,
-      slot.id,
-      scaleX,
-      scaleY,
-      binding,
-      rig,
-      undefined,
-      basePart,
-    );
-    return;
-  }
-
   const visibleParts = slot.parts.filter((part) => part.visible);
   const anglePart = resolveRuntimeSlotPart(slot, runtime, "rest");
   const restPart =
@@ -1144,239 +876,6 @@ function buildMouthSlot(
       kind: "variant",
       variants,
       sceneVariants,
-    },
-  });
-}
-
-function buildGeneratedMouthSlot(
-  out: PuppetDom,
-  character: CharacterPreset,
-  placement:
-    | NonNullable<CharacterPreset["fallbackMouth"]>
-    | NonNullable<CharacterPreset["mouthRig"]>["placement"],
-  slotId: string,
-  scaleX: number,
-  scaleY: number,
-  binding?: ResolvedSlotBinding,
-  rig?: RuntimeRig,
-  boundBoneId?: string,
-  basePart?: CharacterPart,
-): void {
-  const mouthRig = character.mouthRig;
-  if (!mouthRig) return;
-  const rigStyle = RIG_STYLES.find((style) => style.id === mouthRig.styleId) ?? RIG_STYLES[0];
-  const containerId = slotContainerId(slotId);
-  const safeSlot = safeId(slotId);
-  const componentIds = {
-    upperLip: `char-generated-mouth-${safeSlot}-upper-lip`,
-    lowerLip: `char-generated-mouth-${safeSlot}-lower-lip`,
-    interior: `char-generated-mouth-${safeSlot}-interior`,
-    teeth: `char-generated-mouth-${safeSlot}-teeth`,
-    tongue: `char-generated-mouth-${safeSlot}-tongue`,
-  };
-  const drawIndex = rig ? slotDrawIndex(rig, slotId, placement.zIndex) : placement.zIndex;
-  const targetPart = generatedMouthMotionTargetPart(slotId, placement);
-  const anchorPart = basePart ?? targetPart;
-  const anchorRegistration = registrationForPart(anchorPart);
-  const left = binding
-    ? binding.x - anchorRegistration.x + (targetPart.x - anchorPart.x)
-    : placement.x;
-  const top = binding
-    ? binding.y - anchorRegistration.y + (targetPart.y - anchorPart.y)
-    : placement.y;
-  const style = styleString({
-    left: left * scaleX,
-    top: top * scaleY,
-    width: placement.width * scaleX,
-    height: placement.height * scaleY,
-    "z-index": drawIndex,
-    "transform-origin": "50% 50%",
-    transform: `rotate(${binding?.rotation ?? 0}deg) scale(${binding?.scaleX ?? 1}, ${
-      binding?.scaleY ?? 1
-    })`,
-  });
-  out.html.push(
-    `<div id="${esc(containerId)}" data-character-slot="true" data-character-slot-id="${esc(
-      slotId,
-    )}" data-character-role="mouth" data-character-generated-mouth="true"${
-      binding || boundBoneId
-        ? ` data-character-bound-bone-id="${esc(binding?.effectiveBoneId ?? boundBoneId ?? "")}"`
-        : ""
-    } data-character-depth="${esc(binding?.effectiveDepth ?? ("depth" in placement ? placement.depth : 0))}" data-character-draw-order-index="${esc(
-      drawIndex,
-    )}" style="${esc(style)}">`,
-  );
-  out.html.push(
-    renderGeneratedMouthComponent(
-      componentIds.interior,
-      "interior",
-      rigStyle.interiorPath,
-      mouthRig.interiorColor,
-    ),
-  );
-  out.html.push(
-    renderGeneratedMouthComponent(
-      componentIds.tongue,
-      "tongue",
-      rigStyle.tonguePath,
-      mouthRig.tongueColor,
-      0,
-    ),
-  );
-  out.html.push(
-    renderGeneratedMouthComponent(
-      componentIds.teeth,
-      "teeth",
-      rigStyle.teethPath,
-      mouthRig.teethColor,
-      0,
-    ),
-  );
-  out.html.push(
-    renderGeneratedMouthComponent(
-      componentIds.lowerLip,
-      "lower-lip",
-      rigStyle.lowerLipPath,
-      mouthRig.lipColor,
-    ),
-  );
-  out.html.push(
-    renderGeneratedMouthComponent(
-      componentIds.upperLip,
-      "upper-lip",
-      rigStyle.upperLipPath,
-      mouthRig.lipColor,
-    ),
-  );
-  out.html.push("</div>");
-  out.motionTargets.push({
-    kind: "slot",
-    acceptsSlotMotion: true,
-    id: containerId,
-    selector: `#${containerId}`,
-    slotId,
-    role: "mouth",
-    basePart: targetPart,
-    baseRotation: targetPart.rotation,
-    baseAnchorX: targetPart.anchorX,
-    baseAnchorY: targetPart.anchorY,
-  });
-  out.slotTimelines.push({
-    slotId,
-    role: "mouth",
-    defaultKey: "rest",
-    render: {
-      kind: "generatedMouth",
-      componentIds,
-      visemeVars: Object.fromEntries(
-        VISEMES.map((viseme) => [
-          viseme,
-          generatedMouthVarsForPose(
-            mouthRig.poses[viseme] ?? mouthRig.poses.rest ?? VISEME_POSES[viseme],
-            rigStyle,
-            mouthRig,
-          ),
-        ]),
-      ),
-    },
-  });
-}
-
-function buildFallbackMouthRig(
-  out: PuppetDom,
-  character: CharacterPreset,
-  scaleX: number,
-  scaleY: number,
-  boundBoneId: string,
-): void {
-  const placement = character.fallbackMouth;
-  if (!placement) return;
-  const rigStyle = RIG_STYLES[0];
-  const slotId = "fallback:mouth";
-  const containerId = slotContainerId(slotId);
-  const componentIds = {
-    upperLip: "char-fallback-mouth-upper-lip",
-    lowerLip: "char-fallback-mouth-lower-lip",
-    interior: "char-fallback-mouth-interior",
-    teeth: "char-fallback-mouth-teeth",
-    tongue: "char-fallback-mouth-tongue",
-  };
-  out.html.push(
-    `<div id="${esc(containerId)}" data-character-slot="true" data-character-slot-id="${esc(
-      slotId,
-    )}" data-character-role="mouth" data-character-generated-mouth="fallback" data-character-bound-bone-id="${esc(
-      boundBoneId,
-    )}" data-character-depth="${esc("depth" in placement ? placement.depth : 0)}" data-character-draw-order-index="${esc(
-      placement.zIndex,
-    )}" style="${esc(
-      styleString({
-        left: placement.x * scaleX,
-        top: placement.y * scaleY,
-        width: placement.width * scaleX,
-        height: placement.height * scaleY,
-        "z-index": placement.zIndex,
-        "transform-origin": `${placement.anchorX * 100}% ${placement.anchorY * 100}%`,
-        transform: `rotate(${placement.rotation}deg)`,
-      }),
-    )}">`,
-  );
-  out.html.push(
-    renderGeneratedMouthComponent(
-      componentIds.interior,
-      "interior",
-      rigStyle.interiorPath,
-      "#23090b",
-    ),
-  );
-  out.html.push(
-    renderGeneratedMouthComponent(componentIds.tongue, "tongue", rigStyle.tonguePath, "#d96b76", 0),
-  );
-  out.html.push(
-    renderGeneratedMouthComponent(componentIds.teeth, "teeth", rigStyle.teethPath, "#fff2df", 0),
-  );
-  out.html.push(
-    renderGeneratedMouthComponent(
-      componentIds.lowerLip,
-      "lower-lip",
-      rigStyle.lowerLipPath,
-      "#b35b68",
-    ),
-  );
-  out.html.push(
-    renderGeneratedMouthComponent(
-      componentIds.upperLip,
-      "upper-lip",
-      rigStyle.upperLipPath,
-      "#b35b68",
-    ),
-  );
-  out.html.push("</div>");
-  const targetPart = generatedMouthMotionTargetPart(slotId, placement);
-  out.motionTargets.push({
-    kind: "slot",
-    acceptsSlotMotion: true,
-    id: containerId,
-    selector: `#${containerId}`,
-    slotId,
-    role: "mouth",
-    basePart: targetPart,
-    baseRotation: targetPart.rotation,
-    baseAnchorX: targetPart.anchorX,
-    baseAnchorY: targetPart.anchorY,
-  });
-  out.slotTimelines.push({
-    slotId,
-    role: "mouth",
-    defaultKey: "rest",
-    render: {
-      kind: "generatedMouth",
-      componentIds,
-      visemeVars: Object.fromEntries(
-        VISEMES.map((viseme) => [
-          viseme,
-          generatedMouthVarsForPose(VISEME_POSES[viseme], rigStyle),
-        ]),
-      ),
     },
   });
 }
@@ -1697,54 +1196,6 @@ function renderPartVisual(part: CharacterPart, children: string): string {
   return `${visual}${children}`;
 }
 
-function renderGeneratedMouthComponent(
-  id: string,
-  component: string,
-  path: string,
-  fill: string,
-  opacity?: number,
-): string {
-  return `<svg id="${esc(id)}" data-character-generated-mouth-component="${esc(
-    component,
-  )}" viewBox="${esc(MOUTH_VIEWBOX)}" aria-hidden="true" style="${esc(
-    styleString({ opacity: opacity ?? 1, "transform-origin": "50% 50%" }),
-  )}"><path d="${esc(path)}" fill="${esc(fill)}"/></svg>`;
-}
-
-function generatedMouthMotionTargetPart(
-  slotId: string,
-  placement:
-    | NonNullable<CharacterPreset["fallbackMouth"]>
-    | NonNullable<CharacterPreset["mouthRig"]>["placement"],
-): CharacterPart {
-  const rotation = "rotation" in placement ? placement.rotation : 0;
-  const anchorX = "anchorX" in placement ? placement.anchorX : 0.5;
-  const anchorY = "anchorY" in placement ? placement.anchorY : 0.5;
-  return {
-    id: `${slotId}:generated-mouth`,
-    slotId,
-    slotName: "Mouth",
-    role: "mouth",
-    name: "Generated mouth",
-    mediaId: "",
-    x: placement.x,
-    y: placement.y,
-    width: placement.width,
-    height: placement.height,
-    rotation,
-    anchorX,
-    anchorY,
-    pivot: {
-      x: placement.x + anchorX * placement.width,
-      y: placement.y + anchorY * placement.height,
-    },
-    motionBehavior: "lipSync",
-    zIndex: placement.zIndex,
-    depth: 0,
-    visible: true,
-  };
-}
-
 function motionTargetFor(
   id: string,
   slot: CharacterSlotRef,
@@ -1764,25 +1215,6 @@ function motionTargetFor(
     baseAnchorX: basePart.anchorX,
     baseAnchorY: basePart.anchorY,
   };
-}
-
-function buildSpeechAudio(
-  id: string,
-  mediaId: string,
-  start: number,
-  duration: number,
-  trackIndex: number,
-  volume?: number,
-  mediaStart?: number,
-): string {
-  const volumeAttr = volume !== undefined && volume !== 1 ? ` data-volume="${esc(volume)}"` : "";
-  const mediaStartAttr =
-    mediaStart !== undefined && mediaStart > 0 ? ` data-media-start="${esc(mediaStart)}"` : "";
-  return `<audio id="${esc(safeId(id))}" data-character-speech="true" data-start="${esc(
-    start,
-  )}" data-duration="${esc(duration)}" data-track-index="${esc(
-    trackIndex,
-  )}"${volumeAttr}${mediaStartAttr} src="asset:${esc(mediaId)}" preload="auto"></audio>`;
 }
 
 type ResolvedAudioSpeech = {
@@ -1911,129 +1343,6 @@ function buildCharacterTimelineScene(args: CharacterTimelineScriptArgs): Charact
     motionSegments,
     slotEvents,
   };
-}
-
-function buildCharacterTimelineScriptText(args: CharacterTimelineScriptArgs): string {
-  const scene = buildCharacterTimelineScene(args);
-  const sceneJson = safeJson(scene);
-  return `(function(){
-  const S = ${sceneJson};
-  const tl = gsap.timeline({ paused: true });
-  // Anchor the timeline to the full composition duration. The hyperframes runtime
-  // clamps a composition clip's visibility to min(data-duration, timeline.duration()),
-  // so without this tween the character's host clip disappears as soon as the last
-  // internal motion/viseme ends.
-  tl.to({}, { duration: S.duration }, 0);
-  const applyTargetVars = function(targets) {
-    (targets || []).forEach(function(target) { gsap.set(target.selector, target.vars); });
-  };
-  const applyVariantEvent = function(event) {
-    (event.variant.hide || []).forEach(function(id) { gsap.set("#" + id, { opacity: 0 }); });
-    const show = Array.isArray(event.variant.show) ? event.variant.show : event.variant.show ? [event.variant.show] : [];
-    show.forEach(function(id) { gsap.set("#" + id, { opacity: 1 }); });
-    (event.boneAnchors || []).forEach(function(anchor) {
-      gsap.set(anchor.selector, { left: anchor.left, top: anchor.top, rotation: anchor.rotation });
-    });
-  };
-  const applyGeneratedMouthEvent = function(event) {
-    Object.keys(event.generatedMouth.components || {}).forEach(function(selector) {
-      gsap.set(selector, event.generatedMouth.components[selector]);
-    });
-  };
-  const resetInitialState = function() {
-    applyTargetVars(S.initialTargets || []);
-    (S.slotEvents || []).forEach(function(event) {
-      if (Math.abs((event.time || 0)) > 0.0001) return;
-      if (event.variant) applyVariantEvent(event);
-      if (event.generatedMouth) applyGeneratedMouthEvent(event);
-    });
-  };
-  const setVars = function(targets, time) {
-    targets.forEach(function(target) { tl.set(target.selector, target.vars, time); });
-  };
-  setVars(S.initialTargets || [], 0);
-  (S.motionSegments || []).forEach(function(segment) {
-    (segment.targets || []).forEach(function(target) {
-      tl.to(target.selector, Object.assign({ duration: segment.duration, ease: "none" }, target.vars), segment.start);
-    });
-  });
-  (S.slotEvents || []).forEach(function(event) {
-    if (event.variant) {
-      (event.variant.hide || []).forEach(function(id) { tl.set("#" + id, { opacity: 0 }, event.time); });
-      const show = Array.isArray(event.variant.show) ? event.variant.show : event.variant.show ? [event.variant.show] : [];
-      show.forEach(function(id) { tl.set("#" + id, { opacity: 1 }, event.time); });
-      (event.boneAnchors || []).forEach(function(anchor) {
-        tl.set(anchor.selector, { left: anchor.left, top: anchor.top, rotation: anchor.rotation }, event.time);
-      });
-    }
-    if (event.generatedMouth) {
-      Object.keys(event.generatedMouth.components || {}).forEach(function(selector) {
-        tl.to(selector, Object.assign({ duration: event.generatedMouth.duration, ease: "none" }, event.generatedMouth.components[selector]), event.time);
-      });
-    }
-  });
-  const originalSeek = tl.seek;
-  tl.seek = function(time, suppressEvents) {
-    const result = originalSeek.call(this, time, suppressEvents);
-    if (Number(time) <= 0.001) resetInitialState();
-    return result;
-  };
-  tl.eventCallback("onStart", function() {
-    if (tl.time() <= 0.001) resetInitialState();
-  });
-  tl.eventCallback("onReverseComplete", resetInitialState);
-  resetInitialState();
-  window.__timelines = window.__timelines || {};
-  window.__timelines[${JSON.stringify(args.compositionId)}] = tl;
-})();`;
-}
-
-function appendCharacterTimelineScript(doc: Document, args: CharacterTimelineScriptArgs): void {
-  const script = doc.createElement("script");
-  script.textContent = buildCharacterTimelineScriptText(args);
-  doc.body?.appendChild(script);
-}
-
-/**
- * Builds only the GSAP timeline script for a character composition, without constructing
- * the full HTML. Used by the motion recorder to inject override states into the live preview
- * iframe frame-by-frame without a DOM reload.
- */
-export function buildCharacterGsapScript(args: {
-  compositionId: string;
-  clipId: string;
-  duration: number;
-  character: CharacterPreset;
-  meta: CharacterClipMeta;
-  motionPresets: Map<string, MotionPreset>;
-  width: number;
-  height: number;
-}): string {
-  const duration = positiveNumber(args.duration, 0.1);
-  const width = positiveNumber(args.width, 1);
-  const height = positiveNumber(args.height, 1);
-  const runtime = buildCharacterRuntime(args.character);
-  assertCharacterPinRigReadyForAngle(runtime.character, runtime.angle);
-  const character = runtime.character;
-  const scaleX = width / Math.max(1, character.canvasWidth);
-  const scaleY = height / Math.max(1, character.canvasHeight);
-  const dom = buildPuppetDom(character, runtime, args.meta, scaleX, scaleY);
-  return buildCharacterTimelineScriptText({
-    compositionId: args.compositionId,
-    clipId: args.clipId,
-    duration,
-    scaleX,
-    scaleY,
-    meta: args.meta,
-    motionPresets: args.motionPresets,
-    motionTargets: dom.motionTargets,
-    canvasWidth: character.canvasWidth,
-    canvasHeight: character.canvasHeight,
-    slotTimelines: dom.slotTimelines,
-    boneAnchorTimelines: dom.boneAnchorTimelines,
-    constraintContext: runtime.constraintContext,
-    activeAngle: runtime.angle,
-  });
 }
 
 function collectTimelineTimes(
@@ -2208,8 +1517,8 @@ function buildMotionFrame(
         transformOrigin: `${round(originX * 100, 3)}% ${round(originY * 100, 3)}%`,
       };
       // 3D fields are emitted only when actually used, so existing 2D motions stay byte-identical.
-      // The backfill pass in appendCharacterTimelineScript then keeps these present for the whole
-      // motion on any target that uses 3D, so GSAP animates them cleanly back to zero.
+      // backfillThreeDVars then keeps these present for the whole motion on any target that
+      // uses 3D, so the runtime animates them cleanly back to zero.
       if (delta.rotationX) vars.rotationX = round(delta.rotationX, 3);
       if (delta.rotationY) vars.rotationY = round(delta.rotationY, 3);
       if (delta.transformPerspective !== null)
@@ -2407,12 +1716,11 @@ function slotKeyOrDefault(slot: SlotTimeline, key: string | undefined): string {
 }
 
 function slotRenderHasKey(render: SlotRenderStrategy, key: string): boolean {
-  if (render.kind === "variant") return Boolean(render.variants[key]);
-  return Boolean(render.visemeVars[key as MouthViseme]);
+  return Boolean(render.variants[key]);
 }
 
 function slotRenderKeys(render: SlotRenderStrategy): string[] {
-  return render.kind === "variant" ? Object.keys(render.variants) : Object.keys(render.visemeVars);
+  return Object.keys(render.variants);
 }
 
 function lastVisemeAt(visemes: Array<{ t: number; v: MouthViseme }>, time: number): MouthViseme {
@@ -2438,29 +1746,24 @@ function buildSlotEvents(
     ]);
   }
   const previous = new Map<string, string>();
-  for (let index = 0; index < frames.length; index += 1) {
-    const frame = frames[index];
-    const nextFrame = frames[index + 1];
+  for (const frame of frames) {
     for (const slot of slots) {
       const key = frame.slotStates.get(slot.slotId) ?? slot.defaultKey;
       const signature = slotRenderSignature(slot.render, key);
       if (previous.get(slot.slotId) === signature) continue;
       previous.set(slot.slotId, signature);
-      const event = slotEventFor(slot, key, frame.time, nextFrame?.time);
-      if (!event) continue;
-      if (event.variant) {
-        const boneAnchors = (anchorsByParentSlot.get(slot.slotId) ?? []).map((entry) => {
-          const anchor = entry.anchors[key] ?? entry.base;
-          return {
-            selector: entry.selector,
-            sceneNodeId: entry.sceneNodeId,
-            left: anchor.left,
-            top: anchor.top,
-            rotation: anchor.rotation,
-          };
-        });
-        if (boneAnchors.length) event.boneAnchors = boneAnchors;
-      }
+      const event = slotEventFor(slot, key, frame.time);
+      const boneAnchors = (anchorsByParentSlot.get(slot.slotId) ?? []).map((entry) => {
+        const anchor = entry.anchors[key] ?? entry.base;
+        return {
+          selector: entry.selector,
+          sceneNodeId: entry.sceneNodeId,
+          left: anchor.left,
+          top: anchor.top,
+          rotation: anchor.rotation,
+        };
+      });
+      if (boneAnchors.length) event.boneAnchors = boneAnchors;
       events.push(event);
     }
   }
@@ -2468,48 +1771,23 @@ function buildSlotEvents(
 }
 
 function slotRenderSignature(render: SlotRenderStrategy, key: string): string {
-  if (render.kind === "variant") return variantIdsForKey(render, key).join("|") || key;
-  return key;
+  return variantIdsForKey(render, key).join("|") || key;
 }
 
-function slotEventFor(
-  slot: SlotTimeline,
-  key: string,
-  time: number,
-  nextTime: number | undefined,
-): CharacterTimelineSlotEvent | undefined {
-  if (slot.render.kind === "variant") {
-    return {
-      time,
-      slotId: slot.slotId,
-      key,
-      variant: {
-        hide: unique(Object.values(slot.render.variants).flat()),
-        show: variantIdsForKey(slot.render, key),
-        hideSceneNodeIds: slot.render.sceneVariants
-          ? unique(Object.values(slot.render.sceneVariants).flat())
-          : undefined,
-        showSceneNodeIds: slot.render.sceneVariants
-          ? variantSceneNodeIdsForKey(slot.render, key)
-          : undefined,
-      },
-    };
-  }
-  const vars = slot.render.visemeVars[key as MouthViseme] ?? slot.render.visemeVars.rest;
-  if (!vars) return undefined;
+function slotEventFor(slot: SlotTimeline, key: string, time: number): CharacterTimelineSlotEvent {
   return {
     time,
     slotId: slot.slotId,
     key,
-    generatedMouth: {
-      duration: Math.min(0.045, Math.max(0, (nextTime ?? time + 0.045) - time)),
-      components: {
-        [`#${slot.render.componentIds.upperLip}`]: vars.upperLip,
-        [`#${slot.render.componentIds.lowerLip}`]: vars.lowerLip,
-        [`#${slot.render.componentIds.interior}`]: vars.interior,
-        [`#${slot.render.componentIds.teeth}`]: vars.teeth,
-        [`#${slot.render.componentIds.tongue}`]: vars.tongue,
-      },
+    variant: {
+      hide: unique(Object.values(slot.render.variants).flat()),
+      show: variantIdsForKey(slot.render, key),
+      hideSceneNodeIds: slot.render.sceneVariants
+        ? unique(Object.values(slot.render.sceneVariants).flat())
+        : undefined,
+      showSceneNodeIds: slot.render.sceneVariants
+        ? variantSceneNodeIdsForKey(slot.render, key)
+        : undefined,
     },
   };
 }
@@ -2531,54 +1809,6 @@ function variantSceneNodeIdsForKey(render: VariantSlotRender, key: string): stri
     render.sceneVariants[Object.keys(render.sceneVariants)[0]] ??
     []
   );
-}
-
-function generatedMouthVarsForPose(
-  pose: MouthPose,
-  style: (typeof RIG_STYLES)[number],
-  settings?: CharacterPreset["mouthRig"],
-): GeneratedMouthTimelineVars {
-  const t = poseToTransforms(pose, style, {
-    upperCurve: settings?.upperCurve,
-    lowerCurve: settings?.lowerCurve,
-  });
-  return generatedMouthVarsFromTransforms(t);
-}
-
-function generatedMouthVarsFromTransforms(t: RigTransforms): GeneratedMouthTimelineVars {
-  return {
-    upperLip: {
-      y: round(t.upperLip.y, 3),
-      scaleX: round(t.upperLip.scaleX, 4),
-      scaleY: round(t.upperLip.scaleY, 4),
-      transformOrigin: "50% 50%",
-    },
-    lowerLip: {
-      y: round(t.lowerLip.y, 3),
-      scaleX: round(t.lowerLip.scaleX, 4),
-      scaleY: round(t.lowerLip.scaleY, 4),
-      transformOrigin: "50% 50%",
-    },
-    interior: {
-      scaleX: round(t.interior.scaleX, 4),
-      scaleY: round(t.interior.scaleY, 4),
-      opacity: round(t.interior.opacity, 4),
-      transformOrigin: "50% 50%",
-    },
-    teeth: {
-      y: round(t.teeth.y, 3),
-      scaleX: round(t.teeth.scaleX, 4),
-      opacity: round(t.teeth.opacity, 4),
-      transformOrigin: "50% 50%",
-    },
-    tongue: {
-      y: round(t.tongue.y, 3),
-      scaleX: round(t.tongue.scaleX, 4),
-      scaleY: round(t.tongue.scaleY, 4),
-      opacity: round(t.tongue.opacity, 4),
-      transformOrigin: "50% 50%",
-    },
-  };
 }
 
 function slotContainerId(slotId: string): string {
