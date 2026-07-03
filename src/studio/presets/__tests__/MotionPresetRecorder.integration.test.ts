@@ -5,15 +5,16 @@ import { describe, expect, it } from "vitest";
 const recorderPath = join(process.cwd(), "src/studio/presets/MotionPresetRecorder.tsx");
 
 describe("MotionPresetRecorder source integration", () => {
-  it("previews motion through generated HyperFrames character composition HTML", () => {
+  it("previews stamped playback through a persistent Pixi render payload", () => {
     const source = readFileSync(recorderPath, "utf8");
 
-    expect(source).toContain("buildCharacterCompositionHtml");
-    expect(source).toContain("<RecorderHyperFramesPreview");
-    expect(source).toContain("__timelines?");
-    expect(source).toContain("timeline.seek?.(Math.max(0, time), false)");
-    expect(source).toContain("characterAssetIds(character)");
-    expect(source).toContain('sandbox="allow-scripts allow-same-origin"');
+    expect(source).toContain("buildCharacterRenderPayload");
+    expect(source).toContain("const mediaAssets = useStudio((state) => state.mediaAssets)");
+    expect(source).toContain("mediaAssets,");
+    expect(source).toContain("<RecorderPixiPreview");
+    expect(source).toContain("<PixiCharacterPreview");
+    expect(source).toContain("resolveAssetRef={resolveRecorderPreviewAssetRef}");
+    expect(source).toContain("getMediaUrl(asset.id)");
     expect(source).toContain("const [playbackTime, setPlaybackTime]");
     expect(source).toContain("const playbackPreviewPreset = useMemo");
     expect(source).toContain("commitRecorderPreviewToHtml");
@@ -30,10 +31,10 @@ describe("MotionPresetRecorder source integration", () => {
     expect(source).toContain("function KeyposeStrip");
     expect(source).toContain("beforeunload");
     expect(source).toContain("Save the action without the current unstamped pose edits?");
-    // Playback seeking is allowed to seek the stamped HyperFrames timeline, but the
-    // pose editor must not inject or mutate GSAP live while dragging.
-    expect(source).toContain("function seekRecorderPlaybackIframe");
-    expect(source).toContain("timeline.seek?.(Math.max(0, time), false)");
+    // Playback seeking renders the stamped Pixi payload directly, but the pose
+    // editor must not inject or mutate GSAP live while dragging.
+    expect(source).not.toContain("function seekRecorderPlaybackIframe");
+    expect(source).not.toContain("timeline.seek?.(Math.max(0, time), false)");
     expect(source).not.toContain("buildCharacterGsapScript");
     expect(source).not.toContain("function applyEditScriptToIframe");
     expect(source).not.toContain("data-recorder-live-script");
@@ -44,19 +45,15 @@ describe("MotionPresetRecorder source integration", () => {
     expect(source).toContain("AiGeneratedFeatureAdapter");
     expect(source).toContain("buildMotionRequestPrompt");
     expect(source).toContain("buildRepairPrompt");
-    // The preview iframe is built once and seeked — it must not reload on identical
-    // composition HTML or remount stale HTML while a new playback preview resolves.
-    expect(source).toContain("const [resolvedPreview, setResolvedPreview]");
-    expect(source).toContain("prev?.html === resolved");
-    expect(source).toContain("prev.compileRevision === compileRevision");
-    expect(source).toContain("prev.sourceKey === sourceKey");
+    // The playback pane must not rebuild a full HyperFrames iframe for recorder
+    // playback; it keeps a Pixi app and renders explicit time seeks.
+    expect(source).not.toContain("<iframe");
+    expect(source).not.toContain("srcDoc");
+    expect(source).not.toContain('sandbox="allow-scripts allow-same-origin"');
     expect(source).toContain("const [playbackCompileRevision, setPlaybackCompileRevision]");
     expect(source).toContain("setPlaybackCompileRevision((revision) => revision + 1)");
     expect(source).toContain('staleBehavior="blank"');
     expect(source).toContain('loadingLabel="Updating playback..."');
-    expect(source).toContain("sourceKey");
-    expect(source).toContain("function recorderHtmlKey");
-    expect(source).toContain("key={iframeKey}");
     expect(source).toContain("const primaryStampAction =");
     expect(source).toContain("Time already stamped");
     expect(source).toContain("No changes to update");
@@ -64,12 +61,16 @@ describe("MotionPresetRecorder source integration", () => {
     expect(source).toContain("function initialRestKeypose");
     expect(source).toContain("function ensureInitialRestKeypose");
     expect(source).toContain("return [initialRestKeypose(), ...sorted]");
-    expect(source).toContain("function RecorderHyperFramesPreview");
+    expect(source).toContain("function RecorderPixiPreview");
     expect(source).toContain("selectAdjacentKeypose");
     expect(source).not.toContain("preset={draftPreviewPreset}");
     expect(source).not.toContain("function RiggedPosePreview");
     expect(source).not.toContain("applyRecorderEditPose");
     expect(source).not.toContain("editTargets=");
+    expect(source).not.toContain("usesGeneratedMouth");
+    expect(source).not.toContain("generatedMouthPreviewPart");
+    expect(source).not.toContain("__generated-mouth-preview");
+    expect(source).not.toContain("Generated mouth");
     expect(source).not.toContain("JSON.stringify(\n          buildMotionRequest");
   });
 

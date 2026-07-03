@@ -705,11 +705,11 @@ export interface CharacterPreset {
   variantPackages?: CharacterSlotVariantPackage[];
   /** Optional head variants for head-turn animations. */
   headVariants?: HeadVariant[];
-  /** Where generated fallback lip-sync mouth shapes should appear. */
+  /** @deprecated legacy generated-mouth placement; Pixi rendering uses real mouth parts. */
   fallbackMouth?: FallbackMouthAnchor;
-  /** Optional generated SVG mouth slot used when explicitly selected or when no mouth variants exist. */
+  /** @deprecated legacy generated SVG mouth config; kept so old projects can load. */
   mouthRig?: MouthRig;
-  /** Preferred mouth slot render strategy. Defaults to uploaded/generated variants when present. */
+  /** @deprecated legacy mouth render strategy; Pixi rendering uses image/SVG mouth parts. */
   mouthStyle?: "rig" | "images";
   /**
    * Generator revision for built-in/seeded characters. Lets the seeder detect when its generated

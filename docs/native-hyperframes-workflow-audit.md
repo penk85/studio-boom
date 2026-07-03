@@ -118,11 +118,24 @@ movie. `editorMeta` is editor-only intent and UI state.
   Expressions, speech/lip-sync, save/reload, stage playback, and MP4 export using
   the same stored character composition source.
 - Pixi-first character cleanup (renderer removal done July 2026). Remaining:
-  migrate the character editor panel and the Action/Expression recorder preview
-  to a persistent Pixi app fed by the same scene graph (the recorder currently
-  rebuilds a full Pixi composition srcDoc per committed draft edit); reintroduce
-  typed character document commands as renderer-neutral scene-graph operations
-  when an editor consumer needs them (the DOM executor was deleted).
+  keep moving editor-side manipulation math into Pixi-native scene-graph
+  operations. The character editor canvas now renders artwork through the shared
+  Pixi scene/timeline payload; React remains editor chrome for selection frames,
+  handles, anchors, reach tools, thumbnails, and form controls. Slot
+  move/scale/rotate, variant pin placement/reset/clear/rotation, slot
+  reparenting, bone rest edits, bone/slot depth, host constraints, and
+  reach/rotation-reach constraints now route through `applyCharacterSceneCommand`.
+  Continue moving mesh/stretch authoring into this renderer-neutral command
+  boundary before enabling mesh primitives.
+  The Action/Expression recorder playback preview also uses the shared character
+  render payload directly in a persistent Pixi app, while generated HyperFrames
+  composition HTML still owns stage playback and MP4 export. Reintroduce any
+  broader typed character document commands as renderer-neutral scene-graph
+  operations when an editor consumer needs them (the DOM executor was deleted).
+- Eye-state alignment UX debt: closed/open eye art can be manually aligned today,
+  but the alignment UI does not always match final parented Pixi placement. Treat
+  this as authoring UX debt, not preview/export drift; the fix should align
+  variants against the actual rendered rig placement and parent visibility gates.
 - Editable HyperFrames clip-set import after custom block import is stable.
 - Runtime script cleanup: audit whether `hyperframe-runtime.js` stripping should
   happen during ZIP import as canonical source normalization, stay only at

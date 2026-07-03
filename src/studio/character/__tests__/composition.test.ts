@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { validateCompositionSourceHtml } from "../../hyperframes/composition-source";
 import type { CharacterClipMeta, CharacterPreset, MotionPreset } from "../../types";
 import { createBlankCharacter, makePart } from "../character-utils";
-import { buildCharacterCompositionHtml } from "../composition";
+import { buildCharacterCompositionHtml, buildCharacterRenderPayload } from "../composition";
 import { blinkWindowsForClip } from "../eye-state";
 import { createDefaultMouthRig } from "../mouth-libraries";
 import { buildDefaultRig } from "../rig";
@@ -87,6 +87,28 @@ function build(
   character = makeCharacter(),
 ) {
   return buildCharacterCompositionHtml({
+    compositionId: "char_clip-1",
+    clipId: "clip-1",
+    width: 300,
+    height: 450,
+    duration: 4,
+    character,
+    meta: {
+      characterId: "char-1",
+      poses: {},
+      autoBlink: true,
+      ...meta,
+    },
+    motionPresets,
+  });
+}
+
+function buildPayload(
+  meta: Partial<CharacterClipMeta> = {},
+  motionPresets = new Map<string, MotionPreset>(),
+  character = makeCharacter(),
+) {
+  return buildCharacterRenderPayload({
     compositionId: "char_clip-1",
     clipId: "clip-1",
     width: 300,
@@ -221,6 +243,18 @@ function cssNumber(value: number) {
 }
 
 describe("buildCharacterCompositionHtml", () => {
+  it("exposes the same Pixi scene and timeline payload used by generated HTML", () => {
+    const payload = buildPayload();
+    const embedded = extractPixiPayload(build());
+
+    expect(payload.scene).toEqual(embedded.scene);
+    expect(payload.timelineScene).toEqual(embedded.timelineScene);
+    expect(payload.character.id).toBe("char-1");
+    expect(payload.width).toBe(300);
+    expect(payload.height).toBe(450);
+    expect(payload.duration).toBe(4);
+  });
+
   it("generates explicit Pixi character source, asset refs, dimensions, and timeline registration", () => {
     const html = build();
     const validation = validateCompositionSourceHtml(html, {
@@ -326,7 +360,12 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).toContain("https://pixijs.download/release/pixi.min.js");
     expect(html).toContain("new PIXI.Application()");
     expect(html).toContain("PIXI.Assets.load");
+    expect(html).toContain("preferCreateImageBitmap: false");
+    expect(html).toContain("Failed to load character texture");
+    expect(html).not.toContain("alias: asset.id");
     expect(html).toContain("new PIXI.Sprite");
+    expect(html).toContain("createTexturedLeaf(PIXI, node, textures[node.assetId])");
+    expect(html).toContain("nodes[nodeId].addChild(leaf)");
     expect(html).not.toContain("new PIXI.MeshPlane");
     expect(html).toContain('"assetRef":"asset:body-media"');
     expect(html).toContain('window.__timelines["char_clip-1"] = tl');
@@ -711,6 +750,7 @@ describe("buildCharacterCompositionHtml", () => {
   });
 
   it("nests iris slots inside the open eye variant", () => {
+    const clipId = "clip-iris-nested";
     const character = {
       ...createBlankCharacter("Eye actor"),
       id: "eye-char",
@@ -769,22 +809,26 @@ describe("buildCharacterCompositionHtml", () => {
     };
     const html = buildCharacterCompositionHtml({
       compositionId: "char_iris_nested",
-      clipId: "clip-iris-nested",
+      clipId,
       width: 300,
       height: 450,
-      duration: 4,
+      duration: 10,
       character: { ...character, rig: buildDefaultRig(character) },
       meta: {
         characterId: "eye-char",
         poses: {},
-        autoBlink: false,
+        autoBlink: true,
       },
       motionPresets: new Map(),
     });
 
     const payload = extractPixiPayload(html);
+    const irisPartNodeId = payload.scene.partNodeIds["left-iris"];
     const irisBoneId = payload.scene.boneNodeIds["bone:slot:left-iris"];
     const eyeBoneId = payload.scene.boneNodeIds["bone:slot:left-eye"];
+    expect(blinkWindowsForClip({ id: clipId, duration: 10, autoBlink: true }).length).toBeGreaterThan(
+      0,
+    );
     expect(payload.scene.nodes[irisBoneId]?.parentId).toBe(eyeBoneId);
     expect(payload.scene.nodes[payload.scene.slotNodeIds["slot:left-iris"]]?.parentId).toBe(
       irisBoneId,
@@ -794,6 +838,18 @@ describe("buildCharacterCompositionHtml", () => {
       (event) => event.slotId === "slot:left-eye",
     );
     expect(eyeEvent?.boneAnchors?.some((anchor) => anchor.sceneNodeId === irisBoneId)).toBe(true);
+    const closedEyeEvent = payload.timelineScene.slotEvents.find(
+      (event) => event.slotId === "slot:left-eye" && event.key === "closed",
+    );
+    const reopenedEyeEvent = payload.timelineScene.slotEvents.find(
+      (event) =>
+        event.slotId === "slot:left-eye" &&
+        event.key === "open" &&
+        (event.time || 0) > (closedEyeEvent?.time || 0),
+    );
+    expect(closedEyeEvent?.variant?.hideSceneNodeIds).toContain(irisPartNodeId);
+    expect(closedEyeEvent?.variant?.showSceneNodeIds ?? []).not.toContain(irisPartNodeId);
+    expect(reopenedEyeEvent?.variant?.showSceneNodeIds).toContain(irisPartNodeId);
   });
 
   it("positions nested child slots from runtime socket placement, not raw art offsets", () => {

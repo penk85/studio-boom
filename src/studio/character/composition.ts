@@ -55,12 +55,16 @@ import {
 import { runtimeMotionTargetForSlot } from "./motion-targets";
 import { pinTransformInBoneSpace, registrationForPart } from "./registration";
 import { assertCharacterPinRigReadyForAngle } from "./rig-v2";
-import { buildPixiCharacterCompositionHtml } from "./pixi-composition";
+import {
+  buildPixiCharacterCompositionHtml,
+  type PixiCharacterAudioSpeech,
+} from "./pixi-composition";
 import {
   buildCharacterScene,
   characterSceneBoneNodeId,
   characterScenePartNodeId,
   characterSceneSlotNodeId,
+  type CharacterSceneGraph,
 } from "./scene";
 import type {
   CharacterTimelineScene,
@@ -96,6 +100,19 @@ export interface BuildCharacterCompositionArgs {
   mediaAssets?: ReadonlyMap<string, Pick<MediaAsset, "filename" | "mimeType">>;
   /** @deprecated Legacy single-speech length; superseded by `speeches`. */
   speechDuration?: number;
+}
+
+export interface CharacterRenderPayload {
+  compositionId: string;
+  clipId: string;
+  width: number;
+  height: number;
+  duration: number;
+  character: CharacterPreset;
+  meta: CharacterClipMeta;
+  scene: CharacterSceneGraph;
+  timelineScene: CharacterTimelineScene;
+  audioSpeeches: PixiCharacterAudioSpeech[];
 }
 
 /** A speech resolved for the builder: audio ref + start + length + its viseme track. */
@@ -147,6 +164,10 @@ interface SlotTimeline {
   hostSlotId?: string;
   defaultKey: string;
   render: SlotRenderStrategy;
+  parentVariantGate?: {
+    parentSlotId: string;
+    keys: string[];
+  };
 }
 
 interface VariantSlotRender {
@@ -204,6 +225,23 @@ export function characterAssetIds(
 }
 
 export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArgs): string {
+  const payload = buildCharacterRenderPayload(args);
+  return buildPixiCharacterCompositionHtml({
+    ...args,
+    width: payload.width,
+    height: payload.height,
+    duration: payload.duration,
+    character: payload.character,
+    meta: payload.meta,
+    scene: payload.scene,
+    timelineScene: payload.timelineScene,
+    audioSpeeches: payload.audioSpeeches,
+  });
+}
+
+export function buildCharacterRenderPayload(
+  args: BuildCharacterCompositionArgs,
+): CharacterRenderPayload {
   const width = positiveNumber(args.width, 1);
   const height = positiveNumber(args.height, 1);
   const duration = positiveNumber(args.duration, 0.1);
@@ -240,8 +278,9 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
     constraintContext: runtime.constraintContext,
     activeAngle: runtime.angle,
   });
-  return buildPixiCharacterCompositionHtml({
-    ...args,
+  return {
+    compositionId: args.compositionId,
+    clipId: args.clipId,
     width,
     height,
     duration,
@@ -257,7 +296,7 @@ export function buildCharacterCompositionHtml(args: BuildCharacterCompositionArg
     }),
     timelineScene,
     audioSpeeches,
-  });
+  };
 }
 
 function buildCharacterTimelineInputs(
@@ -555,9 +594,10 @@ function collectNestedTimelineInputsForPart(
   if (children.length === 0) return;
   children
     .filter(({ relation }) => relationActiveForParentPart(relation, parentPart))
-    .forEach(({ slot }) => {
+    .forEach(({ slot, relation }) => {
       const binding = runtime.bindingBySlot.get(slot.id);
       if (binding && !binding.visible) return;
+      const beforeSlotTimelines = out.slotTimelines.length;
       buildSlotByRole(
         out,
         character,
@@ -570,6 +610,16 @@ function collectNestedTimelineInputsForPart(
         runtime,
         nestedChildrenByParentSlotId,
       );
+      const gateKeys = relation.activeWhenParentVariant?.keys ?? [];
+      if (relation.visibilityMode === "withParentVariant" && gateKeys.length > 0) {
+        for (const timeline of out.slotTimelines.slice(beforeSlotTimelines)) {
+          if (timeline.slotId !== slot.id) continue;
+          timeline.parentVariantGate = {
+            parentSlotId: parentSlot.id,
+            keys: [...gateKeys],
+          };
+        }
+      }
     });
 }
 
@@ -1371,10 +1421,19 @@ function buildSlotEvents(
 ) {
   const events: CharacterTimelineSlotEvent[] = [];
   const anchorsByParentSlot = new Map<string, BoneAnchorTimeline[]>();
+  const childVisibilityByParentSlot = new Map<string, SlotTimeline[]>();
   for (const entry of boneAnchorTimelines) {
     anchorsByParentSlot.set(entry.parentSlotId, [
       ...(anchorsByParentSlot.get(entry.parentSlotId) ?? []),
       entry,
+    ]);
+  }
+  for (const slot of slots) {
+    const parentSlotId = slot.parentVariantGate?.parentSlotId;
+    if (!parentSlotId) continue;
+    childVisibilityByParentSlot.set(parentSlotId, [
+      ...(childVisibilityByParentSlot.get(parentSlotId) ?? []),
+      slot,
     ]);
   }
   const previous = new Map<string, string>();
@@ -1396,10 +1455,47 @@ function buildSlotEvents(
         };
       });
       if (boneAnchors.length) event.boneAnchors = boneAnchors;
+      const gatedChildren = childVisibilityByParentSlot.get(slot.slotId) ?? [];
+      if (gatedChildren.length) applyGatedChildVisibility(event, gatedChildren, key, frame);
       events.push(event);
     }
   }
   return events;
+}
+
+function applyGatedChildVisibility(
+  event: CharacterTimelineSlotEvent,
+  children: SlotTimeline[],
+  parentKey: string,
+  frame: { slotStates: Map<string, string> },
+): void {
+  for (const child of children) {
+    const allChildIds = unique(Object.values(child.render.variants).flat());
+    const allChildSceneNodeIds = child.render.sceneVariants
+      ? unique(Object.values(child.render.sceneVariants).flat())
+      : [];
+    const active = child.parentVariantGate?.keys.includes(parentKey) ?? false;
+    event.variant ??= { hide: [], show: [] };
+    event.variant.hide = unique([...(event.variant.hide ?? []), ...allChildIds]);
+    if (event.variant.hideSceneNodeIds || allChildSceneNodeIds.length) {
+      event.variant.hideSceneNodeIds = unique([
+        ...(event.variant.hideSceneNodeIds ?? []),
+        ...allChildSceneNodeIds,
+      ]);
+    }
+    if (!active) continue;
+    const childKey = frame.slotStates.get(child.slotId) ?? child.defaultKey;
+    event.variant.show = unique([
+      ...(event.variant.show ?? []),
+      ...variantIdsForKey(child.render, childKey),
+    ]);
+    if (child.render.sceneVariants) {
+      event.variant.showSceneNodeIds = unique([
+        ...(event.variant.showSceneNodeIds ?? []),
+        ...variantSceneNodeIdsForKey(child.render, childKey),
+      ]);
+    }
+  }
 }
 
 function slotRenderSignature(render: SlotRenderStrategy, key: string): string {

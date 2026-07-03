@@ -49,6 +49,12 @@
       "skillPath": "skills/pixijs/SKILL.md",
       "computedHash": "3841d26daab0e91119af07fced716d508f01601e3ff072dd73404992f36a94f2"
     },
+    "pixijs-application": {
+      "source": "pixijs/pixijs-skills",
+      "sourceType": "github",
+      "skillPath": "skills/pixijs-application/SKILL.md",
+      "computedHash": "17cdbe975621930c1268585b8528a1cdfcca040b2340982326060434db5a9b0d"
+    },
     "pixijs-assets": {
       "source": "pixijs/pixijs-skills",
       "sourceType": "github",

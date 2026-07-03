@@ -435,7 +435,7 @@ function ColorPicker({
 }
 
 // ─── Rig preview (pure SVG, no DOM IDs, no GSAP) ─────────────────────────────
-// Used only in the MouthCreator UI. Stage and export use GSAP on DOM elements.
+// Used only in the MouthCreator UI; legacy generated mouth rigs are no longer rendered.
 export function RigPreview({
   style,
   pose,

@@ -20,7 +20,9 @@ import {
 import { db, getMediaUrl, uid } from "../db";
 import { useMediaUrl } from "../hooks/useMediaUrl";
 import { useStudio } from "../store";
-import { buildCharacterCompositionHtml, characterAssetIds } from "../character/composition";
+import { buildCharacterRenderPayload } from "../character/composition";
+import { PixiCharacterPreview } from "../character/PixiCharacterPreview";
+import type { CharacterSceneAsset } from "../character/scene";
 import { variantKeyForPart, variantLabelForPart } from "../character/character-utils";
 import { localAlphaBounds } from "../character/alpha-bounds";
 import { faceTurnMotionForPart } from "../character/face-turn";
@@ -171,11 +173,6 @@ export function MotionPresetRecorder({
   const slots = runtime.slots;
   // The same resolved runtime boundary the compiled timeline clamps through — editing is WYSIWYG.
   const constraintCtx = runtime.constraintContext;
-  const usesGeneratedMouth = !!character.mouthRig && character.mouthStyle === "rig";
-  const generatedMouthPart = useMemo(
-    () => (usesGeneratedMouth ? generatedMouthPreviewPart(character) : null),
-    [character, usesGeneratedMouth],
-  );
   const [name, setName] = useState(
     initialPreset && (initialPreset.builtin || copyOnSave)
       ? customPresetName(initialPreset.name)
@@ -234,12 +231,10 @@ export function MotionPresetRecorder({
   const activeAngleRig = useMemo(() => angleRigJsonFromPreset(character), [character]);
   const activePartForSlot = useCallback(
     (slot: CharacterSlot, poseSwap?: string) => {
-      if (usesGeneratedMouth && slot.role === "mouth" && generatedMouthPart)
-        return generatedMouthPart;
       const poseKey = poseSwap ?? basePoses[slot.id];
       return resolveRuntimeSlotPart(slot, runtime, poseKey);
     },
-    [basePoses, generatedMouthPart, runtime, usesGeneratedMouth],
+    [basePoses, runtime],
   );
   const motionAiAdapter = useMemo<AiGeneratedFeatureAdapter<MotionJson>>(
     () => ({
@@ -384,7 +379,7 @@ export function MotionPresetRecorder({
         const slotId = slotIdForRecordedOverride(runtime, ov);
         const slot = slotId ? runtime.slotById.get(slotId) : undefined;
         if (!slot) continue;
-        const poseSwap = usesGeneratedMouth && slot.role === "mouth" ? undefined : ov.poseSwap;
+        const poseSwap = ov.poseSwap;
         const part = activePartForSlot(slot, poseSwap);
         next.set(slot.id, {
           ...defaultOverride(slot.id, part),
@@ -432,7 +427,6 @@ export function MotionPresetRecorder({
       rig,
       runtime,
       slots,
-      usesGeneratedMouth,
     ],
   );
 
@@ -529,7 +523,7 @@ export function MotionPresetRecorder({
     const parts: RecordedPartOverride[] = [];
     for (const ov of overrides.values()) {
       const slot = slots.find((s) => s.id === ov.slotId);
-      const poseSwap = slot?.role === "mouth" && usesGeneratedMouth ? undefined : ov.poseSwap;
+      const poseSwap = ov.poseSwap;
       const activePart = slot ? activePartForSlot(slot, poseSwap) : undefined;
       const normalizedOverride = { ...ov, poseSwap };
       if (!slot || !isDirtyOverride(normalizedOverride, activePart)) continue;
@@ -552,7 +546,7 @@ export function MotionPresetRecorder({
       parts.push(part);
     }
     return parts;
-  }, [activePartForSlot, overrides, runtime, slots, usesGeneratedMouth]);
+  }, [activePartForSlot, overrides, runtime, slots]);
 
   const sortedKeyposes = useMemo(
     () => cloneKeyposes(keyposes).sort((a, b) => a.t - b.t),
@@ -593,13 +587,9 @@ export function MotionPresetRecorder({
         const cur = next.get(slotId);
         const curPart = slot ? activePartForSlot(slot, cur?.poseSwap) : undefined;
         const base = cur ?? defaultOverride(slotId, curPart);
-        const normalizedPatch =
-          slot?.role === "mouth" && usesGeneratedMouth && "poseSwap" in patch
-            ? { ...patch, poseSwap: undefined }
-            : patch;
         const targetMeta = slot ? recorderMotionTargetForSlot(slot, runtime) : {};
         const current = { ...base, ...targetMeta };
-        const merged = { ...current, ...normalizedPatch };
+        const merged = { ...current, ...patch };
         if (recorderOverridesEqual(current, merged)) return prev;
         next.set(slotId, merged);
         const constrained = constrainRecorderOverrides({
@@ -630,7 +620,6 @@ export function MotionPresetRecorder({
       runtime,
       slots,
       stopCompiledPreview,
-      usesGeneratedMouth,
     ],
   );
   const queuedOverrideUpdate = useRafCoalescedCallback<{
@@ -1363,7 +1352,7 @@ export function MotionPresetRecorder({
                       transform: `scale(${playbackScale})`,
                     }}
                   >
-                    <RecorderHyperFramesPreview
+                    <RecorderPixiPreview
                       character={character}
                       basePoses={basePoses}
                       preset={playbackPreviewPreset}
@@ -1496,7 +1485,6 @@ export function MotionPresetRecorder({
             slot={selectedSlot}
             part={selectedPart}
             override={selectedOverride}
-            usesGeneratedMouth={usesGeneratedMouth}
             advancedOpen={advancedOpen}
             rotationLimit={selectedRotationLimit}
             allowOutOfBounds={selectedAllowsOutOfBounds}
@@ -2011,7 +1999,6 @@ function PropertiesPanel({
   slot,
   part,
   override,
-  usesGeneratedMouth,
   advancedOpen,
   rotationLimit,
   allowOutOfBounds,
@@ -2023,7 +2010,6 @@ function PropertiesPanel({
   slot: CharacterSlot | null;
   part: CharacterPart | null;
   override: RecorderPartState | null;
-  usesGeneratedMouth: boolean;
   advancedOpen: boolean;
   rotationLimit: { min: number; max: number; variantLimited: boolean } | null;
   allowOutOfBounds: boolean;
@@ -2039,8 +2025,7 @@ function PropertiesPanel({
       </div>
     );
   }
-  const variantOptions =
-    usesGeneratedMouth && slot.role === "mouth" ? [] : variantOptionsForSlot(slot);
+  const variantOptions = variantOptionsForSlot(slot);
   return (
     <div>
       <div className="mb-2 flex items-center gap-2">
@@ -2244,43 +2229,11 @@ function PropertyRow({
   );
 }
 
-// Playback preview is still the compiled HyperFrames timeline. The pose editor is
-// React-only draft UI, so this helper only seeks stamped playback; it never injects
-// editor state into GSAP.
-function seekRecorderPlaybackIframe(
-  iframe: HTMLIFrameElement | null,
-  compositionId: string,
-  time: number,
-  attempts = 0,
-  isCancelled: () => boolean = () => false,
-): void {
-  if (isCancelled()) return;
-  type TimelineEntry = {
-    seek?: (t: number, suppressEvents?: boolean) => unknown;
-    pause?: () => unknown;
-  };
-  type RWin = Window & { __timelines?: Record<string, TimelineEntry> };
-  let timeline: TimelineEntry | undefined;
-  try {
-    const win = iframe?.contentWindow as RWin | undefined;
-    timeline = win?.__timelines?.[compositionId];
-  } catch {
-    timeline = undefined;
-  }
-  if (!timeline) {
-    if (iframe && attempts < 30) {
-      window.setTimeout(
-        () => seekRecorderPlaybackIframe(iframe, compositionId, time, attempts + 1, isCancelled),
-        40,
-      );
-    }
-    return;
-  }
-  timeline.pause?.();
-  timeline.seek?.(Math.max(0, time), false);
-}
-
-function RecorderHyperFramesPreview({
+// Playback preview consumes the same render payload as generated character
+// composition HTML, but keeps a persistent Pixi app instead of rebuilding an
+// iframe for every stamped draft. The pose editor remains React draft UI until a
+// pose is stamped into the canonical keypose model.
+function RecorderPixiPreview({
   character,
   basePoses,
   preset,
@@ -2297,14 +2250,12 @@ function RecorderHyperFramesPreview({
   staleBehavior?: "hold" | "blank";
   loadingLabel?: string;
 }) {
-  const iframeRef = useRef<HTMLIFrameElement>(null);
   const compositionId = "recorder_character_preview";
+  const mediaAssets = useStudio((state) => state.mediaAssets);
 
-  // Stable HTML: Pixi character composition source + committed motion. Controls srcDoc.
-  // Only changes when the character, base poses, or committed keyposes change.
-  const sourceHtml = useMemo(() => {
+  const payload = useMemo(() => {
     const motionPresets = preset ? new Map([[preset.id, preset]]) : new Map<string, MotionPreset>();
-    return buildCharacterCompositionHtml({
+    return buildCharacterRenderPayload({
       compositionId,
       clipId: "recorder-character-preview-clip",
       width: character.canvasWidth,
@@ -2328,106 +2279,28 @@ function RecorderHyperFramesPreview({
             ]
           : [],
       },
+      mediaAssets,
       motionPresets,
     });
-  }, [basePoses, character, compositionId, preset]);
+  }, [basePoses, character, compositionId, mediaAssets, preset]);
 
-  const [resolvedPreview, setResolvedPreview] = useState<{
-    html: string;
-    compileRevision: number;
-    sourceKey: string;
-  } | null>(null);
-  const sourceKey = useMemo(
-    () => `${recorderHtmlKey(sourceHtml)}:compile-${compileRevision}`,
-    [compileRevision, sourceHtml],
-  );
-  const resolvedIsCurrent = resolvedPreview?.sourceKey === sourceKey;
-  const visiblePreview = resolvedIsCurrent || staleBehavior === "hold" ? resolvedPreview : null;
-  const html = visiblePreview?.html ?? null;
-  const iframeKey = visiblePreview
-    ? `${visiblePreview.sourceKey}:${recorderHtmlKey(visiblePreview.html)}`
-    : "pending";
-
-  useEffect(() => {
-    let alive = true;
-    // Keep the current iframe mounted while the next composition resolves, and bail when
-    // the resolved HTML and compile revision are identical. Updating the iframe key before
-    // the new srcDoc is resolved can briefly remount stale HTML, which makes playback feel
-    // like it needs a second start.
-    void resolveRecorderPreviewAssetRefs(sourceHtml, character).then((resolved) => {
-      if (!alive) return;
-      setResolvedPreview((prev) =>
-        prev?.html === resolved &&
-        prev.compileRevision === compileRevision &&
-        prev.sourceKey === sourceKey
-          ? prev
-          : { html: resolved, compileRevision, sourceKey },
-      );
-    });
-    return () => {
-      alive = false;
-    };
-  }, [character, compileRevision, sourceHtml, sourceKey]);
-
-  useEffect(() => {
-    if (!html) return;
-    let alive = true;
-    seekRecorderPlaybackIframe(iframeRef.current, compositionId, time, 0, () => !alive);
-    return () => {
-      alive = false;
-    };
-  }, [compositionId, html, time]);
+  const resetKey = `${payload.character.id}:${payload.duration}:${compileRevision}`;
 
   return (
-    <>
-      {html ? (
-        <iframe
-          key={iframeKey}
-          ref={iframeRef}
-          title="Recorder HyperFrames character preview"
-          sandbox="allow-scripts allow-same-origin"
-          referrerPolicy="no-referrer"
-          srcDoc={html}
-          className="pointer-events-none absolute inset-0 block h-full w-full border-0 bg-transparent"
-          onLoad={() => seekRecorderPlaybackIframe(iframeRef.current, compositionId, time)}
-        />
-      ) : (
-        <div className="pointer-events-none absolute inset-0 grid place-items-center text-[11px] text-muted-foreground">
-          {loadingLabel}
-        </div>
-      )}
-      {html && !resolvedIsCurrent && (
-        <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/20 text-[11px] text-muted-foreground">
-          {loadingLabel}
-        </div>
-      )}
-    </>
+    <PixiCharacterPreview
+      payload={payload}
+      time={time}
+      resetKey={resetKey}
+      staleBehavior={staleBehavior}
+      loadingLabel={loadingLabel}
+      resolveAssetRef={resolveRecorderPreviewAssetRef}
+      className="pointer-events-none absolute inset-0 block h-full w-full bg-transparent"
+    />
   );
 }
 
-async function resolveRecorderPreviewAssetRefs(
-  html: string,
-  character: CharacterPreset,
-): Promise<string> {
-  let resolved = html;
-  const assetIds = Array.from(characterAssetIds(character));
-  const entries = await Promise.all(
-    assetIds.map(async (id) => [id, await getMediaUrl(id)] as const),
-  );
-  for (const [id, url] of entries) {
-    if (!url) continue;
-    resolved = resolved.replaceAll(`asset:${id}`, url);
-  }
-  return resolved;
-}
-
-function recorderHtmlKey(html: string): string {
-  let hash = 2166136261;
-  for (let i = 0; i < html.length; i += 1) {
-    hash ^= html.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `${html.length}:${hash >>> 0}`;
+async function resolveRecorderPreviewAssetRef(asset: CharacterSceneAsset): Promise<string | null> {
+  return getMediaUrl(asset.id);
 }
 
 interface RafCoalescedDispatcher<T> {
@@ -3378,35 +3251,6 @@ function recorderOverridesEqual(a: RecorderPartState, b: RecorderPartState): boo
     Object.is(a.originY, b.originY) &&
     Object.is(a.opacity, b.opacity)
   );
-}
-
-function generatedMouthPreviewPart(character: CharacterPreset): CharacterPart | null {
-  const rig = character.mouthRig;
-  if (!rig) return null;
-  const placement = rig.placement;
-  return {
-    id: "__generated-mouth-preview",
-    slotId: "role:mouth",
-    slotName: "Mouth",
-    role: "mouth",
-    name: "Generated mouth",
-    mediaId: "",
-    x: placement.x,
-    y: placement.y,
-    width: placement.width,
-    height: placement.height,
-    rotation: 0,
-    anchorX: 0.5,
-    anchorY: 0.5,
-    pivot: {
-      x: placement.x + placement.width / 2,
-      y: placement.y + placement.height / 2,
-    },
-    motionBehavior: "lipSync",
-    zIndex: placement.zIndex,
-    depth: 0,
-    visible: true,
-  };
 }
 
 function isDirtyOverride(override: RecorderPartState | undefined, part?: CharacterPart) {

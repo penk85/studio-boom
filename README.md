@@ -67,6 +67,11 @@ Working now:
   box as the stage for moving, resizing, and rotating parts.
 - Pixi-backed character rendering inside generated HyperFrames character
   sub-compositions. Preview and MP4 export use the same stored character source.
+- The Action/Expression recorder playback pane uses the same Pixi scene/timeline
+  payload as generated character composition HTML, mounted in a persistent Pixi app.
+- The character editor canvas renders character artwork through the shared Pixi
+  scene/timeline payload; DOM/React remains editor chrome for selection frames,
+  handles, anchors, reach tools, thumbnails, and form controls.
 - Export-parity regression coverage for Pixi character source, local Pixi runtime
   packaging, image/SVG asset refs, and the current mesh-free default render path.
 - Character Actions and Expressions:
@@ -94,9 +99,12 @@ Still in progress:
 - Full mesh/stretch-limb deformation is deferred until it has dedicated
   preview/export parity coverage. Current Pixi character parts render as sprites
   or vector nodes by default.
-- The character editor panel still previews with its own React/DOM drawing; the
-  planned follow-up is a persistent Pixi app in the panel fed by the same
-  character scene graph.
+- Pixi-native character authoring commands are still in progress. The editor
+  artwork is Pixi-rendered, and slot move/scale/rotate, variant pin edits, bone
+  rest edits, slot depth, host constraints, and reach constraints now go through
+  a renderer-neutral scene command boundary. Mesh/stretch authoring still needs
+  dedicated command design and preview/export parity coverage before mesh is
+  enabled.
 - Local backup/restore for the IndexedDB database still needs a product flow.
 - There is no hosted backend, team sync, or cloud account.
 
@@ -164,7 +172,8 @@ A character can include:
 - Body, head, hair, accessory, limb, hand, foot, and custom parts.
 - Eye and eyebrow variants, including auto-blink support.
 - Mouth image variants mapped to visemes.
-- A generated SVG mouth rig when no custom mouth shapes exist.
+- Mouth image or SVG variants mapped to visemes. Legacy generated mouth rigs are
+  load-only compatibility and no longer render.
 - Per-part transforms, pivots, alpha bounds, depth, and motion behavior.
 - Head-direction variants for head turns.
 - Parallax settings.

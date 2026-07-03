@@ -29,7 +29,7 @@ import {
   Plus,
   Upload,
 } from "lucide-react";
-import { db, importMediaFile, uid } from "../db";
+import { db, getMediaUrl, importMediaFile, uid } from "../db";
 import { useMediaUrl } from "../hooks/useMediaUrl";
 import { useStudio } from "../store";
 import {
@@ -66,12 +66,8 @@ import {
   buildRigHealthReport,
   collectVariantKeyIssues,
   migrateLegacyVariantSockets,
-  removeVariantPin,
-  resetVariantPinToArtwork,
   renameVariantKeyEverywhere,
-  setVariantPinRotation,
   slotVariantKeys,
-  upsertVariantPinAtPoint,
   variantPreviewDeltas,
   type RigHealthReport,
   type VariantKeyIssue,
@@ -136,14 +132,9 @@ import {
   bindSlotPartToAngle,
   buildDefaultRig,
   rebuildRigPreservingConstraints,
-  moveSlotBinding,
-  moveSlotParts,
   normalizeCharacterRig,
   parentSlotIdForSlot,
   resolveSlotBinding,
-  setBoneDepth,
-  setSlotHostConstraint,
-  setSlotDepth,
   setSlotReach,
   setSlotRotReach,
   slotIdsForBoneSubtree,
@@ -156,18 +147,66 @@ import {
   type CharacterRuntime,
   type RuntimePartPlacement,
 } from "./runtime";
+import { buildCharacterRenderPayload } from "./composition";
+import { PixiCharacterPreview } from "./PixiCharacterPreview";
+import type { CharacterSceneAsset } from "./scene";
+import {
+  applyCharacterSceneCommand,
+  rotatePointAroundAnchor,
+  type CharacterSceneCommand,
+} from "./scene-commands";
 import { runtimeAncestorMotionTargets } from "./motion-targets";
 import {
-  moveCharacterBoneRest,
+  CharacterPinRigError,
   resolvePinnedBonesForAngle,
-  setCharacterBoneRestTransform,
-  setCharacterSlotParent,
   upgradeCharacterRigV2,
+  validateCharacterPinRig,
 } from "./rig-v2";
 
 interface Props {
   characterId: string;
   onClose: () => void;
+}
+
+interface RenderBlockingRigFix {
+  issue: string;
+  parentSlotId: ID;
+  parentSlotName: string;
+  parentVariantKey: string;
+  childSlotId: ID;
+  childSlotName: string;
+  instructions: string;
+}
+
+async function resolveCharacterEditorPreviewAssetRef(
+  asset: CharacterSceneAsset,
+): Promise<string | null> {
+  return getMediaUrl(asset.id);
+}
+
+function renderBlockingRigFixForIssue(
+  doc: CharacterPreset,
+  issue: { path: string; message: string },
+): RenderBlockingRigFix | null {
+  const match = issue.path.match(/^parts\.([^.]+)\.pins\.(.+)$/);
+  if (!match) return null;
+  const [, parentPartId, pinName] = match;
+  const childSlotId = pinName.startsWith("attach:") ? pinName.slice("attach:".length) : null;
+  const parentPart = doc.parts.find((part) => part.id === parentPartId);
+  if (!parentPart || !childSlotId) return null;
+  const parentSlotId = getPartSlotId(parentPart);
+  const parentSlotName = findCharacterSlot(doc, parentSlotId)?.name ?? parentPart.name;
+  const childSlotName = findCharacterSlot(doc, childSlotId)?.name ?? childSlotId;
+  const parentVariantKey = variantKeyForPart(parentPart);
+  return {
+    issue: issue.message,
+    parentSlotId,
+    parentSlotName,
+    parentVariantKey,
+    childSlotId,
+    childSlotName,
+    instructions: `Click the point on ${parentSlotName} (${parentVariantKey}) where ${childSlotName} should attach.`,
+  };
 }
 
 const CANVAS_PRESETS = [
@@ -309,6 +348,7 @@ interface RangeEdit {
 type EditorBoundsMode = "frame" | "art";
 
 export function CharacterEditor({ characterId, onClose }: Props) {
+  const mediaAssets = useStudio((state) => state.mediaAssets);
   const [doc, setDoc] = useState<CharacterPreset | null>(null);
   const [selectedPartId, setSelectedPartId] = useState<ID | null>(null);
   const [selectedSlotId, setSelectedSlotId] = useState<ID | null>(null);
@@ -331,7 +371,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   // True while a layer is actively being dragged / resized / rotated, so the other layers
   // can blur to keep focus on it. Set at gesture start; cleared globally on pointerup below.
   const [interacting, setInteracting] = useState(false);
-  const [, setPreviewTick] = useState(0);
+  const [previewTick, setPreviewTick] = useState(0);
   const [status, setStatus] = useState<string | null>(null);
   const [mouthTestPlaying, setMouthTestPlaying] = useState(false);
   const [historyPast, setHistoryPast] = useState<CharacterPreset[]>([]);
@@ -927,6 +967,55 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     setStatus("Redone");
   }
 
+  const renderBlockingRigIssues = useMemo(
+    () =>
+      doc
+        ? validateCharacterPinRig(doc, { angle: editorRuntime?.angle }).filter(
+            (issue) => issue.severity === "error",
+          )
+        : [],
+    [doc, editorRuntime?.angle],
+  );
+  const renderBlockingRigFix = useMemo(
+    () =>
+      doc && renderBlockingRigIssues[0]
+        ? renderBlockingRigFixForIssue(doc, renderBlockingRigIssues[0])
+        : null,
+    [doc, renderBlockingRigIssues],
+  );
+  const pixiEditorPreviewPayload = useMemo(() => {
+    if (!doc || renderBlockingRigIssues.length > 0) return null;
+    const previewPoses = { ...variantPreview };
+    if (preview) {
+      const previewPart =
+        doc.parts.find((part) => part.id === preview.targetPartId) ??
+        doc.parts.find((part) => getPartSlotId(part) === preview.targetSlotId);
+      const previewVariant = previewPart
+        ? activePreviewVariantForPart(previewPart, preview)
+        : undefined;
+      if (previewVariant) previewPoses[preview.targetSlotId] = previewVariant;
+    }
+    try {
+      return buildCharacterRenderPayload({
+        compositionId: "character_editor_preview",
+        clipId: "character-editor-preview-clip",
+        width: doc.canvasWidth,
+        height: doc.canvasHeight,
+        duration: 1,
+        character: doc,
+        meta: {
+          characterId: doc.id,
+          poses: previewPoses,
+          autoBlink: false,
+        },
+        mediaAssets,
+        motionPresets: new Map(),
+      });
+    } catch (error) {
+      if (error instanceof CharacterPinRigError) return null;
+      throw error;
+    }
+  }, [doc, mediaAssets, preview, previewTick, renderBlockingRigIssues.length, variantPreview]);
   if (!doc) {
     return (
       <div className="flex h-screen items-center justify-center bg-background text-muted-foreground">
@@ -1031,7 +1120,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
             return normalizePartPatch({ ...part, ...patch, ...semanticPatch }, patch);
           if (!parentPivot || rotationDelta === 0 || !descendantIds.has(part.id)) return part;
           const pivot = pivotForPart(part);
-          const rotatedPivot = rotateCanvasPointAroundPivot(pivot, parentPivot, rotationDelta);
+          const rotatedPivot = rotatePointAroundAnchor(pivot, parentPivot, rotationDelta);
           const dx = rotatedPivot.x - pivot.x;
           const dy = rotatedPivot.y - pivot.y;
           return normalizePartPatch(
@@ -1196,6 +1285,11 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   const orderedParts = doc.parts.slice().sort((a, b) => a.zIndex - b.zIndex);
 
   const selectPart = (id: ID) => {
+    const part = doc.parts.find((candidate) => candidate.id === id);
+    if (part) {
+      const slotId = getPartSlotId(part);
+      if (partsInSlot(slotId).length > 1) previewVariant(slotId, variantKeyForPart(part));
+    }
     setSelectedPartId(id);
     setSelectedSlotId(null);
     setSelectedBoneId(null);
@@ -1297,15 +1391,15 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       const rig = normalizeCharacterRig(d);
       const limited = clampSlotDragDelta(d, rig, slotId, dx, dy);
       const angle = rig.activeAngle;
-      return withRig(
-        {
-          ...d,
-          parts: moveSlotParts(d, slotId, limited.dx, limited.dy, angle),
-          rig: moveSlotBinding(rig, slotId, limited.dx, limited.dy),
-          updatedAt: Date.now(),
-        },
-        true,
-      );
+      const result = applyCharacterSceneCommand(d, {
+        kind: "move-slot",
+        slotId,
+        dx: limited.dx,
+        dy: limited.dy,
+        angle,
+        rig,
+      });
+      return withRig(result.character, true);
     });
   };
 
@@ -1317,29 +1411,20 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     scaleY: number,
   ) => {
     const angle = currentAngle();
-    const targetIds = new Set(partsInSlot(slotId, angle).map((part) => part.id));
     pushUndoSnapshot();
     setDoc((d) =>
       d
-        ? withRig({
-            ...d,
-            parts: d.parts.map((p) => {
-              if (!targetIds.has(p.id)) return p;
-              const pivot = pivotForPart(p);
-              return {
-                ...p,
-                x: Math.round(anchor.x + (p.x - anchor.x) * scaleX),
-                y: Math.round(anchor.y + (p.y - anchor.y) * scaleY),
-                width: Math.max(4, Math.round(p.width * scaleX)),
-                height: Math.max(4, Math.round(p.height * scaleY)),
-                pivot: {
-                  x: Math.round(anchor.x + (pivot.x - anchor.x) * scaleX),
-                  y: Math.round(anchor.y + (pivot.y - anchor.y) * scaleY),
-                },
-              };
-            }),
-            updatedAt: Date.now(),
-          })
+        ? withRig(
+            applyCharacterSceneCommand(d, {
+              kind: "scale-slot",
+              slotId,
+              anchor,
+              scaleX,
+              scaleY,
+              angle,
+            }).character,
+            true,
+          )
         : d,
     );
   };
@@ -1350,25 +1435,17 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     pushUndoSnapshot();
     setDoc((d) => {
       if (!d) return d;
-      const targetIds = partIdsForSlotSubtree(d.parts, normalizeCharacterRig(d), slotId, angle);
-      return withRig({
-        ...d,
-        parts: d.parts.map((part) => {
-          if (!targetIds.has(part.id)) return part;
-          const pivot = pivotForPart(part);
-          const rotatedPivot = rotateCanvasPointAroundPivot(pivot, anchor, degrees);
-          const dx = rotatedPivot.x - pivot.x;
-          const dy = rotatedPivot.y - pivot.y;
-          return {
-            ...part,
-            x: Math.round(part.x + dx),
-            y: Math.round(part.y + dy),
-            pivot: { x: Math.round(rotatedPivot.x), y: Math.round(rotatedPivot.y) },
-            rotation: Math.round(part.rotation + degrees),
-          };
-        }),
-        updatedAt: Date.now(),
-      });
+      return withRig(
+        applyCharacterSceneCommand(d, {
+          kind: "rotate-slot",
+          slotId,
+          anchor,
+          degrees,
+          angle,
+          rig: normalizeCharacterRig(d),
+        }).character,
+        true,
+      );
     });
   };
 
@@ -1787,22 +1864,32 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         const appliedDx = limited.dx;
         const appliedDy = limited.dy;
         if (movesBone && binding) {
-          const moved = moveCharacterBoneRest(
+          const moved = applyCharacterSceneCommand(
             { ...d, parts: snapshotParts, rig: rigSnapshot },
-            binding.effectiveBoneId,
-            appliedDx,
-            appliedDy,
-            angle,
-            { activeVariants: variantPreview },
-          );
+            {
+              kind: "move-bone-rest",
+              boneId: binding.effectiveBoneId,
+              dx: appliedDx,
+              dy: appliedDy,
+              angle,
+              activeVariants: variantPreview,
+            },
+          ).character;
           latestCharacter = { ...moved, updatedAt: Date.now() };
           return latestCharacter;
         }
-        const parts = movesBone
-          ? moveSlotSetFromSnapshot(snapshotParts, snapshot, subtreeSlotIds, appliedDx, appliedDy)
-          : moveSlotParts({ ...d, parts: snapshotParts }, slotId, appliedDx, appliedDy, angle);
-        const rig = moveSlotBinding(rigSnapshot, slotId, appliedDx, appliedDy);
-        latestCharacter = withRig({ ...d, parts, rig, updatedAt: Date.now() }, true);
+        const result = applyCharacterSceneCommand(
+          { ...d, parts: snapshotParts, rig: rigSnapshot },
+          {
+            kind: "move-slot",
+            slotId,
+            dx: appliedDx,
+            dy: appliedDy,
+            angle,
+            rig: rigSnapshot,
+          },
+        );
+        latestCharacter = withRig(result.character, true);
         return latestCharacter;
       });
     };
@@ -1848,23 +1935,18 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           dx,
           dy,
         );
-        const rig = moveSlotBinding(rigSnapshot, slotId, limited.dx, limited.dy);
         latestCharacter = withRig(
-          {
-            ...d,
-            parts: moveSlotParts(
-              {
-                ...d,
-                parts: snapshotParts,
-              },
+          applyCharacterSceneCommand(
+            { ...d, parts: snapshotParts, rig: rigSnapshot },
+            {
+              kind: "move-slot",
               slotId,
-              limited.dx,
-              limited.dy,
+              dx: limited.dx,
+              dy: limited.dy,
               angle,
-            ),
-            rig,
-            updatedAt: Date.now(),
-          },
+              rig: rigSnapshot,
+            },
+          ).character,
           true,
         );
         return latestCharacter;
@@ -1893,10 +1975,15 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     const move = (ev: PointerEvent) => {
       const dx = Math.round((ev.clientX - sx) / scale);
       const dy = Math.round((ev.clientY - sy) / scale);
-      latest = moveCharacterBoneRest(snapshot, boneId, dx, dy, currentAngle(), {
+      latest = applyCharacterSceneCommand(snapshot, {
+        kind: "move-bone-rest",
+        boneId,
+        dx,
+        dy,
+        angle: currentAngle(),
         keepArtwork,
         activeVariants: variantPreview,
-      });
+      }).character;
       setDoc({ ...latest, updatedAt: Date.now() });
     };
     const up = () => {
@@ -2011,7 +2098,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               parts: d.parts.map((part) => {
                 const base = snapshot.find((item) => item.id === part.id);
                 if (!base) return part;
-                const rotatedPivot = rotateCanvasPointAroundPivot(base.pivot, anchor, degrees);
+                const rotatedPivot = rotatePointAroundAnchor(base.pivot, anchor, degrees);
                 const dx = rotatedPivot.x - base.pivot.x;
                 const dy = rotatedPivot.y - base.pivot.y;
                 return {
@@ -2053,6 +2140,19 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
   const slotDisplayName = (slotId: ID) => slotNameFor(slotId);
 
+  const commitSceneCommand = (
+    command: CharacterSceneCommand,
+    options: { history?: boolean } = {},
+  ) => {
+    const result = applyCharacterSceneCommand(doc, command);
+    if (!result.changed) return result;
+    updateDoc(
+      { parts: result.character.parts, rig: result.character.rig },
+      { history: options.history },
+    );
+    return result;
+  };
+
   const startAnchorDrag = (
     e: React.PointerEvent,
     context: { childSlotId: ID; parentSlotId: ID; variantKey: string },
@@ -2085,13 +2185,16 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       if (!startAnchor) return;
       const dx = (ev.clientX - startX) / scale;
       const dy = (ev.clientY - startY) / scale;
-      const next = upsertVariantPinAtPoint(doc, {
-        parentSlotId: context.parentSlotId,
-        variantKey: context.variantKey,
-        childSlotId: context.childSlotId,
-        anchorPoint: { x: startAnchor.x + dx, y: startAnchor.y + dy },
-      });
-      updateDoc({ parts: next.parts, rig: next.rig }, { history: false });
+      commitSceneCommand(
+        {
+          kind: "place-variant-pin",
+          parentSlotId: context.parentSlotId,
+          variantKey: context.variantKey,
+          childSlotId: context.childSlotId,
+          anchorPoint: { x: startAnchor.x + dx, y: startAnchor.y + dy },
+        },
+        { history: false },
+      );
       setStatus(`Pin placed — ${childName} follows ${parentName} : ${context.variantKey}`);
     };
     window.addEventListener("pointermove", onMove);
@@ -2100,8 +2203,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
   const clearPin = (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => {
     pushUndoSnapshot();
-    const next = removeVariantPin(doc, context);
-    updateDoc({ parts: next.parts, rig: next.rig }, { history: false });
+    commitSceneCommand({ kind: "clear-variant-pin", ...context }, { history: false });
     setStatus(
       `Pin removed — ${slotDisplayName(context.childSlotId)} is unresolved for this variant`,
     );
@@ -2113,8 +2215,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     childSlotId: ID;
   }) => {
     pushUndoSnapshot();
-    const next = resetVariantPinToArtwork(doc, context);
-    updateDoc({ parts: next.parts, rig: next.rig }, { history: false });
+    commitSceneCommand({ kind: "reset-variant-pin", ...context }, { history: false });
     setStatus(
       `Pin reset from artwork — ${slotDisplayName(context.childSlotId)} now uses its authored pivot`,
     );
@@ -2125,12 +2226,27 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     rotation: number,
   ) => {
     pushUndoSnapshot();
-    const next = setVariantPinRotation(doc, { ...context, rotation });
-    updateDoc({ parts: next.parts, rig: next.rig }, { history: false });
+    commitSceneCommand(
+      { kind: "set-variant-pin-rotation", ...context, rotation },
+      { history: false },
+    );
     setStatus(
       `Anchor angle — ${slotDisplayName(context.childSlotId)} at ${rotation}° under ` +
         `${slotDisplayName(context.parentSlotId)} : ${context.variantKey}`,
     );
+  };
+
+  const armRenderBlockingRigFix = (fix: RenderBlockingRigFix) => {
+    selectSlot(fix.childSlotId);
+    switchPhase("rig");
+    previewVariant(fix.parentSlotId, fix.parentVariantKey);
+    setShowAnchors(true);
+    setPinPlacement({
+      childSlotId: fix.childSlotId,
+      parentSlotId: fix.parentSlotId,
+      variantKey: fix.parentVariantKey,
+    });
+    setStatus(fix.instructions);
   };
 
   const startCanvasDragForSubject = (
@@ -2182,32 +2298,26 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   };
 
   const clearReach = (slotId: ID) => {
-    let rig = normalizeCharacterRig(doc);
-    rig = setSlotReach(rig, slotId, undefined);
-    rig = setSlotRotReach(rig, slotId, undefined);
-    updateDoc({ rig });
+    commitSceneCommand({ kind: "clear-slot-reach", slotId });
     setReachDraft(null);
     setRotDraft(null);
     setStatus("Reach cleared");
   };
 
   const setSlotHost = (slotId: ID, hostSlotId: ID | "") => {
-    updateDoc({
-      rig: setSlotHostConstraint(normalizeCharacterRig(doc), slotId, hostSlotId || undefined),
-    });
+    commitSceneCommand({ kind: "set-slot-host", slotId, hostSlotId: hostSlotId || undefined });
   };
 
   const setSlotHostMode = (slotId: ID, mode: "insideHostMask" | "insideHostBounds") => {
-    const rig = normalizeCharacterRig(doc);
-    const current = rig.hostConstraints.find((constraint) => constraint.slotId === slotId);
-    updateDoc({
-      rig: setSlotHostConstraint(
-        rig,
-        slotId,
-        current?.hostSlotId,
-        mode,
-        current?.reachPolicy ?? "scaleToFit",
-      ),
+    const current = normalizeCharacterRig(doc).hostConstraints.find(
+      (constraint) => constraint.slotId === slotId,
+    );
+    commitSceneCommand({
+      kind: "set-slot-host",
+      slotId,
+      hostSlotId: current?.hostSlotId,
+      mode,
+      reachPolicy: current?.reachPolicy ?? "scaleToFit",
     });
   };
 
@@ -2253,7 +2363,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           parts: d.parts.map((part) => {
             const base = byId.get(part.id);
             if (!base) return part;
-            const rp = rotateCanvasPointAroundPivot(base.pivot, anchor, degrees);
+            const rp = rotatePointAroundAnchor(base.pivot, anchor, degrees);
             return {
               ...part,
               x: Math.round(base.x + (rp.x - base.pivot.x)),
@@ -2302,8 +2412,12 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   // Set the child bone's parent for the active angle. The bone graph is the hierarchy; parent
   // artwork supplies the named output pin that derives the child joint.
   const setSlotAttachTo = (slotId: ID, parentSlotId: ID | "") => {
-    const next = setCharacterSlotParent(doc, slotId, parentSlotId || undefined, currentAngle());
-    updateDoc({ parts: next.parts, rig: next.rig });
+    commitSceneCommand({
+      kind: "set-slot-parent",
+      childSlotId: slotId,
+      parentSlotId: parentSlotId || undefined,
+      angle: currentAngle(),
+    });
   };
 
   // Sweep the layer around its extremes; the traced outline (convex hull of its swept footprint)
@@ -2346,10 +2460,17 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           if (!snap) return p;
           return { ...p, x: snap.x, y: snap.y, pivot: snap.pivot };
         });
-        return {
-          ...d,
-          parts: moveSlotParts({ ...d, parts: restored }, slotId, dx, dy, currentAngle()),
-        };
+        return applyCharacterSceneCommand(
+          { ...d, parts: restored },
+          {
+            kind: "move-slot",
+            slotId,
+            dx,
+            dy,
+            angle: currentAngle(),
+            updateRig: false,
+          },
+        ).character;
       });
     };
     const up = () => {
@@ -2402,13 +2523,16 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     // child's anchor under the armed parent variant. Mirrors the pivot tool's act-and-disarm.
     if (pinPlacement) {
       pushUndoSnapshot();
-      const next = upsertVariantPinAtPoint(doc, {
-        parentSlotId: pinPlacement.parentSlotId,
-        variantKey: pinPlacement.variantKey,
-        childSlotId: pinPlacement.childSlotId,
-        anchorPoint: point,
-      });
-      updateDoc({ parts: next.parts, rig: next.rig }, { history: false });
+      commitSceneCommand(
+        {
+          kind: "place-variant-pin",
+          parentSlotId: pinPlacement.parentSlotId,
+          variantKey: pinPlacement.variantKey,
+          childSlotId: pinPlacement.childSlotId,
+          anchorPoint: point,
+        },
+        { history: false },
+      );
       setStatus(
         `Pin placed — ${slotDisplayName(pinPlacement.childSlotId)} follows ` +
           `${slotDisplayName(pinPlacement.parentSlotId)} : ${pinPlacement.variantKey}`,
@@ -2976,6 +3100,17 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                 transform: `scale(${scale})`,
               }}
             >
+              {pixiEditorPreviewPayload && (
+                <PixiCharacterPreview
+                  payload={pixiEditorPreviewPayload}
+                  time={0}
+                  resetKey={`${doc.id}:${doc.updatedAt}:${editorActiveAngle}:${activePoseId ?? "manual"}`}
+                  staleBehavior="hold"
+                  loadingLabel="Loading render preview..."
+                  resolveAssetRef={resolveCharacterEditorPreviewAssetRef}
+                  className="pointer-events-none absolute inset-0 block h-full w-full bg-transparent"
+                />
+              )}
               {hoverHit && (
                 <div
                   className="pointer-events-none absolute z-[10050] -translate-y-full whitespace-nowrap rounded border border-border bg-panel/95 px-1.5 py-0.5 text-muted-foreground"
@@ -3192,6 +3327,45 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               )}
             </div>
           )}
+          {!modeBanner && renderBlockingRigIssues.length > 0 && (
+            <div
+              role="status"
+              className="absolute left-1/2 top-3 z-[80] flex max-w-[min(720px,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded border border-amber-500/50 bg-panel/95 px-3 py-2 text-xs text-foreground shadow-[var(--shadow-panel)]"
+            >
+              <span className="h-2 w-2 shrink-0 rounded-full bg-amber-400" />
+              <span className="min-w-0 flex-1">
+                <span className="font-medium text-amber-200">Render preview paused.</span>{" "}
+                <span className="text-muted-foreground">
+                  {renderBlockingRigFix
+                    ? `${renderBlockingRigFix.childSlotName} needs an attach point on ${renderBlockingRigFix.parentSlotName} (${renderBlockingRigFix.parentVariantKey}).`
+                    : renderBlockingRigIssues[0]?.message}
+                  {renderBlockingRigIssues.length > 1
+                    ? ` (+${renderBlockingRigIssues.length - 1} more)`
+                    : ""}
+                </span>
+              </span>
+              {renderBlockingRigFix && (
+                <button
+                  type="button"
+                  onClick={() => armRenderBlockingRigFix(renderBlockingRigFix)}
+                  className="shrink-0 rounded border border-amber-400/60 bg-amber-400/10 px-2 py-0.5 text-[10px] text-amber-100 hover:bg-amber-400/15"
+                  title={renderBlockingRigFix.instructions}
+                >
+                  Fix this pin
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAnchors(true);
+                  switchPhase("rig");
+                }}
+                className="shrink-0 rounded border border-border px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+              >
+                Show rig tools
+              </button>
+            </div>
+          )}
           {status && (
             <div
               role="status"
@@ -3343,9 +3517,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                     selectedPart={selectedPart}
                     showBones={showBones}
                     activeVariants={variantPreview}
-                    onCharacterChange={(character) =>
-                      updateDoc({ parts: character.parts, rig: character.rig })
-                    }
+                    onSceneCommand={(command) => commitSceneCommand(command)}
                     onRigChange={(rig) => updateDoc({ rig })}
                     onResetRig={() => {
                       updateDoc({ rig: buildDefaultRig(doc) });
@@ -4708,7 +4880,7 @@ function SkeletonCard({
   selectedPart,
   showBones,
   activeVariants,
-  onCharacterChange,
+  onSceneCommand,
   onRigChange,
   onResetRig,
 }: {
@@ -4718,7 +4890,7 @@ function SkeletonCard({
   selectedPart: CharacterPart | null;
   showBones: boolean;
   activeVariants: Readonly<Record<ID, string>>;
-  onCharacterChange: (character: CharacterPreset) => void;
+  onSceneCommand: (command: CharacterSceneCommand) => void;
   onRigChange: (rig: CharacterRig) => void;
   onResetRig: () => void;
 }) {
@@ -4758,39 +4930,47 @@ function SkeletonCard({
             label="Bone X"
             value={selectedBone.x}
             onChange={(x) =>
-              onCharacterChange(
-                setCharacterBoneRestTransform(doc, selectedBone.id, { x }, runtime.angle, {
-                  activeVariants,
-                }),
-              )
+              onSceneCommand({
+                kind: "set-bone-rest-transform",
+                boneId: selectedBone.id,
+                patch: { x },
+                angle: runtime.angle,
+                activeVariants,
+              })
             }
           />
           <NumberField
             label="Bone Y"
             value={selectedBone.y}
             onChange={(y) =>
-              onCharacterChange(
-                setCharacterBoneRestTransform(doc, selectedBone.id, { y }, runtime.angle, {
-                  activeVariants,
-                }),
-              )
+              onSceneCommand({
+                kind: "set-bone-rest-transform",
+                boneId: selectedBone.id,
+                patch: { y },
+                angle: runtime.angle,
+                activeVariants,
+              })
             }
           />
           <NumberField
             label="Bone Rot"
             value={selectedBone.rotation}
             onChange={(rotation) =>
-              onCharacterChange(
-                setCharacterBoneRestTransform(doc, selectedBone.id, { rotation }, runtime.angle, {
-                  activeVariants,
-                }),
-              )
+              onSceneCommand({
+                kind: "set-bone-rest-transform",
+                boneId: selectedBone.id,
+                patch: { rotation },
+                angle: runtime.angle,
+                activeVariants,
+              })
             }
           />
           <NumberField
             label="Bone Depth"
             value={selectedBone.depth ?? 0}
-            onChange={(depth) => onRigChange(setBoneDepth(rig, selectedBone.id, depth))}
+            onChange={(depth) =>
+              onSceneCommand({ kind: "set-bone-depth", boneId: selectedBone.id, depth })
+            }
           />
         </div>
       )}
@@ -4799,7 +4979,9 @@ function SkeletonCard({
           <NumberField
             label="Slot Depth"
             value={selectedBinding.effectiveDepth}
-            onChange={(depth) => onRigChange(setSlotDepth(rig, selectedBinding.slotId, depth))}
+            onChange={(depth) =>
+              onSceneCommand({ kind: "set-slot-depth", slotId: selectedBinding.slotId, depth })
+            }
           />
           <Field label="Angle Variant">
             <button
@@ -6388,16 +6570,17 @@ function PartLayer({
   /** Resolved registration/pin placement shared with generated output. */
   placement?: RuntimePartPlacement;
 }) {
-  const url = useMediaUrl(part.mediaId);
   const sameSlotParts = allParts.filter(
     (candidate) => getPartSlotId(candidate) === getPartSlotId(part),
   );
   const ghost = ghosted && sameSlotParts.length > 1 && part.visible;
+  const activeVariant =
+    sameSlotParts.length > 1
+      ? (previewVariantKey ??
+        activePreviewVariantForPart(part, preview) ??
+        defaultVariantForSlotParts(sameSlotParts, part.role))
+      : undefined;
   if (sameSlotParts.length > 1 && !selected && !ghost) {
-    const activeVariant =
-      previewVariantKey ??
-      activePreviewVariantForPart(part, preview) ??
-      defaultVariantForSlotParts(sameSlotParts, part.role);
     if (activeVariant && !partMatchesVariant(part, activeVariant)) return null;
   }
   if (!part.visible && !selected && !previewVariantKey) return null;
@@ -6436,16 +6619,9 @@ function PartLayer({
           transform: `rotate(${part.rotation + previewTransform.rotation}deg) scale(${previewTransform.scale}, ${previewTransform.scaleY ?? previewTransform.scale})`,
           transformOrigin: `${((pivot.x - part.x) / part.width) * 100}% ${((pivot.y - part.y) / part.height) * 100}%`,
         }}
-      >
-        {url && (
-          <img
-            src={url}
-            alt={part.name}
-            draggable={false}
-            className="pointer-events-none h-full w-full object-contain"
-          />
-        )}
-      </div>
+        data-character-editor-chrome="part-frame"
+        aria-label={selected ? `${part.name} selection frame` : undefined}
+      />
     </>
   );
 }
@@ -6703,22 +6879,6 @@ function editorPartPivot(part: CharacterPart) {
       y: part.y + part.height * part.anchorY,
     }
   );
-}
-
-function rotateCanvasPointAroundPivot(
-  point: { x: number; y: number },
-  pivot: { x: number; y: number },
-  degrees: number,
-) {
-  const radians = (degrees * Math.PI) / 180;
-  const cos = Math.cos(radians);
-  const sin = Math.sin(radians);
-  const relX = point.x - pivot.x;
-  const relY = point.y - pivot.y;
-  return {
-    x: pivot.x + relX * cos - relY * sin,
-    y: pivot.y + relX * sin + relY * cos,
-  };
 }
 
 function editorTransformPointAroundPivot(
@@ -7214,27 +7374,6 @@ function unionAlphaBounds(parts: CharacterPart[]) {
 
 function unionHostClampBounds(parts: CharacterPart[], mode: "insideHostMask" | "insideHostBounds") {
   return mode === "insideHostBounds" ? unionFrameBounds(parts) : unionEditorArtBounds(parts);
-}
-
-function moveSlotSetFromSnapshot(
-  parts: CharacterPart[],
-  snapshot: Array<{ id: ID; x: number; y: number; pivot: { x: number; y: number } }>,
-  slotIds: Set<ID>,
-  dx: number,
-  dy: number,
-): CharacterPart[] {
-  const snapshotById = new Map(snapshot.map((part) => [part.id, part]));
-  return parts.map((part) => {
-    if (!slotIds.has(getPartSlotId(part))) return part;
-    const start = snapshotById.get(part.id);
-    if (!start) return part;
-    return {
-      ...part,
-      x: start.x + dx,
-      y: start.y + dy,
-      pivot: { x: start.pivot.x + dx, y: start.pivot.y + dy },
-    };
-  });
 }
 
 function clampSlotDragDelta(

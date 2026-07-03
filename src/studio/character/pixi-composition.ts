@@ -220,6 +220,11 @@ function appendPixiCharacterScript(
       : "";
     return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' + svgAttr(node.viewBox || ("0 0 " + node.frame.width + " " + node.frame.height)) + '" width="' + svgAttr(Math.max(0.0001, node.frame.width || 0)) + '" height="' + svgAttr(Math.max(0.0001, node.frame.height || 0)) + '"><path d="' + svgAttr(node.path || "") + '" fill="' + svgAttr(node.fill || "#733f43") + '"' + stroke + '/></svg>';
   };
+  const createTexturedLeaf = function(PIXI, node, texture) {
+    // Mesh nodes share the same parent-container contract as sprites. They stay
+    // sprite-backed until mesh export parity is explicitly enabled.
+    return new PIXI.Sprite({ texture: texture });
+  };
   const applyVectorFrame = function(container, frame) {
     container.position.set(frame.x + frame.originX, frame.y + frame.originY);
     container.pivot.set(frame.originX, frame.originY);
@@ -261,14 +266,14 @@ function appendPixiCharacterScript(
           displayObject.alpha = 1;
         }
       });
-      (event.boneAnchors || []).forEach(function(anchor) {
-        const displayObject = anchor.sceneNodeId ? ctx.nodes[anchor.sceneNodeId] : null;
-        if (!displayObject) return;
-        displayObject.position.set(anchor.left, anchor.top);
-        displayObject.pivot.set(0, 0);
-        displayObject.rotation = toRadians(anchor.rotation);
-      });
     }
+    (event.boneAnchors || []).forEach(function(anchor) {
+      const displayObject = anchor.sceneNodeId ? ctx.nodes[anchor.sceneNodeId] : null;
+      if (!displayObject) return;
+      displayObject.position.set(anchor.left, anchor.top);
+      displayObject.pivot.set(0, 0);
+      displayObject.rotation = toRadians(anchor.rotation);
+    });
   };
   const cloneVars = function(vars) {
     return Object.assign({}, vars || {});
@@ -425,21 +430,34 @@ function appendPixiCharacterScript(
     root.appendChild(app.canvas || app.view);
     app.stage.sortableChildren = true;
     app.stage.label = "character-scene-root";
+    if (PIXI.Assets && PIXI.Assets.setPreferences) {
+      PIXI.Assets.setPreferences({ preferCreateImageBitmap: false });
+    }
     const textures = {};
     await Promise.all((S.scene.assets || []).map(async function(asset) {
-      textures[asset.id] = await PIXI.Assets.load({
-        alias: asset.id,
-        src: asset.ref,
-        parser: asset.parser || "texture"
-      });
+      try {
+        textures[asset.id] = await PIXI.Assets.load({
+          src: asset.ref,
+          parser: asset.parser || "texture"
+        });
+      } catch (error) {
+        throw new Error(
+          "Failed to load character texture " + asset.id +
+          " for parts " + (asset.partIds || []).join(", ") +
+          ": " + (error && error.message ? error.message : String(error))
+        );
+      }
     }));
     const nodes = {};
     Object.keys(S.scene.nodes).forEach(function(nodeId) {
       const node = S.scene.nodes[nodeId];
       if (node.kind === "sprite" || node.kind === "mesh") {
-        nodes[nodeId] = new PIXI.Sprite({ texture: textures[node.assetId] });
+        nodes[nodeId] = new PIXI.Container({ sortableChildren: true });
+        const leaf = createTexturedLeaf(PIXI, node, textures[node.assetId]);
+        leaf.label = nodeId + ":" + node.kind;
+        nodes[nodeId].addChild(leaf);
       } else if (node.kind === "vector") {
-        nodes[nodeId] = new PIXI.Container();
+        nodes[nodeId] = new PIXI.Container({ sortableChildren: true });
         const graphic = new PIXI.Graphics();
         graphic.svg(svgForVectorNode(node));
         graphic.label = nodeId + ":graphics";

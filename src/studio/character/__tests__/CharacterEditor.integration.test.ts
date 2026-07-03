@@ -60,6 +60,32 @@ describe("CharacterEditor source integration", () => {
     expect(source).not.toContain("allParts={doc.parts}");
   });
 
+  it("uses Pixi as the editor artwork renderer while React owns chrome only", () => {
+    const source = readFileSync(editorPath, "utf8");
+
+    expect(source).toContain("buildCharacterRenderPayload");
+    expect(source).toContain("const mediaAssets = useStudio((state) => state.mediaAssets)");
+    expect(source).toContain("mediaAssets,");
+    expect(source).toContain("<PixiCharacterPreview");
+    expect(source).toContain("resolveCharacterEditorPreviewAssetRef");
+    expect(source).toContain("previewVariant(slotId, variantKeyForPart(part))");
+    expect(source).toContain('data-character-editor-chrome="part-frame"');
+    expect(source).toContain("applyCharacterSceneCommand");
+    expect(source).not.toContain("pixiEditorPreviewActive");
+    expect(source).not.toContain("pixiBacked=");
+    expect(source).not.toContain("drawnByPixi");
+    expect(source).toContain("error instanceof CharacterPinRigError");
+    expect(source).toContain("renderBlockingRigIssues");
+    expect(source).toContain("Render preview paused.");
+    expect(source).toContain("renderBlockingRigFixForIssue");
+    expect(source).toContain("Fix this pin");
+    expect(source).toContain("armRenderBlockingRigFix");
+    expect(source).toContain("Show rig tools");
+    expect(source).toContain("CharacterPartMoveable");
+    expect(source).toContain("RigBonesOverlay");
+    expect(source).toContain("VariantAnchorOverlay");
+  });
+
   it("consolidates the parts rail into one list with per-slot variant upload", () => {
     const source = readFileSync(editorPath, "utf8");
 
@@ -99,13 +125,13 @@ describe("CharacterEditor source integration", () => {
     const source = readFileSync(editorPath, "utf8");
 
     expect(source).toContain('useState<BoneDragMode>("calibrate")');
-    expect(source).toContain("moveCharacterBoneRest(snapshot, boneId, dx, dy");
+    expect(source).toContain('kind: "move-bone-rest"');
     expect(source).toContain("keepArtwork");
     expect(source).toContain("Calibrate");
     expect(source).toContain("Move art");
     expect(source).toContain("Drag bones onto the artwork while images stay pinned");
     expect(source).toContain("syncLiveCharacterPreset(latest)");
-    expect(source).toContain("setCharacterBoneRestTransform");
+    expect(source).toContain('kind: "set-bone-rest-transform"');
     expect(source).not.toContain("const shouldMoveArt = false");
     expect(source).not.toContain("Bones drive the skeleton only; artwork stays put");
     expect(source).not.toContain("applyLiveBoneTransform");
