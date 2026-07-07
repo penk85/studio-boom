@@ -6,12 +6,19 @@ import type {
   CharacterPreset,
   PartRole,
 } from "../types";
+import { localAlphaBounds } from "./alpha-bounds";
 import {
   anchorPartForVariant,
   pivotAlignedPartOffset,
   variantAliasesForPart,
   variantKeyForPart,
 } from "./character-utils";
+import {
+  BEND_CROSS_VERTICES,
+  DEFAULT_BEND_SEGMENTS,
+  DEFAULT_LIMB_CROSS_VERTICES,
+  clampBendDegrees,
+} from "./mesh-deform";
 import { runtimeAncestorMotionTargets, runtimeMotionTargetForSlot } from "./motion-targets";
 import { registrationForPart, pinTransformInBoneSpace } from "./registration";
 import { representativePart, slotDrawIndex } from "./rig";
@@ -134,7 +141,7 @@ export interface CharacterSceneSpriteNode extends CharacterSceneNodeBase {
 
 export interface CharacterSceneMeshNode extends CharacterSceneNodeBase {
   kind: "mesh";
-  meshKind: "plane";
+  meshKind: "plane" | "rope";
   slotId: string;
   partId: string;
   role: PartRole;
@@ -144,9 +151,35 @@ export interface CharacterSceneMeshNode extends CharacterSceneNodeBase {
   variantKey: string;
   variantAliases: string[];
   active: boolean;
-  verticesX: number;
-  verticesY: number;
-  stretchAxis: "x" | "y";
+  verticesX?: number;
+  verticesY?: number;
+  /** Limb axis the art bends along; matches the part's longer dimension. */
+  stretchAxis?: "x" | "y";
+  /** Which end of the limb axis stays fixed at the joint (registration end). */
+  bendAnchor?: "start" | "end";
+  /** Registration point in normalized texture space, used as the bend joint. */
+  bendOriginX?: number;
+  bendOriginY?: number;
+  /** Authored base curve in degrees applied every frame before motion vars. */
+  bend?: number;
+  /** Point path (spine) for flexible limb/stretch rendering, part-local px. */
+  pathPoints?: Array<{ x: number; y: number }>;
+  /** Ribbon cross width in part-local px (the visible limb's short dimension). */
+  ropeWidth?: number;
+  /** Columns across the ribbon (>=2). */
+  crossVertices?: number;
+  /** Visible texture sub-rect (0..1) mapped across the ribbon. */
+  uvRect?: { u0: number; v0: number; u1: number; v1: number };
+  /** True when the limb's long axis is the texture's height (v). */
+  ribbonVertical?: boolean;
+  /**
+   * Authoring source size (part-local px) for rope geometry, which lives in
+   * part-local pixels rather than texture pixels. The runtime scales the rope
+   * container by frame.width/sourceWidth so a resized limb still aligns (using
+   * texture dims here would mis-scale any part whose size != its image size).
+   */
+  sourceWidth?: number;
+  sourceHeight?: number;
   placement: CharacterScenePlacement;
 }
 
@@ -576,10 +609,85 @@ function buildPartNode(args: {
     assetRef: `asset:${part.mediaId}`,
   };
 
+  if (part.deform?.mode === "limb-path") {
+    const alpha = localAlphaBounds(part);
+    const w = Math.max(1, part.width);
+    const h = Math.max(1, part.height);
+    return {
+      ...textured,
+      kind: "mesh",
+      meshKind: "rope",
+      pathPoints: limbPathPoints(part.deform),
+      ropeWidth: Math.max(1, part.deform.width ?? Math.min(alpha.width, alpha.height)),
+      crossVertices: DEFAULT_LIMB_CROSS_VERTICES,
+      // Map only the visible art across the ribbon so padding is not shown.
+      uvRect: {
+        u0: alpha.x / w,
+        v0: alpha.y / h,
+        u1: (alpha.x + alpha.width) / w,
+        v1: (alpha.y + alpha.height) / h,
+      },
+      ribbonVertical: alpha.height >= alpha.width,
+      // Ribbon geometry is in part-local px; carry the authoring size so the
+      // runtime scales by it rather than the texture's intrinsic size.
+      sourceWidth: w,
+      sourceHeight: h,
+    };
+  }
+
+  if (part.deform?.mode === "bend") {
+    const stretchAxis: "x" | "y" = part.height >= part.width ? "y" : "x";
+    const segments = Math.max(2, Math.round(part.deform.segments ?? DEFAULT_BEND_SEGMENTS));
+    const alongVertices = segments + 1;
+    // The joint stays where the artwork registers onto its bone; the far end
+    // is the free end that curves.
+    const registrationAlong = stretchAxis === "y" ? partRegistration.y : partRegistration.x;
+    const partLength = stretchAxis === "y" ? part.height : part.width;
+    return {
+      ...textured,
+      kind: "mesh",
+      meshKind: "plane",
+      verticesX: stretchAxis === "y" ? BEND_CROSS_VERTICES : alongVertices,
+      verticesY: stretchAxis === "y" ? alongVertices : BEND_CROSS_VERTICES,
+      stretchAxis,
+      bendAnchor: registrationAlong <= partLength / 2 ? "start" : "end",
+      bendOriginX: normalizedRegistration(partRegistration.x, part.width),
+      bendOriginY: normalizedRegistration(partRegistration.y, part.height),
+      bend: clampBendDegrees(part.deform.bend ?? 0),
+    };
+  }
+
   return {
     ...textured,
     kind: "sprite",
   };
+}
+
+function normalizedRegistration(value: number, size: number): number {
+  const normalized = (Number(value) || 0) / Math.max(1, Number(size) || 1);
+  return Math.max(0, Math.min(1, normalized));
+}
+
+function limbPathPoints(deform: Extract<CharacterPart["deform"], { mode: "limb-path" }>) {
+  if (!deform) return [];
+  const segments = Math.max(2, Math.round(deform.segments ?? DEFAULT_BEND_SEGMENTS));
+  const points: Array<{ x: number; y: number }> = [];
+  for (let i = 0; i <= segments; i += 1) {
+    const t = i / segments;
+    if (!deform.curve) {
+      points.push({
+        x: deform.start.x + (deform.end.x - deform.start.x) * t,
+        y: deform.start.y + (deform.end.y - deform.start.y) * t,
+      });
+      continue;
+    }
+    const inv = 1 - t;
+    points.push({
+      x: inv * inv * deform.start.x + 2 * inv * t * deform.curve.x + t * t * deform.end.x,
+      y: inv * inv * deform.start.y + 2 * inv * t * deform.curve.y + t * t * deform.end.y,
+    });
+  }
+  return points;
 }
 
 function buildBoneAnchorTracks(

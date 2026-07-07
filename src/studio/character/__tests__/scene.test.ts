@@ -4,6 +4,7 @@ import {
   characterSceneBoneNodeId,
   characterSceneSlotNodeId,
   type CharacterSceneBoneNode,
+  type CharacterSceneMeshNode,
   type CharacterSceneSlotNode,
   type CharacterSceneSpriteNode,
 } from "../scene";
@@ -100,5 +101,45 @@ describe("buildCharacterScene", () => {
     expect(handBone.frame.x).toBeCloseTo(handBone.variantAnchors!.anchors.bent.x);
     expect(handBone.frame.y).toBeCloseTo(handBone.variantAnchors!.anchors.bent.y);
     expect(handBone.frame.rotation).toBeCloseTo(handBone.variantAnchors!.anchors.bent.rotation);
+  });
+
+  it("emits a rope path mesh node for flexible limb-path parts", () => {
+    const character = makeVariantArmCharacter();
+    character.parts = character.parts.map((part) =>
+      part.id === "arm-straight"
+        ? {
+            ...part,
+            deform: {
+              mode: "limb-path" as const,
+              start: { x: 10, y: 10 },
+              end: { x: 10, y: 180 },
+              width: 60,
+              segments: 8,
+            },
+          }
+        : part,
+    );
+    const scene = buildCharacterScene({ character, width: 300, height: 450 });
+
+    const armSlot = scene.nodes[scene.slotNodeIds["slot:right-arm"]] as CharacterSceneSlotNode;
+    const straightArm = scene.nodes[armSlot.variantNodeIds.straight[0]] as CharacterSceneMeshNode;
+    expect(straightArm.kind).toBe("mesh");
+    expect(straightArm.meshKind).toBe("rope");
+    expect(straightArm.pathPoints).toHaveLength(9);
+    expect(straightArm.pathPoints?.[0]).toEqual({ x: 10, y: 10 });
+    expect(straightArm.pathPoints?.[8]).toEqual({ x: 10, y: 180 });
+    expect(straightArm.ropeWidth).toBe(60);
+    // Rope geometry is in part-local px, so it carries the part's authoring
+    // size for the runtime to scale by (not the texture's intrinsic size).
+    expect(straightArm.sourceWidth).toBe(60);
+    expect(straightArm.sourceHeight).toBe(180);
+    expect(straightArm.assetRef).toBe("asset:arm-straight-media");
+
+    // Rigid variants of the same slot stay sprites, and assets register once.
+    const bentArm = scene.nodes[armSlot.variantNodeIds.bent[0]] as CharacterSceneSpriteNode;
+    expect(bentArm.kind).toBe("sprite");
+    expect(scene.assets.find((asset) => asset.id === "arm-straight-media")).toMatchObject({
+      partIds: ["arm-straight"],
+    });
   });
 });

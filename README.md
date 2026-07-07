@@ -96,15 +96,15 @@ Still in progress:
 - The UI around custom blocks and source editing is intentionally minimal.
 - Nested composition timeline editing is not built yet.
 - Crop, mirror, richer keyframe editing, and shader transition support are deferred.
-- Full mesh/stretch-limb deformation is deferred until it has dedicated
-  preview/export parity coverage. Current Pixi character parts render as sprites
-  or vector nodes by default.
+- Flexible limb meshes are available as an opt-in per-slot character setting and
+  are covered by preview/export parity tests. New flexible parts use a
+  point-path Pixi `MeshRope` model; current Pixi character parts still render as
+  sprites or vector nodes by default, and richer drag-handle authoring remains
+  in progress.
 - Pixi-native character authoring commands are still in progress. The editor
   artwork is Pixi-rendered, and slot move/scale/rotate, variant pin edits, bone
-  rest edits, slot depth, host constraints, and reach constraints now go through
-  a renderer-neutral scene command boundary. Mesh/stretch authoring still needs
-  dedicated command design and preview/export parity coverage before mesh is
-  enabled.
+  rest edits, slot depth, host constraints, reach constraints, and Flexible
+  deform edits now go through a renderer-neutral scene command boundary.
 - Local backup/restore for the IndexedDB database still needs a product flow.
 - There is no hosted backend, team sync, or cloud account.
 

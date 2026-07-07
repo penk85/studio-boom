@@ -303,6 +303,12 @@ export interface CharacterPart {
   alphaBounds?: CharacterPartAlphaBounds;
   motionBehavior?: PartMotionBehavior;
   morph?: SvgMorphMetadata;
+  /**
+   * Flexible-part deformation. A part with `deform` renders as a Pixi mesh in
+   * the character composition so limb-like art can follow an authored path
+   * instead of rotating as a rigid card. Undefined = rigid sprite.
+   */
+  deform?: CharacterPartDeform;
   zIndex: number;
   /** Parallax depth (-1 back .. 0 neutral .. +1 front). */
   depth: number;
@@ -310,6 +316,39 @@ export interface CharacterPart {
   /** Editor lock: a locked part ignores canvas clicks/drags (still selectable from the list). */
   locked?: boolean;
 }
+
+export interface CharacterPartDeformPoint {
+  /** Part-local x in source pixels. */
+  x: number;
+  /** Part-local y in source pixels. */
+  y: number;
+}
+
+export interface CharacterPartLimbPathDeform {
+  /**
+   * Point-based flexible limb model. The start point stays attached to the
+   * rig, the end point is the user-facing stretch handle, and the optional
+   * curve point gives the limb a bend.
+   */
+  mode: "limb-path";
+  start: CharacterPartDeformPoint;
+  end: CharacterPartDeformPoint;
+  curve?: CharacterPartDeformPoint;
+  /** Visual thickness of the rope mesh in part-local source pixels. */
+  width?: number;
+  /** Number of sampled path points. More = smoother curve. Default 12. */
+  segments?: number;
+}
+
+export interface CharacterPartLegacyBendDeform {
+  /** Legacy exploratory MeshPlane bend. Kept readable for old saves. */
+  mode: "bend";
+  bend?: number;
+  segments?: number;
+}
+
+/** Flexible deformation settings for a character part. */
+export type CharacterPartDeform = CharacterPartLimbPathDeform | CharacterPartLegacyBendDeform;
 
 /** Manifest of which optional roles this character has. */
 export interface PartManifest {
@@ -734,6 +773,11 @@ export interface MotionKeyframe {
   rotation?: number; // additive degrees (2D, Z axis)
   rotationX?: number; // additive degrees, 3D X axis (vertical flip)
   rotationY?: number; // additive degrees, 3D Y axis (horizontal / card flip)
+  bend?: number; // additive degrees of smooth curve; only moves flexible (deform) parts
+  pathEndX?: number; // flexible limb end-point x offset in part-local pixels
+  pathEndY?: number; // flexible limb end-point y offset in part-local pixels
+  pathCurveX?: number; // flexible limb curve-control x offset in part-local pixels
+  pathCurveY?: number; // flexible limb curve-control y offset in part-local pixels
   transformPerspective?: number; // px, 3D perspective depth for rotationX/rotationY
   originX?: number; // transform origin x, 0..1 within part
   originY?: number; // transform origin y, 0..1 within part
@@ -798,6 +842,11 @@ export interface RecordedPartOverride {
   rotation?: number;
   rotationX?: number; // additive degrees, 3D X axis (vertical flip)
   rotationY?: number; // additive degrees, 3D Y axis (horizontal / card flip)
+  bend?: number; // additive degrees of smooth curve; only moves flexible (deform) parts
+  pathEndX?: number; // flexible limb end-point x offset in part-local pixels
+  pathEndY?: number; // flexible limb end-point y offset in part-local pixels
+  pathCurveX?: number; // flexible limb curve-control x offset in part-local pixels
+  pathCurveY?: number; // flexible limb curve-control y offset in part-local pixels
   transformPerspective?: number; // px, 3D perspective depth for rotationX/rotationY
   originX?: number; // transform origin x, 0..1 within part
   originY?: number; // transform origin y, 0..1 within part

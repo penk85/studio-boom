@@ -2,6 +2,13 @@ import { generateHyperframesHtml } from "@hyperframes/core";
 import type { CharacterClipMeta, CharacterPreset, MotionPreset } from "../types";
 import { validateCompositionSourceHtml } from "../hyperframes/composition-source";
 import { normalizeNativeHyperframesHtml } from "../hyperframes/native";
+import {
+  MAX_BEND_DEGREES,
+  bendPlanePositions,
+  limbRibbonIndices,
+  limbRibbonPositions,
+  limbRibbonUVs,
+} from "./mesh-deform";
 import type { CharacterSceneGraph } from "./scene";
 import type { CharacterTimelineScene } from "./timeline-scene";
 
@@ -190,22 +197,98 @@ function appendPixiCharacterScript(
     scene: args.scene,
     timelineScene: args.timelineScene,
   });
+  const hasRopeMesh = Object.values(args.scene.nodes).some(
+    (node) => node.kind === "mesh" && node.meshKind === "rope",
+  );
+  const hasPlaneMesh = Object.values(args.scene.nodes).some(
+    (node) => node.kind === "mesh" && node.meshKind === "plane",
+  );
+  // Mesh support is emitted only when the scene actually contains flexible
+  // (deform) parts, so default characters stay mesh-free end to end. The
+  // plane-bend runtime is legacy-only; new limb-path parts render as MeshRope.
+  const meshRuntime = hasPlaneMesh
+    ? `
+  // Shared bend math, embedded from mesh-deform.ts (locked by mesh-deform.test.ts).
+  const bendPlanePositions = ${bendPlanePositions.toString()};
+  const clampBend = function(value) {
+    const bend = Number(value) || 0;
+    return bend > ${MAX_BEND_DEGREES} ? ${MAX_BEND_DEGREES} : bend < ${-MAX_BEND_DEGREES} ? ${-MAX_BEND_DEGREES} : bend;
+  };
+  const applyMeshBends = function(ctx) {
+    (ctx.meshEntries || []).forEach(function(entry) {
+      const geometry = entry.mesh.geometry;
+      const buffer = geometry.getBuffer("aPosition");
+      bendPlanePositions({
+        width: geometry.width,
+        height: geometry.height,
+        verticesX: geometry.verticesX,
+        verticesY: geometry.verticesY,
+        axis: entry.node.stretchAxis,
+        anchor: entry.node.bendAnchor,
+        originX: (entry.node.bendOriginX == null ? 0.5 : entry.node.bendOriginX) * geometry.width,
+        originY: (entry.node.bendOriginY == null ? 0.5 : entry.node.bendOriginY) * geometry.height,
+        bend: clampBend((entry.node.bend || 0) + entry.bendDelta),
+        out: buffer.data
+      });
+      buffer.update();
+    });
+  };`
+    : "";
+  const ropeRuntime = hasRopeMesh
+    ? `
+  // Ribbon geometry math, embedded from mesh-deform.ts (locked by mesh-deform.test.ts).
+  const limbRibbonPositions = ${limbRibbonPositions.toString()};
+  const limbRibbonUVs = ${limbRibbonUVs.toString()};
+  const limbRibbonIndices = ${limbRibbonIndices.toString()};
+  const clonePathPoints = function(points) {
+    const source = points && points.length >= 2 ? points : [{ x: 0, y: 0 }, { x: 1, y: 0 }];
+    return source.map(function(point) { return { x: point.x, y: point.y }; });
+  };
+  const applyRopePathOffsets = function(ctx) {
+    (ctx.ropeEntries || []).forEach(function(entry) {
+      const count = entry.basePathPoints.length;
+      if (count === 0) return;
+      const denom = Math.max(1, count - 1);
+      for (let i = 0; i < count; i += 1) {
+        const t = i / denom;
+        const curveWeight = 4 * t * (1 - t);
+        const base = entry.basePathPoints[i];
+        entry.scratchPath[i].x = base.x + entry.pathEndX * t + entry.pathCurveX * curveWeight;
+        entry.scratchPath[i].y = base.y + entry.pathEndY * t + entry.pathCurveY * curveWeight;
+      }
+      limbRibbonPositions(entry.scratchPath, entry.width, entry.crossVertices, entry.positions);
+      entry.mesh.vertices = entry.positions;
+    });
+  };`
+    : "";
   script.textContent = `(function(){
   const S = ${payload};
-  const toRadians = function(degrees) { return (Number(degrees) || 0) * Math.PI / 180; };
+  const toRadians = function(degrees) { return (Number(degrees) || 0) * Math.PI / 180; };${meshRuntime}${ropeRuntime}
   const applyContainerFrame = function(displayObject, frame) {
     displayObject.position.set(frame.x + frame.originX, frame.y + frame.originY);
     displayObject.pivot.set(frame.originX, frame.originY);
     displayObject.rotation = toRadians(frame.rotation);
     displayObject.scale.set(frame.scaleX || 1, frame.scaleY || 1);
   };
-  const applyTexturedFrame = function(displayObject, frame, texture) {
-    const sx = frame.width / Math.max(1, texture.width || frame.width || 1);
-    const sy = frame.height / Math.max(1, texture.height || frame.height || 1);
+  const applyTexturedFrame = function(displayObject, frame, sourceWidth, sourceHeight) {
+    const sx = frame.width / Math.max(1, sourceWidth || frame.width || 1);
+    const sy = frame.height / Math.max(1, sourceHeight || frame.height || 1);
     displayObject.position.set(frame.x + frame.originX, frame.y + frame.originY);
     displayObject.pivot.set(sx ? frame.originX / sx : frame.originX, sy ? frame.originY / sy : frame.originY);
     displayObject.rotation = toRadians(frame.rotation);
     displayObject.scale.set(sx * (frame.scaleX || 1), sy * (frame.scaleY || 1));
+  };
+  const texturedFrameSize = function(node, texture) {
+    if (node.kind === "mesh" && node.meshKind === "rope") {
+      return {
+        width: node.sourceWidth || (texture && texture.width) || node.frame.width,
+        height: node.sourceHeight || (texture && texture.height) || node.frame.height
+      };
+    }
+    return {
+      width: (texture && texture.width) || node.frame.width,
+      height: (texture && texture.height) || node.frame.height
+    };
   };
   const svgAttr = function(value) {
     return String(value == null ? "" : value)
@@ -220,9 +303,55 @@ function appendPixiCharacterScript(
       : "";
     return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' + svgAttr(node.viewBox || ("0 0 " + node.frame.width + " " + node.frame.height)) + '" width="' + svgAttr(Math.max(0.0001, node.frame.width || 0)) + '" height="' + svgAttr(Math.max(0.0001, node.frame.height || 0)) + '"><path d="' + svgAttr(node.path || "") + '" fill="' + svgAttr(node.fill || "#733f43") + '"' + stroke + '/></svg>';
   };
-  const createTexturedLeaf = function(PIXI, node, texture) {
-    // Mesh nodes share the same parent-container contract as sprites. They stay
-    // sprite-backed until mesh export parity is explicitly enabled.
+  const createTexturedLeaf = function(PIXI, node, texture) {${
+    hasRopeMesh
+      ? `
+    if (node.kind === "mesh" && node.meshKind === "rope" && PIXI.MeshSimple) {
+      try {
+        const basePathPoints = clonePathPoints(node.pathPoints);
+        const rows = basePathPoints.length;
+        const crossVertices = Math.max(2, node.crossVertices || 2);
+        const width = node.ropeWidth || Math.min(texture.width || 1, texture.height || 1);
+        const uvRect = node.uvRect || { u0: 0, v0: 0, u1: 1, v1: 1 };
+        const positions = limbRibbonPositions(basePathPoints, width, crossVertices);
+        // A textured ribbon (MeshSimple) preserves the full limb art along the
+        // spine; MeshRope pancakes it (texture height crushed into the width).
+        const mesh = new PIXI.MeshSimple({
+          texture: texture,
+          vertices: positions,
+          uvs: limbRibbonUVs(rows, crossVertices, uvRect, node.ribbonVertical !== false),
+          indices: limbRibbonIndices(rows, crossVertices)
+        });
+        mesh.__ribbon = {
+          basePathPoints: basePathPoints,
+          width: width,
+          crossVertices: crossVertices,
+          positions: positions,
+          scratchPath: basePathPoints.map(function(point) { return { x: point.x, y: point.y }; })
+        };
+        return mesh;
+      } catch (error) {
+        if (typeof console !== "undefined" && console.warn) {
+          console.warn("Falling back to Sprite for flexible limb mesh character part " + (node.partId || node.id), error);
+        }
+      }
+    }`
+      : ""
+  }${
+    hasPlaneMesh
+      ? `
+    if (node.kind === "mesh" && node.meshKind === "plane" && PIXI.MeshPlane) {
+      try {
+        return new PIXI.MeshPlane({ texture: texture, verticesX: node.verticesX || 2, verticesY: node.verticesY || 2 });
+      } catch (error) {
+        if (typeof console !== "undefined" && console.warn) {
+          console.warn("Falling back to Sprite for mesh character part " + (node.partId || node.id), error);
+        }
+      }
+    }
+    // Legacy MeshPlane deforms degrade to a rigid sprite instead of failing export capture.`
+      : ""
+  }
     return new PIXI.Sprite({ texture: texture });
   };
   const applyVectorFrame = function(container, frame) {
@@ -231,7 +360,22 @@ function appendPixiCharacterScript(
     container.rotation = toRadians(frame.rotation);
     container.scale.set(frame.scaleX || 1, frame.scaleY || 1);
   };
-  const applyBaseScene = function(ctx) {
+  const applyBaseScene = function(ctx) {${
+    hasPlaneMesh
+      ? `
+    (ctx.meshEntries || []).forEach(function(entry) { entry.bendDelta = 0; });`
+      : ""
+  }${
+    hasRopeMesh
+      ? `
+    (ctx.ropeEntries || []).forEach(function(entry) {
+      entry.pathEndX = 0;
+      entry.pathEndY = 0;
+      entry.pathCurveX = 0;
+      entry.pathCurveY = 0;
+    });`
+      : ""
+  }
     Object.keys(S.scene.nodes).forEach(function(nodeId) {
       const node = S.scene.nodes[nodeId];
       const displayObject = ctx.nodes[nodeId];
@@ -240,7 +384,8 @@ function appendPixiCharacterScript(
       displayObject.alpha = node.opacity == null ? 1 : node.opacity;
       displayObject.zIndex = node.zIndex || 0;
       if (node.kind === "sprite" || node.kind === "mesh") {
-        applyTexturedFrame(displayObject, node.frame, ctx.textures[node.assetId]);
+        const size = texturedFrameSize(node, ctx.textures[node.assetId]);
+        applyTexturedFrame(displayObject, node.frame, size.width, size.height);
       } else if (node.kind === "vector") {
         applyVectorFrame(displayObject, node.frame);
       } else {
@@ -335,14 +480,43 @@ function appendPixiCharacterScript(
       if (typeof vars.rotationY === "number") displayObject.scale.x *= Math.cos(toRadians(vars.rotationY));
       if (typeof vars.rotationX === "number") displayObject.scale.y *= Math.cos(toRadians(vars.rotationX));
       if (typeof vars.rotation === "number") displayObject.rotation = toRadians(vars.rotation);
-      if (typeof vars.opacity === "number") displayObject.alpha = vars.opacity;
+      if (typeof vars.opacity === "number") displayObject.alpha = vars.opacity;${
+        hasPlaneMesh
+          ? `
+      if (typeof vars.bend === "number") {
+        ((ctx.meshEntriesByNodeId || {})[nodeId] || []).forEach(function(entry) {
+          entry.bendDelta += vars.bend;
+        });
+      }`
+          : ""
+      }${
+        hasRopeMesh
+          ? `
+      ((ctx.ropeEntriesByNodeId || {})[nodeId] || []).forEach(function(entry) {
+        entry.pathEndX += vars.pathEndX || 0;
+        entry.pathEndY += vars.pathEndY || 0;
+        entry.pathCurveX += vars.pathCurveX || 0;
+        entry.pathCurveY += vars.pathCurveY || 0;
+      });`
+          : ""
+      }
     });
   };
   const renderAt = function(ctx, time) {
     const t = Math.max(0, Math.min(S.timelineScene.duration || S.duration, Number(time) || 0));
     applyBaseScene(ctx);
     latestEventsAt(t).forEach(function(event) { applySlotEvent(ctx, event); });
-    applyTargetVars(ctx, targetVarsAt(t));
+    applyTargetVars(ctx, targetVarsAt(t));${
+      hasRopeMesh
+        ? `
+    applyRopePathOffsets(ctx);`
+        : ""
+    }${
+      hasPlaneMesh
+        ? `
+    applyMeshBends(ctx);`
+        : ""
+    }
     ctx.app.render();
   };
   const state = { ctx: null, pendingTime: 0, readyResolve: null, readyReject: null };
@@ -448,14 +622,52 @@ function appendPixiCharacterScript(
         );
       }
     }));
-    const nodes = {};
+    const nodes = {};${
+      hasPlaneMesh
+        ? `
+    const meshEntries = [];
+    const meshEntriesByNodeId = {};`
+        : ""
+    }${
+      hasRopeMesh
+        ? `
+    const ropeEntries = [];
+    const ropeEntriesByNodeId = {};`
+        : ""
+    }
     Object.keys(S.scene.nodes).forEach(function(nodeId) {
       const node = S.scene.nodes[nodeId];
       if (node.kind === "sprite" || node.kind === "mesh") {
         nodes[nodeId] = new PIXI.Container({ sortableChildren: true });
         const leaf = createTexturedLeaf(PIXI, node, textures[node.assetId]);
         leaf.label = nodeId + ":" + node.kind;
-        nodes[nodeId].addChild(leaf);
+        nodes[nodeId].addChild(leaf);${
+          hasRopeMesh
+            ? `
+        if (node.kind === "mesh" && node.meshKind === "rope" && leaf && leaf.__ribbon) {
+          ropeEntries.push({
+            mesh: leaf,
+            node: node,
+            basePathPoints: leaf.__ribbon.basePathPoints,
+            width: leaf.__ribbon.width,
+            crossVertices: leaf.__ribbon.crossVertices,
+            positions: leaf.__ribbon.positions,
+            scratchPath: leaf.__ribbon.scratchPath,
+            pathEndX: 0,
+            pathEndY: 0,
+            pathCurveX: 0,
+            pathCurveY: 0
+          });
+        }`
+            : ""
+        }${
+          hasPlaneMesh
+            ? `
+        if (node.kind === "mesh" && node.meshKind === "plane" && PIXI.MeshPlane && leaf instanceof PIXI.MeshPlane) {
+          meshEntries.push({ mesh: leaf, node: node, bendDelta: 0 });
+        }`
+            : ""
+        }
       } else if (node.kind === "vector") {
         nodes[nodeId] = new PIXI.Container({ sortableChildren: true });
         const graphic = new PIXI.Graphics();
@@ -473,8 +685,36 @@ function appendPixiCharacterScript(
       if (!displayObject) return;
       const parent = node.parentId ? nodes[node.parentId] : app.stage;
       (parent || app.stage).addChild(displayObject);
-    });
-    const ctx = { app: app, nodes: nodes, textures: textures };
+    });${
+      hasRopeMesh
+        ? `
+    ropeEntries.forEach(function(entry) {
+      let cursor = entry.node.id;
+      while (cursor) {
+        (ropeEntriesByNodeId[cursor] = ropeEntriesByNodeId[cursor] || []).push(entry);
+        const sceneNode = S.scene.nodes[cursor];
+        cursor = sceneNode ? sceneNode.parentId : null;
+      }
+    });`
+        : ""
+    }${
+      hasPlaneMesh
+        ? `
+    // Timeline vars address slot/bone containers; map every ancestor node id
+    // to the mesh leaves beneath it so a bend var reaches the deformable art.
+    meshEntries.forEach(function(entry) {
+      let cursor = entry.node.id;
+      while (cursor) {
+        (meshEntriesByNodeId[cursor] = meshEntriesByNodeId[cursor] || []).push(entry);
+        const sceneNode = S.scene.nodes[cursor];
+        cursor = sceneNode ? sceneNode.parentId : null;
+      }
+    });`
+        : ""
+    }
+    const ctx = { app: app, nodes: nodes, textures: textures${
+      hasPlaneMesh ? ", meshEntries: meshEntries, meshEntriesByNodeId: meshEntriesByNodeId" : ""
+    }${hasRopeMesh ? ", ropeEntries: ropeEntries, ropeEntriesByNodeId: ropeEntriesByNodeId" : ""} };
     state.ctx = ctx;
     window.__studioBoomPixiScenes = window.__studioBoomPixiScenes || {};
     window.__studioBoomPixiScenes[S.compositionId] = ctx;

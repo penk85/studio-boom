@@ -1,5 +1,11 @@
 import type { EditorClip } from "../types";
 import type { PickedElement } from "@hyperframes/studio";
+import { type CompositionRect, type ScreenRect, rectToBounds } from "../interaction/transform-box";
+
+// The transform-box geometry now lives in `interaction/transform-box.ts` so every editor
+// surface shares one copy. Re-exported here so existing Stage imports keep working.
+export { scaleCompositionRectFromHandleRect } from "../interaction/transform-box";
+export type { CompositionRect, ScreenRect } from "../interaction/transform-box";
 
 export interface StageGeometry {
   rect: DOMRect;
@@ -8,13 +14,6 @@ export interface StageGeometry {
 }
 
 export type ResizeHandle = "nw" | "ne" | "sw" | "se";
-
-export interface CompositionRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
 
 export type StageSnapAxis = "x" | "y";
 export type StageSnapAnchor = "start" | "center" | "end";
@@ -197,28 +196,6 @@ export function resizeCompositionRect({
   };
 }
 
-export function scaleCompositionRectFromHandleRect(
-  startClip: CompositionRect,
-  startHandleRect: CompositionRect,
-  previewHandleRect: CompositionRect,
-  minSize = 16,
-): CompositionRect {
-  const startClipBounds = rectToBounds(startClip);
-  const startHandleBounds = rectToBounds(startHandleRect);
-  const previewHandleBounds = rectToBounds(previewHandleRect);
-  const scaleX = previewHandleRect.width / Math.max(1, startHandleRect.width);
-  const scaleY = previewHandleRect.height / Math.max(1, startHandleRect.height);
-  const left = previewHandleBounds.left - (startHandleBounds.left - startClipBounds.left) * scaleX;
-  const top = previewHandleBounds.top - (startHandleBounds.top - startClipBounds.top) * scaleY;
-
-  return {
-    x: left,
-    y: top,
-    width: Math.max(minSize, startClip.width * scaleX),
-    height: Math.max(minSize, startClip.height * scaleY),
-  };
-}
-
 export function roundCompositionRect(rect: CompositionRect): CompositionRect {
   return {
     x: Math.round(rect.x),
@@ -275,13 +252,6 @@ export function compositionDomRectToCss(rect: DOMRect, geometry: StageGeometry) 
     width: rect.width / geometry.scaleX,
     height: rect.height / geometry.scaleY,
   };
-}
-
-export interface ScreenRect {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
 }
 
 /** Axis-aligned overlap test. Touching edges (zero-area overlap) do not count as a hit. */
@@ -534,15 +504,6 @@ function asElement(value: unknown): Element | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as { nodeType?: number };
   return candidate.nodeType === 1 ? (value as Element) : null;
-}
-
-function rectToBounds(rect: CompositionRect) {
-  return {
-    left: rect.x,
-    top: rect.y,
-    right: rect.x + rect.width,
-    bottom: rect.y + rect.height,
-  };
 }
 
 function findAxisSnap(

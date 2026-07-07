@@ -159,4 +159,31 @@ describe("MotionPresetRecorder source integration", () => {
     expect(source).toContain("defaultPoseForCharacter(character)");
     expect(source).toContain("poses: basePoses");
   });
+
+  it("can enable Flexible limb-path parts in place without exposing the old Bend slider", () => {
+    const source = readFileSync(recorderPath, "utf8");
+
+    // When the selected part is eligible, the panel offers a Flexible toggle
+    // right here. It stays visible once enabled so it can also be turned back
+    // off. That is a structural character edit persisted through the scene
+    // command.
+    expect(source).toContain("roleSupportsBend(selectedSlot.role)");
+    expect(source).toContain("defaultLimbPathDeformForPart(selectedPart)");
+    expect(source).toContain('kind: "set-slot-deform"');
+    expect(source).toContain("onCharacterChange(result.character)");
+    expect(source).toContain("〰 Flexible");
+    // The toggle reflects current state and allows disabling, so it must not be
+    // gated on the part not-yet being flexible.
+    expect(source).toContain("checked={!!part?.deform}");
+    expect(source).toContain("onSetFlexible(e.target.checked)");
+    expect(source).toContain("onSetFlexible");
+    expect(source).not.toContain('label="Bend"');
+    expect(source).not.toContain("MAX_BEND_DEGREES");
+    expect(source).toContain("pathEndX");
+    expect(source).toContain("pathCurveX");
+    expect(source).toContain("startFlexiblePointDrag");
+    expect(source).toContain("frame.inverseMatrix");
+    expect(source).toContain("const livePreviewPreset = useMemo");
+    expect(source).toContain("preset={livePreviewPreset}");
+  });
 });

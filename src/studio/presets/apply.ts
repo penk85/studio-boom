@@ -23,6 +23,11 @@ export interface ComposedDelta {
   rotation: number; // additive degrees (2D, Z axis)
   rotationX: number; // additive degrees, 3D X axis (vertical flip)
   rotationY: number; // additive degrees, 3D Y axis (horizontal / card flip)
+  bend: number; // additive degrees of smooth curve; only moves flexible (deform) parts
+  pathEndX: number; // flexible limb end-point x offset in part-local pixels
+  pathEndY: number; // flexible limb end-point y offset in part-local pixels
+  pathCurveX: number; // flexible limb curve-control x offset in part-local pixels
+  pathCurveY: number; // flexible limb curve-control y offset in part-local pixels
   transformPerspective: number | null; // px, 3D perspective depth; null = none
   originX: number | null; // null = inherit part anchor
   originY: number | null; // null = inherit part anchor
@@ -102,6 +107,11 @@ export function emptyDelta(): ComposedDelta {
     rotation: 0,
     rotationX: 0,
     rotationY: 0,
+    bend: 0,
+    pathEndX: 0,
+    pathEndY: 0,
+    pathCurveX: 0,
+    pathCurveY: 0,
     transformPerspective: null,
     originX: null,
     originY: null,
@@ -128,6 +138,11 @@ function interpKf(a: MotionKeyframe, b: MotionKeyframe, u: number): ComposedDelt
     rotation: lerp(a.rotation, b.rotation, 0),
     rotationX: lerp(a.rotationX, b.rotationX, 0),
     rotationY: lerp(a.rotationY, b.rotationY, 0),
+    bend: lerp(a.bend, b.bend, 0),
+    pathEndX: lerp(a.pathEndX, b.pathEndX, 0),
+    pathEndY: lerp(a.pathEndY, b.pathEndY, 0),
+    pathCurveX: lerp(a.pathCurveX, b.pathCurveX, 0),
+    pathCurveY: lerp(a.pathCurveY, b.pathCurveY, 0),
     transformPerspective:
       a.transformPerspective === undefined && b.transformPerspective === undefined
         ? null
@@ -159,6 +174,11 @@ export function sampleTrack(
       rotation: k.rotation ?? 0,
       rotationX: k.rotationX ?? 0,
       rotationY: k.rotationY ?? 0,
+      bend: k.bend ?? 0,
+      pathEndX: k.pathEndX ?? 0,
+      pathEndY: k.pathEndY ?? 0,
+      pathCurveX: k.pathCurveX ?? 0,
+      pathCurveY: k.pathCurveY ?? 0,
       transformPerspective: k.transformPerspective ?? null,
       originX: k.originX ?? null,
       originY: k.originY ?? null,
@@ -189,6 +209,11 @@ export function applyIntensity(d: ComposedDelta, intensity: number): ComposedDel
     rotation: d.rotation * intensity,
     rotationX: d.rotationX * intensity,
     rotationY: d.rotationY * intensity,
+    bend: d.bend * intensity,
+    pathEndX: d.pathEndX * intensity,
+    pathEndY: d.pathEndY * intensity,
+    pathCurveX: d.pathCurveX * intensity,
+    pathCurveY: d.pathCurveY * intensity,
     transformPerspective: d.transformPerspective,
     originX: d.originX,
     originY: d.originY,
@@ -208,6 +233,11 @@ export function combine(a: ComposedDelta, b: ComposedDelta): ComposedDelta {
     rotation: a.rotation + b.rotation,
     rotationX: a.rotationX + b.rotationX,
     rotationY: a.rotationY + b.rotationY,
+    bend: a.bend + b.bend,
+    pathEndX: a.pathEndX + b.pathEndX,
+    pathEndY: a.pathEndY + b.pathEndY,
+    pathCurveX: a.pathCurveX + b.pathCurveX,
+    pathCurveY: a.pathCurveY + b.pathCurveY,
     transformPerspective: b.transformPerspective ?? a.transformPerspective,
     originX: b.originX ?? a.originX,
     originY: b.originY ?? a.originY,
@@ -443,6 +473,11 @@ function applyKeyposes(
       rotation: lerp(pa?.rotation, pb?.rotation, 0),
       rotationX: lerp(pa?.rotationX, pb?.rotationX, 0),
       rotationY: lerp(pa?.rotationY, pb?.rotationY, 0),
+      bend: lerp(pa?.bend, pb?.bend, 0),
+      pathEndX: lerp(pa?.pathEndX, pb?.pathEndX, 0),
+      pathEndY: lerp(pa?.pathEndY, pb?.pathEndY, 0),
+      pathCurveX: lerp(pa?.pathCurveX, pb?.pathCurveX, 0),
+      pathCurveY: lerp(pa?.pathCurveY, pb?.pathCurveY, 0),
       transformPerspective:
         pa?.transformPerspective === undefined && pb?.transformPerspective === undefined
           ? null
@@ -491,6 +526,11 @@ function invertOverrideForAnticipation(
     rotation: part.rotation === undefined ? undefined : -part.rotation * amount,
     rotationX: part.rotationX === undefined ? undefined : -part.rotationX * amount,
     rotationY: part.rotationY === undefined ? undefined : -part.rotationY * amount,
+    bend: part.bend === undefined ? undefined : -part.bend * amount,
+    pathEndX: part.pathEndX === undefined ? undefined : -part.pathEndX * amount,
+    pathEndY: part.pathEndY === undefined ? undefined : -part.pathEndY * amount,
+    pathCurveX: part.pathCurveX === undefined ? undefined : -part.pathCurveX * amount,
+    pathCurveY: part.pathCurveY === undefined ? undefined : -part.pathCurveY * amount,
     // transformPerspective is a depth setting, not a motion delta — carried through by the spread.
     originX: part.originX,
     originY: part.originY,

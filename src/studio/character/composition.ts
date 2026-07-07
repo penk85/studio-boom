@@ -1005,6 +1005,8 @@ function buildCharacterTimelineScene(args: CharacterTimelineScriptArgs): Charact
     ),
   );
   backfillThreeDVars(frames);
+  backfillBendVars(frames);
+  backfillFlexiblePathVars(frames);
   const slotEvents = buildSlotEvents(frames, args.slotTimelines, args.boneAnchorTimelines);
   const motionSegments = frames.slice(1).flatMap((frame, index) => {
     const previousFrame = frames[index];
@@ -1203,6 +1205,11 @@ function buildMotionFrame(
       // uses 3D, so the runtime animates them cleanly back to zero.
       if (delta.rotationX) vars.rotationX = round(delta.rotationX, 3);
       if (delta.rotationY) vars.rotationY = round(delta.rotationY, 3);
+      if (delta.bend) vars.bend = round(delta.bend, 3);
+      if (delta.pathEndX) vars.pathEndX = round(delta.pathEndX, 3);
+      if (delta.pathEndY) vars.pathEndY = round(delta.pathEndY, 3);
+      if (delta.pathCurveX) vars.pathCurveX = round(delta.pathCurveX, 3);
+      if (delta.pathCurveY) vars.pathCurveY = round(delta.pathCurveY, 3);
       if (delta.transformPerspective !== null)
         vars.transformPerspective = round(delta.transformPerspective, 3);
       if (delta.opacity !== null) vars.opacity = round(delta.opacity, 4);
@@ -1251,6 +1258,55 @@ function backfillThreeDVars(
       if (target.vars.rotationX === undefined) target.vars.rotationX = 0;
       if (target.vars.rotationY === undefined) target.vars.rotationY = 0;
       if (target.vars.transformPerspective === undefined) target.vars.transformPerspective = persp;
+    }
+  }
+}
+
+/**
+ * Like backfillThreeDVars: once a target animates `bend` anywhere in the
+ * motion, every frame for that target must carry `bend` — otherwise a frame
+ * that omits it leaves the interpolated curve stuck at the previous value
+ * mid-segment and snapping at the segment end.
+ */
+function backfillBendVars(frames: Array<{ targets: Array<{ selector: string; vars: GsapVars }> }>) {
+  const bendSelectors = new Set<string>();
+  for (const frame of frames) {
+    for (const target of frame.targets) {
+      if (target.vars.bend !== undefined) bendSelectors.add(target.selector);
+    }
+  }
+  if (bendSelectors.size === 0) return;
+  for (const frame of frames) {
+    for (const target of frame.targets) {
+      if (bendSelectors.has(target.selector) && target.vars.bend === undefined) {
+        target.vars.bend = 0;
+      }
+    }
+  }
+}
+
+function backfillFlexiblePathVars(
+  frames: Array<{ targets: Array<{ selector: string; vars: GsapVars }> }>,
+) {
+  const pathSelectors = new Set<string>();
+  for (const frame of frames) {
+    for (const target of frame.targets) {
+      const usesPath =
+        target.vars.pathEndX !== undefined ||
+        target.vars.pathEndY !== undefined ||
+        target.vars.pathCurveX !== undefined ||
+        target.vars.pathCurveY !== undefined;
+      if (usesPath) pathSelectors.add(target.selector);
+    }
+  }
+  if (pathSelectors.size === 0) return;
+  for (const frame of frames) {
+    for (const target of frame.targets) {
+      if (!pathSelectors.has(target.selector)) continue;
+      if (target.vars.pathEndX === undefined) target.vars.pathEndX = 0;
+      if (target.vars.pathEndY === undefined) target.vars.pathEndY = 0;
+      if (target.vars.pathCurveX === undefined) target.vars.pathCurveX = 0;
+      if (target.vars.pathCurveY === undefined) target.vars.pathCurveY = 0;
     }
   }
 }

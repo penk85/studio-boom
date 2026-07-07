@@ -2,6 +2,7 @@ import type {
   CharacterAngle,
   CharacterHostConstraint,
   CharacterPart,
+  CharacterPartDeform,
   CharacterPreset,
   CharacterRig,
   ID,
@@ -159,6 +160,12 @@ export interface SetSlotRotReachCommand {
   rotReach?: { min: number; max: number };
 }
 
+export interface SetSlotDeformCommand {
+  kind: "set-slot-deform";
+  slotId: ID;
+  deform?: CharacterPartDeform;
+}
+
 export type CharacterSceneCommand =
   | MoveSlotCommand
   | ScaleSlotCommand
@@ -175,7 +182,8 @@ export type CharacterSceneCommand =
   | SetSlotHostCommand
   | ClearSlotReachCommand
   | SetSlotReachCommand
-  | SetSlotRotReachCommand;
+  | SetSlotRotReachCommand
+  | SetSlotDeformCommand;
 
 /**
  * Pure renderer-neutral authoring command boundary. The editor can drive these
@@ -301,6 +309,8 @@ export function applyCharacterSceneCommand(
         character,
         setSlotRotReach(normalizeCharacterRig(character), command.slotId, command.rotReach),
       );
+    case "set-slot-deform":
+      return setSlotDeform(character, command);
   }
 }
 
@@ -384,6 +394,28 @@ function rotateSlot(
       parts: character.parts.map((part) =>
         targetIds.has(part.id) ? rotatePartAroundAnchor(part, command.anchor, degrees) : part,
       ),
+      updatedAt: Date.now(),
+    },
+    changed: true,
+  };
+}
+
+function setSlotDeform(
+  character: CharacterPreset,
+  command: SetSlotDeformCommand,
+): CharacterSceneCommandResult {
+  let changed = false;
+  const parts = character.parts.map((part) => {
+    if (getPartSlotId(part) !== command.slotId) return part;
+    if (part.deform === command.deform) return part;
+    changed = true;
+    return { ...part, deform: command.deform };
+  });
+  if (!changed) return { character, changed: false };
+  return {
+    character: {
+      ...character,
+      parts,
       updatedAt: Date.now(),
     },
     changed: true,

@@ -53,10 +53,14 @@ movie. `editorMeta` is editor-only intent and UI state.
   skipped with a console warning; mouth image/SVG parts restore the mouth.
 - Character deformation boundary: textured Pixi character parts render as
   `Sprite` leaves by default; morph/vector parts render through Pixi Graphics.
-  Mesh primitives are not emitted by default because `MeshPlane` failed in the
-  HyperFrames export capture path when the Pixi mesh pipe was unavailable.
-  Stretch-limb/mesh work should return only behind dedicated preview/export
-  parity coverage.
+  Flexible parts (`CharacterPart.deform`, the "Flexible" slot-inspector control)
+  render as point-path `MeshRope` leaves for stretch-ready limb art. The mesh
+  runtime block is emitted only when the scene contains mesh nodes, staging uses
+  the packaged full `pixi.min.js` (mesh pipe included), and the generated script
+  degrades to a rigid sprite when `PIXI.MeshRope` is unavailable or cannot
+  construct. Legacy saved `mode: "bend"` parts still read through the old
+  `MeshPlane` path for compatibility, but new UI authors the `limb-path` model.
+  Preview/export mesh parity is covered by `preview-parity.test.ts`.
 - Character document direction: character authoring should move toward the
   HyperFrames-first document model in `docs/character-json-rig-motion-architecture.md`.
   The character sub-composition HTML is the editable document; JSON artifacts are
@@ -124,9 +128,8 @@ movie. `editorMeta` is editor-only intent and UI state.
   handles, anchors, reach tools, thumbnails, and form controls. Slot
   move/scale/rotate, variant pin placement/reset/clear/rotation, slot
   reparenting, bone rest edits, bone/slot depth, host constraints, and
-  reach/rotation-reach constraints now route through `applyCharacterSceneCommand`.
-  Continue moving mesh/stretch authoring into this renderer-neutral command
-  boundary before enabling mesh primitives.
+  reach/rotation-reach constraints, and Flexible/deform edits now route through
+  `applyCharacterSceneCommand`.
   The Action/Expression recorder playback preview also uses the shared character
   render payload directly in a persistent Pixi app, while generated HyperFrames
   composition HTML still owns stage playback and MP4 export. Reintroduce any

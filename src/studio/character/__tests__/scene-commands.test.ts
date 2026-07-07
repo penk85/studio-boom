@@ -317,4 +317,53 @@ describe("character scene commands", () => {
 
     expect(clearedReach).toMatchObject({ reach: undefined, rotReach: undefined });
   });
+
+  it("sets flexible-part deformation across every variant in a slot", () => {
+    const character = makeVariantArmCharacter();
+    const result = applyCharacterSceneCommand(character, {
+      kind: "set-slot-deform",
+      slotId: "slot:right-arm",
+      deform: {
+        mode: "limb-path",
+        start: { x: 10, y: 10 },
+        end: { x: 10, y: 180 },
+        segments: 8,
+      },
+    });
+
+    expect(result.changed).toBe(true);
+    expect(
+      result.character.parts
+        .filter((part) => part.slotId === "slot:right-arm")
+        .map((part) => part.deform),
+    ).toEqual([
+      {
+        mode: "limb-path",
+        start: { x: 10, y: 10 },
+        end: { x: 10, y: 180 },
+        segments: 8,
+      },
+      {
+        mode: "limb-path",
+        start: { x: 10, y: 10 },
+        end: { x: 10, y: 180 },
+        segments: 8,
+      },
+    ]);
+    expect(result.character.parts.find((part) => part.slotId === "slot:right-hand")?.deform).toBe(
+      undefined,
+    );
+
+    const cleared = applyCharacterSceneCommand(result.character, {
+      kind: "set-slot-deform",
+      slotId: "slot:right-arm",
+      deform: undefined,
+    });
+
+    expect(
+      cleared.character.parts
+        .filter((part) => part.slotId === "slot:right-arm")
+        .every((part) => part.deform === undefined),
+    ).toBe(true);
+  });
 });

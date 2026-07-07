@@ -12,6 +12,8 @@ import {
   roleEnabledByManifest,
   normalizePartRole,
   getPartSlotId,
+  roleSupportsBend,
+  defaultLimbPathDeformForPart,
   defaultSlotIdForRole,
   removePartFromAngle,
   withUpsertedCharacterSlot,
@@ -51,6 +53,93 @@ function makePart(overrides: Partial<CharacterPart>): CharacterPart {
 }
 
 // ─── defaultSlotIdForRole ──────────────────────────────────────────────────────
+
+describe("roleSupportsBend", () => {
+  it("excludes face builders and allows limb-like roles", () => {
+    for (const role of ["eye", "mouth", "iris", "eyebrow", "nose"] as const) {
+      expect(roleSupportsBend(role)).toBe(false);
+    }
+    for (const role of ["arm", "leg", "hand", "body", "hair", "custom"] as const) {
+      expect(roleSupportsBend(role)).toBe(true);
+    }
+  });
+});
+
+describe("defaultLimbPathDeformForPart", () => {
+  it("spans the full visible art down its centerline, not the padded image", () => {
+    // A tall arm image with transparent padding: visible pixels only span
+    // y=20..140 of a 200px-tall image.
+    const part = makePart({
+      role: "arm",
+      slotId: "slot:right-arm",
+      side: "right",
+      x: 0,
+      y: 0,
+      width: 60,
+      height: 200,
+      pivot: { x: 30, y: 24 },
+      alphaBounds: { x: 20, y: 20, width: 20, height: 120, sourceWidth: 60, sourceHeight: 200 },
+    });
+
+    const deform = defaultLimbPathDeformForPart(part);
+    expect(deform.mode).toBe("limb-path");
+    if (deform.mode !== "limb-path") return;
+    // The spine covers the whole visible limb (y=20..140), centered on the art's
+    // short axis (x=30) — not the padded image (0..200), and not half of it.
+    expect(deform.start.x).toBeCloseTo(30, 0);
+    expect(deform.start.y).toBeCloseTo(20, 0);
+    expect(deform.end.x).toBeCloseTo(30, 0);
+    expect(deform.end.y).toBeCloseTo(140, 0);
+    expect(deform.end.y).toBeLessThan(part.height);
+    // Thickness follows the visible limb's short dimension (20), not 60.
+    expect(deform.width).toBeCloseTo(20, 0);
+  });
+
+  it("spans the full visible art even without an explicit pivot (no squash)", () => {
+    // No pivot → pivotForPart falls back to the alpha CENTER. Anchoring the
+    // spine there collapsed it onto half the art (the reported deformation), so
+    // the default must be pivot-independent and cover the whole visible limb.
+    const part = makePart({
+      role: "arm",
+      slotId: "slot:left-arm",
+      side: "left",
+      x: 0,
+      y: 0,
+      width: 40,
+      height: 120,
+      alphaBounds: { x: 8, y: 0, width: 24, height: 120, sourceWidth: 40, sourceHeight: 120 },
+    });
+
+    const deform = defaultLimbPathDeformForPart(part);
+    if (deform.mode !== "limb-path") throw new Error("expected limb-path");
+    expect(deform.start.x).toBeCloseTo(20, 0); // centered on alpha (8..32)
+    expect(deform.start.y).toBeCloseTo(0, 0);
+    expect(deform.end.y).toBeCloseTo(120, 0);
+    // Full visible height, not the center-anchored half (which would be 60).
+    expect(deform.end.y - deform.start.y).toBeCloseTo(120, 0);
+    expect(deform.width).toBeCloseTo(24, 0);
+  });
+
+  it("runs a horizontal limb along its width, centered on its height", () => {
+    const part = makePart({
+      role: "arm",
+      slotId: "slot:tail",
+      side: "center",
+      x: 0,
+      y: 0,
+      width: 160,
+      height: 40,
+      alphaBounds: { x: 10, y: 8, width: 140, height: 24, sourceWidth: 160, sourceHeight: 40 },
+    });
+
+    const deform = defaultLimbPathDeformForPart(part);
+    if (deform.mode !== "limb-path") throw new Error("expected limb-path");
+    const centerY = 8 + 24 / 2; // 20
+    expect(deform.start).toEqual({ x: 10, y: centerY });
+    expect(deform.end).toEqual({ x: 150, y: centerY });
+    expect(deform.width).toBeCloseTo(24, 0);
+  });
+});
 
 describe("defaultSlotIdForRole", () => {
   it("returns role:head for head", () => {

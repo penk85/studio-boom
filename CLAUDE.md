@@ -274,10 +274,20 @@ now builds renderer-neutral timeline inputs directly; it no longer emits
 unstaged legacy DOM strings. Typed character document commands should return as
 renderer-neutral scene-graph operations when an editor consumer needs them.
 
-Do not emit Pixi mesh primitives by default. `MeshPlane` caused an export-capture
-failure when the render environment lacked the mesh render pipe. Mesh/stretch-limb
-features must return only behind dedicated preview/export parity coverage and must
-still live inside canonical `project.hf.compositionHtml`.
+Mesh deformation is opt-in per part (July 2026): a part with
+`CharacterPart.deform` ("Flexible" in the slot inspector) renders as a Pixi mesh
+inside the generated character composition. New flexible parts use the
+point-based `limb-path` model: a rig-attached start point, a draggable end point
+for stretch/reach, and an optional curve point for bend. The generated source
+renders this as `MeshRope`, with a rigid `Sprite` fallback if the mesh class is
+unavailable. Parts without `deform` stay `Sprite` leaves and default characters
+remain mesh-free end to end. Legacy saved `mode: "bend"` parts still read through
+the old `MeshPlane` path and shared math in `src/studio/character/mesh-deform.ts`,
+but new UI should not author that model. Flexible edits route through
+`applyCharacterSceneCommand` (`set-slot-deform`) like other rig/scene authoring
+operations. Preview/export mesh parity is locked by `preview-parity.test.ts`;
+mesh features must keep living inside canonical `project.hf.compositionHtml` —
+never in an editor-only canvas.
 
 ### Export
 
@@ -343,6 +353,8 @@ ClipEditorMeta {
 | `src/studio/character/scene.ts`                  | Renderer-neutral character scene graph: bones, slots, parts, assets, pivots, placements, and motion targets                                    |
 | `src/studio/character/timeline-scene.ts`         | Renderer-neutral character timeline payload consumed by Pixi composition source                                                                |
 | `src/studio/character/pixi-composition.ts`       | Pixi-backed character composition builder; registers a synchronous HyperFrames timeline and Pixi readiness gate                                |
+| `src/studio/character/pixi-preview-runtime.ts`   | Shared editor-side Pixi runtime (same semantics as the composition script); drives `PixiCharacterPreview` in the editor and recorder           |
+| `src/studio/character/mesh-deform.ts`            | Legacy Plane-bend math for old saved flexible parts; embedded only for compatibility with legacy `mode: "bend"` mesh nodes                     |
 | `src/studio/presets/action-terminology.ts`       | Shared Action/Expression labels, lanes, regions, exclusivity, and role-to-region rules                                                         |
 | `docs/ai-generated-hyperframes-clips-roadmap.md` | Roadmap for AI-generated clips, source-visible custom HyperFrames blocks, native text/composition clip support, and nested composition editing |
 

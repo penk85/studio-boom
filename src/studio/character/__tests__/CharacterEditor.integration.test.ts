@@ -40,6 +40,18 @@ describe("CharacterEditor source integration", () => {
     expect(source).toContain("undoCharacterHistory();");
   });
 
+  it("hides the selection boxes while a one-shot tool is armed so its click reaches the canvas", () => {
+    const source = readFileSync(editorPath, "utf8");
+    // The part transform box and the group box both overlay the selected art and
+    // would swallow the pivot / bounds placement click; they render only in
+    // select mode so `handleCanvasPointerDown` can position the tool.
+    expect(source).toContain('selectedEditorPart && !focusEditing && mode === "select" && (');
+    // The group box is gated on select mode between its selectedSlotBounds test and render.
+    expect(source).toMatch(/selectedSlotBounds &&[\s\S]{0,240}?mode === "select" &&[\s\S]{0,120}?GroupControlsOverlay/);
+    // And the armed-tool click path actually places the pivot / bounds.
+    expect(source).toContain("if (mode === \"pivot\") setPivotForParts(ids, point);");
+  });
+
   it("keeps the effortless layer wired", () => {
     const source = readFileSync(editorPath, "utf8");
     // Autosave honesty: Done button + live save indicator.
@@ -100,6 +112,31 @@ describe("CharacterEditor source integration", () => {
     expect(source).not.toContain("function UploadSlots");
     expect(source).not.toContain("function StructureEditor");
     expect(source).not.toContain("roleEnabledByManifest");
+  });
+
+  it("offers a slot-level Flexible limb-path control reachable from both inspectors", () => {
+    const source = readFileSync(editorPath, "utf8");
+
+    // Flexible is slot-level (every variant gets the same deform model), face
+    // roles are excluded, and new saves use the point-based limb path model
+    // instead of the retired bend slider experiment.
+    expect(source).toContain("const setSlotDeform");
+    expect(source).toContain('kind: "set-slot-deform"');
+    expect(source).not.toContain("getPartSlotId(part) === slotId ? { ...part, deform } : part");
+    expect(source).toContain("defaultLimbPathDeformForPart");
+    expect(source).not.toContain("function FlexiblePathOverlay");
+    expect(source).not.toContain("startFlexiblePathDrag");
+    expect(source).not.toContain("onDeformEditStart");
+    expect(source).not.toContain("span>Curve</span>");
+    expect(source).not.toContain("MAX_BEND_DEGREES");
+    expect(source).toContain("const faceRole");
+
+    // The control is one shared component rendered by BOTH the part Inspector
+    // (single-image limbs) and the GroupInspector (multi-variant slots) — a
+    // plain one-image arm must be able to reach it, not just multi-variant
+    // slots. Two render sites.
+    expect(source).toContain("function FlexibleSection");
+    expect(source.match(/<FlexibleSection/g)?.length).toBe(2);
   });
 
   it("uses authored bounds for editor art bounds and host clamping", () => {

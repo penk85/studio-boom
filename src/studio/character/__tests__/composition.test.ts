@@ -143,6 +143,14 @@ interface PayloadSceneNode {
   variantAliases?: string[];
   assetId?: string;
   assetRef?: string;
+  meshKind?: string;
+  verticesX?: number;
+  verticesY?: number;
+  stretchAxis?: string;
+  bendAnchor?: string;
+  bend?: number;
+  pathPoints?: Array<{ x: number; y: number }>;
+  ropeWidth?: number;
   frame: {
     x: number;
     y: number;
@@ -437,6 +445,81 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).toContain("new PIXI.Graphics()");
     expect(html).toContain("graphic.svg(svgForVectorNode(node))");
     expect(html).not.toContain('if (node.kind === "vector") return');
+  });
+
+  it("renders flexible limb-path parts as rope meshes with a sprite fallback", () => {
+    const base = makeCharacter();
+    const character: CharacterPreset = {
+      ...base,
+      parts: base.parts.map((part) =>
+        part.id === "body-idle"
+          ? {
+              ...part,
+              deform: {
+                mode: "limb-path" as const,
+                start: { x: 110, y: 20 },
+                end: { x: 110, y: 360 },
+                curve: { x: 150, y: 180 },
+                width: 180,
+                segments: 6,
+              },
+            }
+          : part,
+      ),
+    };
+    const html = buildCharacterCompositionHtml({
+      compositionId: "char_clip-1",
+      clipId: "clip-1",
+      width: 300,
+      height: 450,
+      duration: 4,
+      character,
+      meta: {
+        characterId: "char-1",
+        poses: {},
+        autoBlink: false,
+      },
+      motionPresets: new Map(),
+    });
+    const validation = validateCompositionSourceHtml(html, {
+      compositionId: "char_clip-1",
+      duration: 4,
+      width: 300,
+      height: 450,
+    });
+    expect(validation.ok).toBe(true);
+
+    // The generated source renders the limb as a textured MeshSimple ribbon
+    // (a MeshRope would pancake the art) plus a rigid-sprite fallback so
+    // capture environments without the mesh pipe cannot fail.
+    expect(html).toContain("new PIXI.MeshSimple");
+    expect(html).not.toContain("new PIXI.MeshRope");
+    expect(html).toContain('node.meshKind === "rope"');
+    expect(html).toContain("applyRopePathOffsets");
+    expect(html).toContain("ropeEntriesByNodeId");
+    // The ribbon follows the spine and rebuilds its full vertex grid per seek.
+    expect(html).toContain("limbRibbonPositions");
+    expect(html).toContain("limbRibbonUVs");
+    expect(html).toContain("entry.mesh.vertices = entry.positions");
+    // Rope frames scale by the part's source size, not the texture's size.
+    expect(html).toContain("texturedFrameSize");
+    expect(html).not.toContain("new PIXI.MeshPlane");
+    expect(html).not.toContain("bendPlanePositions");
+    expect(html).toContain("try {");
+    expect(html).toContain("Falling back to Sprite for flexible limb mesh character part");
+    expect(html).toContain("new PIXI.Sprite");
+
+    const payload = extractPixiPayload(html);
+    const meshNode = Object.values(payload.scene.nodes).find((node) => node.kind === "mesh");
+    expect(meshNode).toBeDefined();
+    expect(meshNode).toMatchObject({
+      meshKind: "rope",
+      partId: "body-idle",
+      ropeWidth: 180,
+      sourceWidth: 220,
+      sourceHeight: 360,
+    });
+    expect(meshNode?.pathPoints?.length).toBe(7);
   });
 
   it("marks SVG character media with the Pixi SVG asset parser", () => {
@@ -826,9 +909,9 @@ describe("buildCharacterCompositionHtml", () => {
     const irisPartNodeId = payload.scene.partNodeIds["left-iris"];
     const irisBoneId = payload.scene.boneNodeIds["bone:slot:left-iris"];
     const eyeBoneId = payload.scene.boneNodeIds["bone:slot:left-eye"];
-    expect(blinkWindowsForClip({ id: clipId, duration: 10, autoBlink: true }).length).toBeGreaterThan(
-      0,
-    );
+    expect(
+      blinkWindowsForClip({ id: clipId, duration: 10, autoBlink: true }).length,
+    ).toBeGreaterThan(0);
     expect(payload.scene.nodes[irisBoneId]?.parentId).toBe(eyeBoneId);
     expect(payload.scene.nodes[payload.scene.slotNodeIds["slot:left-iris"]]?.parentId).toBe(
       irisBoneId,

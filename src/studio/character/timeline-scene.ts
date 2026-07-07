@@ -9,6 +9,13 @@ export interface CharacterTimelineVars {
   rotation?: number;
   rotationX?: number;
   rotationY?: number;
+  /** Smooth-curve degrees applied to flexible (mesh) parts under the target. */
+  bend?: number;
+  /** Flexible limb path offsets in part-local source pixels. */
+  pathEndX?: number;
+  pathEndY?: number;
+  pathCurveX?: number;
+  pathCurveY?: number;
   transformPerspective?: number;
   opacity?: number;
   transformOrigin?: string;

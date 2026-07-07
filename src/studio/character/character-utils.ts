@@ -4,6 +4,7 @@ import {
   DEFAULT_PARALLAX_CONFIG,
   DEFAULT_PART_MANIFEST,
   type CharacterAngle,
+  type CharacterPartDeform,
   type CharacterSlotVariant,
   type CharacterSlotVariantPackage,
   type CharacterVariantKind,
@@ -18,7 +19,7 @@ import {
   type PartRole,
 } from "../types";
 import { legacyVisemeToStandard } from "../lipsync/viseme-schema";
-import { alphaCenterForPart, pivotForPart } from "./alpha-bounds";
+import { alphaCenterForPart, localAlphaBounds, pivotForPart } from "./alpha-bounds";
 import { normalizePartRegistration } from "./registration";
 import { inferPartSide, isSidedSlotRole } from "./side-utils";
 
@@ -99,6 +100,52 @@ export function defaultSlotIdForRole(
     return `slot:${side}-${role}`;
   }
   return role === "custom" && partId ? `custom:${partId}` : `role:${role}`;
+}
+
+/**
+ * Whether a part role can be made "Flexible". Face builders sit at authored
+ * offsets and must not deform; everything else (arms, legs, tails, hair,
+ * torso, accessories) may use the point-path limb mesh.
+ */
+export function roleSupportsBend(role: PartRole): boolean {
+  return (
+    role !== "eye" && role !== "mouth" && role !== "iris" && role !== "eyebrow" && role !== "nose"
+  );
+}
+
+export function defaultLimbPathDeformForPart(part: CharacterPart): CharacterPartDeform {
+  // The spine must span the FULL visible art along the limb's long axis, run
+  // down its centerline, and be as wide as the art's short dimension. Only then
+  // does the ribbon reproduce the sprite exactly at rest — anchoring `start` at
+  // the pivot (which defaults to the alpha center) collapsed the spine onto half
+  // the art, so the texture squashed into that half. The path also lives on the
+  // visible artwork, not the padded image rect, so limbs with transparent
+  // padding don't reach past the drawn limb.
+  //
+  // `start` sits at the art edge nearest the image origin (top for a vertical
+  // limb, left for a horizontal one), which for a standard top/left-attached
+  // limb coincides with the rig joint; `end` is the draggable stretch/reach
+  // point at the far edge.
+  const alpha = localAlphaBounds(part);
+  const vertical = alpha.height >= alpha.width;
+  if (vertical) {
+    const centerX = alpha.x + alpha.width / 2;
+    return {
+      mode: "limb-path",
+      start: { x: centerX, y: alpha.y },
+      end: { x: centerX, y: alpha.y + alpha.height },
+      width: Math.max(4, alpha.width),
+      segments: 12,
+    };
+  }
+  const centerY = alpha.y + alpha.height / 2;
+  return {
+    mode: "limb-path",
+    start: { x: alpha.x, y: centerY },
+    end: { x: alpha.x + alpha.width, y: centerY },
+    width: Math.max(4, alpha.height),
+    segments: 12,
+  };
 }
 
 export function getPartSlotId(part: CharacterPart): ID {
@@ -673,10 +720,7 @@ function normalizedPartRoleSearchText(value: string) {
   };
 }
 
-function hasRoleAlias(
-  search: ReturnType<typeof normalizedPartRoleSearchText>,
-  aliases: string[],
-) {
+function hasRoleAlias(search: ReturnType<typeof normalizedPartRoleSearchText>, aliases: string[]) {
   return aliases.some((alias) => {
     const compactAlias = alias.replace(/[^a-z0-9]+/g, "").toLowerCase();
     if (compactAlias.length <= 3) {
@@ -794,6 +838,7 @@ export function makePart(
     alphaBounds: opts.alphaBounds,
     motionBehavior: opts.motionBehavior ?? defaultMotionBehaviorForRole(role, opts.viseme),
     morph: opts.morph,
+    deform: opts.deform,
     zIndex: opts.zIndex ?? 0,
     depth: opts.depth ?? 0,
     visible: opts.visible ?? true,

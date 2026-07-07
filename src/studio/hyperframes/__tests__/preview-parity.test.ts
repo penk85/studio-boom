@@ -163,8 +163,29 @@ function makePixiCharacterAssets(): MediaAsset[] {
   ];
 }
 
-function makePixiCharacterProject(): Project {
+function makePixiCharacterProject(options: { flexibleBody?: boolean } = {}): Project {
   const assets = makePixiCharacterAssets();
+  const baseActor = makePixiActor();
+  const character = options.flexibleBody
+    ? {
+        ...baseActor,
+        parts: baseActor.parts.map((part) =>
+          part.id === "body-idle"
+            ? {
+                ...part,
+                deform: {
+                  mode: "limb-path" as const,
+                  start: { x: 110, y: 20 },
+                  end: { x: 110, y: 360 },
+                  curve: { x: 145, y: 180 },
+                  width: 180,
+                  segments: 10,
+                },
+              }
+            : part,
+        ),
+      }
+    : baseActor;
   const motionPreset: MotionPreset = {
     id: "pixi-export-motion",
     name: "Pixi export motion",
@@ -177,7 +198,13 @@ function makePixiCharacterProject(): Project {
         slotId: "role:body",
         keyframes: [
           { t: 0, dx: 0, dy: 0, rotation: 0, ease: "linear" },
-          { t: 1, dx: 18, dy: -12, rotation: 8, ease: "linear" },
+          {
+            t: 1,
+            dx: 18,
+            dy: -12,
+            rotation: 8,
+            ease: "linear",
+          },
         ],
       },
     ],
@@ -196,7 +223,7 @@ function makePixiCharacterProject(): Project {
     width: 300,
     height: 450,
     duration: 4,
-    character: makePixiActor(),
+    character,
     meta: {
       characterId: "pixi-actor",
       poses: {},
@@ -419,5 +446,47 @@ describe("preview ↔ export file parity", () => {
     }
     expect(postedFiles.map((file) => file.name)).toContain("pixi.min.js");
     expect(postedFiles.map((file) => file.name)).toContain("assets/body-media.svg");
+  });
+
+  it("stages flexible-part mesh source identically for preview and export", async () => {
+    const { buildHyperframesProjectFiles } = await import("../../export/project-files");
+    const { bundlePreviewProject } = await import("../preview");
+    const project = makePixiCharacterProject({ flexibleBody: true });
+    for (const asset of project.hf.assets) {
+      mediaRows.set(asset.id, new Blob([asset.id], { type: asset.mimeType }));
+    }
+
+    const files = await buildHyperframesProjectFiles(project);
+    await bundlePreviewProject(project);
+
+    const textByPath = new Map(files.textFiles.map((file) => [file.path, file.contents]));
+    const composition = textByPath.get("compositions/comp_pixi-character.html") ?? "";
+    const postedText = new Map<string, string>();
+    for (const file of postedFiles) {
+      if (file.type === "text/html") postedText.set(file.name, await file.text());
+    }
+
+    // The mesh runtime ships inside the canonical composition source with the
+    // full local Pixi bundle (which includes the mesh render pipe) and a
+    // rigid-sprite fallback, so capture cannot fail on a missing pipe.
+    expect(composition).toContain("new PIXI.MeshSimple");
+    expect(composition).not.toContain("new PIXI.MeshRope");
+    expect(composition).toContain('node.meshKind === "rope"');
+    expect(composition).toContain("applyRopePathOffsets");
+    expect(composition).toContain("ropeEntriesByNodeId");
+    expect(composition).not.toContain("new PIXI.MeshPlane");
+    expect(composition).not.toContain("bendPlanePositions");
+    expect(composition).toContain("Falling back to Sprite for flexible limb mesh character part");
+    expect(composition).toContain("new PIXI.Sprite");
+    expect(composition).toContain('"kind":"mesh"');
+    expect(composition).toContain('"meshKind":"rope"');
+    expect(composition).toContain('src="../pixi.min.js"');
+    expect(composition).not.toContain("pixijs.download");
+    expect(files.textFiles.filter((file) => file.path === "pixi.min.js")).toHaveLength(1);
+
+    // Preview and MP4 export must stage byte-identical composition source.
+    for (const file of files.textFiles.filter((file) => file.mimeType === "text/html")) {
+      expect(postedText.get(file.path)).toBe(file.contents);
+    }
   });
 });

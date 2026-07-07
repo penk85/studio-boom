@@ -36,6 +36,7 @@ import {
   createBlankCharacter,
   CHARACTER_VARIANT_KIND_VALUES,
   defaultSlotIdForRole,
+  defaultLimbPathDeformForPart,
   defaultMotionBehaviorForRole,
   defaultVariantForSlotParts,
   detectPartRoleFromFilename,
@@ -47,6 +48,7 @@ import {
   normalizePartVariant,
   partMatchesVariant,
   roleLabel,
+  roleSupportsBend,
   slotLabelForRoleSide,
   withUpdatedCharacterSlot,
   claimSharedPartsForAngles,
@@ -58,7 +60,8 @@ import {
   variantLabelForPart,
   type VariantKeySource,
 } from "./character-utils";
-import Moveable from "react-moveable";
+import { TransformMoveable } from "../interaction/TransformMoveable";
+import type { ScreenRect } from "../interaction/transform-box";
 import { inferCharacterSideFromText } from "./side-utils";
 import {
   anchorEntryForChild,
@@ -113,6 +116,7 @@ import type {
   CharacterAngle,
   CharacterPart,
   CharacterPartBounds,
+  CharacterPartDeform,
   CharacterPosePreset,
   CharacterPreset,
   CharacterRig,
@@ -1629,7 +1633,9 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   };
 
   const selectedSlotBounds =
-    selectedSlotParts.length > 0 ? unionFrameBounds(selectedSlotParts, partPreviewTransform) : null;
+    selectedSlotParts.length > 0
+      ? unionSelectionBounds(selectedSlotParts, boundsMode, partPreviewTransform)
+      : null;
 
   const localPointForPart = (part: CharacterPart, point: { x: number; y: number }) =>
     canvasPointToPartLocal(part, point, partPreviewTransform(part));
@@ -1760,6 +1766,16 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       `Mirrored ${plan.newParts.length} layer${plan.newParts.length === 1 ? "" : "s"} to the ${plan.targetSide} side`,
     );
     selectSlot(plan.targetSlotId);
+  };
+  // Flexible is slot-level: every variant of the layer must use the same
+  // deform model so variant swaps stay consistent. Deform does not move bones,
+  // so the rig is preserved as-is.
+  const setSlotDeform = (
+    slotId: ID,
+    deform: CharacterPartDeform | undefined,
+    options: { history?: boolean } = {},
+  ) => {
+    commitSceneCommand({ kind: "set-slot-deform", slotId, deform }, options);
   };
   const alignSelectedVariantArt = () => {
     const plan = selectedAlignPlan;
@@ -2011,7 +2027,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     setInteracting(true);
     pushUndoSnapshot();
     const parts = partsInSlot(slotId);
-    const box = unionFrameBounds(parts);
+    const box = unionSelectionBounds(parts, boundsMode);
     const anchor = {
       x: corner.includes("w") ? box.x + box.width : box.x,
       y: corner.includes("n") ? box.y + box.height : box.y,
@@ -2069,7 +2085,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     const canvas = e.currentTarget.closest("[data-editor-canvas]") as HTMLDivElement | null;
     const rect = canvas?.getBoundingClientRect();
     const parts = partsInSlot(slotId);
-    const box = unionFrameBounds(parts);
+    const box = unionSelectionBounds(parts, boundsMode);
     const anchor = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
     if (!rect) return;
     const anchorScreen = {
@@ -3171,6 +3187,9 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               {selectedSlotId &&
                 selectedSlotBounds &&
                 !focusEditing &&
+                // One-shot tools (pivot / bounds) take the next canvas click; the
+                // group box would otherwise swallow it over the selected art.
+                mode === "select" &&
                 (() => {
                   return (
                     <GroupControlsOverlay
@@ -3219,13 +3238,17 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                 })()}
             </div>
           </div>
-          {selectedEditorPart && !focusEditing && (
+          {selectedEditorPart && !focusEditing && mode === "select" && (
+            // Hidden while a one-shot tool (pivot / bounds) is armed: its proxy
+            // sits over the selected art and would otherwise capture the tool's
+            // placement click before it reaches the canvas.
             <CharacterPartMoveable
               part={selectedEditorPart}
               previewTransform={partPreviewTransform(selectedEditorPart)}
               canvasRef={canvasRef}
               wrapRef={wrapRef}
               scale={scale}
+              boundsMode={boundsMode}
               onBegin={() => {
                 setInteracting(true);
                 pushUndoSnapshot();
@@ -3562,6 +3585,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   onImport={importSvg}
                   mirrorPlan={mirrorPlanForSlot(selectedSlotId)}
                   onMirror={() => mirrorSlotToOtherSide(selectedSlotId)}
+                  onSetDeform={(deform, options) => setSlotDeform(selectedSlotId, deform, options)}
                   previewedKey={variantPreview[selectedSlotId]}
                   variantPreview={variantPreview}
                   pinPlacement={pinPlacement}
@@ -3595,6 +3619,9 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   variantPreview={variantPreview}
                   alignPlan={selectedAlignPlan}
                   onAlignVariant={alignSelectedVariantArt}
+                  onSetDeform={(deform, options) =>
+                    selectedPart && setSlotDeform(getPartSlotId(selectedPart), deform, options)
+                  }
                   anchorDragContext={
                     selectedPart ? anchorDragContextForSlot(getPartSlotId(selectedPart)) : null
                   }
@@ -4196,6 +4223,7 @@ function Inspector({
   variantPreview,
   alignPlan,
   onAlignVariant,
+  onSetDeform,
   anchorDragContext,
   pinPlacement,
   onPreviewVariant,
@@ -4223,6 +4251,7 @@ function Inspector({
   /** Snap plan for aligning this variant's art onto the slot's default variant. */
   alignPlan: VariantAlignPlan | null;
   onAlignVariant: () => void;
+  onSetDeform: (deform: CharacterPartDeform | undefined, options?: { history?: boolean }) => void;
   /** Set when dragging this part on the canvas would pin its anchor (parent variant previewed). */
   anchorDragContext: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
   pinPlacement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
@@ -4501,6 +4530,12 @@ function Inspector({
               </Field>
             </div>
           </section>
+
+          <FlexibleSection
+            role={part.role}
+            parts={doc.parts.filter((candidate) => getPartSlotId(candidate) === partSlotId)}
+            onSetDeform={onSetDeform}
+          />
 
           <section className="rounded border border-border bg-panel-2 p-3">
             <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
@@ -6156,6 +6191,56 @@ function GroupControlsOverlay({
   );
 }
 
+/**
+ * Slot-level "Flexible" path-mesh control. Shown in both the part Inspector
+ * (single-image limbs) and the GroupInspector (multi-variant slots) so it is
+ * reachable however the layer is selected. Deform is written to every variant
+ * of the slot so swaps stay consistent; face builders are excluded.
+ */
+function FlexibleSection({
+  role,
+  parts,
+  onSetDeform,
+}: {
+  role: PartRole;
+  parts: CharacterPart[];
+  onSetDeform: (deform: CharacterPartDeform | undefined, options?: { history?: boolean }) => void;
+}) {
+  // Face builders sit at authored offsets and never bend; flexibility is for
+  // textured limb-like art (arms, legs, tails, hair, accessories).
+  const faceRole = !roleSupportsBend(role);
+  const texturedParts = parts.filter((part) => !part.morph?.primaryPath);
+  if (faceRole || texturedParts.length === 0) return null;
+  const deform = texturedParts.find((part) => part.deform)?.deform;
+  return (
+    <section className="rounded border border-border bg-panel-2 p-3">
+      <label className="flex cursor-pointer items-center justify-between gap-2">
+        <span className="font-semibold uppercase tracking-wider text-muted-foreground">
+          〰 Flexible
+        </span>
+        <input
+          type="checkbox"
+          checked={!!deform}
+          onChange={(e) =>
+            onSetDeform(
+              e.target.checked ? defaultLimbPathDeformForPart(texturedParts[0]) : undefined,
+            )
+          }
+        />
+      </label>
+      <div className="mt-1 text-[10px] text-muted-foreground">
+        Uses a point path for stretch-ready limb art instead of swinging like a stiff card — made
+        for arms, legs, tails, and hair.
+      </div>
+      {deform?.mode === "limb-path" && (
+        <div className="mt-2 rounded border border-border bg-panel px-2 py-1 text-[10px] text-muted-foreground">
+          Path mesh ready
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** Inspector panel shown when a whole slot group is selected. */
 function GroupInspector({
   doc,
@@ -6168,6 +6253,7 @@ function GroupInspector({
   onImport,
   mirrorPlan,
   onMirror,
+  onSetDeform,
   previewedKey,
   variantPreview,
   pinPlacement,
@@ -6198,6 +6284,7 @@ function GroupInspector({
   onImport: (file: File, options?: ImportOptions) => void;
   mirrorPlan: MirrorSlotPlan;
   onMirror: () => void;
+  onSetDeform: (deform: CharacterPartDeform | undefined, options?: { history?: boolean }) => void;
   previewedKey?: string;
   variantPreview: Record<ID, string>;
   pinPlacement: { childSlotId: ID; parentSlotId: ID; variantKey: string } | null;
@@ -6370,6 +6457,7 @@ function GroupInspector({
           </>
         )}
       </section>
+      {phase === "build" && <FlexibleSection role={role} parts={parts} onSetDeform={onSetDeform} />}
       {phase === "pose" && isMouth && (
         <section className="rounded border border-border bg-panel-2 p-3">
           <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
@@ -6667,11 +6755,12 @@ function resizeCursor(corner: ResizeCorner) {
 }
 
 /**
- * react-moveable chrome for the selected part — the same control box the Stage
- * uses. A screen-space proxy tracks the part's rendered frame (preview shifts
- * included); moveable drives the proxy, and every gesture converts back to
- * canvas units through one patch path: one undo snapshot at gesture start,
- * history-off part patches while it runs.
+ * Selection chrome for the selected part — a thin adapter over the shared
+ * `TransformMoveable` (the same control the Stage and motion recorder use). The box hugs the
+ * part's SELECTION bounds (`editorSelectionBounds`, i.e. alpha/art in "art" mode, the full
+ * transparent frame in "frame" mode) instead of the raw image frame, so it no longer spans the
+ * canvas or eats clicks meant for layers underneath. Every gesture converts back to canvas units
+ * through one patch path: one undo snapshot at gesture start, history-off part patches while it runs.
  */
 function CharacterPartMoveable({
   part,
@@ -6679,6 +6768,7 @@ function CharacterPartMoveable({
   canvasRef,
   wrapRef,
   scale,
+  boundsMode,
   onBegin,
   onPatch,
   onEnd,
@@ -6688,98 +6778,79 @@ function CharacterPartMoveable({
   canvasRef: React.RefObject<HTMLDivElement | null>;
   wrapRef: React.RefObject<HTMLDivElement | null>;
   scale: number;
+  boundsMode: EditorBoundsMode;
   onBegin: () => void;
   onPatch: (patch: Partial<CharacterPart>) => void;
   onEnd: () => void;
 }) {
-  const proxyRef = useRef<HTMLDivElement>(null);
-  const moveableRef = useRef<Moveable>(null);
-  const interactingRef = useRef(false);
-  const startRef = useRef({ x: part.x, y: part.y, width: part.width, height: part.height });
+  // The editor canvas's top-left within the wrap element — the origin all screen rects are
+  // measured from. Re-measured every render (cheap) and only committed when it actually changes;
+  // updates from a layout effect are flushed by React before paint, so there is no visible flash.
+  const [origin, setOrigin] = useState<{ x: number; y: number } | null>(null);
   const viewScale = Math.max(0.0001, scale);
-  const pivot = pivotForPart(part);
-  const renderedRotation = part.rotation + previewTransform.rotation;
 
-  // Keep the proxy glued to the part's rendered box whenever the part, preview,
-  // zoom, or layout change — skipped mid-gesture so moveable owns the transform.
   useLayoutEffect(() => {
-    const proxy = proxyRef.current;
     const canvas = canvasRef.current;
     const wrap = wrapRef.current;
-    if (!proxy || !canvas || !wrap || interactingRef.current) return;
+    if (!canvas || !wrap) return;
     const canvasBox = canvas.getBoundingClientRect();
     const wrapBox = wrap.getBoundingClientRect();
-    const left = canvasBox.left - wrapBox.left + (part.x + previewTransform.dx) * viewScale;
-    const top = canvasBox.top - wrapBox.top + (part.y + previewTransform.dy) * viewScale;
-    proxy.style.left = `${left}px`;
-    proxy.style.top = `${top}px`;
-    proxy.style.width = `${Math.max(1, part.width * viewScale)}px`;
-    proxy.style.height = `${Math.max(1, part.height * viewScale)}px`;
-    proxy.style.transformOrigin = `${(pivot.x - part.x) * viewScale}px ${(pivot.y - part.y) * viewScale}px`;
-    proxy.style.transform = `rotate(${renderedRotation}deg)`;
-    moveableRef.current?.updateRect();
+    const x = canvasBox.left - wrapBox.left;
+    const y = canvasBox.top - wrapBox.top;
+    setOrigin((prev) => (prev && prev.x === x && prev.y === y ? prev : { x, y }));
   });
 
-  const begin = () => {
-    interactingRef.current = true;
-    startRef.current = { x: part.x, y: part.y, width: part.width, height: part.height };
-    onBegin();
-  };
-  const finish = () => {
-    interactingRef.current = false;
-    onEnd();
+  if (!origin) return null;
+
+  const dx = previewTransform.dx;
+  const dy = previewTransform.dy;
+  const toScreen = (rect: { x: number; y: number; width: number; height: number }): ScreenRect => ({
+    left: origin.x + rect.x * viewScale,
+    top: origin.y + rect.y * viewScale,
+    width: Math.max(1, rect.width * viewScale),
+    height: Math.max(1, rect.height * viewScale),
+  });
+  // A screen frame rect back to a part patch (canvas units, preview shift removed).
+  const frameToCanvasPatch = (frame: ScreenRect) => ({
+    x: Math.round((frame.left - origin.x) / viewScale - dx),
+    y: Math.round((frame.top - origin.y) / viewScale - dy),
+    width: Math.max(1, Math.round(frame.width / viewScale)),
+    height: Math.max(1, Math.round(frame.height / viewScale)),
+  });
+
+  const sel = editorSelectionBounds(part, boundsMode);
+  const contentRect = toScreen({
+    x: part.x + dx + sel.x,
+    y: part.y + dy + sel.y,
+    width: sel.width,
+    height: sel.height,
+  });
+  const frameRect = toScreen({ x: part.x + dx, y: part.y + dy, width: part.width, height: part.height });
+  const pivotCanvas = pivotForPart(part);
+  const pivot = {
+    x: origin.x + (pivotCanvas.x + dx) * viewScale,
+    y: origin.y + (pivotCanvas.y + dy) * viewScale,
   };
 
   return (
-    <>
-      <div
-        ref={proxyRef}
-        data-character-part-proxy=""
-        className="absolute left-0 top-0"
-        style={{ pointerEvents: "auto" }}
-      />
-      <Moveable
-        ref={moveableRef}
-        target={proxyRef}
-        draggable
-        resizable
-        rotatable
-        origin={false}
-        throttleDrag={0}
-        throttleResize={0}
-        throttleRotate={0}
-        onDragStart={begin}
-        onDrag={(e) => {
-          e.target.style.transform = `translate(${e.beforeTranslate[0]}px, ${e.beforeTranslate[1]}px) rotate(${renderedRotation}deg)`;
-          onPatch({
-            x: Math.round(startRef.current.x + e.beforeTranslate[0] / viewScale),
-            y: Math.round(startRef.current.y + e.beforeTranslate[1] / viewScale),
-          });
-        }}
-        onDragEnd={finish}
-        onResizeStart={begin}
-        onResize={(e) => {
-          e.target.style.width = `${e.width}px`;
-          e.target.style.height = `${e.height}px`;
-          e.target.style.transform = e.transform;
-          onPatch({
-            x: Math.round(startRef.current.x + e.drag.beforeTranslate[0] / viewScale),
-            y: Math.round(startRef.current.y + e.drag.beforeTranslate[1] / viewScale),
-            width: Math.max(1, Math.round(e.width / viewScale)),
-            height: Math.max(1, Math.round(e.height / viewScale)),
-          });
-        }}
-        onResizeEnd={finish}
-        onRotateStart={begin}
-        onRotate={(e) => {
-          e.target.style.transform = e.transform;
-          onPatch({
-            rotation: Math.round((e.rotation - previewTransform.rotation) * 10) / 10,
-          });
-        }}
-        onRotateEnd={finish}
-      />
-    </>
+    <TransformMoveable
+      contentRect={contentRect}
+      frameRect={frameRect}
+      rotationDeg={part.rotation + previewTransform.rotation}
+      pivot={pivot}
+      onInteractingChange={(interacting) => (interacting ? onBegin() : onEnd())}
+      onMove={(frame) => {
+        const patch = frameToCanvasPatch(frame);
+        onPatch({ x: patch.x, y: patch.y });
+      }}
+      onResize={(frame) => {
+        const patch = frameToCanvasPatch(frame);
+        onPatch(patch);
+      }}
+      onRotate={(deg) => {
+        onPatch({ rotation: Math.round((deg - previewTransform.rotation) * 10) / 10 });
+      }}
+    />
   );
 }
 
@@ -7241,6 +7312,28 @@ function unionFrameBounds(
     return transform
       ? localRectCanvasBoundsWithTransform(p, bounds, transform)
       : localRectCanvasBounds(p, bounds);
+  });
+  const minX = Math.min(...rects.map((r) => r.x));
+  const minY = Math.min(...rects.map((r) => r.y));
+  const maxX = Math.max(...rects.map((r) => r.x + r.width));
+  const maxY = Math.max(...rects.map((r) => r.y + r.height));
+  return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+}
+
+// Union of the parts' SELECTION bounds in canvas coords — art/alpha bounds in "art" mode, the full
+// registration frame in "frame" mode. This is what the group selection box hugs, so (like the
+// single-part box) it tracks the visible art instead of spanning the whole transparent canvas.
+function unionSelectionBounds(
+  parts: CharacterPart[],
+  boundsMode: EditorBoundsMode,
+  transformForPart?: (part: CharacterPart) => EditorPartTransform,
+) {
+  const rects = parts.map((p) => {
+    const local = editorSelectionBounds(p, boundsMode);
+    const transform = transformForPart?.(p);
+    return transform
+      ? localRectCanvasBoundsWithTransform(p, local, transform)
+      : localRectCanvasBounds(p, local);
   });
   const minX = Math.min(...rects.map((r) => r.x));
   const minY = Math.min(...rects.map((r) => r.y));

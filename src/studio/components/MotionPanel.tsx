@@ -5,6 +5,7 @@ import { usePlayerStore } from "@hyperframes/studio";
 import { db, uid } from "../db";
 import { useStudio } from "../store";
 import { ensureMotionPresetsSeeded } from "../presets/seed";
+import { saveCharacter } from "../character/character-utils";
 import { MotionPresetRecorder } from "../presets/MotionPresetRecorder";
 import {
   ACTION_CATEGORY_COLORS,
@@ -35,6 +36,7 @@ export function MotionPanel({
   character: CharacterPreset;
 }) {
   const update = useStudio((s) => s.updateClip);
+  const registerCharacterPreset = useStudio((s) => s.registerCharacterPreset);
   const syncMotionPresets = useStudio((s) => s.syncMotionPresets);
   const currentTime = usePlayerStore((s) => s.currentTime);
   const [picking, setPicking] = useState(false);
@@ -143,6 +145,9 @@ export function MotionPanel({
         initialPreset={editingPreset ?? undefined}
         initialCategory={recordingCategory}
         copyOnSave={!!editingMotionId}
+        onCharacterChange={(next) => {
+          void saveCharacter(next).then((saved) => registerCharacterPreset(saved));
+        }}
         onSaved={(preset) => {
           if (editingMotionId) {
             updateMotion(editingMotionId, { presetId: preset.id });
