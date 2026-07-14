@@ -35,8 +35,8 @@ import { useStudio } from "../store";
 import {
   createBlankCharacter,
   CHARACTER_VARIANT_KIND_VALUES,
-  defaultSlotIdForRole,
   defaultLimbPathDeformForPart,
+  defaultSlotIdForRole,
   defaultMotionBehaviorForRole,
   defaultVariantForSlotParts,
   detectPartRoleFromFilename,
@@ -60,6 +60,7 @@ import {
   variantLabelForPart,
   type VariantKeySource,
 } from "./character-utils";
+import { defaultLimbPathDeformForSlot } from "./deform-fit";
 import { TransformMoveable } from "../interaction/TransformMoveable";
 import type { ScreenRect } from "../interaction/transform-box";
 import { inferCharacterSideFromText } from "./side-utils";
@@ -153,7 +154,8 @@ import {
 } from "./runtime";
 import { buildCharacterRenderPayload } from "./composition";
 import { PixiCharacterPreview } from "./PixiCharacterPreview";
-import type { CharacterSceneAsset } from "./scene";
+import { limbPathBendSide, type CharacterSceneAsset } from "./scene";
+import { limbPathPointAt, limbPathProjectPointT } from "./mesh-deform";
 import {
   applyCharacterSceneCommand,
   rotatePointAroundAnchor,
@@ -367,6 +369,11 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   const [boundsMode, setBoundsMode] = useState<EditorBoundsMode>("art");
   // Focus mode for editing a layer's reach (hides bones/chrome, shows the traced reach outline).
   const [rangeEdit, setRangeEdit] = useState<RangeEdit | null>(null);
+  // Focus mode for editing a flexible part's mesh path (joint/end/curve points).
+  // While set, the part/group drag chrome is NOT rendered, so the path knobs
+  // never compete with the move box for pointer events. Keyed by part id so
+  // changing selection exits automatically.
+  const [meshEditPartId, setMeshEditPartId] = useState<ID | null>(null);
   // The traced reach outline as absolute canvas points (convex hull), while editing.
   const [reachDraft, setReachDraft] = useState<{ x: number; y: number }[] | null>(null);
   // Live rotation reach (min/max degrees from rest) while twisting the layer.
@@ -1636,6 +1643,38 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     selectedSlotParts.length > 0
       ? unionSelectionBounds(selectedSlotParts, boundsMode, partPreviewTransform)
       : null;
+  const selectedDeformPathPart = (() => {
+    const slotId =
+      selectedSlotId ?? (selectedEditorPart ? getPartSlotId(selectedEditorPart) : null);
+    if (!slotId) return null;
+    if (
+      selectedEditorPart &&
+      getPartSlotId(selectedEditorPart) === slotId &&
+      selectedEditorPart.deform?.mode === "limb-path"
+    ) {
+      return selectedEditorPart;
+    }
+    const parts = visibleEditorParts.filter((part) => getPartSlotId(part) === slotId);
+    const activeKey =
+      variantPreview[slotId] ??
+      (selectedEditorPart && getPartSlotId(selectedEditorPart) === slotId
+        ? variantKeyForPart(selectedEditorPart)
+        : parts[0]
+          ? defaultVariantForSlotParts(parts, parts[0].role)
+          : undefined);
+    return (
+      parts.find(
+        (part) =>
+          part.deform?.mode === "limb-path" && (!activeKey || partMatchesVariant(part, activeKey)),
+      ) ??
+      parts.find((part) => part.deform?.mode === "limb-path") ??
+      null
+    );
+  })();
+
+  // Mesh-path focus mode is active only while the SAME flexible part stays
+  // selected; a stale id simply stops matching (no cleanup effect needed).
+  const meshPathEditing = !!selectedDeformPathPart && meshEditPartId === selectedDeformPathPart.id;
 
   const localPointForPart = (part: CharacterPart, point: { x: number; y: number }) =>
     canvasPointToPartLocal(part, point, partPreviewTransform(part));
@@ -2653,6 +2692,15 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     window.addEventListener("pointerup", onUp);
   };
 
+  const handleCanvasPointerDownCapture = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    if (!pinPlacement && mode === "select") return;
+    if (rangeEdit) return;
+    e.preventDefault();
+    e.stopPropagation();
+    handleCanvasPointerDown(e);
+  };
+
   // Hover identification: name the art under the cursor without clicking.
   const handleCanvasHover = (e: React.PointerEvent) => {
     if (mode !== "select" || interacting || anchorDrag || rangeEdit) {
@@ -3106,6 +3154,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
             <div
               ref={canvasRef}
               data-editor-canvas
+              onPointerDownCapture={handleCanvasPointerDownCapture}
               onPointerDown={handleCanvasPointerDown}
               onPointerMove={handleCanvasHover}
               onPointerLeave={() => setHoverHit(null)}
@@ -3160,7 +3209,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   placement={runtimePlacementForPart(part)}
                 />
               ))}
-              {showBones && !focusEditing && (
+              {showBones && !focusEditing && mode === "select" && (
                 <RigBonesOverlay
                   doc={doc}
                   variantPreview={variantPreview}
@@ -3170,7 +3219,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   onStartBoneDrag={startBoneDrag}
                 />
               )}
-              {showAnchors && !focusEditing && (
+              {showAnchors && !focusEditing && mode === "select" && (
                 <VariantAnchorOverlay
                   doc={doc}
                   variantPreview={variantPreview}
@@ -3184,9 +3233,29 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   onStartAnchorDrag={startAnchorDrag}
                 />
               )}
+              {selectedDeformPathPart?.deform?.mode === "limb-path" && !focusEditing && (
+                <DeformPathOverlay
+                  part={selectedDeformPathPart}
+                  deform={selectedDeformPathPart.deform}
+                  previewTransform={partPreviewTransform(selectedDeformPathPart)}
+                  scale={scale}
+                  canvasWidth={doc.canvasWidth}
+                  canvasHeight={doc.canvasHeight}
+                  editing={meshPathEditing}
+                  onToggleEditing={() =>
+                    setMeshEditPartId(meshPathEditing ? null : selectedDeformPathPart.id)
+                  }
+                  onSetDeform={(deform, options) =>
+                    setSlotDeform(getPartSlotId(selectedDeformPathPart), deform, options)
+                  }
+                />
+              )}
               {selectedSlotId &&
                 selectedSlotBounds &&
                 !focusEditing &&
+                // While mesh-path editing, the group box would swallow the path
+                // knobs' pointer events, so it is not rendered at all.
+                !meshPathEditing &&
                 // One-shot tools (pivot / bounds) take the next canvas click; the
                 // group box would otherwise swallow it over the selected art.
                 mode === "select" &&
@@ -3238,10 +3307,12 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                 })()}
             </div>
           </div>
-          {selectedEditorPart && !focusEditing && mode === "select" && (
+          {selectedEditorPart && !focusEditing && !meshPathEditing && mode === "select" && (
             // Hidden while a one-shot tool (pivot / bounds) is armed: its proxy
             // sits over the selected art and would otherwise capture the tool's
-            // placement click before it reaches the canvas.
+            // placement click before it reaches the canvas. Also hidden during
+            // mesh-path editing — react-moveable portals its box outside the
+            // canvas stacking context, so it cannot be layered under the knobs.
             <CharacterPartMoveable
               part={selectedEditorPart}
               previewTransform={partPreviewTransform(selectedEditorPart)}
@@ -4532,6 +4603,8 @@ function Inspector({
           </section>
 
           <FlexibleSection
+            doc={doc}
+            slotId={partSlotId}
             role={part.role}
             parts={doc.parts.filter((candidate) => getPartSlotId(candidate) === partSlotId)}
             onSetDeform={onSetDeform}
@@ -5774,6 +5847,287 @@ function ReachOverlay({
   );
 }
 
+function DeformPathOverlay({
+  part,
+  deform,
+  previewTransform,
+  scale,
+  canvasWidth,
+  canvasHeight,
+  editing,
+  onToggleEditing,
+  onSetDeform,
+}: {
+  part: CharacterPart;
+  deform: Extract<CharacterPartDeform, { mode: "limb-path" }>;
+  previewTransform: EditorPartTransform;
+  scale: number;
+  canvasWidth: number;
+  canvasHeight: number;
+  editing?: boolean;
+  onToggleEditing?: () => void;
+  onSetDeform?: (deform: CharacterPartDeform | undefined, options?: { history?: boolean }) => void;
+}) {
+  const stroke = Math.max(1.5, 2 / Math.max(0.0001, scale));
+  const knob = Math.max(4, 5 / Math.max(0.0001, scale));
+  const toCanvas = (point: { x: number; y: number }) =>
+    partLocalPointToCanvas(part, point, previewTransform);
+  const samples = deformPathSamples(deform);
+  const pathPoints = samples.map(toCanvas);
+  const pathD = pathPoints
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
+    .join(" ");
+  const start = toCanvas(deform.start);
+  const end = toCanvas(deform.end);
+  const curveLocal = deform.curve ?? {
+    x: (deform.start.x + deform.end.x) / 2,
+    y: (deform.start.y + deform.end.y) / 2,
+  };
+  const curve = deform.curve ? toCanvas(deform.curve) : null;
+  // While editing, an unset curve shows as a ghost dot at the chord midpoint;
+  // dragging it authors deform.curve.
+  const curveGhost = !deform.curve && editing ? toCanvas(curveLocal) : null;
+  const locks = (deform.locks ?? []).map(toCanvas);
+  const interactive = editing && !!onSetDeform;
+  const knobClass = interactive ? "pointer-events-auto cursor-grab" : undefined;
+  // The joint (elbow/knee) marker slides along the spine; default is midway.
+  const jointLocal = deform.joint ?? limbPathPointAt(samples, 0.5);
+  const joint = toCanvas(jointLocal);
+  // Fold-direction arrow: which side the elbow will swing toward. Solid when
+  // the direction is locked, faded when it is only implied by the curve point.
+  const foldSide = deform.side === 1 || deform.side === -1 ? deform.side : limbPathBendSide(deform);
+  let foldArrow: { from: { x: number; y: number }; to: { x: number; y: number } } | null = null;
+  if (foldSide) {
+    const jointT = Math.max(0.05, Math.min(0.95, limbPathProjectPointT(samples, jointLocal)));
+    const ahead = limbPathPointAt(samples, Math.min(1, jointT + 0.05));
+    const behind = limbPathPointAt(samples, Math.max(0, jointT - 0.05));
+    const tangentLength = Math.hypot(ahead.x - behind.x, ahead.y - behind.y) || 1;
+    const nx = -(ahead.y - behind.y) / tangentLength;
+    const ny = (ahead.x - behind.x) / tangentLength;
+    const reach = Math.max(16, (deform.width ?? 30) * 0.75);
+    foldArrow = {
+      from: joint,
+      to: toCanvas({
+        x: jointLocal.x + nx * foldSide * reach,
+        y: jointLocal.y + ny * foldSide * reach,
+      }),
+    };
+  }
+  const foldArrowHead = (() => {
+    if (!foldArrow) return null;
+    const dx = foldArrow.to.x - foldArrow.from.x;
+    const dy = foldArrow.to.y - foldArrow.from.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len;
+    const uy = dy / len;
+    const size = knob * 1.4;
+    const baseX = foldArrow.to.x - ux * size;
+    const baseY = foldArrow.to.y - uy * size;
+    return `${foldArrow.to.x},${foldArrow.to.y} ${baseX - uy * size * 0.6},${baseY + ux * size * 0.6} ${baseX + uy * size * 0.6},${baseY - ux * size * 0.6}`;
+  })();
+
+  const startPointDrag = (e: React.PointerEvent<SVGElement>, kind: "joint" | "end" | "curve") => {
+    if (e.button !== 0 || !interactive || !onSetDeform) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const svg = (e.currentTarget as SVGGraphicsElement).ownerSVGElement;
+    const rect = svg?.getBoundingClientRect();
+    if (!rect) return;
+    const pxPerUnitX = rect.width / Math.max(1, canvasWidth);
+    const pxPerUnitY = rect.height / Math.max(1, canvasHeight);
+    const round1 = (value: number) => Math.round(value * 10) / 10;
+    // One undo checkpoint for the whole drag: history on the first patch only.
+    let first = true;
+    const move = (ev: PointerEvent) => {
+      const canvasPoint = {
+        x: (ev.clientX - rect.left) / pxPerUnitX,
+        y: (ev.clientY - rect.top) / pxPerUnitY,
+      };
+      const local = canvasPointToPartLocal(part, canvasPoint, previewTransform);
+      const point = { x: round1(local.x), y: round1(local.y) };
+      if (kind === "joint") {
+        // The joint slides along the spine rather than floating free.
+        const t = Math.max(0.05, Math.min(0.95, limbPathProjectPointT(samples, local)));
+        const snapped = limbPathPointAt(samples, t);
+        onSetDeform(
+          { ...deform, joint: { x: round1(snapped.x), y: round1(snapped.y) } },
+          { history: first },
+        );
+      } else if (kind === "end") {
+        onSetDeform({ ...deform, end: point }, { history: first });
+      } else {
+        onSetDeform({ ...deform, curve: point }, { history: first });
+      }
+      first = false;
+    };
+    startWindowPointerDrag({
+      onMove: move,
+      onEnd: (event) => {
+        if (event) move(event);
+      },
+    });
+  };
+
+  const chipFont = 11 / Math.max(0.0001, scale);
+  return (
+    <>
+      <svg
+        className="pointer-events-none absolute inset-0"
+        width={canvasWidth}
+        height={canvasHeight}
+        // Above the group-move surface (10000) and bone markers (11000) so the
+        // joint knob receives pointer events instead of starting an art drag.
+        style={{ zIndex: 11500 }}
+        aria-hidden="true"
+      >
+        <path
+          d={pathD}
+          fill="none"
+          stroke="#14b8a6"
+          strokeWidth={stroke}
+          strokeDasharray={`${stroke * 3} ${stroke * 2}`}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        {foldArrow && (
+          <g opacity={deform.side === 1 || deform.side === -1 ? 1 : 0.45}>
+            <line
+              x1={foldArrow.from.x}
+              y1={foldArrow.from.y}
+              x2={foldArrow.to.x}
+              y2={foldArrow.to.y}
+              stroke="#a855f7"
+              strokeWidth={stroke * 1.2}
+            />
+            {foldArrowHead && <polygon points={foldArrowHead} fill="#a855f7" />}
+          </g>
+        )}
+        <circle
+          cx={start.x}
+          cy={start.y}
+          r={knob}
+          fill="#ffffff"
+          stroke="#111827"
+          strokeWidth={stroke}
+        />
+        {locks.map((lock, index) => (
+          <circle
+            key={index}
+            cx={lock.x}
+            cy={lock.y}
+            r={knob * 0.9}
+            fill="#facc15"
+            stroke="#7c2d12"
+            strokeWidth={stroke}
+          />
+        ))}
+        {curve && (
+          <circle
+            cx={curve.x}
+            cy={curve.y}
+            r={knob * (editing ? 1.15 : 0.9)}
+            fill="#f59e0b"
+            stroke="#7c2d12"
+            strokeWidth={stroke}
+            className={knobClass}
+            onPointerDown={interactive ? (e) => startPointDrag(e, "curve") : undefined}
+          >
+            {interactive && <title>Curve — drag to give the limb its natural bend</title>}
+          </circle>
+        )}
+        {curveGhost && (
+          <circle
+            cx={curveGhost.x}
+            cy={curveGhost.y}
+            r={knob * 1.15}
+            fill="rgba(245, 158, 11, 0.35)"
+            stroke="#f59e0b"
+            strokeWidth={stroke}
+            strokeDasharray={`${stroke * 2} ${stroke * 2}`}
+            className={knobClass}
+            onPointerDown={interactive ? (e) => startPointDrag(e, "curve") : undefined}
+          >
+            <title>Curve — drag to give the limb its natural bend</title>
+          </circle>
+        )}
+        <circle
+          cx={end.x}
+          cy={end.y}
+          r={knob * (editing ? 1.4 : 1.15)}
+          fill="#14b8a6"
+          stroke="#0f766e"
+          strokeWidth={stroke}
+          className={knobClass}
+          onPointerDown={interactive ? (e) => startPointDrag(e, "end") : undefined}
+        >
+          {interactive && <title>End — drag to where this limb's tip sits in the artwork</title>}
+        </circle>
+        <g transform={`translate(${joint.x} ${joint.y}) rotate(45)`}>
+          <rect
+            x={-knob * (editing ? 1.3 : 1)}
+            y={-knob * (editing ? 1.3 : 1)}
+            width={knob * 2 * (editing ? 1.3 : 1)}
+            height={knob * 2 * (editing ? 1.3 : 1)}
+            fill="#a855f7"
+            stroke="#581c87"
+            strokeWidth={stroke}
+            className={knobClass}
+            onPointerDown={interactive ? (e) => startPointDrag(e, "joint") : undefined}
+          >
+            <title>Joint — drag along the path to set where this limb bends</title>
+          </rect>
+        </g>
+      </svg>
+      {onToggleEditing && (
+        <button
+          type="button"
+          className="pointer-events-auto absolute -translate-x-1/2 rounded-full border font-semibold shadow"
+          style={{
+            left: start.x,
+            top: start.y - 36 / Math.max(0.0001, scale),
+            zIndex: 11500,
+            fontSize: chipFont,
+            padding: `${3 / Math.max(0.0001, scale)}px ${9 / Math.max(0.0001, scale)}px`,
+            background: editing ? "#a855f7" : "rgba(24, 24, 27, 0.92)",
+            color: editing ? "#fff" : "#e9d5ff",
+            borderColor: "#a855f7",
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={onToggleEditing}
+          title={
+            editing
+              ? "Finish editing the mesh path and restore normal move controls"
+              : "Edit the mesh path: drag the joint, end, and curve points (art dragging pauses)"
+          }
+        >
+          {editing ? "✓ Done" : "✎ Edit path"}
+        </button>
+      )}
+    </>
+  );
+}
+
+function deformPathSamples(deform: Extract<CharacterPartDeform, { mode: "limb-path" }>) {
+  const count = Math.max(2, Math.round(deform.segments ?? 12));
+  const points: Array<{ x: number; y: number }> = [];
+  for (let i = 0; i <= count; i += 1) {
+    const t = i / count;
+    if (!deform.curve) {
+      points.push({
+        x: deform.start.x + (deform.end.x - deform.start.x) * t,
+        y: deform.start.y + (deform.end.y - deform.start.y) * t,
+      });
+      continue;
+    }
+    const inv = 1 - t;
+    points.push({
+      x: inv * inv * deform.start.x + 2 * inv * t * deform.curve.x + t * t * deform.end.x,
+      y: inv * inv * deform.start.y + 2 * inv * t * deform.curve.y + t * t * deform.end.y,
+    });
+  }
+  return points;
+}
+
 /**
  * Rotation-reach gizmo: a pivot, a wedge showing the allowed twist range, and a draggable knob to
  * trace it. Distinct (sky-blue) from the amber position reach. Shown in reach-edit focus mode.
@@ -6198,10 +6552,14 @@ function GroupControlsOverlay({
  * of the slot so swaps stay consistent; face builders are excluded.
  */
 function FlexibleSection({
+  doc,
+  slotId,
   role,
   parts,
   onSetDeform,
 }: {
+  doc: CharacterPreset;
+  slotId: ID;
   role: PartRole;
   parts: CharacterPart[];
   onSetDeform: (deform: CharacterPartDeform | undefined, options?: { history?: boolean }) => void;
@@ -6212,6 +6570,8 @@ function FlexibleSection({
   const texturedParts = parts.filter((part) => !part.morph?.primaryPath);
   if (faceRole || texturedParts.length === 0) return null;
   const deform = texturedParts.find((part) => part.deform)?.deform;
+  const neutralDeform = () => defaultLimbPathDeformForPart(texturedParts[0]);
+  const fittedDeform = () => defaultLimbPathDeformForSlot(doc, slotId, texturedParts[0]);
   return (
     <section className="rounded border border-border bg-panel-2 p-3">
       <label className="flex cursor-pointer items-center justify-between gap-2">
@@ -6221,11 +6581,7 @@ function FlexibleSection({
         <input
           type="checkbox"
           checked={!!deform}
-          onChange={(e) =>
-            onSetDeform(
-              e.target.checked ? defaultLimbPathDeformForPart(texturedParts[0]) : undefined,
-            )
-          }
+          onChange={(e) => onSetDeform(e.target.checked ? neutralDeform() : undefined)}
         />
       </label>
       <div className="mt-1 text-[10px] text-muted-foreground">
@@ -6233,8 +6589,52 @@ function FlexibleSection({
         for arms, legs, tails, and hair.
       </div>
       {deform?.mode === "limb-path" && (
-        <div className="mt-2 rounded border border-border bg-panel px-2 py-1 text-[10px] text-muted-foreground">
-          Path mesh ready
+        <div className="mt-2 grid gap-2 rounded border border-border bg-panel p-2 text-[10px] text-muted-foreground">
+          <div>Path mesh ready. Start and end points are stored on the character, not actions.</div>
+          <div className="grid grid-cols-2 gap-1">
+            <button
+              type="button"
+              onClick={() => onSetDeform(neutralDeform())}
+              className="rounded border border-border bg-background px-2 py-1 text-foreground hover:bg-panel-2"
+              title="Reset the flexible path so the artwork renders exactly like the original sprite"
+            >
+              Reset to artwork
+            </button>
+            <button
+              type="button"
+              onClick={() => onSetDeform(fittedDeform())}
+              className="rounded border border-border bg-background px-2 py-1 text-foreground hover:bg-panel-2"
+              title="Snap the flexible path to this slot's rig joint and child socket"
+            >
+              Fit mesh to rig
+            </button>
+          </div>
+          <label className="flex cursor-pointer items-center justify-between gap-2">
+            <span title="Keeps the joint folding one way (no backwards elbows) and lets dragging just the end point bend the limb like a puppet">
+              Lock bend direction
+            </span>
+            <input
+              type="checkbox"
+              checked={deform.side === 1 || deform.side === -1}
+              onChange={(e) =>
+                onSetDeform(
+                  e.target.checked
+                    ? { ...deform, side: limbPathBendSide(deform) === -1 ? -1 : 1 }
+                    : { ...deform, side: undefined },
+                )
+              }
+            />
+          </label>
+          {(deform.side === 1 || deform.side === -1) && (
+            <button
+              type="button"
+              onClick={() => onSetDeform({ ...deform, side: deform.side === 1 ? -1 : 1 })}
+              className="rounded border border-border bg-background px-2 py-1 text-foreground hover:bg-panel-2"
+              title="Bend the joint toward the other side"
+            >
+              ⇄ Flip bend direction
+            </button>
+          )}
         </div>
       )}
     </section>
@@ -6457,7 +6857,15 @@ function GroupInspector({
           </>
         )}
       </section>
-      {phase === "build" && <FlexibleSection role={role} parts={parts} onSetDeform={onSetDeform} />}
+      {phase === "build" && (
+        <FlexibleSection
+          doc={doc}
+          slotId={slotId}
+          role={role}
+          parts={parts}
+          onSetDeform={onSetDeform}
+        />
+      )}
       {phase === "pose" && isMouth && (
         <section className="rounded border border-border bg-panel-2 p-3">
           <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
@@ -6825,7 +7233,12 @@ function CharacterPartMoveable({
     width: sel.width,
     height: sel.height,
   });
-  const frameRect = toScreen({ x: part.x + dx, y: part.y + dy, width: part.width, height: part.height });
+  const frameRect = toScreen({
+    x: part.x + dx,
+    y: part.y + dy,
+    width: part.width,
+    height: part.height,
+  });
   const pivotCanvas = pivotForPart(part);
   const pivot = {
     x: origin.x + (pivotCanvas.x + dx) * viewScale,

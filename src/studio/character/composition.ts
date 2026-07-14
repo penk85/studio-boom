@@ -74,7 +74,10 @@ import type {
 } from "./timeline-scene";
 
 const VISEMES: MouthViseme[] = ["rest", "A", "E", "O", "U", "MBP", "FV", "L", "WQ", "Smile"];
-const MOTION_SAMPLE_FPS = 12;
+// Character motion is baked into a deterministic seekable payload. Sampling at
+// standard video cadence keeps eased/elastic motion smooth when Pixi linearly
+// interpolates between samples without introducing an async runtime clock.
+const MOTION_SAMPLE_FPS = 30;
 
 type CharacterSlotRef = RuntimeCharacterSlot;
 type RuntimeRig = CharacterRuntime["rig"];

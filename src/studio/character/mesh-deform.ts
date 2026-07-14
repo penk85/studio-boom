@@ -1,15 +1,37 @@
 /**
  * Shared deformation math for flexible character parts.
  *
- * New Flexible authoring uses the point-based `limb-path` model, rendered as a
- * MeshSimple textured ribbon via `limbRibbon*` below. `bendPlanePositions`
- * remains for old saved `mode: "bend"` parts (Pixi MeshPlane). Both sets of
- * functions are embedded verbatim into the generated character composition
- * script via Function.prototype.toString(), so they must stay fully
+ * The point-based `limb-path` model (ribbon geometry, two-bone bend solve,
+ * per-seek apply logic) lives in `limb-runtime.ts` as a single self-contained
+ * factory shared verbatim between the editor preview runtime and the generated
+ * composition script; this module re-exports it so existing import sites keep
+ * working. What remains here is the legacy `mode: "bend"` MeshPlane math for
+ * old saved parts, plus the mesh sizing/clamp constants.
+ *
+ * `bendPlanePositions` is embedded verbatim into the generated character
+ * composition script via Function.prototype.toString(), so it must stay fully
  * self-contained: no imports, no outer-scope references, nothing TS-specific
  * beyond type annotations. mesh-deform.test.ts locks the embedded source to
  * the module build.
  */
+
+import { createLimbRuntime } from "./limb-runtime";
+
+export type { LimbRibbonPositionOptions, LimbRopeEntry, PathPoint } from "./limb-runtime";
+
+const limb = createLimbRuntime();
+
+export const limbRibbonPositions = limb.limbRibbonPositions;
+export const limbRibbonUVs = limb.limbRibbonUVs;
+export const limbRibbonIndices = limb.limbRibbonIndices;
+export const limbPathLockFloor = limb.limbPathLockFloor;
+export const limbPathEndWeight = limb.limbPathEndWeight;
+export const limbPathCurveWeight = limb.limbPathCurveWeight;
+export const limbPathProjectPointT = limb.limbPathProjectPointT;
+export const limbPathPointAt = limb.limbPathPointAt;
+export const limbPathTangentAngle = limb.limbPathTangentAngle;
+export const limbPathBendPoints = limb.limbPathBendPoints;
+export const limbPathDeformedPoint = limb.limbPathDeformedPoint;
 
 export interface BendPlaneArgs {
   /** Plane width in texture pixels (MeshPlane uses texture dimensions). */
@@ -107,115 +129,19 @@ export function bendPlanePositions(args: BendPlaneArgs): Float32Array {
 }
 
 /**
- * Textured-ribbon geometry for `limb-path` flexible parts. A MeshRope pancakes
- * limb art (it crams the texture's whole cross axis into the rope thickness),
- * so instead we build a MeshSimple ribbon: a strip of `crossVertices` columns
- * running ALONG the spine, with the full visible texture mapped across it. The
- * positions functions are embedded verbatim into the generated composition
- * script via Function.prototype.toString(), so they must stay self-contained
- * (no imports, no outer-scope references).
+ * Columns across the ribbon. Texture mapping inside each quad is affine per
+ * triangle, so a bent 2-column ribbon kinks the art along every quad diagonal;
+ * more columns spread that warp until it reads as a smooth curve.
  */
-
-/** Columns across the ribbon; 2 is enough for a flat cross-section. */
-export const DEFAULT_LIMB_CROSS_VERTICES = 2;
-
-/** Ribbon vertex positions (part-local px) for a spine sampled into points. */
-export function limbRibbonPositions(
-  points: Array<{ x: number; y: number }>,
-  width: number,
-  crossVertices: number,
-  out?: Float32Array,
-): Float32Array {
-  const rows = points.length;
-  const cross = Math.max(2, Math.floor(crossVertices) || 2);
-  const floats = rows * cross * 2;
-  const result = out && out.length === floats ? out : new Float32Array(floats);
-  const half = (Number(width) || 0) / 2;
-  for (let i = 0; i < rows; i += 1) {
-    const prev = points[i > 0 ? i - 1 : 0];
-    const next = points[i < rows - 1 ? i + 1 : rows - 1];
-    let tx = next.x - prev.x;
-    let ty = next.y - prev.y;
-    const len = Math.hypot(tx, ty) || 1;
-    tx /= len;
-    ty /= len;
-    // Left-hand normal to the tangent gives the cross direction.
-    const nx = -ty;
-    const ny = tx;
-    const p = points[i];
-    for (let j = 0; j < cross; j += 1) {
-      const s = cross === 1 ? 0.5 : j / (cross - 1);
-      const off = (s - 0.5) * half * 2;
-      const idx = (i * cross + j) * 2;
-      result[idx] = p.x + nx * off;
-      result[idx + 1] = p.y + ny * off;
-    }
-  }
-  return result;
-}
+export const DEFAULT_LIMB_CROSS_VERTICES = 8;
 
 /**
- * Static UVs mapping the visible texture sub-rect across the ribbon: the long
- * axis runs along the spine, the short axis across the columns. `vertical`
- * means the limb's long axis is the texture's v (height).
- *
- * The cross-axis mapping must agree with the LEFT-hand normal used in
- * `limbRibbonPositions`. For a vertical limb the cross axis is x, and the left
- * normal puts column `s = 0` on the +x (screen-right) side, so `u` has to run
- * high→low across `s` (`1 - s`) to keep the texture un-mirrored — u0 lands on
- * the left column, u1 on the right. For a horizontal limb the cross axis is y
- * and column `s = 0` already lands on -y (screen-top), so `v` maps straight.
+ * Minimum spine samples used to RENDER a limb-path mesh, independent of the
+ * authored `segments` (which also drives gizmo dash density). Curvature is
+ * concentrated at the rounded joint, so coarse sampling scallops the
+ * silhouette there.
  */
-export function limbRibbonUVs(
-  rows: number,
-  crossVertices: number,
-  uv: { u0: number; v0: number; u1: number; v1: number },
-  vertical: boolean,
-  out?: Float32Array,
-): Float32Array {
-  const cross = Math.max(2, Math.floor(crossVertices) || 2);
-  const rowCount = Math.max(2, Math.floor(rows) || 2);
-  const floats = rowCount * cross * 2;
-  const result = out && out.length === floats ? out : new Float32Array(floats);
-  for (let i = 0; i < rowCount; i += 1) {
-    const t = rowCount === 1 ? 0 : i / (rowCount - 1);
-    for (let j = 0; j < cross; j += 1) {
-      const s = cross === 1 ? 0 : j / (cross - 1);
-      const idx = (i * cross + j) * 2;
-      if (vertical) {
-        result[idx] = uv.u0 + (uv.u1 - uv.u0) * (1 - s);
-        result[idx + 1] = uv.v0 + (uv.v1 - uv.v0) * t;
-      } else {
-        result[idx] = uv.u0 + (uv.u1 - uv.u0) * t;
-        result[idx + 1] = uv.v0 + (uv.v1 - uv.v0) * s;
-      }
-    }
-  }
-  return result;
-}
-
-/** Static triangle indices for the ribbon grid. */
-export function limbRibbonIndices(rows: number, crossVertices: number): Uint32Array {
-  const cross = Math.max(2, Math.floor(crossVertices) || 2);
-  const rowCount = Math.max(2, Math.floor(rows) || 2);
-  const out = new Uint32Array((rowCount - 1) * (cross - 1) * 6);
-  let k = 0;
-  for (let i = 0; i < rowCount - 1; i += 1) {
-    for (let j = 0; j < cross - 1; j += 1) {
-      const a = i * cross + j;
-      const b = a + 1;
-      const c = a + cross;
-      const d = c + 1;
-      out[k++] = a;
-      out[k++] = b;
-      out[k++] = c;
-      out[k++] = b;
-      out[k++] = d;
-      out[k++] = c;
-    }
-  }
-  return out;
-}
+export const LIMB_PATH_RENDER_SEGMENTS = 32;
 
 /** Default number of bend segments along the limb axis. */
 export const DEFAULT_BEND_SEGMENTS = 12;

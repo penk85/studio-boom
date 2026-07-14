@@ -279,9 +279,12 @@ Mesh deformation is opt-in per part (July 2026): a part with
 inside the generated character composition. New flexible parts use the
 point-based `limb-path` model: a rig-attached start point, a draggable end point
 for stretch/reach, and an optional curve point for bend. The generated source
-renders this as `MeshRope`, with a rigid `Sprite` fallback if the mesh class is
-unavailable. Parts without `deform` stay `Sprite` leaves and default characters
-remain mesh-free end to end. Legacy saved `mode: "bend"` parts still read through
+renders this as a seek-updated `MeshSimple` ribbon (the scene node keeps the
+semantic `meshKind: "rope"` label), with a rigid `Sprite` fallback if the mesh
+class is unavailable. `MeshSimple` preserves the full artwork while its vertex
+grid changes; `MeshRope` compresses that artwork into its rope-width mapping.
+Parts without `deform` stay `Sprite` leaves and default characters remain
+mesh-free end to end. Legacy saved `mode: "bend"` parts still read through
 the old `MeshPlane` path and shared math in `src/studio/character/mesh-deform.ts`,
 but new UI should not author that model. Flexible edits route through
 `applyCharacterSceneCommand` (`set-slot-deform`) like other rig/scene authoring

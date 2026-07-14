@@ -10,6 +10,8 @@ export interface PixiCharacterPreviewProps {
   payload: PixiCharacterPreviewPayload;
   time: number;
   resetKey?: string | number;
+  /** Reuse the current Pixi scene when only timeline data changes. */
+  reuseScene?: boolean;
   staleBehavior?: "hold" | "blank";
   loadingLabel?: string;
   className?: string;
@@ -20,6 +22,7 @@ export function PixiCharacterPreview({
   payload,
   time,
   resetKey,
+  reuseScene = false,
   staleBehavior = "hold",
   loadingLabel = "Loading character preview...",
   className,
@@ -28,10 +31,13 @@ export function PixiCharacterPreview({
   const hostRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<PixiCharacterPreviewController | null>(null);
   const latestTimeRef = useRef(time);
+  const latestPayloadRef = useRef(payload);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
 
   latestTimeRef.current = time;
+  latestPayloadRef.current = payload;
+  const scenePayloadKey = reuseScene ? null : payload;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -46,7 +52,7 @@ export function PixiCharacterPreview({
       controllerRef.current = null;
     }
 
-    void createPixiCharacterPreview(host, payload, {
+    void createPixiCharacterPreview(host, latestPayloadRef.current, {
       resolveAssetRef,
       initialTime: latestTimeRef.current,
     })
@@ -57,6 +63,7 @@ export function PixiCharacterPreview({
         }
         previous?.destroy();
         controllerRef.current = controller;
+        controller.updateTimelineScene(latestPayloadRef.current.timelineScene);
         controller.renderAt(latestTimeRef.current);
         setStatus("ready");
       })
@@ -72,7 +79,12 @@ export function PixiCharacterPreview({
     return () => {
       alive = false;
     };
-  }, [payload, resetKey, resolveAssetRef, staleBehavior]);
+  }, [resetKey, resolveAssetRef, scenePayloadKey, staleBehavior]);
+
+  useEffect(() => {
+    if (!reuseScene) return;
+    controllerRef.current?.updateTimelineScene(payload.timelineScene);
+  }, [payload.timelineScene, reuseScene]);
 
   useEffect(() => {
     controllerRef.current?.renderAt(time);

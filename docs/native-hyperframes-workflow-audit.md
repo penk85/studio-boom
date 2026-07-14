@@ -54,10 +54,10 @@ movie. `editorMeta` is editor-only intent and UI state.
 - Character deformation boundary: textured Pixi character parts render as
   `Sprite` leaves by default; morph/vector parts render through Pixi Graphics.
   Flexible parts (`CharacterPart.deform`, the "Flexible" slot-inspector control)
-  render as point-path `MeshRope` leaves for stretch-ready limb art. The mesh
+  render as point-path `MeshSimple` ribbons for stretch-ready limb art. The mesh
   runtime block is emitted only when the scene contains mesh nodes, staging uses
   the packaged full `pixi.min.js` (mesh pipe included), and the generated script
-  degrades to a rigid sprite when `PIXI.MeshRope` is unavailable or cannot
+  degrades to a rigid sprite when `PIXI.MeshSimple` is unavailable or cannot
   construct. Legacy saved `mode: "bend"` parts still read through the old
   `MeshPlane` path for compatibility, but new UI authors the `limb-path` model.
   Preview/export mesh parity is covered by `preview-parity.test.ts`.

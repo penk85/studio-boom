@@ -5,11 +5,14 @@ import {
   ChevronRight,
   Eye,
   EyeOff,
+  FlipHorizontal2,
+  FlipVertical2,
   Lock,
   Maximize2,
   Minimize2,
   Pause,
   Play,
+  RotateCw,
   RotateCcw,
   SkipBack,
   Unlock,
@@ -19,17 +22,19 @@ import { useMediaUrl } from "../hooks/useMediaUrl";
 import { useStudio } from "../store";
 import { buildCharacterRenderPayload } from "../character/composition";
 import { PixiCharacterPreview } from "../character/PixiCharacterPreview";
-import type { CharacterSceneAsset } from "../character/scene";
+import {
+  limbPathBendSide,
+  limbPathSolveInputsForPart,
+  type CharacterSceneAsset,
+} from "../character/scene";
+import { limbPathBendPoints } from "../character/mesh-deform";
 import {
   defaultLimbPathDeformForPart,
   getPartSlotId,
-  roleSupportsBend,
   variantKeyForPart,
   variantLabelForPart,
 } from "../character/character-utils";
 import { localAlphaBounds } from "../character/alpha-bounds";
-import { TransformMoveable } from "../interaction/TransformMoveable";
-import { type ScreenRect, axisAlignedContentFromQuad } from "../interaction/transform-box";
 import { faceTurnMotionForPart } from "../character/face-turn";
 import { defaultPoseForCharacter } from "../character/pose-presets";
 import {
@@ -84,6 +89,11 @@ import {
 import { AiAddonPromptPanel, GeneratedEditorShell } from "../ai/generated-editor";
 import { buildJsonRepairPrompt } from "../ai/external-ai";
 import {
+  flexibleActionControlState,
+  flexibleBendPatch,
+  flexibleReachPatch,
+} from "./flexible-action-controls";
+import {
   useAiGeneratedArtifactAddon,
   type AiGeneratedFeatureAdapter,
 } from "../ai/generated-artifact";
@@ -96,7 +106,6 @@ import {
 import { startWindowPointerDrag } from "../interaction/pointer-drag";
 import type {
   CharacterPart,
-  CharacterPartDeform,
   CharacterPreset,
   MotionCategory,
   MotionKeyframe,
@@ -107,7 +116,6 @@ import type {
   RecordedKeypose,
   RecordedPartOverride,
 } from "../types";
-import { applyCharacterSceneCommand } from "../character/scene-commands";
 import type { MotionJson } from "../character-json/schema";
 
 const CATEGORIES = ACTION_CATEGORY_TABS.filter((tab) => tab.id !== "all");
@@ -157,6 +165,17 @@ interface RecorderPartState {
   opacity: number;
 }
 
+interface RecorderOverridePatch {
+  slotId: string;
+  patch: Partial<RecorderPartState>;
+}
+
+interface FlexiblePointChange {
+  point: "end" | "curve";
+  patch: Partial<RecorderPartState>;
+  canvasDelta: { x: number; y: number };
+}
+
 interface SelectPopover {
   x: number;
   y: number;
@@ -171,7 +190,6 @@ export function MotionPresetRecorder({
   initialPreset,
   initialCategory,
   onSaved,
-  onCharacterChange,
   copyOnSave,
 }: {
   character: CharacterPreset;
@@ -179,8 +197,7 @@ export function MotionPresetRecorder({
   initialPreset?: MotionPreset;
   initialCategory?: MotionCategory;
   onSaved?: (preset: MotionPreset) => void;
-  /** Persist a structural character edit (e.g. making a part Flexible) so bend
-   *  has something to deform. Enabling Flexible here saves the character. */
+  /** Deprecated: action editing must not mutate character artwork/rig structure. */
   onCharacterChange?: (next: CharacterPreset) => void;
   copyOnSave?: boolean;
 }) {
@@ -496,31 +513,6 @@ export function MotionPresetRecorder({
   const selectedOverride = selectedSlotId
     ? (selectedOverrideFromMap ?? defaultOverride(selectedSlotId, selectedPart ?? undefined))
     : null;
-  // Bending needs the part to be a mesh (Flexible). That is a structural
-  // character edit, so it is only offered here when the host can persist it.
-  const selectedFlexEligible =
-    !!selectedSlot &&
-    !!selectedPart &&
-    !!onCharacterChange &&
-    roleSupportsBend(selectedSlot.role) &&
-    !selectedPart.morph?.primaryPath;
-  const setSelectedFlexible = useCallback(
-    (flexible: boolean) => {
-      if (!selectedSlotId || !onCharacterChange) return;
-      const deform: CharacterPartDeform | undefined = flexible
-        ? selectedPart
-          ? defaultLimbPathDeformForPart(selectedPart)
-          : undefined
-        : undefined;
-      const result = applyCharacterSceneCommand(character, {
-        kind: "set-slot-deform",
-        slotId: selectedSlotId,
-        deform,
-      });
-      if (result.changed) onCharacterChange(result.character);
-    },
-    [character, onCharacterChange, selectedPart, selectedSlotId],
-  );
   const activeVariantsBySlot = useMemo(() => {
     const map: Record<string, string> = { ...basePoses };
     for (const [id, override] of overrides) {
@@ -532,8 +524,8 @@ export function MotionPresetRecorder({
     () => runtimeBoneWorldTransforms(runtime, activeVariantsBySlot),
     [activeVariantsBySlot, runtime],
   );
-  // The selected part's runtime frame (alpha quad + pivot + matrix), shared by the in-plane
-  // flexible-limb handles and the out-of-plane selection box so both agree on the same geometry.
+  // The selected part's runtime frame (alpha quad + pivot + matrix), shared by
+  // the action-editor handles and hit testing so both agree on the same geometry.
   const selectionFrame =
     selectedSlot && selectedPart && selectedOverride
       ? recorderPartFrame(
@@ -657,21 +649,27 @@ export function MotionPresetRecorder({
     setPlaybackCompileRevision((revision) => revision + 1);
   }, []);
 
-  const updateOverride = useCallback(
-    (slotId: string, patch: Partial<RecorderPartState>) => {
+  const updateOverrides = useCallback(
+    (updates: RecorderOverridePatch[]) => {
+      if (updates.length === 0) return;
       stopCompiledPreview();
       setDraftDirty(true);
       setOverrides((prev) => {
         const next = new Map(prev);
-        const slot = slots.find((item) => item.id === slotId);
-        const cur = next.get(slotId);
-        const curPart = slot ? activePartForSlot(slot, cur?.poseSwap) : undefined;
-        const base = cur ?? defaultOverride(slotId, curPart);
-        const targetMeta = slot ? recorderMotionTargetForSlot(slot, runtime) : {};
-        const current = { ...base, ...targetMeta };
-        const merged = { ...current, ...patch };
-        if (recorderOverridesEqual(current, merged)) return prev;
-        next.set(slotId, merged);
+        let changed = false;
+        for (const { slotId, patch } of updates) {
+          const slot = slots.find((item) => item.id === slotId);
+          const cur = next.get(slotId);
+          const curPart = slot ? activePartForSlot(slot, cur?.poseSwap) : undefined;
+          const base = cur ?? defaultOverride(slotId, curPart);
+          const targetMeta = slot ? recorderMotionTargetForSlot(slot, runtime) : {};
+          const current = { ...base, ...targetMeta };
+          const merged = { ...current, ...patch };
+          if (recorderOverridesEqual(current, merged)) continue;
+          next.set(slotId, merged);
+          changed = true;
+        }
+        if (!changed) return prev;
         const constrained = constrainRecorderOverrides({
           character,
           rig,
@@ -701,6 +699,17 @@ export function MotionPresetRecorder({
       slots,
       stopCompiledPreview,
     ],
+  );
+  const updateOverride = useCallback(
+    (slotId: string, patch: Partial<RecorderPartState>) => updateOverrides([{ slotId, patch }]),
+    [updateOverrides],
+  );
+  const handleFlexiblePointChange = useCallback(
+    ({ patch }: FlexiblePointChange) => {
+      if (!selectedSlotId) return;
+      updateOverride(selectedSlotId, patch);
+    },
+    [selectedSlotId, updateOverride],
   );
   const queuedOverrideUpdate = useRafCoalescedCallback<{
     slotId: string;
@@ -1380,23 +1389,13 @@ export function MotionPresetRecorder({
                         scale={displayScale}
                         planeRef={planeRef}
                         onChange={(patch) => updateOverride(selectedOverride.slotId, patch)}
+                        onFlexiblePointChange={handleFlexiblePointChange}
                       />
                     )}
                     {import.meta.env.DEV && showAnchorDebug && (
                       <AnchorDebugOverlay runtime={runtime} overrides={overrides} />
                     )}
                   </div>
-                  {selectedSlot && selectedPart && selectedOverride && selectionFrame && (
-                    <RecorderSelectionBox
-                      slot={selectedSlot}
-                      override={selectedOverride}
-                      frame={selectionFrame}
-                      runtime={runtime}
-                      worldByBone={poseWorldByBone}
-                      scale={displayScale}
-                      onChange={(patch) => updateOverride(selectedOverride.slotId, patch)}
-                    />
-                  )}
                 </div>
               </div>
             </section>
@@ -1561,8 +1560,6 @@ export function MotionPresetRecorder({
             advancedOpen={advancedOpen}
             rotationLimit={selectedRotationLimit}
             allowOutOfBounds={selectedAllowsOutOfBounds}
-            flexEligible={selectedFlexEligible}
-            onSetFlexible={setSelectedFlexible}
             onAllowOutOfBoundsChange={setSelectedAllowOutOfBounds}
             onAdvancedOpenChange={setAdvancedOpen}
             onChange={(patch) => selectedSlotId && updateOverride(selectedSlotId, patch)}
@@ -2077,8 +2074,6 @@ function PropertiesPanel({
   advancedOpen,
   rotationLimit,
   allowOutOfBounds,
-  flexEligible,
-  onSetFlexible,
   onAllowOutOfBoundsChange,
   onAdvancedOpenChange,
   onChange,
@@ -2090,9 +2085,6 @@ function PropertiesPanel({
   advancedOpen: boolean;
   rotationLimit: { min: number; max: number; variantLimited: boolean } | null;
   allowOutOfBounds: boolean;
-  /** Whether this part may be made Flexible (persisted structural edit). */
-  flexEligible: boolean;
-  onSetFlexible: (flexible: boolean) => void;
   onAllowOutOfBoundsChange: (allowed: boolean) => void;
   onAdvancedOpenChange: (open: boolean) => void;
   onChange: (patch: Partial<RecorderPartState>) => void;
@@ -2106,6 +2098,13 @@ function PropertiesPanel({
     );
   }
   const variantOptions = variantOptionsForSlot(slot);
+  const mirrored = override.scaleX < 0;
+  const flipped = override.scaleY < 0;
+  const flexiblePath =
+    part.deform?.mode === "limb-path" ? recorderActionLimbPathForPart(part, part.deform) : null;
+  const flexibleControls = flexiblePath
+    ? flexibleActionControlState(flexiblePath, override, limbPathBendSide(flexiblePath))
+    : null;
   return (
     <div>
       <div className="mb-2 flex items-center gap-2">
@@ -2168,22 +2167,55 @@ function PropertiesPanel({
         />
         <PropertyRow
           label="Width"
-          value={override.scaleX}
+          value={scaleMagnitude(override.scaleX)}
           min={0.1}
           max={3}
           step={0.01}
           rest={1}
-          onChange={(value) => onChange({ scaleX: value })}
+          onChange={(value) => onChange({ scaleX: signedScaleValue(override.scaleX, value) })}
         />
         <PropertyRow
           label="Height"
-          value={override.scaleY}
+          value={scaleMagnitude(override.scaleY)}
           min={0.1}
           max={3}
           step={0.01}
           rest={1}
-          onChange={(value) => onChange({ scaleY: value })}
+          onChange={(value) => onChange({ scaleY: signedScaleValue(override.scaleY, value) })}
         />
+        <div className="grid grid-cols-[64px_1fr] items-center gap-2 text-[10px]">
+          <span className="text-muted-foreground">Orient</span>
+          <div className="grid grid-cols-2 gap-1">
+            <button
+              type="button"
+              aria-pressed={mirrored}
+              onClick={() => onChange({ scaleX: toggleSignedScale(override.scaleX) })}
+              className={`flex items-center justify-center gap-1 rounded border px-2 py-1 ${
+                mirrored
+                  ? "border-primary bg-primary/15 text-primary"
+                  : "border-border hover:bg-panel-2"
+              }`}
+              title="Mirror horizontally for this action keyframe"
+            >
+              <FlipHorizontal2 size={12} />
+              Mirror
+            </button>
+            <button
+              type="button"
+              aria-pressed={flipped}
+              onClick={() => onChange({ scaleY: toggleSignedScale(override.scaleY) })}
+              className={`flex items-center justify-center gap-1 rounded border px-2 py-1 ${
+                flipped
+                  ? "border-primary bg-primary/15 text-primary"
+                  : "border-border hover:bg-panel-2"
+              }`}
+              title="Flip vertically for this action keyframe"
+            >
+              <FlipVertical2 size={12} />
+              Flip
+            </button>
+          </div>
+        </div>
         <PropertyRow
           label="Rotation"
           value={override.rotation}
@@ -2193,18 +2225,35 @@ function PropertiesPanel({
           rest={0}
           onChange={(value) => onChange({ rotation: value })}
         />
-        {flexEligible && (
-          <label
-            className="flex cursor-pointer items-center justify-between gap-2 rounded border border-dashed border-border px-2 py-1.5 text-[11px]"
-            title="Make this part flexible so its limb art bends and stretches along a path. Saves the character."
-          >
-            <span className="text-muted-foreground">〰 Flexible</span>
-            <input
-              type="checkbox"
-              checked={!!part?.deform}
-              onChange={(e) => onSetFlexible(e.target.checked)}
+        {flexiblePath && flexibleControls && (
+          <>
+            <PropertyRow
+              label="Bend"
+              value={flexibleControls.bend}
+              min={0}
+              max={flexibleControls.bendLimit}
+              step={1}
+              rest={0}
+              modified={flexibleControls.bendModified}
+              onChange={(value) =>
+                onChange(
+                  flexibleBendPatch(flexiblePath, override, value, limbPathBendSide(flexiblePath)),
+                )
+              }
+              onReset={() => onChange({ pathCurveX: 0, pathCurveY: 0 })}
             />
-          </label>
+            <PropertyRow
+              label="Reach"
+              value={flexibleControls.reach}
+              min={-flexibleControls.reachLimit}
+              max={flexibleControls.reachLimit}
+              step={1}
+              rest={0}
+              modified={flexibleControls.reachModified}
+              onChange={(value) => onChange(flexibleReachPatch(flexiblePath, override, value))}
+              onReset={() => onChange({ pathEndX: 0, pathEndY: 0 })}
+            />
+          </>
         )}
         {rotationLimit && (
           <div className="flex items-center justify-between gap-2 pl-[72px] text-[10px] text-muted-foreground">
@@ -2280,7 +2329,9 @@ function PropertyRow({
   max,
   step,
   rest,
+  modified,
   onChange,
+  onReset,
 }: {
   label: string;
   value: number;
@@ -2288,11 +2339,19 @@ function PropertyRow({
   max: number;
   step: number;
   rest: number;
+  modified?: boolean;
   onChange: (value: number) => void;
+  onReset?: () => void;
 }) {
+  const isModified = modified ?? Math.abs(value - rest) > 0.0001;
   return (
     <label className="grid grid-cols-[64px_1fr_56px_22px] items-center gap-2 text-[10px]">
-      <span className="text-muted-foreground">{label}</span>
+      <span
+        className={`flex items-center gap-1 ${isModified ? "text-primary" : "text-muted-foreground"}`}
+      >
+        {label}
+        {isModified && <span className="h-1 w-1 rounded-full bg-primary" aria-hidden="true" />}
+      </span>
       <input
         type="range"
         min={min}
@@ -2309,12 +2368,17 @@ function PropertyRow({
         step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full rounded border border-border bg-input px-1 py-0.5"
+        className={`w-full rounded border bg-input px-1 py-0.5 ${
+          isModified ? "border-primary/60" : "border-border"
+        }`}
       />
       <button
         type="button"
-        onClick={() => onChange(rest)}
-        className="rounded border border-border px-1 py-0.5 hover:bg-panel-2"
+        onClick={() => (onReset ? onReset() : onChange(rest))}
+        disabled={!isModified}
+        className="rounded border border-border px-1 py-0.5 hover:bg-panel-2 disabled:cursor-default disabled:opacity-30"
+        title={isModified ? `Reset ${label.toLowerCase()}` : `${label} is at rest`}
+        aria-label={`Reset ${label}`}
       >
         <RotateCcw size={10} />
       </button>
@@ -2384,6 +2448,7 @@ function RecorderPixiPreview({
       payload={payload}
       time={time}
       resetKey={resetKey}
+      reuseScene
       staleBehavior={staleBehavior}
       loadingLabel={loadingLabel}
       resolveAssetRef={resolveRecorderPreviewAssetRef}
@@ -2567,104 +2632,6 @@ function recorderPreviewPreset({
   };
 }
 
-/**
- * The recorder's move / resize / rotate box — the same shared `TransformMoveable` the Stage and
- * character editor use, so all three editors share one selection interaction. It hugs the part's
- * alpha quad (decomposed into an axis-aligned rect + rotation) and maps each gesture back to the
- * recorder's motion-override model: drag → dx/dy (via canvasDeltaToMotionDelta), corner-resize →
- * uniform scale, rotate → rotation. Rendered OUTSIDE the scaled plane (in the unscaled positioned
- * div) because react-moveable's pointer math must not sit under a CSS scale. Skew is deliberately
- * not represented here — it warped the old box; it stays editable via the numeric panel.
- */
-function RecorderSelectionBox({
-  slot,
-  override,
-  frame,
-  runtime,
-  worldByBone,
-  scale,
-  onChange,
-}: {
-  slot: CharacterSlot;
-  override: RecorderPartState;
-  frame: RuntimePartFrame;
-  runtime: CharacterRuntime;
-  worldByBone: CharacterRuntime["worldByBone"];
-  scale: number;
-  onChange: (patch: Partial<RecorderPartState>) => void;
-}) {
-  const target = runtimeMotionTargetForSlot(runtime, slot.id);
-  const queued = useRafCoalescedCallback<Partial<RecorderPartState>>(onChange);
-  // Values frozen at gesture start, so live-applied deltas don't feed back into the math mid-drag.
-  const startRef = useRef<{
-    contentLeft: number;
-    contentTop: number;
-    contentWidth: number;
-    dx: number;
-    dy: number;
-    scale: number;
-    baseRotation: number;
-  } | null>(null);
-
-  // Decompose the alpha quad (canvas space) into an axis-aligned content rect + rotation.
-  const { rect: contentCanvas, rotationDeg } = axisAlignedContentFromQuad(frame.quad, frame.pivot);
-  // The positioned plane container is unscaled, so canvas px → screen px is a plain multiply.
-  const contentRect: ScreenRect = {
-    left: contentCanvas.x * scale,
-    top: contentCanvas.y * scale,
-    width: Math.max(1, contentCanvas.width * scale),
-    height: Math.max(1, contentCanvas.height * scale),
-  };
-  const pivot = { x: frame.pivot.x * scale, y: frame.pivot.y * scale };
-
-  return (
-    <TransformMoveable
-      contentRect={contentRect}
-      frameRect={contentRect}
-      rotationDeg={rotationDeg}
-      pivot={pivot}
-      minFrameSize={8}
-      onInteractingChange={(interacting) => {
-        if (interacting) {
-          startRef.current = {
-            contentLeft: contentRect.left,
-            contentTop: contentRect.top,
-            contentWidth: contentRect.width,
-            dx: override.dx,
-            dy: override.dy,
-            scale: override.scale,
-            baseRotation: rotationDeg - override.rotation,
-          };
-        } else {
-          startRef.current = null;
-          queued.flush();
-        }
-      }}
-      onMove={(next) => {
-        const start = startRef.current;
-        if (!start) return;
-        const canvasDelta = {
-          x: (next.left - start.contentLeft) / scale,
-          y: (next.top - start.contentTop) / scale,
-        };
-        const motion = canvasDeltaToMotionDelta(runtime, target, canvasDelta, worldByBone);
-        queued.queue({ dx: Math.round(start.dx + motion.x), dy: Math.round(start.dy + motion.y) });
-      }}
-      onResize={(next) => {
-        const start = startRef.current;
-        if (!start) return;
-        const ratio = next.width / Math.max(1, start.contentWidth);
-        queued.queue({ scale: round(Math.max(0.1, start.scale * ratio), 2) });
-      }}
-      onRotate={(deg) => {
-        const start = startRef.current;
-        if (!start) return;
-        queued.queue({ rotation: round(deg - start.baseRotation, 1) });
-      }}
-    />
-  );
-}
-
 function SelectionHandles({
   part,
   override,
@@ -2672,6 +2639,7 @@ function SelectionHandles({
   scale,
   planeRef,
   onChange,
+  onFlexiblePointChange,
 }: {
   part: CharacterPart;
   override: RecorderPartState;
@@ -2679,57 +2647,137 @@ function SelectionHandles({
   scale: number;
   planeRef: React.RefObject<HTMLDivElement | null>;
   onChange: (patch: Partial<RecorderPartState>) => void;
+  onFlexiblePointChange?: (change: FlexiblePointChange) => void;
 }) {
-  const queuedChange = useRafCoalescedCallback<Partial<RecorderPartState>>(onChange);
+  const queuedChange = useRafCoalescedCallback<FlexiblePointChange>((change) => {
+    if (onFlexiblePointChange) onFlexiblePointChange(change);
+    else onChange(change.patch);
+  });
   const handleSize = 24 / Math.max(0.0001, scale);
   const flexibleDeform = part.deform?.mode === "limb-path" ? part.deform : null;
-  const flexibleBaseCurve = flexibleDeform
-    ? (flexibleDeform.curve ?? {
-        x: (flexibleDeform.start.x + flexibleDeform.end.x) / 2,
-        y: (flexibleDeform.start.y + flexibleDeform.end.y) / 2,
+  const flexibleActionPath = flexibleDeform
+    ? recorderActionLimbPathForPart(part, flexibleDeform)
+    : null;
+  const flexibleBaseCurve = flexibleActionPath
+    ? (flexibleActionPath.curve ?? {
+        x: (flexibleActionPath.start.x + flexibleActionPath.end.x) / 2,
+        y: (flexibleActionPath.start.y + flexibleActionPath.end.y) / 2,
       })
     : null;
-  const flexibleStartPosition = flexibleDeform
-    ? transformPoint(frame.matrix, flexibleDeform.start)
+  const flexibleStartPosition = flexibleActionPath
+    ? transformPoint(frame.matrix, flexibleActionPath.start)
     : null;
-  const flexibleEndPosition = flexibleDeform
+  const flexibleEndPosition = flexibleActionPath
     ? transformPoint(frame.matrix, {
-        x: flexibleDeform.end.x + override.pathEndX,
-        y: flexibleDeform.end.y + override.pathEndY,
+        x: flexibleActionPath.end.x + override.pathEndX,
+        y: flexibleActionPath.end.y + override.pathEndY,
       })
     : null;
   const flexibleCurvePosition =
-    flexibleDeform && flexibleBaseCurve
+    flexibleActionPath && flexibleBaseCurve
       ? transformPoint(frame.matrix, {
           x: flexibleBaseCurve.x + override.pathCurveX,
           y: flexibleBaseCurve.y + override.pathCurveY,
         })
       : null;
-  const flexiblePath =
-    flexibleStartPosition && flexibleEndPosition
+  // Draw the AUTHORED (rig-aligned) path displaced by the runtime's solved
+  // deformation: at rest the dashes trace the alignment set in the character
+  // builder exactly, and while dragging they bend with the same two-bone
+  // solve the renderer applies — so handles and dashes never separate.
+  const flexibleSolveInputs = flexibleDeform ? limbPathSolveInputsForPart(part) : null;
+  const hasFlexibleOffsets =
+    override.pathEndX !== 0 ||
+    override.pathEndY !== 0 ||
+    override.pathCurveX !== 0 ||
+    override.pathCurveY !== 0;
+  let flexibleOverlayPoints: Array<{ x: number; y: number }> | null = null;
+  if (
+    flexibleSolveInputs &&
+    flexibleSolveInputs.basePoints.length >= 2 &&
+    flexibleSolveInputs.authoredPoints.length === flexibleSolveInputs.basePoints.length
+  ) {
+    if (!hasFlexibleOffsets) {
+      flexibleOverlayPoints = flexibleSolveInputs.authoredPoints;
+    } else {
+      const solved = limbPathBendPoints(
+        flexibleSolveInputs.basePoints,
+        { x: override.pathEndX, y: override.pathEndY },
+        { x: override.pathCurveX, y: override.pathCurveY },
+        flexibleSolveInputs.lockTs,
+        undefined,
+        { side: flexibleSolveInputs.side, jointT: flexibleSolveInputs.jointT },
+      );
+      flexibleOverlayPoints = flexibleSolveInputs.authoredPoints.map((point, index) => ({
+        x: point.x + solved[index].x - flexibleSolveInputs.basePoints[index].x,
+        y: point.y + solved[index].y - flexibleSolveInputs.basePoints[index].y,
+      }));
+    }
+  }
+  const flexibleSolvedPath =
+    flexibleOverlayPoints?.map((point) => transformPoint(frame.matrix, point)) ?? null;
+  const flexiblePath = flexibleSolvedPath
+    ? flexibleSolvedPath
+        .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
+        .join(" ")
+    : flexibleStartPosition && flexibleEndPosition
       ? flexibleCurvePosition
         ? `M ${flexibleStartPosition.x} ${flexibleStartPosition.y} Q ${flexibleCurvePosition.x} ${flexibleCurvePosition.y} ${flexibleEndPosition.x} ${flexibleEndPosition.y}`
         : `M ${flexibleStartPosition.x} ${flexibleStartPosition.y} L ${flexibleEndPosition.x} ${flexibleEndPosition.y}`
       : "";
 
+  const canvasPointFromPointer = (ev: PointerEvent | React.PointerEvent) => {
+    const rect = planeRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    return {
+      x: (ev.clientX - rect.left) / scale,
+      y: (ev.clientY - rect.top) / scale,
+    };
+  };
+
   const startFlexiblePointDrag = (e: React.PointerEvent, point: "end" | "curve") => {
     e.preventDefault();
     e.stopPropagation();
-    if (e.button !== 0 || !flexibleDeform) return;
+    if (e.button !== 0 || !flexibleActionPath) return;
     const rect = planeRef.current?.getBoundingClientRect();
     if (!rect) return;
     const basePoint =
       point === "end"
-        ? flexibleDeform.end
+        ? flexibleActionPath.end
         : (flexibleBaseCurve ?? {
-            x: (flexibleDeform.start.x + flexibleDeform.end.x) / 2,
-            y: (flexibleDeform.start.y + flexibleDeform.end.y) / 2,
+            x: (flexibleActionPath.start.x + flexibleActionPath.end.x) / 2,
+            y: (flexibleActionPath.start.y + flexibleActionPath.end.y) / 2,
           });
+    const dragStartPoint =
+      point === "end"
+        ? {
+            x: flexibleActionPath.end.x + override.pathEndX,
+            y: flexibleActionPath.end.y + override.pathEndY,
+          }
+        : {
+            x: basePoint.x + override.pathCurveX,
+            y: basePoint.y + override.pathCurveY,
+          };
+    const dragStartCanvas = transformPoint(frame.matrix, dragStartPoint);
     let lastPatch: Partial<RecorderPartState> | null = null;
     const queuePatch = (patch: Partial<RecorderPartState>) => {
       if (recorderPatchEqual(lastPatch, patch)) return;
       lastPatch = patch;
-      queuedChange.queue(patch);
+      const nextPoint =
+        point === "end"
+          ? { x: basePoint.x + (patch.pathEndX ?? 0), y: basePoint.y + (patch.pathEndY ?? 0) }
+          : {
+              x: basePoint.x + (patch.pathCurveX ?? 0),
+              y: basePoint.y + (patch.pathCurveY ?? 0),
+            };
+      const nextCanvas = transformPoint(frame.matrix, nextPoint);
+      queuedChange.queue({
+        point,
+        patch,
+        canvasDelta: {
+          x: nextCanvas.x - dragStartCanvas.x,
+          y: nextCanvas.y - dragStartCanvas.y,
+        },
+      });
     };
     const move = (ev: PointerEvent) => {
       const local = transformPoint(frame.inverseMatrix, {
@@ -2742,10 +2790,12 @@ function SelectionHandles({
               pathEndX: round(local.x - basePoint.x, 1),
               pathEndY: round(local.y - basePoint.y, 1),
             }
-          : {
-              pathCurveX: round(local.x - basePoint.x, 1),
-              pathCurveY: round(local.y - basePoint.y, 1),
-            };
+          : constrainFlexibleCurvePatch({
+              path: flexibleActionPath,
+              baseCurve: basePoint,
+              desired: local,
+              override,
+            });
       queuePatch(patch);
     };
     startWindowPointerDrag({
@@ -2754,15 +2804,51 @@ function SelectionHandles({
         if (event) move(event);
         queuedChange.flush();
       },
-      onCancel: queuedChange.cancel,
+      onCancel: () => {
+        queuedChange.cancel();
+      },
     });
+  };
+
+  const startRotationDrag = (e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.button !== 0) return;
+    const startPoint = canvasPointFromPointer(e);
+    if (!startPoint) return;
+    const startAngle = Math.atan2(startPoint.y - frame.pivot.y, startPoint.x - frame.pivot.x);
+    const startRotation = override.rotation;
+    let lastPatch: Partial<RecorderPartState> | null = null;
+    const queued = createRafCoalescedDispatcher<Partial<RecorderPartState>>((patch) => {
+      if (!recorderPatchEqual(lastPatch, patch)) {
+        lastPatch = patch;
+        onChange(patch);
+      }
+    });
+    const move = (ev: PointerEvent) => {
+      const point = canvasPointFromPointer(ev);
+      if (!point) return;
+      const angle = Math.atan2(point.y - frame.pivot.y, point.x - frame.pivot.x);
+      queued.queue({ rotation: round(startRotation + ((angle - startAngle) * 180) / Math.PI, 1) });
+    };
+    startWindowPointerDrag({
+      onMove: move,
+      onEnd: (event) => {
+        if (event) move(event);
+        queued.flush();
+      },
+      onCancel: queued.cancel,
+    });
+  };
+
+  const rotateHandle = {
+    x: (frame.bounds.left + frame.bounds.right) / 2,
+    y: frame.bounds.top - Math.max(28, 34 / Math.max(0.0001, scale)),
   };
 
   return (
     <div className="pointer-events-none absolute inset-0" style={{ zIndex: 9999 }}>
-      {/* The selection outline + move/resize/rotate box is the shared TransformMoveable
-          (RecorderSelectionBox), rendered outside the scaled plane. This overlay keeps only the
-          flexible-limb path handles and the pivot marker, which live in canvas space. */}
+      {/* Action editor chrome only: flexible-limb handles, pivot marker, and rotation handle. */}
       <svg className="absolute inset-0 h-full w-full overflow-visible" aria-hidden="true">
         {flexibleStartPosition && flexibleEndPosition && (
           <path
@@ -2826,6 +2912,21 @@ function SelectionHandles({
           transform: "translate(-50%, -50%)",
         }}
       />
+      <button
+        type="button"
+        onPointerDown={startRotationDrag}
+        className="pointer-events-auto absolute flex items-center justify-center rounded-full border border-background bg-primary text-primary-foreground shadow"
+        style={{
+          left: rotateHandle.x,
+          top: rotateHandle.y,
+          width: Math.max(20, handleSize * 0.72),
+          height: Math.max(20, handleSize * 0.72),
+          transform: "translate(-50%, -50%)",
+        }}
+        title="Rotate"
+      >
+        <RotateCw size={Math.max(11, handleSize * 0.34)} />
+      </button>
     </div>
   );
 }
@@ -2928,6 +3029,68 @@ function ensureInitialRestKeypose(keyposes: RecordedKeypose[]): RecordedKeypose[
 
 function customPresetName(name: string) {
   return /\bcustom$/i.test(name.trim()) ? name : `${name} custom`;
+}
+
+function recorderActionLimbPathForPart(
+  part: CharacterPart,
+  deform: Extract<CharacterPart["deform"], { mode: "limb-path" }>,
+) {
+  const neutral = defaultLimbPathDeformForPart(part);
+  if (neutral.mode !== "limb-path") return null;
+  return {
+    ...deform,
+    width: deform.width ?? neutral.width,
+    segments: deform.segments ?? neutral.segments,
+  };
+}
+
+function constrainFlexibleCurvePatch({
+  path,
+  baseCurve,
+  desired,
+  override,
+}: {
+  path: Extract<CharacterPart["deform"], { mode: "limb-path" }>;
+  baseCurve: { x: number; y: number };
+  desired: { x: number; y: number };
+  override: RecorderPartState;
+}): Partial<RecorderPartState> {
+  const currentEnd = {
+    x: path.end.x + override.pathEndX,
+    y: path.end.y + override.pathEndY,
+  };
+  const axis = {
+    x: currentEnd.x - path.start.x,
+    y: currentEnd.y - path.start.y,
+  };
+  const length = Math.hypot(axis.x, axis.y);
+  if (length <= 0.001) {
+    return {
+      pathCurveX: round(desired.x - baseCurve.x, 1),
+      pathCurveY: round(desired.y - baseCurve.y, 1),
+    };
+  }
+  const ux = axis.x / length;
+  const uy = axis.y / length;
+  const nx = -uy;
+  const ny = ux;
+  const mid = {
+    x: path.start.x + axis.x * 0.5,
+    y: path.start.y + axis.y * 0.5,
+  };
+  const dx = desired.x - mid.x;
+  const dy = desired.y - mid.y;
+  const along = Math.max(-length * 0.24, Math.min(length * 0.24, dx * ux + dy * uy));
+  const maxCross = Math.max(12, Math.min(length * 0.72, Math.max(length * 0.38, path.width ?? 0)));
+  const cross = Math.max(-maxCross, Math.min(maxCross, dx * nx + dy * ny));
+  const constrained = {
+    x: mid.x + ux * along + nx * cross,
+    y: mid.y + uy * along + ny * cross,
+  };
+  return {
+    pathCurveX: round(constrained.x - baseCurve.x, 1),
+    pathCurveY: round(constrained.y - baseCurve.y, 1),
+  };
 }
 
 function editorTitle(category: MotionCategory) {
@@ -3583,4 +3746,17 @@ function roleLabel(role: PartRole) {
 function round(n: number, digits: number) {
   const k = Math.pow(10, digits);
   return Math.round(n * k) / k;
+}
+
+function scaleMagnitude(value: number) {
+  return round(Math.max(0.1, Math.abs(value || 1)), 2);
+}
+
+function signedScaleValue(current: number, magnitude: number) {
+  const sign = current < 0 ? -1 : 1;
+  return round(sign * Math.max(0.1, Math.abs(magnitude)), 2);
+}
+
+function toggleSignedScale(current: number) {
+  return round((current < 0 ? 1 : -1) * scaleMagnitude(current), 2);
 }

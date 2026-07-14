@@ -13,6 +13,7 @@ describe("MotionPresetRecorder source integration", () => {
     expect(source).toContain("mediaAssets,");
     expect(source).toContain("<RecorderPixiPreview");
     expect(source).toContain("<PixiCharacterPreview");
+    expect(source).toContain("reuseScene");
     expect(source).toContain("resolveAssetRef={resolveRecorderPreviewAssetRef}");
     expect(source).toContain("getMediaUrl(asset.id)");
     expect(source).toContain("const [playbackTime, setPlaybackTime]");
@@ -160,30 +161,75 @@ describe("MotionPresetRecorder source integration", () => {
     expect(source).toContain("poses: basePoses");
   });
 
-  it("can enable Flexible limb-path parts in place without exposing the old Bend slider", () => {
+  it("keeps Flexible mesh authoring out of the action editor", () => {
     const source = readFileSync(recorderPath, "utf8");
 
-    // When the selected part is eligible, the panel offers a Flexible toggle
-    // right here. It stays visible once enabled so it can also be turned back
-    // off. That is a structural character edit persisted through the scene
-    // command.
-    expect(source).toContain("roleSupportsBend(selectedSlot.role)");
-    expect(source).toContain("defaultLimbPathDeformForPart(selectedPart)");
-    expect(source).toContain('kind: "set-slot-deform"');
-    expect(source).toContain("onCharacterChange(result.character)");
-    expect(source).toContain("〰 Flexible");
-    // The toggle reflects current state and allows disabling, so it must not be
-    // gated on the part not-yet being flexible.
-    expect(source).toContain("checked={!!part?.deform}");
-    expect(source).toContain("onSetFlexible(e.target.checked)");
-    expect(source).toContain("onSetFlexible");
-    expect(source).not.toContain('label="Bend"');
+    // The action editor may animate an already-flexible limb, but structural
+    // mesh setup belongs to the character builder.
+    expect(source).not.toContain("roleSupportsBend(selectedSlot.role)");
+    expect(source).not.toContain("defaultFlexibleDeformForRecorderPart");
+    expect(source).toContain("function recorderActionLimbPathForPart");
+    expect(source).toContain("const neutral = defaultLimbPathDeformForPart(part)");
+    expect(source).toContain("...deform");
+    expect(source).toContain("width: deform.width ?? neutral.width");
+    expect(source).toContain("const flexibleActionPath");
+    expect(source).toContain("function constrainFlexibleCurvePatch");
+    expect(source).not.toContain("registrationForPart(part)");
+    expect(source).not.toContain('kind: "set-slot-deform"');
+    expect(source).not.toContain("onCharacterChange(result.character)");
+    expect(source).not.toContain("〰 Flexible");
+    expect(source).not.toContain("checked={!!part?.deform}");
+    expect(source).not.toContain("onSetFlexible");
+    expect(source).toContain('label="Bend"');
+    expect(source).toContain('label="Reach"');
+    expect(source).toContain("flexibleActionControlState");
+    expect(source).toContain("flexibleBendPatch");
+    expect(source).toContain("flexibleReachPatch");
+    expect(source).toContain("onReset={() => onChange({ pathCurveX: 0, pathCurveY: 0 })}");
+    expect(source).toContain("onReset={() => onChange({ pathEndX: 0, pathEndY: 0 })}");
     expect(source).not.toContain("MAX_BEND_DEGREES");
     expect(source).toContain("pathEndX");
     expect(source).toContain("pathCurveX");
+    expect(source).not.toContain("Mesh points");
+    expect(source).not.toContain("Add lock");
+    expect(source).not.toContain("Snap sockets");
+    expect(source).not.toContain("snapSelectedMeshToSockets");
+    expect(source).not.toContain("meshSetup");
+    expect(source).not.toContain("startMeshSetupPointDrag");
+    expect(source).not.toContain("locks: [...locks, nextLock]");
+    expect(source).not.toContain("onDeformChange");
     expect(source).toContain("startFlexiblePointDrag");
+    expect(source).toContain("onFlexiblePointChange");
+    expect(source).not.toContain("pinNameForChildSlot");
+    expect(source).not.toContain("flexibleEndpointDragRef");
+    expect(source).not.toContain("force: true");
+    expect(source).not.toContain(
+      "updateOverrides([{ slotId: selectedSlotId, patch }, ...followerUpdates])",
+    );
     expect(source).toContain("frame.inverseMatrix");
+    expect(source).toContain(
+      "const dragStartCanvas = transformPoint(frame.matrix, dragStartPoint)",
+    );
     expect(source).toContain("const livePreviewPreset = useMemo");
     expect(source).toContain("preset={livePreviewPreset}");
+    expect(source).toContain("Mirror");
+    expect(source).toContain("Flip");
+    expect(source).toContain("toggleSignedScale");
+    expect(source).toContain("signedScaleValue");
+  });
+
+  it("keeps action-editor selection boxes hidden while preserving canvas drag and rotate", () => {
+    const source = readFileSync(recorderPath, "utf8");
+
+    expect(source).not.toContain("RecorderSelectionBox");
+    expect(source).not.toContain("TransformMoveable");
+    expect(source).toContain("handlePlanePointerDown");
+    expect(source).toContain("slotsAtPoint(e.clientX, e.clientY)");
+    expect(source).toContain(
+      "const subjectId = resolveDragSubject(candidateIds, selectedSlotId) ?? selectedSlotId;",
+    );
+    expect(source).toContain("startRotationDrag");
+    expect(source).toContain("onPointerDown={startRotationDrag}");
+    expect(source).toContain("<RotateCw");
   });
 });

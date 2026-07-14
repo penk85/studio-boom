@@ -9,6 +9,7 @@ import type {
 import { localAlphaBounds } from "./alpha-bounds";
 import {
   anchorPartForVariant,
+  defaultLimbPathDeformForPart,
   pivotAlignedPartOffset,
   variantAliasesForPart,
   variantKeyForPart,
@@ -17,7 +18,9 @@ import {
   BEND_CROSS_VERTICES,
   DEFAULT_BEND_SEGMENTS,
   DEFAULT_LIMB_CROSS_VERTICES,
+  LIMB_PATH_RENDER_SEGMENTS,
   clampBendDegrees,
+  limbPathProjectPointT,
 } from "./mesh-deform";
 import { runtimeAncestorMotionTargets, runtimeMotionTargetForSlot } from "./motion-targets";
 import { registrationForPart, pinTransformInBoneSpace } from "./registration";
@@ -164,6 +167,14 @@ export interface CharacterSceneMeshNode extends CharacterSceneNodeBase {
   bend?: number;
   /** Point path (spine) for flexible limb/stretch rendering, part-local px. */
   pathPoints?: Array<{ x: number; y: number }>;
+  /** Normalized spine positions that stay fixed while the distal mesh segment moves. */
+  pathLockTs?: number[];
+  /** Child bone sockets that should ride along this deformed limb path. */
+  pathAttachments?: CharacterSceneMeshPathAttachment[];
+  /** Locked fold direction (+1 left-hand normal side, -1 opposite). */
+  pathBendSide?: number;
+  /** Authored joint (elbow/knee) position as t along the spine. */
+  pathJointT?: number;
   /** Ribbon cross width in part-local px (the visible limb's short dimension). */
   ropeWidth?: number;
   /** Columns across the ribbon (>=2). */
@@ -181,6 +192,11 @@ export interface CharacterSceneMeshNode extends CharacterSceneNodeBase {
   sourceWidth?: number;
   sourceHeight?: number;
   placement: CharacterScenePlacement;
+}
+
+export interface CharacterSceneMeshPathAttachment {
+  boneNodeId: string;
+  localPoint: { x: number; y: number };
 }
 
 export interface CharacterSceneVectorNode extends CharacterSceneNodeBase {
@@ -493,6 +509,8 @@ function addSlotSceneNodes(args: AddSlotSceneNodesArgs): void {
       bindingPresent: !!binding,
       scaleX,
       scaleY,
+      runtime,
+      boneNodeIds,
     });
     addNode(partNode);
     partNodeIds[part.id] = nodeId;
@@ -540,6 +558,8 @@ function buildPartNode(args: {
   bindingPresent: boolean;
   scaleX: number;
   scaleY: number;
+  runtime: CharacterRuntime;
+  boneNodeIds: Record<string, string>;
 }): CharacterSceneSpriteNode | CharacterSceneMeshNode | CharacterSceneVectorNode {
   const {
     nodeId,
@@ -553,6 +573,8 @@ function buildPartNode(args: {
     bindingPresent,
     scaleX,
     scaleY,
+    runtime,
+    boneNodeIds,
   } = args;
   const partRegistration = registrationForPart(part);
   const baseRegistration = registrationForPart(activePart);
@@ -613,12 +635,19 @@ function buildPartNode(args: {
     const alpha = localAlphaBounds(part);
     const w = Math.max(1, part.width);
     const h = Math.max(1, part.height);
+    const neutralDeform = defaultLimbPathDeformForPart(part);
+    const solveInputs = limbPathSolveInputsForPart(part);
+    const ropeWidth = neutralDeform.mode === "limb-path" ? neutralDeform.width : undefined;
     return {
       ...textured,
       kind: "mesh",
       meshKind: "rope",
-      pathPoints: limbPathPoints(part.deform),
-      ropeWidth: Math.max(1, part.deform.width ?? Math.min(alpha.width, alpha.height)),
+      pathPoints: solveInputs?.basePoints ?? [],
+      pathLockTs: solveInputs?.lockTs,
+      pathAttachments: limbPathAttachments(part, slot, runtime, boneNodeIds),
+      pathBendSide: solveInputs?.side,
+      pathJointT: solveInputs?.jointT,
+      ropeWidth: Math.max(1, ropeWidth ?? Math.min(alpha.width, alpha.height)),
       crossVertices: DEFAULT_LIMB_CROSS_VERTICES,
       // Map only the visible art across the ribbon so padding is not shown.
       uvRect: {
@@ -688,6 +717,112 @@ function limbPathPoints(deform: Extract<CharacterPart["deform"], { mode: "limb-p
     });
   }
   return points;
+}
+
+/**
+ * Everything the limb solver needs for a flexible part, derived the same way
+ * the scene build derives it: the neutral render spine (dense sampling), lock
+ * ts, fold side, and joint t. Editors use this to draw the SOLVED spine —
+ * what the runtime actually renders — instead of the raw control bezier.
+ */
+export function limbPathSolveInputsForPart(part: CharacterPart): {
+  /** The neutral render spine — what the runtime actually deforms. */
+  basePoints: Array<{ x: number; y: number }>;
+  /**
+   * The authored (possibly rig-fitted) control path at the same sampling
+   * density. Editors draw THIS displaced by the solved deformation, so the
+   * gizmo stays anchored to the user's rig alignment while bending exactly
+   * like the runtime.
+   */
+  authoredPoints: Array<{ x: number; y: number }>;
+  lockTs?: number[];
+  side?: number;
+  jointT?: number;
+} | null {
+  const deform = part.deform?.mode === "limb-path" ? part.deform : null;
+  if (!deform) return null;
+  const neutralDeform = defaultLimbPathDeformForPart(part);
+  if (neutralDeform.mode !== "limb-path") return null;
+  const controlPathPoints = limbPathPoints(deform);
+  const renderSegments = Math.max(
+    LIMB_PATH_RENDER_SEGMENTS,
+    Math.round(deform.segments ?? DEFAULT_BEND_SEGMENTS),
+  );
+  return {
+    basePoints: limbPathPoints({ ...neutralDeform, segments: renderSegments }),
+    authoredPoints: limbPathPoints({ ...deform, segments: renderSegments }),
+    lockTs: limbPathLockTs(deform, controlPathPoints),
+    side: limbPathBendSide(deform),
+    jointT: limbPathJointT(deform, controlPathPoints),
+  };
+}
+
+/**
+ * The fold direction for a limb: an explicit authored `side` wins; otherwise
+ * the authored curve control point implies the natural side (which side of
+ * the start→end chord it sits on, against the left-hand normal — matching the
+ * runtime solver's pole convention). Undefined leaves the side to the
+ * animated curve point, and end-only drags stay straight.
+ */
+export function limbPathBendSide(
+  deform: Extract<CharacterPart["deform"], { mode: "limb-path" }>,
+): number | undefined {
+  if (deform.side === 1 || deform.side === -1) return deform.side;
+  if (!deform.curve) return undefined;
+  const dx = deform.end.x - deform.start.x;
+  const dy = deform.end.y - deform.start.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 0.0001) return undefined;
+  const px = -dy / len;
+  const py = dx / len;
+  const midX = (deform.start.x + deform.end.x) / 2;
+  const midY = (deform.start.y + deform.end.y) / 2;
+  const dot = (deform.curve.x - midX) * px + (deform.curve.y - midY) * py;
+  // A curve point sitting on the chord carries no side information.
+  if (Math.abs(dot) < 1) return undefined;
+  return dot >= 0 ? 1 : -1;
+}
+
+/** Authored joint (elbow/knee) position projected onto the spine as t. */
+function limbPathJointT(
+  deform: Extract<CharacterPart["deform"], { mode: "limb-path" }>,
+  points: Array<{ x: number; y: number }>,
+): number | undefined {
+  if (!deform.joint || points.length < 2) return undefined;
+  const t = limbPathProjectPointT(points, deform.joint);
+  return t > 0.02 && t < 0.98 ? t : undefined;
+}
+
+function limbPathLockTs(
+  deform: Extract<CharacterPart["deform"], { mode: "limb-path" }>,
+  points: Array<{ x: number; y: number }>,
+) {
+  const locks = deform?.locks ?? [];
+  if (!locks.length || points.length < 2) return undefined;
+  const ts = locks
+    .map((lock) => limbPathProjectPointT(points, lock))
+    .filter((value) => value > 0.001 && value < 0.999)
+    .sort((a, b) => a - b);
+  return ts.length ? ts : undefined;
+}
+
+function limbPathAttachments(
+  part: CharacterPart,
+  slot: RuntimeCharacterSlot,
+  runtime: CharacterRuntime,
+  boneNodeIds: Record<string, string>,
+): CharacterSceneMeshPathAttachment[] | undefined {
+  const deform = part.deform?.mode === "limb-path" ? part.deform : null;
+  if (!deform) return undefined;
+  const attachments = runtime.angleRig.bones.flatMap((bone) => {
+    if (bone.restSource?.slotId !== slot.id) return [];
+    const boneNodeId = boneNodeIds[bone.id];
+    if (!boneNodeId) return [];
+    const pin = part.pins?.[bone.restSource.pinName];
+    const localPoint = pin ? { x: pin.x, y: pin.y } : deform.end;
+    return [{ boneNodeId, localPoint }];
+  });
+  return attachments.length ? attachments : undefined;
 }
 
 function buildBoneAnchorTracks(

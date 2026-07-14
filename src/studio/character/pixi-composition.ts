@@ -2,13 +2,8 @@ import { generateHyperframesHtml } from "@hyperframes/core";
 import type { CharacterClipMeta, CharacterPreset, MotionPreset } from "../types";
 import { validateCompositionSourceHtml } from "../hyperframes/composition-source";
 import { normalizeNativeHyperframesHtml } from "../hyperframes/native";
-import {
-  MAX_BEND_DEGREES,
-  bendPlanePositions,
-  limbRibbonIndices,
-  limbRibbonPositions,
-  limbRibbonUVs,
-} from "./mesh-deform";
+import { MAX_BEND_DEGREES, bendPlanePositions } from "./mesh-deform";
+import { createLimbRuntime } from "./limb-runtime";
 import type { CharacterSceneGraph } from "./scene";
 import type { CharacterTimelineScene } from "./timeline-scene";
 
@@ -205,7 +200,8 @@ function appendPixiCharacterScript(
   );
   // Mesh support is emitted only when the scene actually contains flexible
   // (deform) parts, so default characters stay mesh-free end to end. The
-  // plane-bend runtime is legacy-only; new limb-path parts render as MeshRope.
+  // plane-bend runtime is legacy-only; new limb-path parts render as a
+  // seek-updated MeshSimple ribbon while retaining the semantic "rope" node kind.
   const meshRuntime = hasPlaneMesh
     ? `
   // Shared bend math, embedded from mesh-deform.ts (locked by mesh-deform.test.ts).
@@ -236,30 +232,10 @@ function appendPixiCharacterScript(
     : "";
   const ropeRuntime = hasRopeMesh
     ? `
-  // Ribbon geometry math, embedded from mesh-deform.ts (locked by mesh-deform.test.ts).
-  const limbRibbonPositions = ${limbRibbonPositions.toString()};
-  const limbRibbonUVs = ${limbRibbonUVs.toString()};
-  const limbRibbonIndices = ${limbRibbonIndices.toString()};
-  const clonePathPoints = function(points) {
-    const source = points && points.length >= 2 ? points : [{ x: 0, y: 0 }, { x: 1, y: 0 }];
-    return source.map(function(point) { return { x: point.x, y: point.y }; });
-  };
-  const applyRopePathOffsets = function(ctx) {
-    (ctx.ropeEntries || []).forEach(function(entry) {
-      const count = entry.basePathPoints.length;
-      if (count === 0) return;
-      const denom = Math.max(1, count - 1);
-      for (let i = 0; i < count; i += 1) {
-        const t = i / denom;
-        const curveWeight = 4 * t * (1 - t);
-        const base = entry.basePathPoints[i];
-        entry.scratchPath[i].x = base.x + entry.pathEndX * t + entry.pathCurveX * curveWeight;
-        entry.scratchPath[i].y = base.y + entry.pathEndY * t + entry.pathCurveY * curveWeight;
-      }
-      limbRibbonPositions(entry.scratchPath, entry.width, entry.crossVertices, entry.positions);
-      entry.mesh.vertices = entry.positions;
-    });
-  };`
+  // Shared limb runtime, embedded verbatim from limb-runtime.ts. The factory
+  // closure is self-contained, so the same source drives the editor preview
+  // (module import) and this composition (locked by mesh-deform.test.ts).
+  const limb = (${createLimbRuntime.toString()})();`
     : "";
   script.textContent = `(function(){
   const S = ${payload};
@@ -308,28 +284,9 @@ function appendPixiCharacterScript(
       ? `
     if (node.kind === "mesh" && node.meshKind === "rope" && PIXI.MeshSimple) {
       try {
-        const basePathPoints = clonePathPoints(node.pathPoints);
-        const rows = basePathPoints.length;
-        const crossVertices = Math.max(2, node.crossVertices || 2);
-        const width = node.ropeWidth || Math.min(texture.width || 1, texture.height || 1);
-        const uvRect = node.uvRect || { u0: 0, v0: 0, u1: 1, v1: 1 };
-        const positions = limbRibbonPositions(basePathPoints, width, crossVertices);
-        // A textured ribbon (MeshSimple) preserves the full limb art along the
-        // spine; MeshRope pancakes it (texture height crushed into the width).
-        const mesh = new PIXI.MeshSimple({
-          texture: texture,
-          vertices: positions,
-          uvs: limbRibbonUVs(rows, crossVertices, uvRect, node.ribbonVertical !== false),
-          indices: limbRibbonIndices(rows, crossVertices)
-        });
-        mesh.__ribbon = {
-          basePathPoints: basePathPoints,
-          width: width,
-          crossVertices: crossVertices,
-          positions: positions,
-          scratchPath: basePathPoints.map(function(point) { return { x: point.x, y: point.y }; })
-        };
-        return mesh;
+        const built = limb.buildRopeRibbon({ MeshSimple: PIXI.MeshSimple, texture: texture, node: node });
+        built.mesh.__ribbonEntry = built.entry;
+        return built.mesh;
       } catch (error) {
         if (typeof console !== "undefined" && console.warn) {
           console.warn("Falling back to Sprite for flexible limb mesh character part " + (node.partId || node.id), error);
@@ -368,12 +325,7 @@ function appendPixiCharacterScript(
   }${
     hasRopeMesh
       ? `
-    (ctx.ropeEntries || []).forEach(function(entry) {
-      entry.pathEndX = 0;
-      entry.pathEndY = 0;
-      entry.pathCurveX = 0;
-      entry.pathCurveY = 0;
-    });`
+    limb.resetRopeEntries(ctx.ropeEntries);`
       : ""
   }
     Object.keys(S.scene.nodes).forEach(function(nodeId) {
@@ -509,7 +461,8 @@ function appendPixiCharacterScript(
     applyTargetVars(ctx, targetVarsAt(t));${
       hasRopeMesh
         ? `
-    applyRopePathOffsets(ctx);`
+    limb.applyRopePathOffsets(ctx.ropeEntries);
+    limb.applyRopePathAttachments(ctx.ropeEntries, ctx.nodes);`
         : ""
     }${
       hasPlaneMesh
@@ -597,7 +550,9 @@ function appendPixiCharacterScript(
       height: S.scene.output.height,
       backgroundAlpha: 0,
       antialias: true,
-      autoStart: false
+      autoStart: false,
+      autoDensity: true,
+      resolution: (typeof window !== "undefined" && window.devicePixelRatio) || 1
     });
     app.ticker.stop();
     root.textContent = "";
@@ -612,7 +567,8 @@ function appendPixiCharacterScript(
       try {
         textures[asset.id] = await PIXI.Assets.load({
           src: asset.ref,
-          parser: asset.parser || "texture"
+          parser: asset.parser || "texture",
+          data: asset.parser === "svg" ? { resolution: 2 } : { autoGenerateMipmaps: true }
         });
       } catch (error) {
         throw new Error(
@@ -644,20 +600,8 @@ function appendPixiCharacterScript(
         nodes[nodeId].addChild(leaf);${
           hasRopeMesh
             ? `
-        if (node.kind === "mesh" && node.meshKind === "rope" && leaf && leaf.__ribbon) {
-          ropeEntries.push({
-            mesh: leaf,
-            node: node,
-            basePathPoints: leaf.__ribbon.basePathPoints,
-            width: leaf.__ribbon.width,
-            crossVertices: leaf.__ribbon.crossVertices,
-            positions: leaf.__ribbon.positions,
-            scratchPath: leaf.__ribbon.scratchPath,
-            pathEndX: 0,
-            pathEndY: 0,
-            pathCurveX: 0,
-            pathCurveY: 0
-          });
+        if (node.kind === "mesh" && node.meshKind === "rope" && leaf && leaf.__ribbonEntry) {
+          ropeEntries.push(leaf.__ribbonEntry);
         }`
             : ""
         }${

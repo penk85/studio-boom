@@ -45,11 +45,21 @@ describe("CharacterEditor source integration", () => {
     // The part transform box and the group box both overlay the selected art and
     // would swallow the pivot / bounds placement click; they render only in
     // select mode so `handleCanvasPointerDown` can position the tool.
-    expect(source).toContain('selectedEditorPart && !focusEditing && mode === "select" && (');
+    expect(source).toContain(
+      'selectedEditorPart && !focusEditing && !meshPathEditing && mode === "select" && (',
+    );
     // The group box is gated on select mode between its selectedSlotBounds test and render.
-    expect(source).toMatch(/selectedSlotBounds &&[\s\S]{0,240}?mode === "select" &&[\s\S]{0,120}?GroupControlsOverlay/);
+    expect(source).toMatch(
+      /selectedSlotBounds &&[\s\S]{0,520}?mode === "select" &&[\s\S]{0,120}?GroupControlsOverlay/,
+    );
+    // Bone / anchor handles are also descendants of the canvas; the capture handler gives armed
+    // one-shot tools first claim on the click before those handles can stop propagation.
+    expect(source).toContain("const handleCanvasPointerDownCapture");
+    expect(source).toContain("onPointerDownCapture={handleCanvasPointerDownCapture}");
+    expect(source).toContain('{showBones && !focusEditing && mode === "select" && (');
+    expect(source).toContain('{showAnchors && !focusEditing && mode === "select" && (');
     // And the armed-tool click path actually places the pivot / bounds.
-    expect(source).toContain("if (mode === \"pivot\") setPivotForParts(ids, point);");
+    expect(source).toContain('if (mode === "pivot") setPivotForParts(ids, point);');
   });
 
   it("keeps the effortless layer wired", () => {
@@ -124,6 +134,17 @@ describe("CharacterEditor source integration", () => {
     expect(source).toContain('kind: "set-slot-deform"');
     expect(source).not.toContain("getPartSlotId(part) === slotId ? { ...part, deform } : part");
     expect(source).toContain("defaultLimbPathDeformForPart");
+    expect(source).toContain("defaultLimbPathDeformForSlot");
+    expect(source).toContain("Reset to artwork");
+    expect(source).toContain("Fit mesh to rig");
+    expect(source).toContain("const neutralDeform");
+    expect(source).toContain("const fittedDeform");
+    expect(source).toContain("const selectedDeformPathPart");
+    expect(source).toContain("function DeformPathOverlay");
+    expect(source).toContain("function deformPathSamples");
+    expect(source).toContain("onSetDeform(e.target.checked ? neutralDeform() : undefined)");
+    expect(source).toContain("onClick={() => onSetDeform(neutralDeform())}");
+    expect(source).toContain("onClick={() => onSetDeform(fittedDeform())}");
     expect(source).not.toContain("function FlexiblePathOverlay");
     expect(source).not.toContain("startFlexiblePathDrag");
     expect(source).not.toContain("onDeformEditStart");

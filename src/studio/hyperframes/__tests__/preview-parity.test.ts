@@ -469,7 +469,8 @@ describe("preview ↔ export file parity", () => {
     // The mesh runtime ships inside the canonical composition source with the
     // full local Pixi bundle (which includes the mesh render pipe) and a
     // rigid-sprite fallback, so capture cannot fail on a missing pipe.
-    expect(composition).toContain("new PIXI.MeshSimple");
+    expect(composition).toContain("MeshSimple: PIXI.MeshSimple");
+    expect(composition).toContain("buildRopeRibbon");
     expect(composition).not.toContain("new PIXI.MeshRope");
     expect(composition).toContain('node.meshKind === "rope"');
     expect(composition).toContain("applyRopePathOffsets");

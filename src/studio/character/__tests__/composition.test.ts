@@ -150,6 +150,7 @@ interface PayloadSceneNode {
   bendAnchor?: string;
   bend?: number;
   pathPoints?: Array<{ x: number; y: number }>;
+  pathLockTs?: number[];
   ropeWidth?: number;
   frame: {
     x: number;
@@ -392,12 +393,18 @@ describe("buildCharacterCompositionHtml", () => {
     const bodyMotionTargets = payload.timelineScene.motionSegments.flatMap((segment) =>
       segment.targets.filter((target) => target.sceneNodeId?.includes("role:body")),
     );
+    const bodyMotionSegments = payload.timelineScene.motionSegments.filter((segment) =>
+      segment.targets.some((target) => target.sceneNodeId?.includes("role:body")),
+    );
     const mouthVariantEvent = payload.timelineScene.slotEvents.find(
       (event) => event.slotId === "role:mouth" && event.key === "raspberry",
     );
 
     expect(bodyMotionTargets.some((target) => Number(target.vars.x) > 0)).toBe(true);
     expect(bodyMotionTargets.every((target) => target.sceneNodeId)).toBe(true);
+    expect(Math.max(...bodyMotionSegments.map((segment) => segment.duration))).toBeLessThanOrEqual(
+      0.034,
+    );
     expect(
       mouthVariantEvent?.variant?.showSceneNodeIds?.some((id) => id.includes("raspberry")),
     ).toBe(true);
@@ -458,6 +465,7 @@ describe("buildCharacterCompositionHtml", () => {
               deform: {
                 mode: "limb-path" as const,
                 start: { x: 110, y: 20 },
+                locks: [{ x: 130, y: 185 }],
                 end: { x: 110, y: 360 },
                 curve: { x: 150, y: 180 },
                 width: 180,
@@ -492,7 +500,9 @@ describe("buildCharacterCompositionHtml", () => {
     // The generated source renders the limb as a textured MeshSimple ribbon
     // (a MeshRope would pancake the art) plus a rigid-sprite fallback so
     // capture environments without the mesh pipe cannot fail.
-    expect(html).toContain("new PIXI.MeshSimple");
+    expect(html).toContain("MeshSimple: PIXI.MeshSimple");
+    expect(html).toContain("buildRopeRibbon");
+    expect(html).toContain("createLimbRuntime");
     expect(html).not.toContain("new PIXI.MeshRope");
     expect(html).toContain('node.meshKind === "rope"');
     expect(html).toContain("applyRopePathOffsets");
@@ -500,6 +510,13 @@ describe("buildCharacterCompositionHtml", () => {
     // The ribbon follows the spine and rebuilds its full vertex grid per seek.
     expect(html).toContain("limbRibbonPositions");
     expect(html).toContain("limbRibbonUVs");
+    expect(html).toContain("limbPathBendPoints");
+    expect(html).toContain("limbPathLockFloor");
+    expect(html).toContain("limbPathProjectPointT");
+    expect(html).toContain("basePoints: entry.basePathPoints");
+    expect(html).toContain("applyRopePathAttachments");
+    expect(html).toContain("lockTs: node.pathLockTs");
+    expect(html).toContain("pathAttachments: node.pathAttachments");
     expect(html).toContain("entry.mesh.vertices = entry.positions");
     // Rope frames scale by the part's source size, not the texture's size.
     expect(html).toContain("texturedFrameSize");
@@ -515,11 +532,14 @@ describe("buildCharacterCompositionHtml", () => {
     expect(meshNode).toMatchObject({
       meshKind: "rope",
       partId: "body-idle",
-      ropeWidth: 180,
+      ropeWidth: 220,
       sourceWidth: 220,
       sourceHeight: 360,
     });
-    expect(meshNode?.pathPoints?.length).toBe(7);
+    // Render sampling is decoupled from the authored `segments` so bent
+    // silhouettes stay smooth.
+    expect(meshNode?.pathPoints?.length).toBe(33);
+    expect(meshNode?.pathLockTs).toHaveLength(1);
   });
 
   it("marks SVG character media with the Pixi SVG asset parser", () => {

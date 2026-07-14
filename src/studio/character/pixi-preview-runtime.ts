@@ -9,13 +9,8 @@ import {
   type PlaneGeometry,
   type Texture,
 } from "pixi.js";
-import {
-  bendPlanePositions,
-  clampBendDegrees,
-  limbRibbonIndices,
-  limbRibbonPositions,
-  limbRibbonUVs,
-} from "./mesh-deform";
+import { bendPlanePositions, clampBendDegrees } from "./mesh-deform";
+import { createLimbRuntime, type LimbRopeEntry } from "./limb-runtime";
 import type {
   CharacterSceneAsset,
   CharacterSceneGraph,
@@ -37,6 +32,7 @@ export interface PixiCharacterPreviewOptions {
 
 export interface PixiCharacterPreviewController {
   renderAt(time: number): void;
+  updateTimelineScene(timelineScene: CharacterTimelineScene): void;
   destroy(): void;
 }
 
@@ -47,19 +43,10 @@ interface BendableMeshEntry {
   bendDelta: number;
 }
 
-interface RopeMeshEntry {
-  mesh: MeshSimple;
-  node: CharacterSceneMeshNode;
-  basePathPoints: Array<{ x: number; y: number }>;
-  width: number;
-  crossVertices: number;
-  positions: Float32Array;
-  scratchPath: Array<{ x: number; y: number }>;
-  pathEndX: number;
-  pathEndY: number;
-  pathCurveX: number;
-  pathCurveY: number;
-}
+/** Shared limb runtime instance; the composition script embeds the same factory. */
+const limb = createLimbRuntime();
+
+type RopeMeshEntry = LimbRopeEntry<MeshSimple, CharacterSceneMeshNode>;
 
 interface PixiCharacterPreviewContext {
   app: Application;
@@ -79,50 +66,67 @@ export async function createPixiCharacterPreview(
   options: PixiCharacterPreviewOptions = {},
 ): Promise<PixiCharacterPreviewController> {
   const app = new Application();
-  await app.init({
-    width: payload.scene.output.width,
-    height: payload.scene.output.height,
-    backgroundAlpha: 0,
-    antialias: true,
-    autoStart: false,
-    autoDensity: true,
-    resolution: typeof window === "undefined" ? 1 : window.devicePixelRatio || 1,
-  });
-  app.ticker.stop();
-  app.stage.sortableChildren = true;
-  app.stage.label = "character-scene-root";
-  app.canvas.style.display = "block";
-  app.canvas.style.width = "100%";
-  app.canvas.style.height = "100%";
+  let initialized = false;
+  try {
+    await app.init({
+      width: payload.scene.output.width,
+      height: payload.scene.output.height,
+      backgroundAlpha: 0,
+      antialias: true,
+      autoStart: false,
+      autoDensity: true,
+      resolution: typeof window === "undefined" ? 1 : window.devicePixelRatio || 1,
+    });
+    initialized = true;
+    app.ticker.stop();
+    app.stage.sortableChildren = true;
+    app.stage.label = "character-scene-root";
+    app.canvas.style.display = "block";
+    app.canvas.style.width = "100%";
+    app.canvas.style.height = "100%";
 
-  const textures = await loadPreviewTextures(payload.scene, options.resolveAssetRef);
-  const { nodes, meshEntries, meshEntriesByNodeId, ropeEntries, ropeEntriesByNodeId } =
-    buildPixiScene(app, payload.scene, textures);
-  const ctx: PixiCharacterPreviewContext = {
-    app,
-    scene: payload.scene,
-    nodes,
-    textures,
-    meshEntries,
-    meshEntriesByNodeId,
-    ropeEntries,
-    ropeEntriesByNodeId,
-  };
-  renderPixiCharacterAt(ctx, payload.timelineScene, options.initialTime ?? 0);
-  host.appendChild(app.canvas);
+    const textures = await loadPreviewTextures(payload.scene, options.resolveAssetRef);
+    const { nodes, meshEntries, meshEntriesByNodeId, ropeEntries, ropeEntriesByNodeId } =
+      buildPixiScene(app, payload.scene, textures);
+    const ctx: PixiCharacterPreviewContext = {
+      app,
+      scene: payload.scene,
+      nodes,
+      textures,
+      meshEntries,
+      meshEntriesByNodeId,
+      ropeEntries,
+      ropeEntriesByNodeId,
+    };
+    let timelineScene = payload.timelineScene;
+    let currentTime = options.initialTime ?? 0;
+    renderPixiCharacterAt(ctx, timelineScene, currentTime);
+    host.appendChild(app.canvas);
 
-  let destroyed = false;
-  return {
-    renderAt(time: number) {
-      if (destroyed) return;
-      renderPixiCharacterAt(ctx, payload.timelineScene, time);
-    },
-    destroy() {
-      if (destroyed) return;
-      destroyed = true;
+    let destroyed = false;
+    return {
+      renderAt(time: number) {
+        if (destroyed) return;
+        currentTime = time;
+        renderPixiCharacterAt(ctx, timelineScene, currentTime);
+      },
+      updateTimelineScene(nextTimelineScene: CharacterTimelineScene) {
+        if (destroyed) return;
+        timelineScene = nextTimelineScene;
+        renderPixiCharacterAt(ctx, timelineScene, currentTime);
+      },
+      destroy() {
+        if (destroyed) return;
+        destroyed = true;
+        app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true });
+      },
+    };
+  } catch (error) {
+    if (initialized) {
       app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true });
-    },
-  };
+    }
+    throw error;
+  }
 }
 
 async function loadPreviewTextures(
@@ -138,6 +142,9 @@ async function loadPreviewTextures(
         textures[asset.id] = await Assets.load<Texture>({
           src: resolved,
           parser: asset.parser || "texture",
+          // SVG parts rasterize at 2x so bends and zoom stay crisp; bitmap
+          // parts get mipmaps so minified sampling doesn't alias.
+          data: asset.parser === "svg" ? { resolution: 2 } : { autoGenerateMipmaps: true },
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -215,38 +222,10 @@ function createPixiNode(
     // both leaf kinds; a mesh leaf only adds vertex-level bending inside it.
     if (node.kind === "mesh" && node.meshKind === "rope") {
       try {
-        const basePathPoints = copyPathPoints(node.pathPoints);
-        const rows = basePathPoints.length;
-        const crossVertices = Math.max(2, node.crossVertices ?? 2);
-        const width = node.ropeWidth ?? Math.min(texture.width || 1, texture.height || 1);
-        const uvRect = node.uvRect ?? { u0: 0, v0: 0, u1: 1, v1: 1 };
-        const positions = limbRibbonPositions(basePathPoints, width, crossVertices);
-        // A textured ribbon (MeshSimple) preserves the full limb art along the
-        // spine; a MeshRope pancakes it (texture height crushed into the width).
-        const mesh = new MeshSimple({
-          texture,
-          vertices: positions,
-          uvs: limbRibbonUVs(rows, crossVertices, uvRect, node.ribbonVertical !== false),
-          indices: limbRibbonIndices(rows, crossVertices),
-        });
-        mesh.label = `${node.id}:${node.kind}`;
-        container.addChild(mesh);
-        return {
-          container,
-          ropeEntry: {
-            mesh,
-            node,
-            basePathPoints,
-            width,
-            crossVertices,
-            positions,
-            scratchPath: basePathPoints.map((point) => ({ x: point.x, y: point.y })),
-            pathEndX: 0,
-            pathEndY: 0,
-            pathCurveX: 0,
-            pathCurveY: 0,
-          },
-        };
+        const built = limb.buildRopeRibbon({ MeshSimple, texture, node });
+        built.mesh.label = `${node.id}:${node.kind}`;
+        container.addChild(built.mesh);
+        return { container, ropeEntry: built.entry };
       } catch (error) {
         console.warn(
           "Falling back to Sprite for flexible limb mesh character part",
@@ -295,39 +274,10 @@ export function renderPixiCharacterAt(
   applyBaseScene(ctx);
   latestEventsAt(timelineScene, t).forEach((event) => applySlotEvent(ctx, event));
   applyTargetVars(ctx, targetVarsAt(timelineScene, t));
-  applyRopePathOffsets(ctx);
+  limb.applyRopePathOffsets(ctx.ropeEntries);
+  limb.applyRopePathAttachments(ctx.ropeEntries, ctx.nodes);
   applyMeshBends(ctx);
   ctx.app.render();
-}
-
-function copyPathPoints(points?: Array<{ x: number; y: number }>): Array<{ x: number; y: number }> {
-  const source =
-    points && points.length >= 2
-      ? points
-      : [
-          { x: 0, y: 0 },
-          { x: 1, y: 0 },
-        ];
-  return source.map((point) => ({ x: point.x, y: point.y }));
-}
-
-function applyRopePathOffsets(ctx: PixiCharacterPreviewContext): void {
-  for (const entry of ctx.ropeEntries) {
-    const count = entry.basePathPoints.length;
-    if (count === 0) continue;
-    const denom = Math.max(1, count - 1);
-    // Rebuild the animated spine (base path + end/curve offsets), then rebuild
-    // the ribbon geometry so the full limb art follows the curve.
-    for (let i = 0; i < count; i += 1) {
-      const t = i / denom;
-      const curveWeight = 4 * t * (1 - t);
-      const base = entry.basePathPoints[i];
-      entry.scratchPath[i].x = base.x + entry.pathEndX * t + entry.pathCurveX * curveWeight;
-      entry.scratchPath[i].y = base.y + entry.pathEndY * t + entry.pathCurveY * curveWeight;
-    }
-    limbRibbonPositions(entry.scratchPath, entry.width, entry.crossVertices, entry.positions);
-    entry.mesh.vertices = entry.positions;
-  }
 }
 
 function applyMeshBends(ctx: PixiCharacterPreviewContext): void {
@@ -353,12 +303,7 @@ function applyMeshBends(ctx: PixiCharacterPreviewContext): void {
 
 function applyBaseScene(ctx: PixiCharacterPreviewContext): void {
   for (const entry of ctx.meshEntries) entry.bendDelta = 0;
-  for (const entry of ctx.ropeEntries) {
-    entry.pathEndX = 0;
-    entry.pathEndY = 0;
-    entry.pathCurveX = 0;
-    entry.pathCurveY = 0;
-  }
+  limb.resetRopeEntries(ctx.ropeEntries);
   Object.keys(ctx.nodes).forEach((nodeId) => {
     const node = ctx.scene.nodes[nodeId];
     const displayObject = ctx.nodes[nodeId];

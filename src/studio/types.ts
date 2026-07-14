@@ -304,9 +304,9 @@ export interface CharacterPart {
   motionBehavior?: PartMotionBehavior;
   morph?: SvgMorphMetadata;
   /**
-   * Flexible-part deformation. A part with `deform` renders as a Pixi mesh in
-   * the character composition so limb-like art can follow an authored path
-   * instead of rotating as a rigid card. Undefined = rigid sprite.
+   * Flexible-part deformation controls. A part with `deform` can render as a
+   * neutral Pixi mesh and receive action-editor path offsets; the authored path
+   * itself is alignment metadata and must not reshape artwork at rest.
    */
   deform?: CharacterPartDeform;
   zIndex: number;
@@ -332,9 +332,26 @@ export interface CharacterPartLimbPathDeform {
    */
   mode: "limb-path";
   start: CharacterPartDeformPoint;
+  /** Additional fixed points along the limb spine. Points before the last lock stay attached. */
+  locks?: CharacterPartDeformPoint[];
   end: CharacterPartDeformPoint;
   curve?: CharacterPartDeformPoint;
-  /** Visual thickness of the rope mesh in part-local source pixels. */
+  /**
+   * Where the limb bends (elbow/knee), as a point on/near the spine in
+   * part-local source pixels. Defaults to midway along the free path.
+   */
+  joint?: CharacterPartDeformPoint;
+  /**
+   * Locked bend direction: 1 folds toward the spine's left-hand normal, -1
+   * the other way. When unset, the side follows the animated curve point
+   * (and end-only drags cannot fold). Prevents joints flipping backwards.
+   */
+  side?: 1 | -1;
+  /**
+   * Reference thickness for editor guides and curve constraints. Rendered rest
+   * thickness comes from visible alpha bounds so enabling Flexible never
+   * reshapes the original artwork before an action moves it.
+   */
   width?: number;
   /** Number of sampled path points. More = smoother curve. Default 12. */
   segments?: number;

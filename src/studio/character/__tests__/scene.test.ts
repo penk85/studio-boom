@@ -103,7 +103,7 @@ describe("buildCharacterScene", () => {
     expect(handBone.frame.rotation).toBeCloseTo(handBone.variantAnchors!.anchors.bent.rotation);
   });
 
-  it("emits a rope path mesh node for flexible limb-path parts", () => {
+  it("emits a neutral rope mesh while keeping flexible limb-path controls authored", () => {
     const character = makeVariantArmCharacter();
     character.parts = character.parts.map((part) =>
       part.id === "arm-straight"
@@ -112,6 +112,7 @@ describe("buildCharacterScene", () => {
             deform: {
               mode: "limb-path" as const,
               start: { x: 10, y: 10 },
+              locks: [{ x: 10, y: 95 }],
               end: { x: 10, y: 180 },
               width: 60,
               segments: 8,
@@ -125,9 +126,19 @@ describe("buildCharacterScene", () => {
     const straightArm = scene.nodes[armSlot.variantNodeIds.straight[0]] as CharacterSceneMeshNode;
     expect(straightArm.kind).toBe("mesh");
     expect(straightArm.meshKind).toBe("rope");
-    expect(straightArm.pathPoints).toHaveLength(9);
-    expect(straightArm.pathPoints?.[0]).toEqual({ x: 10, y: 10 });
-    expect(straightArm.pathPoints?.[8]).toEqual({ x: 10, y: 180 });
+    // Render sampling is decoupled from the authored `segments`: joints need
+    // dense spine sampling or the bent silhouette scallops.
+    expect(straightArm.pathPoints).toHaveLength(33);
+    // The stored deform path is an alignment/control path. The visible mesh
+    // starts from the artwork's own neutral alpha spine so setup never rotates
+    // or reshapes the limb at rest.
+    expect(straightArm.pathPoints?.[0]).toEqual({ x: 30, y: 0 });
+    expect(straightArm.pathPoints?.[32]).toEqual({ x: 30, y: 180 });
+    expect(straightArm.pathLockTs?.[0]).toBeCloseTo(0.5, 5);
+    expect(straightArm.pathAttachments?.[0]).toEqual({
+      boneNodeId: scene.boneNodeIds["bone:slot:right-hand"],
+      localPoint: { x: 20, y: 185 },
+    });
     expect(straightArm.ropeWidth).toBe(60);
     // Rope geometry is in part-local px, so it carries the part's authoring
     // size for the runtime to scale by (not the texture's intrinsic size).
@@ -141,5 +152,61 @@ describe("buildCharacterScene", () => {
     expect(scene.assets.find((asset) => asset.id === "arm-straight-media")).toMatchObject({
       partIds: ["arm-straight"],
     });
+  });
+
+  it("threads the fold side and joint position onto the rope node", () => {
+    const character = makeVariantArmCharacter();
+    character.parts = character.parts.map((part) =>
+      part.id === "arm-straight"
+        ? {
+            ...part,
+            deform: {
+              mode: "limb-path" as const,
+              start: { x: 10, y: 10 },
+              end: { x: 10, y: 180 },
+              // Curve sits toward -x of the vertical chord: left-hand normal
+              // for a downward chord is -x, so the derived side is +1.
+              curve: { x: -30, y: 95 },
+              joint: { x: 10, y: 52.5 },
+              width: 60,
+              segments: 8,
+            },
+          }
+        : part,
+    );
+    const scene = buildCharacterScene({ character, width: 300, height: 450 });
+
+    const armSlot = scene.nodes[scene.slotNodeIds["slot:right-arm"]] as CharacterSceneSlotNode;
+    const straightArm = scene.nodes[armSlot.variantNodeIds.straight[0]] as CharacterSceneMeshNode;
+    expect(straightArm.pathBendSide).toBe(1);
+    // Joint authored a quarter of the way down the authored path (10→180);
+    // the authored curve bulges the control path, shifting arc-length t a bit.
+    expect(straightArm.pathJointT).toBeCloseTo(0.25, 1);
+
+    // An explicit side wins over the curve-derived one.
+    const flipped = makeVariantArmCharacter();
+    flipped.parts = flipped.parts.map((part) =>
+      part.id === "arm-straight"
+        ? {
+            ...part,
+            deform: {
+              mode: "limb-path" as const,
+              start: { x: 10, y: 10 },
+              end: { x: 10, y: 180 },
+              curve: { x: -30, y: 95 },
+              side: -1 as const,
+              width: 60,
+            },
+          }
+        : part,
+    );
+    const flippedScene = buildCharacterScene({ character: flipped, width: 300, height: 450 });
+    const flippedSlot = flippedScene.nodes[
+      flippedScene.slotNodeIds["slot:right-arm"]
+    ] as CharacterSceneSlotNode;
+    const flippedArm = flippedScene.nodes[
+      flippedSlot.variantNodeIds.straight[0]
+    ] as CharacterSceneMeshNode;
+    expect(flippedArm.pathBendSide).toBe(-1);
   });
 });
