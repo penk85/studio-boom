@@ -3,7 +3,7 @@
 import { create } from "zustand";
 import { removeElementFromHtml } from "@hyperframes/core";
 import type { TimelineElement } from "@hyperframes/core";
-import { db, deleteMediaIfUnused, isCurrentProjectShape, uid } from "./db";
+import { db, deleteMediaIfUnused, requireCurrentProjectShape, uid } from "./db";
 import type {
   AnyClip,
   CharacterClipMeta,
@@ -518,7 +518,7 @@ function assertValidCompositionSourceHtml(
   },
   options: { expectedCompositionId?: string } = {},
 ): ValidCompositionSource {
-  const result = validateCompositionSourceHtml(html, defaults);
+  const result = validateCompositionSourceHtml(html, { ...defaults, isSubComposition: true });
   const errors = [...result.errors];
   const compositionId = result.compositionId ?? defaults.compositionId;
 
@@ -1066,6 +1066,19 @@ export interface ProjectMutationOptions {
   history?: boolean;
 }
 
+/** Whether a generic clip patch changes inputs embedded in a character sub-composition. */
+export function characterCompositionPatchRequiresRebuild(patch: Partial<AnyClip>): boolean {
+  return (
+    "character" in patch ||
+    "compositionId" in patch ||
+    "compositionKind" in patch ||
+    patch.kind !== undefined ||
+    patch.duration !== undefined ||
+    patch.width !== undefined ||
+    patch.height !== undefined
+  );
+}
+
 export type SaveStatus = "saved" | "saving" | "error";
 
 export type ClipKeyframeValuePatch = ClipKeyframeDisplayValues & {
@@ -1086,6 +1099,7 @@ interface StudioState {
   /** The full multi-selection set (marquee / shift-click). Always contains selectedClipId when non-empty. */
   selectedClipIds: string[];
   selectedKeyframe: ClipKeyframeSelection | null;
+  activeSceneId: string | null;
   /** Speech selected inside the character Speech inspector tab. */
   selectedSpeechId: string | null;
   /** Bumped to request the inspector jump to the Speech tab (e.g. from the timeline). */
@@ -1141,7 +1155,12 @@ interface StudioState {
     options?: ProjectMutationOptions,
   ) => void;
   /** Set a speech's playback volume (0–1). */
-  setSpeechVolume: (clipId: string, speechId: string, volume: number) => void;
+  setSpeechVolume: (
+    clipId: string,
+    speechId: string,
+    volume: number,
+    options?: ProjectMutationOptions,
+  ) => void;
   /** Trim a speech: in-point (`mediaStartTime`), trimmed `duration`, and/or `start`,
    *  bounded by the source audio length and the host clip. */
   trimSpeech: (
@@ -1357,13 +1376,8 @@ export const useStudio = create<StudioState>((set, get) => ({
 
   async loadProject(id) {
     const storedProject = (await db.projects.get(id)) as unknown;
-    if (!storedProject) return;
-    if (!isCurrentProjectShape(storedProject)) {
-      await db.projects.delete(id);
-      await db.projectThumbnails.delete(id);
-      await get().newProject();
-      return;
-    }
+    if (!storedProject) throw new Error(`Project "${id}" was not found.`);
+    const currentProject = requireCurrentProjectShape(storedProject, id);
 
     const [allCharacters, allPresets, allMedia] = await Promise.all([
       db.characters.toArray(),
@@ -1375,12 +1389,12 @@ export const useStudio = create<StudioState>((set, get) => ({
     const mediaAssets = new Map(allMedia.map((m) => [m.id, m]));
 
     let project = rebuildCharacterCompositions(
-      syncProjectRenderTrackIndices(storedProject),
+      syncProjectRenderTrackIndices(currentProject),
       characters,
       mediaAssets,
       motionPresets,
     );
-    if (project !== storedProject) {
+    if (project !== currentProject) {
       project = { ...project, updatedAt: Date.now() };
       await db.projects.put(project);
     }
@@ -2092,24 +2106,32 @@ export const useStudio = create<StudioState>((set, get) => ({
       ...p.editorMeta,
       clips: { ...p.editorMeta.clips, [id]: newMeta },
     };
-    let newProject: Project = syncProjectRenderTrackIndices(
-      commitEditingRootHtml(
-        {
-          ...p,
-          editorMeta,
-          updatedAt: Date.now(),
-        },
-        state.activeSceneId,
-        rootHtml,
-      ),
+    let newProject: Project = commitEditingRootHtml(
+      {
+        ...p,
+        editorMeta,
+        updatedAt: Date.now(),
+      },
+      state.activeSceneId,
+      rootHtml,
     );
-    newProject = rebuildCharacterCompositionInProject(
-      newProject,
-      id,
-      state.characters,
-      state.mediaAssets,
-      state.motionPresets,
-    );
+    if (
+      patch.start !== undefined ||
+      patch.duration !== undefined ||
+      patch.trackIndex !== undefined ||
+      patch.laneIndex !== undefined
+    ) {
+      newProject = syncProjectRenderTrackIndices(newProject);
+    }
+    if (isCharacterMeta(newMeta) && characterCompositionPatchRequiresRebuild(patch)) {
+      newProject = rebuildCharacterCompositionInProject(
+        newProject,
+        id,
+        state.characters,
+        state.mediaAssets,
+        state.motionPresets,
+      );
+    }
     if (removedCharacterAudioIds.size > 0) {
       newProject = {
         ...newProject,
@@ -2178,7 +2200,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     );
   },
 
-  setSpeechVolume(clipId, speechId, volume) {
+  setSpeechVolume(clipId, speechId, volume, options) {
     const state = get();
     const editingProject = getEditingProject(state);
     if (!state.project || !editingProject) return;
@@ -2188,9 +2210,13 @@ export const useStudio = create<StudioState>((set, get) => ({
     const speeches = characterSpeeches(clip.character).map((speech) =>
       speech.id === speechId ? { ...speech, volume: clamped } : speech,
     );
-    get().updateClip(clipId, {
-      character: { ...clip.character, speeches, lipSyncAudioId: undefined },
-    } as Partial<CompositionClip>);
+    get().updateClip(
+      clipId,
+      {
+        character: { ...clip.character, speeches, lipSyncAudioId: undefined },
+      } as Partial<CompositionClip>,
+      options,
+    );
   },
 
   trimSpeech(clipId, speechId, patch, options) {

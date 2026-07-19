@@ -1,10 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  characterCompositionPatchRequiresRebuild,
   pickFreeLane,
   createBlankProject,
   syncProjectRenderTrackIndices,
   useStudio,
 } from "../store";
+
+describe("character composition rebuild policy", () => {
+  it("only rebuilds when a patch changes embedded composition inputs", () => {
+    expect(characterCompositionPatchRequiresRebuild({ x: 100, y: 200, rotation: 15 })).toBe(false);
+    expect(characterCompositionPatchRequiresRebuild({ start: 2, opacity: 0.5 })).toBe(false);
+    expect(characterCompositionPatchRequiresRebuild({ duration: 8 })).toBe(true);
+    expect(characterCompositionPatchRequiresRebuild({ width: 640, height: 360 })).toBe(true);
+    expect(
+      characterCompositionPatchRequiresRebuild({
+        character: { characterId: "character-1", poses: {} },
+      } as Partial<CompositionClip>),
+    ).toBe(true);
+  });
+});
 
 const coreMock = vi.hoisted(() => ({
   generateCalls: [] as Array<{

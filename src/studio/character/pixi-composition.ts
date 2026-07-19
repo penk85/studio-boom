@@ -48,7 +48,9 @@ export function buildPixiCharacterCompositionHtml(args: BuildPixiCharacterCompos
   stage.innerHTML = "";
   stage.insertAdjacentHTML(
     "beforeend",
-    `<div id="${esc(pixiRootId(args.compositionId))}" data-character-root="true" data-character-renderer="pixi" data-character-id="${esc(
+    `<div id="${esc(pixiRootId(args.compositionId))}" data-character-root="true" data-character-renderer="pixi" data-character-composition-id="${esc(
+      args.compositionId,
+    )}" data-character-id="${esc(
       args.character.id,
     )}" data-character-angle="${esc(args.scene.angle)}"></div>`,
   );
@@ -88,6 +90,7 @@ export function buildPixiCharacterCompositionHtml(args: BuildPixiCharacterCompos
     duration,
     width,
     height,
+    isSubComposition: true,
   });
   if (!validation.ok || !validation.html) {
     throw new Error(
@@ -279,10 +282,10 @@ function appendPixiCharacterScript(
       : "";
     return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' + svgAttr(node.viewBox || ("0 0 " + node.frame.width + " " + node.frame.height)) + '" width="' + svgAttr(Math.max(0.0001, node.frame.width || 0)) + '" height="' + svgAttr(Math.max(0.0001, node.frame.height || 0)) + '"><path d="' + svgAttr(node.path || "") + '" fill="' + svgAttr(node.fill || "#733f43") + '"' + stroke + '/></svg>';
   };
-  const createTexturedLeaf = function(PIXI, node, texture) {${
+  const createTexturedLeaf = function(PIXI, node, texture, supportsMesh) {${
     hasRopeMesh
       ? `
-    if (node.kind === "mesh" && node.meshKind === "rope" && PIXI.MeshSimple) {
+    if (supportsMesh && node.kind === "mesh" && node.meshKind === "rope" && PIXI.MeshSimple) {
       try {
         const built = limb.buildRopeRibbon({ MeshSimple: PIXI.MeshSimple, texture: texture, node: node });
         built.mesh.__ribbonEntry = built.entry;
@@ -297,7 +300,7 @@ function appendPixiCharacterScript(
   }${
     hasPlaneMesh
       ? `
-    if (node.kind === "mesh" && node.meshKind === "plane" && PIXI.MeshPlane) {
+    if (supportsMesh && node.kind === "mesh" && node.meshKind === "plane" && PIXI.MeshPlane) {
       try {
         return new PIXI.MeshPlane({ texture: texture, verticesX: node.verticesX || 2, verticesY: node.verticesY || 2 });
       } catch (error) {
@@ -471,6 +474,16 @@ function appendPixiCharacterScript(
         : ""
     }
     ctx.app.render();
+    const renderer = ctx.app && ctx.app.renderer;
+    const gl = renderer && renderer.gl;
+    if (gl && typeof gl.finish === "function") gl.finish();
+    ctx.presentationContext.clearRect(
+      0,
+      0,
+      ctx.presentationCanvas.width,
+      ctx.presentationCanvas.height
+    );
+    ctx.presentationContext.drawImage(ctx.renderCanvas, 0, 0);
   };
   const state = { ctx: null, pendingTime: 0, readyResolve: null, readyReject: null };
   const readyPromise = new Promise(function(resolve, reject) {
@@ -479,14 +492,52 @@ function appendPixiCharacterScript(
   });
   window.__studioBoomPixiReady = window.__studioBoomPixiReady || {};
   window.__studioBoomPixiReady[S.compositionId] = readyPromise;
+  (window.__studioBoomPixiReadyRegistrationListeners || []).slice().forEach(function(listener) {
+    listener();
+  });
   const installHyperframesReadinessGate = function() {
     const w = window;
     if (w.__studioBoomPixiHfGateInstalled) return;
     w.__studioBoomPixiHfGateInstalled = true;
     let hfValue = w.__hf;
-    const pixiReadyPromises = function() {
-      return Object.values(w.__studioBoomPixiReady || {}).filter(function(promise) {
-        return promise && typeof promise.then === "function";
+    const expectedPixiCompositionIds = function() {
+      const ids = new Set();
+      const collect = function(root) {
+        if (!root || typeof root.querySelectorAll !== "function") return;
+        root.querySelectorAll("[data-character-composition-id]").forEach(function(element) {
+          const id = element.getAttribute("data-character-composition-id");
+          if (id) ids.add(id);
+        });
+      };
+      collect(document);
+      document.querySelectorAll("template").forEach(function(template) {
+        collect(template.content);
+      });
+      return Array.from(ids);
+    };
+    const waitForPixiReady = function() {
+      const expectedIds = expectedPixiCompositionIds();
+      if (expectedIds.length === 0) {
+        return Promise.all(Object.values(w.__studioBoomPixiReady || {}));
+      }
+      return new Promise(function(resolve, reject) {
+        const listeners = w.__studioBoomPixiReadyRegistrationListeners =
+          w.__studioBoomPixiReadyRegistrationListeners || [];
+        const removeListener = function(check) {
+          const index = listeners.indexOf(check);
+          if (index >= 0) listeners.splice(index, 1);
+        };
+        const check = function() {
+          const registry = w.__studioBoomPixiReady || {};
+          const promises = expectedIds.map(function(id) { return registry[id]; });
+          if (!promises.every(function(promise) {
+            return promise && typeof promise.then === "function";
+          })) return;
+          removeListener(check);
+          Promise.all(promises).then(resolve).catch(reject);
+        };
+        listeners.push(check);
+        check();
       });
     };
     const installOnHf = function(hf) {
@@ -506,7 +557,7 @@ function appendPixiCharacterScript(
         };
       }
       hf.__studioBoomPixiReadyGate = true;
-      Promise.all(pixiReadyPromises()).then(function() {
+      waitForPixiReady().then(function() {
         released = true;
       }).catch(function(error) {
         console.error(error);
@@ -545,57 +596,77 @@ function appendPixiCharacterScript(
     const root = document.getElementById(S.rootId);
     if (!root) throw new Error("Missing Pixi character root " + S.rootId);
     const app = new PIXI.Application();
-    await app.init({
-      width: S.scene.output.width,
-      height: S.scene.output.height,
-      backgroundAlpha: 0,
-      antialias: true,
-      autoStart: false,
-      autoDensity: true,
-      resolution: (typeof window !== "undefined" && window.devicePixelRatio) || 1
-    });
-    app.ticker.stop();
-    root.textContent = "";
-    root.appendChild(app.canvas || app.view);
-    app.stage.sortableChildren = true;
-    app.stage.label = "character-scene-root";
-    if (PIXI.Assets && PIXI.Assets.setPreferences) {
-      PIXI.Assets.setPreferences({ preferCreateImageBitmap: false });
-    }
-    const textures = {};
-    await Promise.all((S.scene.assets || []).map(async function(asset) {
-      try {
-        textures[asset.id] = await PIXI.Assets.load({
-          src: asset.ref,
-          parser: asset.parser || "texture",
-          data: asset.parser === "svg" ? { resolution: 2 } : { autoGenerateMipmaps: true }
-        });
-      } catch (error) {
-        throw new Error(
-          "Failed to load character texture " + asset.id +
-          " for parts " + (asset.partIds || []).join(", ") +
-          ": " + (error && error.message ? error.message : String(error))
-        );
+    let initialized = false;
+    try {
+      await app.init({
+        width: S.scene.output.width,
+        height: S.scene.output.height,
+        backgroundAlpha: 0,
+        antialias: true,
+        webgl: { preserveDrawingBuffer: true },
+        autoStart: false,
+        autoDensity: true,
+        resolution: (typeof window !== "undefined" && window.devicePixelRatio) || 1
+      });
+      initialized = true;
+      app.ticker.stop();
+      root.textContent = "";
+      const renderCanvas = app.canvas || app.view;
+      const presentationCanvas = document.createElement("canvas");
+      presentationCanvas.width = renderCanvas.width;
+      presentationCanvas.height = renderCanvas.height;
+      const presentationContext = presentationCanvas.getContext("2d");
+      if (!presentationContext) throw new Error("2D character presentation canvas is unavailable");
+      root.appendChild(renderCanvas);
+      renderCanvas.style.display = "none";
+      root.appendChild(presentationCanvas);
+      app.stage.sortableChildren = true;
+      app.stage.label = "character-scene-root";
+      const supportsMesh = !!(
+        app.renderer &&
+        app.renderer.renderPipes &&
+        app.renderer.renderPipes.mesh &&
+        typeof app.renderer.renderPipes.mesh.validateRenderable === "function"
+      );
+      if (PIXI.Assets && PIXI.Assets.setPreferences) {
+        PIXI.Assets.setPreferences({ preferCreateImageBitmap: false });
       }
-    }));
-    const nodes = {};${
-      hasPlaneMesh
-        ? `
-    const meshEntries = [];
-    const meshEntriesByNodeId = {};`
-        : ""
-    }${
-      hasRopeMesh
-        ? `
-    const ropeEntries = [];
-    const ropeEntriesByNodeId = {};`
-        : ""
-    }
-    Object.keys(S.scene.nodes).forEach(function(nodeId) {
+      const textures = {};
+      await Promise.all((S.scene.assets || []).map(async function(asset) {
+        try {
+          textures[asset.id] = await PIXI.Assets.load({
+            src: asset.ref,
+            parser: asset.parser || "texture",
+            data: asset.parser === "svg"
+              ? { width: asset.rasterWidth, height: asset.rasterHeight, resolution: 1 }
+              : { autoGenerateMipmaps: true }
+          });
+        } catch (error) {
+          throw new Error(
+            "Failed to load character texture " + asset.id +
+            " for parts " + (asset.partIds || []).join(", ") +
+            ": " + (error && error.message ? error.message : String(error))
+          );
+        }
+      }));
+      const nodes = {};${
+        hasPlaneMesh
+          ? `
+      const meshEntries = [];
+      const meshEntriesByNodeId = {};`
+          : ""
+      }${
+        hasRopeMesh
+          ? `
+      const ropeEntries = [];
+      const ropeEntriesByNodeId = {};`
+          : ""
+      }
+      Object.keys(S.scene.nodes).forEach(function(nodeId) {
       const node = S.scene.nodes[nodeId];
       if (node.kind === "sprite" || node.kind === "mesh") {
         nodes[nodeId] = new PIXI.Container({ sortableChildren: true });
-        const leaf = createTexturedLeaf(PIXI, node, textures[node.assetId]);
+        const leaf = createTexturedLeaf(PIXI, node, textures[node.assetId], supportsMesh);
         leaf.label = nodeId + ":" + node.kind;
         nodes[nodeId].addChild(leaf);${
           hasRopeMesh
@@ -656,14 +727,26 @@ function appendPixiCharacterScript(
     });`
         : ""
     }
-    const ctx = { app: app, nodes: nodes, textures: textures${
-      hasPlaneMesh ? ", meshEntries: meshEntries, meshEntriesByNodeId: meshEntriesByNodeId" : ""
-    }${hasRopeMesh ? ", ropeEntries: ropeEntries, ropeEntriesByNodeId: ropeEntriesByNodeId" : ""} };
-    state.ctx = ctx;
-    window.__studioBoomPixiScenes = window.__studioBoomPixiScenes || {};
-    window.__studioBoomPixiScenes[S.compositionId] = ctx;
-    renderIfReady(state.pendingTime);
-    if (state.readyResolve) state.readyResolve(true);
+      const ctx = {
+        app: app,
+        renderCanvas: renderCanvas,
+        presentationCanvas: presentationCanvas,
+        presentationContext: presentationContext,
+        nodes: nodes,
+        textures: textures${
+          hasPlaneMesh ? ", meshEntries: meshEntries, meshEntriesByNodeId: meshEntriesByNodeId" : ""
+        }${hasRopeMesh ? ", ropeEntries: ropeEntries, ropeEntriesByNodeId: ropeEntriesByNodeId" : ""} };
+      state.ctx = ctx;
+      window.__studioBoomPixiScenes = window.__studioBoomPixiScenes || {};
+      window.__studioBoomPixiScenes[S.compositionId] = ctx;
+      renderIfReady(state.pendingTime);
+      if (state.readyResolve) state.readyResolve(true);
+    } catch (error) {
+      if (initialized) {
+        app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true });
+      }
+      throw error;
+    }
   };
   start().catch(function(error) {
     console.error(error);

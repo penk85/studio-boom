@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -14,6 +14,7 @@ import { findInlineScripts } from "./script-blocks";
 
 interface RenderResult {
   outputPath: string;
+  rootDir: string;
   createdAt: number;
   log: string;
 }
@@ -35,22 +36,64 @@ interface HyperframesRenderPluginOptions {
   elevenLabsApiKey?: string;
 }
 
-function rememberRenderResult(id: string, result: RenderResult): void {
-  pruneExpiredResults();
+async function rememberRenderResult(id: string, result: RenderResult): Promise<void> {
+  await pruneExpiredResults();
   results.set(id, result);
   // Hard cap so a flood of renders can't grow the map unbounded.
   while (results.size > MAX_RESULTS) {
     const oldestKey = results.keys().next().value;
     if (!oldestKey) break;
-    results.delete(oldestKey);
+    const oldestResult = results.get(oldestKey);
+    if (oldestResult) await discardRenderResult(oldestKey, oldestResult);
   }
 }
 
-function pruneExpiredResults(): void {
-  const cutoff = Date.now() - RESULT_TTL_MS;
+async function pruneExpiredResults(now = Date.now()): Promise<void> {
+  const cutoff = now - RESULT_TTL_MS;
+  const expired: Array<[string, RenderResult]> = [];
   for (const [id, result] of results) {
-    if (result.createdAt <= cutoff) results.delete(id);
+    if (result.createdAt <= cutoff) expired.push([id, result]);
   }
+  await Promise.all(expired.map(([id, result]) => discardRenderResult(id, result)));
+}
+
+async function discardRenderResult(id: string, result: RenderResult): Promise<void> {
+  if (results.get(id) === result) results.delete(id);
+  await removeRenderTempDirectory(result.rootDir);
+}
+
+async function discardAllRenderResults(): Promise<void> {
+  await Promise.all(
+    Array.from(results.entries()).map(([id, result]) => discardRenderResult(id, result)),
+  );
+}
+
+/** Remove one request's staged project and generated output. */
+export async function removeRenderTempDirectory(rootDir: string): Promise<void> {
+  await rm(rootDir, { recursive: true, force: true });
+}
+
+export function isTrustedStudioApiRequest(headers: { host?: string; origin?: string }): boolean {
+  if (!headers.host) return false;
+  try {
+    const requestHost = new URL(`http://${headers.host}`);
+    if (!isLoopbackHostname(requestHost.hostname)) return false;
+    if (!headers.origin) return true;
+
+    const origin = new URL(headers.origin);
+    return isLoopbackHostname(origin.hostname) && origin.host === requestHost.host;
+  } catch {
+    return false;
+  }
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function isStudioApiPath(pathname: string): boolean {
+  return pathname.startsWith("/api/hyperframes/") || pathname.startsWith("/api/elevenlabs/");
 }
 
 export function hyperframesRenderPlugin(options: HyperframesRenderPluginOptions = {}): Plugin {
@@ -58,9 +101,24 @@ export function hyperframesRenderPlugin(options: HyperframesRenderPluginOptions 
     name: "studio-boom-hyperframes-render",
     apply: "serve",
     configureServer(server) {
+      server.httpServer?.once("close", () => {
+        void discardAllRenderResults();
+      });
       server.middlewares.use(async (req, res, next) => {
         try {
           const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+          if (
+            isStudioApiPath(pathname) &&
+            !isTrustedStudioApiRequest({
+              host: req.headers.host,
+              origin: req.headers.origin,
+            })
+          ) {
+            res.statusCode = 403;
+            res.setHeader("Content-Type", "text/plain; charset=utf-8");
+            res.end("Studio API requests must come from the local Studio origin.");
+            return;
+          }
 
           if (req.method === "POST" && pathname === "/api/hyperframes/render") {
             await handleRender(req, res);
@@ -193,20 +251,26 @@ async function pipeUpstreamResponse(res: ServerResponse, upstream: Response): Pr
 }
 
 async function handlePreviewBundle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const projectDir = await writePostedProjectFiles(req);
-  await assertProjectFilesNoTrackOverlaps(projectDir);
-  const scaleHints = await readCompositionScaleHints(projectDir);
-  const bundleToSingleHtml = await loadHyperframesBundler();
-  const html = resolvePreviewRuntimeScriptRefs(
-    applyCompositionScaleWrappers(
-      await bundleToSingleHtml(projectDir, { runtime: "inline" }),
-      scaleHints,
-    ),
-  );
-  assertInlineScriptSyntax(html);
-  res.statusCode = 200;
-  res.setHeader("Content-Type", "text/html");
-  res.end(html);
+  const rootDir = path.join(tmpdir(), "studio-boom-hyperframes", randomUUID());
+  const projectDir = path.join(rootDir, "project");
+  try {
+    await writePostedProjectFiles(req, projectDir);
+    await assertProjectFilesNoTrackOverlaps(projectDir);
+    const scaleHints = await readCompositionScaleHints(projectDir);
+    const bundleToSingleHtml = await loadHyperframesBundler();
+    const html = resolvePreviewRuntimeScriptRefs(
+      applyCompositionScaleWrappers(
+        await bundleToSingleHtml(projectDir, { runtime: "inline" }),
+        scaleHints,
+      ),
+    );
+    assertInlineScriptSyntax(html);
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/html");
+    res.end(html);
+  } finally {
+    await removeRenderTempDirectory(rootDir);
+  }
 }
 
 async function handlePreviewRuntime(filename: string, res: ServerResponse): Promise<void> {
@@ -332,54 +396,74 @@ async function handleRender(req: IncomingMessage, res: ServerResponse): Promise<
   const rootDir = path.join(tmpdir(), "studio-boom-hyperframes", id);
   const projectDir = path.join(rootDir, "project");
   const outputPath = path.join(rootDir, "studio-boom.mp4");
-  await writePostedProjectFiles(req, projectDir);
-  await assertProjectFilesNoTrackOverlaps(projectDir);
-  const scaleHints = await readCompositionScaleHints(projectDir);
-  const bundleToSingleHtml = await loadHyperframesBundler();
-  const bundledHtml = resolveRenderRuntimeScriptRefs(
-    applyCompositionScaleWrappers(
-      await bundleToSingleHtml(projectDir, { runtime: "inline" }),
-      scaleHints,
-    ),
-  );
-  assertInlineScriptSyntax(bundledHtml);
-  await writeFile(path.join(projectDir, "index.html"), bundledHtml);
+  try {
+    await writePostedProjectFiles(req, projectDir);
+    await assertProjectFilesNoTrackOverlaps(projectDir);
+    const renderPixiArgs = await renderPixiArgsForProject(projectDir);
+    const scaleHints = await readCompositionScaleHints(projectDir);
+    const bundleToSingleHtml = await loadHyperframesBundler();
+    const bundledHtml = resolveRenderRuntimeScriptRefs(
+      applyCompositionScaleWrappers(
+        await bundleToSingleHtml(projectDir, { runtime: "inline" }),
+        scaleHints,
+      ),
+    );
+    assertInlineScriptSyntax(bundledHtml);
+    await writeFile(path.join(projectDir, "index.html"), bundledHtml);
 
-  let log = "";
-  log += await runHyperframes(["render", projectDir, "--output", outputPath, "--format", "mp4"]);
+    let log = "";
+    log += await runHyperframes([
+      "render",
+      projectDir,
+      "--output",
+      outputPath,
+      "--format",
+      "mp4",
+      ...renderPixiArgs,
+    ]);
 
-  rememberRenderResult(id, { outputPath, createdAt: Date.now(), log });
-  sendJson(res, { url: `/api/hyperframes/result/${id}`, log });
+    await rememberRenderResult(id, { outputPath, rootDir, createdAt: Date.now(), log });
+    sendJson(res, { url: `/api/hyperframes/result/${id}`, log });
+  } catch (error) {
+    const result = results.get(id);
+    if (result) await discardRenderResult(id, result);
+    else await removeRenderTempDirectory(rootDir);
+    throw error;
+  }
 }
 
 async function handleThumbnail(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const id = randomUUID();
   const rootDir = path.join(tmpdir(), "studio-boom-hyperframes", id);
   const projectDir = path.join(rootDir, "project");
-  await writePostedProjectFiles(req, projectDir);
-  await assertProjectFilesNoTrackOverlaps(projectDir);
-  const scaleHints = await readCompositionScaleHints(projectDir);
-  const bundleToSingleHtml = await loadHyperframesBundler();
-  const bundledHtml = resolveRenderRuntimeScriptRefs(
-    applyCompositionScaleWrappers(
-      await bundleToSingleHtml(projectDir, { runtime: "inline" }),
-      scaleHints,
-    ),
-  );
-  assertInlineScriptSyntax(bundledHtml);
-  await writeFile(path.join(projectDir, "index.html"), bundledHtml);
+  try {
+    await writePostedProjectFiles(req, projectDir);
+    await assertProjectFilesNoTrackOverlaps(projectDir);
+    const scaleHints = await readCompositionScaleHints(projectDir);
+    const bundleToSingleHtml = await loadHyperframesBundler();
+    const bundledHtml = resolveRenderRuntimeScriptRefs(
+      applyCompositionScaleWrappers(
+        await bundleToSingleHtml(projectDir, { runtime: "inline" }),
+        scaleHints,
+      ),
+    );
+    assertInlineScriptSyntax(bundledHtml);
+    await writeFile(path.join(projectDir, "index.html"), bundledHtml);
 
-  const png = await captureProjectThumbnail(projectDir, bundledHtml);
-  res.statusCode = 200;
-  res.setHeader("Content-Type", "image/png");
-  res.setHeader("Cache-Control", "no-store");
-  res.end(png);
+    const png = await captureProjectThumbnail(projectDir, bundledHtml);
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "no-store");
+    res.end(png);
+  } finally {
+    await removeRenderTempDirectory(rootDir);
+  }
 }
 
 async function captureProjectThumbnail(projectDir: string, html: string): Promise<Buffer> {
   const dimensions = readRootCompositionDimensions(html);
   const browser = await puppeteer.launch({
-    headless: "new",
+    headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-crash-reporter"],
   });
 
@@ -395,7 +479,10 @@ async function captureProjectThumbnail(projectDir: string, html: string): Promis
       timeout: 10000,
     });
     await page.evaluate(() => {
-      const timelines = Object.values(window.__timelines || {}) as Array<{
+      const hyperframesWindow = window as typeof window & {
+        __timelines?: Record<string, unknown>;
+      };
+      const timelines = Object.values(hyperframesWindow.__timelines ?? {}) as Array<{
         pause?: () => void;
         seek?: (time: number) => void;
       }>;
@@ -426,10 +513,7 @@ function readRootCompositionDimensions(html: string): { width: number; height: n
   };
 }
 
-async function writePostedProjectFiles(
-  req: IncomingMessage,
-  projectDir = path.join(tmpdir(), "studio-boom-hyperframes", randomUUID(), "project"),
-): Promise<string> {
+async function writePostedProjectFiles(req: IncomingMessage, projectDir: string): Promise<string> {
   await mkdir(projectDir, { recursive: true });
 
   const request = await nodeRequestFromIncoming(req);
@@ -452,7 +536,7 @@ async function writePostedProjectFiles(
 
 async function handleResult(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const id = decodeURIComponent(req.url?.split("/").pop() ?? "");
-  pruneExpiredResults();
+  await pruneExpiredResults();
   const result = results.get(id);
   if (!result) {
     res.statusCode = 404;
@@ -463,7 +547,21 @@ async function handleResult(req: IncomingMessage, res: ServerResponse): Promise<
   res.statusCode = 200;
   res.setHeader("Content-Type", "video/mp4");
   res.setHeader("Content-Disposition", 'attachment; filename="studio-boom.mp4"');
-  createReadStream(result.outputPath).pipe(res);
+  const stream = createReadStream(result.outputPath);
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    void discardRenderResult(id, result);
+  };
+  res.once("finish", cleanup);
+  res.once("close", cleanup);
+  stream.once("error", (error) => {
+    cleanup();
+    if (res.headersSent) res.destroy(error);
+    else sendError(res, error);
+  });
+  stream.pipe(res);
 }
 
 async function nodeRequestFromIncoming(req: IncomingMessage): Promise<Request> {
@@ -622,8 +720,13 @@ interface TimedHtmlClip {
   end: number;
 }
 
-async function assertProjectFilesNoTrackOverlaps(projectDir: string): Promise<void> {
-  const sources: Array<{ label: string; html: string }> = [
+interface ProjectHtmlSource {
+  label: string;
+  html: string;
+}
+
+async function readProjectHtmlSources(projectDir: string): Promise<ProjectHtmlSource[]> {
+  const sources: ProjectHtmlSource[] = [
     { label: "index.html", html: await readFile(path.join(projectDir, "index.html"), "utf8") },
   ];
   const compositionsDir = path.join(projectDir, "compositions");
@@ -642,6 +745,12 @@ async function assertProjectFilesNoTrackOverlaps(projectDir: string): Promise<vo
     if (!isMissingFileError(error)) throw error;
   }
 
+  return sources;
+}
+
+async function assertProjectFilesNoTrackOverlaps(projectDir: string): Promise<void> {
+  const sources = await readProjectHtmlSources(projectDir);
+
   const errors = sources.flatMap(({ label, html }) => findTrackOverlapErrors(html, label));
   if (errors.length > 0) {
     throw new Error(
@@ -650,6 +759,16 @@ async function assertProjectFilesNoTrackOverlaps(projectDir: string): Promise<vo
       )}\n\nMove one of the listed clips to a different editor lane/track or give internal block clips distinct data-track-index values.`,
     );
   }
+}
+
+/** Select safe CLI capture settings from the staged project before bundling rewrites its HTML. */
+export async function renderPixiArgsForProject(projectDir: string): Promise<string[]> {
+  const sources = await readProjectHtmlSources(projectDir);
+  for (const { html } of sources) {
+    const args = renderPixiArgsForHtml(html);
+    if (args.length > 0) return args;
+  }
+  return [];
 }
 
 export function assertNoTrackOverlaps(html: string, sourceLabel = "HTML"): void {
@@ -661,6 +780,13 @@ export function assertNoTrackOverlaps(html: string, sourceLabel = "HTML"): void 
       )}\n\nMove one of the listed clips to a different editor lane/track or give internal block clips distinct data-track-index values.`,
     );
   }
+}
+
+/** Keep Pixi meshes on deterministic software WebGL and avoid per-worker context exhaustion. */
+export function renderPixiArgsForHtml(html: string): string[] {
+  return /data-character-renderer\s*=\s*["']pixi["']/i.test(html)
+    ? ["--workers", "1", "--no-browser-gpu"]
+    : [];
 }
 
 function findTrackOverlapErrors(html: string, sourceLabel: string): string[] {

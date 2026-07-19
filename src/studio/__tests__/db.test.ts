@@ -3,6 +3,7 @@ import {
   collectCharacterMediaUsages,
   collectProjectMediaUsages,
   isCurrentProjectShape,
+  requireCurrentProjectShape,
 } from "../db";
 import type { CharacterPreset, Project } from "../types";
 
@@ -39,6 +40,12 @@ describe("isCurrentProjectShape", () => {
     };
 
     expect(isCurrentProjectShape(legacyProject)).toBe(false);
+  });
+
+  it("fails incompatible loads with a recovery-safe message", () => {
+    expect(() => requireCurrentProjectShape({ id: "legacy" }, "legacy")).toThrow(
+      /stored project was preserved/i,
+    );
   });
 });
 

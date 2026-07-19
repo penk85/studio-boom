@@ -16,6 +16,7 @@ describe("validateCompositionSourceHtml", () => {
   <body>
     <div id="stage" data-composition-id="ai-title" data-width="1920" data-height="1080">
       <div>AI Title</div>
+      <script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
       <script>
         window.__timelines = window.__timelines || {};
         const tl = gsap.timeline({ paused: true });
@@ -37,6 +38,7 @@ describe("validateCompositionSourceHtml", () => {
       `<template id="ai-title-template">
         <div data-composition-id="ai-title" data-width="1920" data-height="1080">
           <div class="title">AI Title</div>
+          <script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
           <script>
             const tl = gsap.timeline({ paused: true });
             window.__timelines = window.__timelines || {};
@@ -189,7 +191,31 @@ describe("validateCompositionSourceHtml", () => {
     );
 
     expect(result.ok).toBe(false);
-    expect(result.errors.join("\n")).toContain("Script block 1 has invalid JavaScript");
+    expect(result.errors.join("\n")).toContain("[invalid_inline_script_syntax]");
+  });
+
+  it("uses the HyperFrames linter to reject non-deterministic composition code", () => {
+    const result = validateCompositionSourceHtml(
+      `<!DOCTYPE html>
+<html data-composition-id="ai-title" data-composition-duration="4">
+  <body>
+    <div id="stage" data-composition-id="ai-title" data-width="1920" data-height="1080">
+      <script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+      <script>
+        window.__timelines = window.__timelines || {};
+        const tl = gsap.timeline({ paused: true });
+        const offset = Math.random();
+        tl.to("#title", { x: offset });
+        window.__timelines["ai-title"] = tl;
+      </script>
+    </div>
+  </body>
+</html>`,
+      defaults,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.errors.join("\n")).toContain("[non_deterministic_code]");
   });
 
   it("builds a copyable repair prompt", () => {

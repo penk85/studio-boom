@@ -13,6 +13,8 @@ describe("Inspector source integration", () => {
     expect(source).toContain("<RootElementSourceInspector");
     expect(source).toContain("readRootElementSource(rootHtml, clip.id)");
     expect(source).toContain("readOnly");
+    expect(source).toContain("rootProject={rootProject}");
+    expect(source).toContain("<ProjectSettingsPanel project={rootProject} />");
   });
 
   it("shows motion controls for visual clips", () => {
@@ -43,5 +45,13 @@ describe("Inspector source integration", () => {
     expect(source).not.toContain(
       "{character && <MotionPanel clip={characterClip} character={character} />}\n      <VoiceLipSyncPanel",
     );
+  });
+
+  it("commits text content once after editing instead of once per keystroke", () => {
+    const source = readFileSync(inspectorPath, "utf8");
+
+    expect(source).toContain("const [contentDraft, setContentDraft]");
+    expect(source).toContain("onChange={(event) => setContentDraft(event.target.value)}");
+    expect(source).toContain("onBlur={(event) => commitContent(event.currentTarget.value)}");
   });
 });

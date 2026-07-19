@@ -62,6 +62,24 @@ describe("buildCharacterScene", () => {
     });
   });
 
+  it("sizes SVG rasterization to the rendered part instead of the source canvas", () => {
+    const scene = buildCharacterScene({
+      character: makeVariantArmCharacter(),
+      poses: { "slot:right-arm": "bent" },
+      width: 300,
+      height: 450,
+      mediaAssets: new Map([
+        ["arm-bent-media", { filename: "full-character-layer.svg", mimeType: "image/svg+xml" }],
+      ]),
+    });
+
+    expect(scene.assets.find((asset) => asset.id === "arm-bent-media")).toMatchObject({
+      parser: "svg",
+      rasterWidth: 45,
+      rasterHeight: 60,
+    });
+  });
+
   it("maps runtime motion targets to scene nodes instead of DOM selectors", () => {
     const character = makeVariantArmCharacter();
     const runtime = buildCharacterRuntime(character);

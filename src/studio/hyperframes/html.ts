@@ -225,7 +225,7 @@ function buildNativeFallbackElement(el: HTMLElement): TimelineElement | null {
   const end = parseFiniteNumber(el.getAttribute("data-end"));
   const duration =
     parseFiniteNumber(el.getAttribute("data-duration")) ??
-    (end !== undefined ? Math.max(0.1, end - startTime) : 1);
+    (end !== null ? Math.max(0.1, end - startTime) : 1);
   const sourceWidth =
     parseFiniteNumber(el.getAttribute("data-source-width")) ??
     parseFiniteNumber(el.getAttribute("data-width")) ??

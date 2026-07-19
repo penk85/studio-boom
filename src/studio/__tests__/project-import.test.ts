@@ -44,7 +44,7 @@ describe("createProjectFromHyperframesHtml", () => {
           data-start="4"
           data-duration="4"
           data-track-index="2"
-          src="https://example.com/visual.png"
+          src="https://images.unsplash.com/photo-1"
           data-width="640"
           data-height="360"
         />
@@ -277,7 +277,8 @@ function makeZipFile(files: Record<string, string | Uint8Array>, name = "project
     ]),
   );
   const zipped = zipSync(entries);
-  const bytes = zipped.buffer.slice(zipped.byteOffset, zipped.byteOffset + zipped.byteLength);
+  const bytes = new ArrayBuffer(zipped.byteLength);
+  new Uint8Array(bytes).set(zipped);
   return new File([bytes], name, { type: "application/zip" });
 }
 

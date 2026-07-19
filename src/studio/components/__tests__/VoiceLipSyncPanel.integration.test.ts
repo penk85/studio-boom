@@ -18,4 +18,18 @@ describe("Voice lip sync panel integration", () => {
     expect(helperSource).toContain("db.mediaBlobs.get(args.audioId)");
     expect(helperSource).toContain("forcedAlignAudioWithText({ file, text: transcript })");
   });
+
+  it("commits speech timing and volume once per completed edit", () => {
+    const panelSource = readFileSync(panelPath, "utf8");
+
+    expect(panelSource).toContain("<SpeechStartInput");
+    expect(panelSource).toContain("<SpeechVolumeInput");
+    expect(panelSource).toContain("onBlur={(event) => commit(event.currentTarget.value)}");
+    expect(panelSource).toContain(
+      "onPointerUp={(event) => commit(Number(event.currentTarget.value))}",
+    );
+    expect(panelSource).not.toContain(
+      "onChange={(e) => moveSpeech(clip.id, speech.id, Number(e.target.value))}",
+    );
+  });
 });

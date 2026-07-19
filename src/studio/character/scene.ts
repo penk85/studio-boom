@@ -240,6 +240,9 @@ export interface CharacterSceneAsset {
   kind: "texture";
   parser: "texture" | "svg";
   partIds: string[];
+  /** Logical output size used to rasterize SVG source instead of its often much larger canvas. */
+  rasterWidth?: number;
+  rasterHeight?: number;
 }
 
 export interface CharacterSceneGraph {
@@ -526,6 +529,16 @@ function addSlotSceneNodes(args: AddSlotSceneNodesArgs): void {
         partIds: [],
       };
       asset.partIds.push(part.id);
+      if (asset.parser === "svg") {
+        asset.rasterWidth = Math.max(
+          asset.rasterWidth ?? 1,
+          Math.ceil(partNode.frame.width * Math.abs(partNode.frame.scaleX || 1)),
+        );
+        asset.rasterHeight = Math.max(
+          asset.rasterHeight ?? 1,
+          Math.ceil(partNode.frame.height * Math.abs(partNode.frame.scaleY || 1)),
+        );
+      }
       assetsById.set(partNode.assetId, asset);
     }
   }

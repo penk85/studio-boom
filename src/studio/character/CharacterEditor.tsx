@@ -995,6 +995,8 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     [doc, renderBlockingRigIssues],
   );
   const pixiEditorPreviewPayload = useMemo(() => {
+    // The selected action preview is time-based; this state tick intentionally resamples it.
+    void previewTick;
     if (!doc || renderBlockingRigIssues.length > 0) return null;
     const previewPoses = { ...variantPreview };
     if (preview) {
@@ -4267,16 +4269,17 @@ function parentSlotIdForEditorRelation(
     slotParts: CharacterPart[];
   }>,
 ): ID | undefined {
-  if (relation.parentRef.type === "slot" || relation.parentRef.type === "semanticSlot") {
-    return relation.parentRef.id;
+  const parentRef = relation.parentRef;
+  if (parentRef.type === "slot" || parentRef.type === "semanticSlot") {
+    return parentRef.id;
   }
-  if (relation.parentRef.type === "role") {
+  if (parentRef.type === "role") {
     return groups.find(
       (group) =>
-        group.role === relation.parentRef.role &&
-        (!relation.parentRef.side ||
-          group.side === relation.parentRef.side ||
-          group.slotParts.some((part) => part.side === relation.parentRef.side)),
+        group.role === parentRef.role &&
+        (!parentRef.side ||
+          group.side === parentRef.side ||
+          group.slotParts.some((part) => part.side === parentRef.side)),
     )?.slotId;
   }
   return undefined;
@@ -7197,6 +7200,8 @@ function CharacterPartMoveable({
   const [origin, setOrigin] = useState<{ x: number; y: number } | null>(null);
   const viewScale = Math.max(0.0001, scale);
 
+  // Re-measure after every render because surrounding editor chrome can move without changing refs.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
     const wrap = wrapRef.current;

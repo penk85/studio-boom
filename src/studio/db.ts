@@ -245,6 +245,15 @@ export function isCurrentProjectShape(project: unknown): project is Project {
   return true;
 }
 
+/** Return a loadable project or fail without mutating the persisted record. */
+export function requireCurrentProjectShape(project: unknown, projectId: string): Project {
+  if (isCurrentProjectShape(project)) return project;
+  throw new Error(
+    `Project "${projectId}" uses an incompatible or damaged data format. ` +
+      "The stored project was preserved so it can be recovered or migrated.",
+  );
+}
+
 export function collectProjectMediaUsages(project: Project, onlyMediaId?: string): MediaUsage[] {
   const usages: MediaUsage[] = [];
   const push = (mediaId: string | undefined, usage: Omit<MediaUsage, "mediaId">) => {

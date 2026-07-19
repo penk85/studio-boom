@@ -1,5 +1,5 @@
+import { lintHyperframeHtml } from "@hyperframes/core/lint";
 import { normalizeNativeHyperframesHtml } from "./native";
-import { findInlineScripts } from "./script-blocks";
 
 export interface CompositionSourceValidation {
   ok: boolean;
@@ -16,6 +16,7 @@ export interface CompositionSourceDefaults {
   duration: number;
   width: number;
   height: number;
+  isSubComposition?: boolean;
 }
 
 export function validateCompositionSourceHtml(
@@ -75,22 +76,13 @@ export function validateCompositionSourceHtml(
   if (!Number.isFinite(width) || width <= 0) errors.push("Width must be positive.");
   if (!Number.isFinite(height) || height <= 0) errors.push("Height must be positive.");
 
-  if (!doc.querySelector("script")) {
-    errors.push(
-      "Missing script timeline registration. Add a paused GSAP timeline and register it on window.__timelines.",
-    );
-  }
-  errors.push(...validateInlineScriptSyntax(trimmed));
-
-  if (compositionId && !sourceMentionsTimelineRegistration(trimmed, compositionId)) {
-    errors.push(`Missing window.__timelines registration for "${compositionId}".`);
-  }
-
+  errors.push(
+    ...validateWithHyperframesLinter(
+      trimmed,
+      defaults.isSubComposition ?? trimmed.trimStart().toLowerCase().startsWith("<template"),
+    ),
+  );
   errors.push(...validateTimedClipTracks(doc, root, compositionId));
-
-  if (/\brepeat\s*:\s*-1\b/.test(trimmed)) {
-    errors.push("Infinite GSAP repeats are not allowed. Use a finite repeat count.");
-  }
 
   if (errors.length > 0) {
     return { ok: false, errors, compositionId, duration, width, height };
@@ -166,12 +158,17 @@ function parsePositiveNumber(value: string | null | undefined): number | undefin
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-function sourceMentionsTimelineRegistration(html: string, compositionId: string): boolean {
-  return (
-    html.includes(`__timelines["${compositionId}"]`) ||
-    html.includes(`__timelines['${compositionId}']`) ||
-    html.includes(`__timelines[${JSON.stringify(compositionId)}]`)
-  );
+function validateWithHyperframesLinter(html: string, isSubComposition: boolean): string[] {
+  const result = lintHyperframeHtml(html, {
+    isSubComposition,
+  });
+  return result.findings
+    .filter((finding) => finding.severity === "error")
+    .map((finding) => {
+      const target = finding.elementId ? ` Element: ${finding.elementId}.` : "";
+      const fix = finding.fixHint ? ` ${finding.fixHint}` : "";
+      return `[${finding.code}] ${finding.message}${target}${fix}`;
+    });
 }
 
 interface ScheduledClip {
@@ -250,18 +247,4 @@ function parseNumber(value: string | null): number | undefined {
 function formatElementLabel(el: Element): string {
   const id = el.getAttribute("id");
   return `<${el.tagName.toLowerCase()}${id ? ` id="${id}"` : ""}>`;
-}
-
-function validateInlineScriptSyntax(html: string): string[] {
-  const errors: string[] = [];
-  for (const script of findInlineScripts(html)) {
-    try {
-      // Parse only. This does not execute the pasted script.
-      new Function(script.source);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      errors.push(`Script block ${script.index} has invalid JavaScript: ${message}`);
-    }
-  }
-  return errors;
 }

@@ -21,7 +21,8 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@hyperframes/core/runtime/lottie-readiness": ["./src/shims/lottie-readiness.ts"]
     }
   }
 }

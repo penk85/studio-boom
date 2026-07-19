@@ -542,7 +542,8 @@ export function validateMotionJson(value: unknown): JsonValidationResult {
       validateMotionKeyframe(keyframe, `${path}.keyframes[${index}]`, issues, track.channel);
     }
   });
-  for (const [index, item] of optionalArray(value.constraints?.allowOutOfBounds).entries()) {
+  const constraints = isRecord(value.constraints) ? value.constraints : undefined;
+  for (const [index, item] of optionalArray(constraints?.allowOutOfBounds).entries()) {
     const path = `$.constraints.allowOutOfBounds[${index}]`;
     if (!isRecord(item)) {
       issues.error(path, "Expected allowOutOfBounds object.");
@@ -614,7 +615,7 @@ export function validateMotionJsonForAngle(
       transformBoneTracks.push({
         index,
         boneId: resolved.target.id,
-        track: track as MotionJsonTrack,
+        track: track as unknown as MotionJsonTrack,
       });
     }
   }

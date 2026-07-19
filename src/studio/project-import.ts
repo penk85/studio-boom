@@ -148,6 +148,7 @@ export async function createProjectFromHyperframesZip(
       duration: rootValidation.duration ?? 30,
       width: rootValidation.width ?? 1920,
       height: rootValidation.height ?? 1080,
+      isSubComposition: true,
     });
     if (!validation.ok || !validation.html || !validation.compositionId) {
       throw new Error(
@@ -487,11 +488,17 @@ function getOrCreateImportedMediaFile(
     asset,
     mediaBlob: {
       id: asset.id,
-      blob: new Blob([bytes], { type: mimeType }),
+      blob: new Blob([copyToArrayBuffer(bytes)], { type: mimeType }),
     },
   };
   args.mediaFiles.set(path, mediaFile);
   return mediaFile;
+}
+
+function copyToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
 }
 
 function collectMissingPackagedReferences(

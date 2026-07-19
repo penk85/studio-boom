@@ -130,13 +130,13 @@ export function runtimeAncestorMotionTargets(
 
   return boneIds
     .reverse()
-    .map((ancestorBoneId) => {
+    .map<RuntimeMotionTarget | undefined>((ancestorBoneId) => {
       const ancestorSlotId = slotsByBone.get(ancestorBoneId);
       if (!ancestorSlotId) return undefined;
       const target = runtimeMotionTargetForSlot(runtime, ancestorSlotId);
       return target.kind === "bone" && target.boneId === ancestorBoneId ? target : undefined;
     })
-    .filter((target): target is RuntimeMotionTarget => !!target);
+    .filter((target): target is RuntimeMotionTarget => target !== undefined);
 }
 
 function motionParentWorldRotation(

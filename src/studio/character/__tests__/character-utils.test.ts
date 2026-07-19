@@ -20,7 +20,12 @@ import {
   withUpdatedCharacterSlot,
 } from "../character-utils";
 import { pivotForPart } from "../alpha-bounds";
-import type { CharacterPart, CharacterPreset, PartManifest } from "../../types";
+import {
+  DEFAULT_PART_MANIFEST,
+  type CharacterPart,
+  type CharacterPreset,
+  type PartManifest,
+} from "../../types";
 import { makeVariantArmCharacter } from "./fixtures";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -280,6 +285,8 @@ describe("legacy artwork hierarchy", () => {
         hostConstraints: [],
         reaches: [],
       },
+      manifest: DEFAULT_PART_MANIFEST,
+      parallax: { onCamera: true, onClip: true, intensity: 0.15 },
       createdAt: 1,
       updatedAt: 1,
     } as CharacterPreset;
@@ -488,7 +495,7 @@ describe("listCharacterSlots", () => {
       canvasHeight: 900,
       slots: [{ id: "slot:left-hand", name: "Near hand", role: "hand", side: "left" }],
       parts: [part],
-      manifest: {},
+      manifest: DEFAULT_PART_MANIFEST,
       parallax: { onCamera: true, onClip: true, intensity: 0.15 },
       createdAt: 1,
       updatedAt: 1,
@@ -509,7 +516,7 @@ describe("listCharacterSlots", () => {
       canvasHeight: 900,
       slots: [{ id: "slot:right-hand", name: "Right hand", role: "hand", side: "right" }],
       parts: [],
-      manifest: {},
+      manifest: DEFAULT_PART_MANIFEST,
       parallax: { onCamera: true, onClip: true, intensity: 0.15 },
       createdAt: 1,
       updatedAt: 1,
@@ -529,7 +536,7 @@ describe("listCharacterSlots", () => {
       canvasWidth: 600,
       canvasHeight: 900,
       parts: [part],
-      manifest: {},
+      manifest: DEFAULT_PART_MANIFEST,
       parallax: { onCamera: true, onClip: true, intensity: 0.15 },
       createdAt: 1,
       updatedAt: 1,
@@ -573,7 +580,7 @@ describe("listCharacterSlots", () => {
       canvasHeight: 900,
       parts: [relaxed, bent],
       slots: [{ id: "slot:right-arm", name: "Right arm", role: "arm", side: "right" }],
-      manifest: {},
+      manifest: DEFAULT_PART_MANIFEST,
       parallax: { onCamera: true, onClip: true, intensity: 0.15 },
       createdAt: 1,
       updatedAt: 1,
@@ -615,7 +622,7 @@ describe("listCharacterSlots", () => {
       canvasHeight: 900,
       parts: [part],
       slots: [{ id: "slot:badge", name: "Badge", role: "accessory", side: "front" }],
-      manifest: {},
+      manifest: DEFAULT_PART_MANIFEST,
       parallax: { onCamera: true, onClip: true, intensity: 0.15 },
       createdAt: 1,
       updatedAt: 1,
@@ -635,7 +642,7 @@ describe("listCharacterSlots", () => {
       canvasHeight: 900,
       parts: [],
       slots: [],
-      manifest: {},
+      manifest: DEFAULT_PART_MANIFEST,
       parallax: { onCamera: true, onClip: true, intensity: 0.15 },
       createdAt: 1,
       updatedAt: 1,
@@ -786,7 +793,7 @@ describe("removePartFromAngle", () => {
       canvasHeight: 900,
       angles: ["front", "3qR"],
       parts,
-      manifest: {},
+      manifest: DEFAULT_PART_MANIFEST,
       parallax: { onCamera: true, onClip: true, intensity: 0.15 },
       createdAt: 1,
       updatedAt: 1,

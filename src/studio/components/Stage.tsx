@@ -685,9 +685,12 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   // bumps `project` with `{ ...p, updatedAt }` but shares the same `hf` reference, and
   // selection/keyframe-selection live outside `project` entirely — none of those touch
   // `hf`, so none of them reload. The latest `project` is read at resolve time.
-  const projectHf = project?.hf;
+  const projectHf = rootProject?.hf;
   useEffect(() => {
-    const current = project;
+    const state = useStudio.getState();
+    const current = state.project
+      ? buildSceneEditingProject(state.project, state.activeSceneId)
+      : null;
     if (!current) {
       setResolvedHtml(null);
       setPreviewError(null);
@@ -714,7 +717,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     return () => {
       alive = false;
     };
-  }, [project, projectHf, repairTimelineLanes]);
+  }, [activeSceneId, projectHf, repairTimelineLanes]);
 
   useEffect(() => {
     if (!resolvedHtml) return;

@@ -293,13 +293,10 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
                   </button>
                   <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground">
                     start
-                    <input
-                      type="number"
-                      min={0}
-                      step={0.1}
-                      value={Number(speech.start.toFixed(2))}
-                      onChange={(e) => moveSpeech(clip.id, speech.id, Number(e.target.value))}
-                      className="w-12 rounded border border-border bg-input px-1 py-0.5 text-right text-foreground"
+                    <SpeechStartInput
+                      speechId={speech.id}
+                      value={speech.start}
+                      onCommit={(start) => moveSpeech(clip.id, speech.id, start)}
                     />
                     s
                   </label>
@@ -329,20 +326,11 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
               <label className="mb-2 flex items-center gap-2 text-[10px] text-muted-foreground">
                 <Volume2 size={12} className="shrink-0" />
                 <span className="shrink-0">Volume</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.05}
+                <SpeechVolumeInput
+                  speechId={selectedSpeech.id}
                   value={selectedSpeech.volume ?? 1}
-                  onChange={(e) =>
-                    setSpeechVolume(clip.id, selectedSpeech.id, Number(e.target.value))
-                  }
-                  className="flex-1"
+                  onCommit={(volume) => setSpeechVolume(clip.id, selectedSpeech.id, volume)}
                 />
-                <span className="w-8 shrink-0 text-right text-foreground">
-                  {Math.round((selectedSpeech.volume ?? 1) * 100)}%
-                </span>
               </label>
               <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                 Lip sync — {selectedAsset?.name ?? "voice"}
@@ -635,6 +623,97 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
         )}
       </div>
     </div>
+  );
+}
+
+function SpeechStartInput({
+  speechId,
+  value,
+  onCommit,
+}: {
+  speechId: string;
+  value: number;
+  onCommit: (value: number) => void;
+}) {
+  const formattedValue = String(Math.round(value * 100) / 100);
+  const [draft, setDraft] = useState(formattedValue);
+
+  useEffect(() => {
+    setDraft(formattedValue);
+  }, [formattedValue, speechId]);
+
+  const commit = (nextDraft: string) => {
+    const trimmed = nextDraft.trim();
+    const parsed = Number(trimmed);
+    if (trimmed === "" || !Number.isFinite(parsed)) {
+      setDraft(formattedValue);
+      return;
+    }
+    if (parsed !== value) onCommit(parsed);
+  };
+
+  return (
+    <input
+      type="number"
+      min={0}
+      step={0.1}
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={(event) => commit(event.currentTarget.value)}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.currentTarget.value = formattedValue;
+          setDraft(formattedValue);
+          event.currentTarget.blur();
+        } else if (event.key === "Enter") {
+          event.currentTarget.blur();
+        }
+      }}
+      className="w-12 rounded border border-border bg-input px-1 py-0.5 text-right text-foreground"
+    />
+  );
+}
+
+function SpeechVolumeInput({
+  speechId,
+  value,
+  onCommit,
+}: {
+  speechId: string;
+  value: number;
+  onCommit: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  const committedValueRef = useRef(value);
+
+  useEffect(() => {
+    setDraft(value);
+    committedValueRef.current = value;
+  }, [speechId, value]);
+
+  const commit = (nextValue: number) => {
+    if (nextValue === committedValueRef.current) return;
+    committedValueRef.current = nextValue;
+    onCommit(nextValue);
+  };
+
+  return (
+    <>
+      <input
+        type="range"
+        min={0}
+        max={1}
+        step={0.05}
+        value={draft}
+        onChange={(event) => setDraft(Number(event.target.value))}
+        onPointerUp={(event) => commit(Number(event.currentTarget.value))}
+        onPointerCancel={(event) => commit(Number(event.currentTarget.value))}
+        onKeyUp={(event) => commit(Number(event.currentTarget.value))}
+        onBlur={(event) => commit(Number(event.currentTarget.value))}
+        className="flex-1"
+      />
+      <span className="w-8 shrink-0 text-right text-foreground">{Math.round(draft * 100)}%</span>
+    </>
   );
 }
 

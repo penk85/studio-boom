@@ -609,6 +609,7 @@ function BlocksTab() {
       duration: 4,
       width: project.hf.width,
       height: project.hf.height,
+      isSubComposition: true,
     });
     setErrors(result.errors);
     setValidated(result);

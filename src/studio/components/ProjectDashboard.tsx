@@ -64,11 +64,13 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
   const [importSource, setImportSource] = useState("");
   const [importZipFile, setImportZipFile] = useState<File | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [openError, setOpenError] = useState<string | null>(null);
 
   const projects = useMemo(
     () => (storedProjects ?? []).filter(isCurrentProjectShape),
     [storedProjects],
   );
+  const incompatibleProjectCount = (storedProjects?.length ?? 0) - projects.length;
   const filteredProjects = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return projects;
@@ -77,8 +79,11 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
 
   const openProject = async (projectId: string) => {
     setOpeningId(projectId);
+    setOpenError(null);
     try {
       await onOpenProject(projectId);
+    } catch (error) {
+      setOpenError(error instanceof Error ? error.message : String(error));
     } finally {
       setOpeningId(null);
     }
@@ -298,6 +303,27 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
             />
           </div>
         </div>
+
+        {(openError || incompatibleProjectCount > 0) && (
+          <div className="space-y-2" role="alert">
+            {openError && (
+              <div className="flex items-start gap-2 rounded-md border border-destructive/45 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                <span>{openError}</span>
+              </div>
+            )}
+            {incompatibleProjectCount > 0 && (
+              <div className="flex items-start gap-2 rounded-md border border-border bg-secondary px-3 py-2 text-xs text-secondary-foreground">
+                <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                <span>
+                  {incompatibleProjectCount} incompatible project
+                  {incompatibleProjectCount === 1 ? " is" : "s are"} hidden but preserved for
+                  recovery.
+                </span>
+              </div>
+            )}
+          </div>
+        )}
 
         {storedProjects === undefined ? (
           <div className="grid flex-1 place-items-center text-sm text-muted-foreground">

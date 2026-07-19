@@ -1136,6 +1136,7 @@ function buildCompositionSourceErrors(
       duration: clip.duration,
       width: clip.width || project.hf.width,
       height: clip.height || project.hf.height,
+      isSubComposition: true,
     });
     if (!result.ok) errorsByClipId.set(clip.id, result.errors);
   }

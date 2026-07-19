@@ -142,9 +142,13 @@ async function loadPreviewTextures(
         textures[asset.id] = await Assets.load<Texture>({
           src: resolved,
           parser: asset.parser || "texture",
-          // SVG parts rasterize at 2x so bends and zoom stay crisp; bitmap
-          // parts get mipmaps so minified sampling doesn't alias.
-          data: asset.parser === "svg" ? { resolution: 2 } : { autoGenerateMipmaps: true },
+          // Full-canvas SVG layers can be several times larger than the
+          // composition. Rasterize at their actual output size so each layer
+          // consumes only the pixels the video can display.
+          data:
+            asset.parser === "svg"
+              ? { width: asset.rasterWidth, height: asset.rasterHeight, resolution: 1 }
+              : { autoGenerateMipmaps: true },
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -173,9 +177,10 @@ function buildPixiScene(
   const meshEntriesByNodeId: Record<string, BendableMeshEntry[]> = {};
   const ropeEntries: RopeMeshEntry[] = [];
   const ropeEntriesByNodeId: Record<string, RopeMeshEntry[]> = {};
+  const supportsMesh = hasPixiMeshPipe(app);
   Object.keys(scene.nodes).forEach((nodeId) => {
     const node = scene.nodes[nodeId];
-    const built = createPixiNode(node, textures);
+    const built = createPixiNode(node, textures, supportsMesh);
     nodes[nodeId] = built.container;
     nodes[nodeId].label = nodeId;
     if (built.meshEntry) meshEntries.push(built.meshEntry);
@@ -213,6 +218,7 @@ function buildPixiScene(
 function createPixiNode(
   node: CharacterSceneNode,
   textures: Record<string, Texture>,
+  supportsMesh: boolean,
 ): { container: Container; meshEntry?: BendableMeshEntry; ropeEntry?: RopeMeshEntry } {
   if (node.kind === "sprite" || node.kind === "mesh") {
     const texture = textures[node.assetId];
@@ -220,7 +226,7 @@ function createPixiNode(
     const container = new Container({ sortableChildren: true });
     // The parent container owns transforms, visibility, and timeline vars for
     // both leaf kinds; a mesh leaf only adds vertex-level bending inside it.
-    if (node.kind === "mesh" && node.meshKind === "rope") {
+    if (supportsMesh && node.kind === "mesh" && node.meshKind === "rope") {
       try {
         const built = limb.buildRopeRibbon({ MeshSimple, texture, node });
         built.mesh.label = `${node.id}:${node.kind}`;
@@ -234,7 +240,7 @@ function createPixiNode(
         );
       }
     }
-    if (node.kind === "mesh" && node.meshKind === "plane") {
+    if (supportsMesh && node.kind === "mesh" && node.meshKind === "plane") {
       try {
         const mesh = new MeshPlane({
           texture,
@@ -262,6 +268,14 @@ function createPixiNode(
     return { container };
   }
   return { container: new Container({ sortableChildren: true }) };
+}
+
+/** CanvasRenderer exposes mesh classes but has no mesh render pipe; use rigid sprites there. */
+function hasPixiMeshPipe(app: Application): boolean {
+  const renderer = app.renderer as unknown as {
+    renderPipes?: { mesh?: { validateRenderable?: unknown } };
+  };
+  return typeof renderer.renderPipes?.mesh?.validateRenderable === "function";
 }
 
 export function renderPixiCharacterAt(

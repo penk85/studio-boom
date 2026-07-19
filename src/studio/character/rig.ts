@@ -730,19 +730,18 @@ function angleRelationHasCrossSideConflict(
   relation: CharacterSlotRelation,
   angleRig: CharacterAngleRig,
 ): boolean {
+  const parentRef = relation.parentRef;
   const boneById = new Map(angleRig.bones.map((bone) => [bone.id, bone]));
   const bindingBySlot = new Map(angleRig.slotBindings.map((binding) => [binding.slotId, binding]));
   const childBone = boneById.get(bindingBySlot.get(relation.childSlotId)?.boneId ?? "");
   let parentBone: CharacterBone | undefined;
-  if (relation.parentRef.type === "slot" || relation.parentRef.type === "semanticSlot") {
-    parentBone = boneById.get(bindingBySlot.get(relation.parentRef.id)?.boneId ?? "");
-  } else if (relation.parentRef.type === "bone") {
-    parentBone = boneById.get(relation.parentRef.id);
-  } else if (relation.parentRef.type === "role") {
+  if (parentRef.type === "slot" || parentRef.type === "semanticSlot") {
+    parentBone = boneById.get(bindingBySlot.get(parentRef.id)?.boneId ?? "");
+  } else if (parentRef.type === "bone") {
+    parentBone = boneById.get(parentRef.id);
+  } else if (parentRef.type === "role") {
     parentBone = angleRig.bones.find(
-      (bone) =>
-        bone.role === relation.parentRef.role &&
-        (!relation.parentRef.side || bone.side === relation.parentRef.side),
+      (bone) => bone.role === parentRef.role && (!parentRef.side || bone.side === parentRef.side),
     );
   }
   const childSide = childBone?.side;
@@ -1308,14 +1307,12 @@ export function parentSlotIdForSlot(
   }
   for (const relation of angleRig.slotRelations ?? []) {
     if (relation.childSlotId !== childSlotId) continue;
-    if (relation.parentRef.type === "slot" || relation.parentRef.type === "semanticSlot")
-      return relation.parentRef.id;
-    if (relation.parentRef.type === "bone") return slotByBone.get(relation.parentRef.id);
-    if (relation.parentRef.type === "role") {
+    const parentRef = relation.parentRef;
+    if (parentRef.type === "slot" || parentRef.type === "semanticSlot") return parentRef.id;
+    if (parentRef.type === "bone") return slotByBone.get(parentRef.id);
+    if (parentRef.type === "role") {
       const parentBone = angleRig.bones.find(
-        (bone) =>
-          bone.role === relation.parentRef.role &&
-          (!relation.parentRef.side || bone.side === relation.parentRef.side),
+        (bone) => bone.role === parentRef.role && (!parentRef.side || bone.side === parentRef.side),
       );
       if (parentBone) return slotByBone.get(parentBone.id);
     }

@@ -235,8 +235,8 @@ function remapCharacterRigSlotIds(
 ): CharacterRig | undefined {
   if (!rig || slotIds.size === 0) return rig;
   const slotId = (id: ID) => slotIds.get(id) ?? id;
-  const boneIds = new Map(
-    Array.from(slotIds, ([from, to]) => [`bone:${from}`, `bone:${to}`] as const),
+  const boneIds = new Map<ID, ID>(
+    Array.from(slotIds, ([from, to]) => [`bone:${from}`, `bone:${to}`]),
   );
   const boneId = (id: ID | undefined) => (id ? (boneIds.get(id) ?? id) : undefined);
   const remapAngle = <
@@ -280,7 +280,7 @@ function remapCharacterRigSlotIds(
     hostConstraints: angle.hostConstraints.map((constraint) => ({
       ...constraint,
       slotId: slotId(constraint.slotId),
-      hostSlotId: slotId(constraint.hostSlotId),
+      hostSlotId: constraint.hostSlotId ? slotId(constraint.hostSlotId) : undefined,
       hostBoneId: boneId(constraint.hostBoneId),
     })),
     reaches: angle.reaches.map((reach) => ({ ...reach, slotId: slotId(reach.slotId) })),

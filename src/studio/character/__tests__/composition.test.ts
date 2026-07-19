@@ -198,7 +198,14 @@ function extractPixiPayload(html: string) {
           anchors: Record<string, { x: number; y: number; rotation: number }>;
         }
       >;
-      assets: Array<{ id: string; parser: string; ref: string; partIds: string[] }>;
+      assets: Array<{
+        id: string;
+        parser: string;
+        ref: string;
+        partIds: string[];
+        rasterWidth?: number;
+        rasterHeight?: number;
+      }>;
     };
     timelineScene: {
       duration: number;
@@ -366,20 +373,38 @@ describe("buildCharacterCompositionHtml", () => {
 
     expect(validation.ok).toBe(true);
     expect(html).toContain('data-character-renderer="pixi"');
+    expect(html).toContain('data-character-composition-id="char_clip-1"');
     expect(html).toContain("https://pixijs.download/release/pixi.min.js");
     expect(html).toContain("new PIXI.Application()");
     expect(html).toContain("PIXI.Assets.load");
     expect(html).toContain("preferCreateImageBitmap: false");
+    expect(html).toContain(
+      "{ width: asset.rasterWidth, height: asset.rasterHeight, resolution: 1 }",
+    );
     expect(html).toContain("Failed to load character texture");
+    expect(html).toContain("let initialized = false");
+    expect(html).toContain("if (initialized) {");
+    expect(html).toContain(
+      "app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true })",
+    );
     expect(html).not.toContain("alias: asset.id");
     expect(html).toContain("new PIXI.Sprite");
-    expect(html).toContain("createTexturedLeaf(PIXI, node, textures[node.assetId])");
+    expect(html).toContain("createTexturedLeaf(PIXI, node, textures[node.assetId], supportsMesh)");
     expect(html).toContain("nodes[nodeId].addChild(leaf)");
     expect(html).not.toContain("new PIXI.MeshPlane");
     expect(html).toContain('"assetRef":"asset:body-media"');
     expect(html).toContain('window.__timelines["char_clip-1"] = tl');
     expect(html).toContain("window.__studioBoomPixiReady");
     expect(html).toContain("installHyperframesReadinessGate");
+    expect(html).toContain("expectedPixiCompositionIds");
+    expect(html).toContain("__studioBoomPixiReadyRegistrationListeners");
+    expect(html).toContain("waitForPixiReady().then");
+    expect(html).toContain("webgl: { preserveDrawingBuffer: true }");
+    expect(html).not.toContain("useBackBuffer");
+    expect(html).toContain('document.createElement("canvas")');
+    expect(html).toContain('presentationCanvas.getContext("2d")');
+    expect(html).toContain("ctx.presentationContext.drawImage(ctx.renderCanvas, 0, 0)");
+    expect(html).toContain('typeof gl.finish === "function"');
     expect(html).toContain("targetVarsAt");
     expect(html).toContain("showSceneNodeIds");
     expect(html).not.toContain("<img ");
@@ -501,6 +526,9 @@ describe("buildCharacterCompositionHtml", () => {
     // (a MeshRope would pancake the art) plus a rigid-sprite fallback so
     // capture environments without the mesh pipe cannot fail.
     expect(html).toContain("MeshSimple: PIXI.MeshSimple");
+    expect(html).toContain("app.renderer.renderPipes.mesh.validateRenderable");
+    expect(html).toContain('if (supportsMesh && node.kind === "mesh" && node.meshKind === "rope"');
+    expect(html).toContain("textures[node.assetId], supportsMesh");
     expect(html).toContain("buildRopeRibbon");
     expect(html).toContain("createLimbRuntime");
     expect(html).not.toContain("new PIXI.MeshRope");
@@ -566,6 +594,7 @@ describe("buildCharacterCompositionHtml", () => {
     const eyeAsset = payload.scene.assets.find((asset) => asset.id === "eye-open-media");
 
     expect(bodyAsset?.parser).toBe("svg");
+    expect(bodyAsset).toMatchObject({ rasterWidth: 110, rasterHeight: 180 });
     expect(eyeAsset?.parser).toBe("texture");
   });
 

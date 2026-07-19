@@ -494,10 +494,11 @@ function listText(items: string[] | undefined): string {
 function boneWorldTransforms(
   angle: AngleRigJson,
 ): Map<string, { x: number; y: number; rotation: number }> {
+  type WorldTransform = { x: number; y: number; rotation: number };
   const bonesById = new Map(angle.bones.map((bone) => [bone.id, bone]));
-  const out = new Map<string, { x: number; y: number; rotation: number }>();
+  const out = new Map<string, WorldTransform>();
   const resolving = new Set<string>();
-  const resolve = (bone: AngleRigJson["bones"][number]) => {
+  const resolve = (bone: AngleRigJson["bones"][number]): WorldTransform => {
     const cached = out.get(bone.id);
     if (cached) return cached;
     const local = { x: bone.x, y: bone.y, rotation: bone.rotation };
@@ -507,10 +508,10 @@ function boneWorldTransforms(
       return local;
     }
     resolving.add(bone.id);
-    const parentWorld = resolve(parent);
+    const parentWorld: WorldTransform = resolve(parent);
     resolving.delete(bone.id);
     const rotated = rotatePoint(local.x, local.y, parentWorld.rotation);
-    const world = {
+    const world: WorldTransform = {
       x: parentWorld.x + rotated.x,
       y: parentWorld.y + rotated.y,
       rotation: parentWorld.rotation + local.rotation,

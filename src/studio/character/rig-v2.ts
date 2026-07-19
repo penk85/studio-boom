@@ -298,6 +298,16 @@ export function requiredPinNamesForSlot(
 
 type ActiveVariantSelection = ReadonlyMap<string, string> | Readonly<Record<string, string>>;
 
+function activeVariantForSlot(
+  selection: ActiveVariantSelection | undefined,
+  slotId: string,
+): string | undefined {
+  if (!selection) return undefined;
+  const mapSelection = selection as ReadonlyMap<string, string>;
+  if (typeof mapSelection.get === "function") return mapSelection.get(slotId);
+  return (selection as Readonly<Record<string, string>>)[slotId];
+}
+
 /**
  * Resolve the local rest transform of every pin-driven bone for one angle.
  *
@@ -319,11 +329,7 @@ export function resolvePinnedBonesForAngle(
     const parentSlot = slotById.get(source.slotId);
     const binding = bindingBySlot.get(source.slotId);
     if (!parentSlot) return bone;
-    const variantKey = activeVariants
-      ? activeVariants instanceof Map
-        ? activeVariants.get(source.slotId)
-        : activeVariants[source.slotId]
-      : undefined;
+    const variantKey = activeVariantForSlot(activeVariants, source.slotId);
     const visibleParts = parentSlot.parts.filter((part) => part.visible);
     const parentPart =
       (variantKey
@@ -417,11 +423,7 @@ export function moveCharacterBoneRest(
   );
   if (!parentWorld || parentParts.length === 0) return canonical;
 
-  const activeVariant = options.activeVariants
-    ? options.activeVariants instanceof Map
-      ? options.activeVariants.get(bone.restSource.slotId)
-      : options.activeVariants[bone.restSource.slotId]
-    : undefined;
+  const activeVariant = activeVariantForSlot(options.activeVariants, bone.restSource.slotId);
   const activeParentPart =
     (activeVariant ? anchorPartForVariant(parentParts, activeVariant) : undefined) ??
     (parentBinding?.partId
@@ -540,11 +542,7 @@ export function setCharacterBoneRestTransform(
   const parentBinding = nextAngleRig.slotBindings.find(
     (binding) => binding.slotId === nextBone.restSource?.slotId,
   );
-  const activeVariant = options.activeVariants
-    ? options.activeVariants instanceof Map
-      ? options.activeVariants.get(nextBone.restSource.slotId)
-      : options.activeVariants[nextBone.restSource.slotId]
-    : undefined;
+  const activeVariant = activeVariantForSlot(options.activeVariants, nextBone.restSource.slotId);
   const activeParentPart =
     (activeVariant ? anchorPartForVariant(parentParts, activeVariant) : undefined) ??
     (parentBinding?.partId

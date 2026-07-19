@@ -17,7 +17,7 @@ export default defineConfig(({ mode }) => {
   ];
 
   return mergeConfig(
-    { server: { host: "::", port: 8080 } },
+    { server: { host: "127.0.0.1", port: 8080 } },
     {
       plugins,
       define: {

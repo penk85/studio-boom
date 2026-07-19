@@ -197,6 +197,7 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
               <AdvancedInspectorTab
                 clip={clip}
                 project={project}
+                rootProject={rootProject}
                 tracks={tracks}
                 onUpdate={(patch) => update(clip.id, patch)}
                 onRemove={() => remove(clip.id)}
@@ -529,6 +530,7 @@ function CharacterRigPresetPanel({ character }: { character: CharacterPreset }) 
 function AdvancedInspectorTab({
   clip,
   project,
+  rootProject,
   tracks,
   onUpdate,
   onRemove,
@@ -536,6 +538,7 @@ function AdvancedInspectorTab({
 }: {
   clip: EditorClip;
   project: Project;
+  rootProject: Project;
   tracks: TrackMeta[];
   onUpdate: ClipUpdater;
   onRemove: () => void;
@@ -1361,7 +1364,7 @@ function validateCompositionSourceForClip(
   expectedCompositionId: string,
   defaults: Parameters<typeof validateCompositionSourceHtml>[1],
 ) {
-  const result = validateCompositionSourceHtml(html, defaults);
+  const result = validateCompositionSourceHtml(html, { ...defaults, isSubComposition: true });
   if (result.ok && result.compositionId !== expectedCompositionId) {
     return {
       ...result,
@@ -1389,14 +1392,35 @@ function TextInspector({
   clip: TextClip;
   update: (patch: Partial<TextClip>) => void;
 }) {
+  const content = clip.content ?? "";
+  const [contentDraft, setContentDraft] = useState(content);
+
+  useEffect(() => {
+    setContentDraft(content);
+  }, [clip.id, content]);
+
+  const commitContent = (nextContent: string) => {
+    if (nextContent !== content) update({ content: nextContent });
+  };
+
   return (
     <PanelSection title="Text" icon={Type}>
       <div className="space-y-2">
         <Field label="Content">
           <textarea
-            value={clip.content ?? ""}
+            value={contentDraft}
             rows={3}
-            onChange={(e) => update({ content: e.target.value })}
+            onChange={(event) => setContentDraft(event.target.value)}
+            onBlur={(event) => commitContent(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.currentTarget.value = content;
+                setContentDraft(content);
+                event.currentTarget.blur();
+              } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                event.currentTarget.blur();
+              }
+            }}
             className="w-full resize-none rounded border border-border bg-input px-2 py-1 text-foreground"
           />
         </Field>

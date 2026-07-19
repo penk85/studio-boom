@@ -47,4 +47,17 @@ describe("getProjectThumbnailCacheKey", () => {
 
     expect(getProjectThumbnailCacheKey(updated)).not.toBe(getProjectThumbnailCacheKey(project));
   });
+
+  it("supports legacy asset manifests without an explicit kind", () => {
+    const project = makeProject();
+    const legacyProject = {
+      ...project,
+      hf: {
+        ...project.hf,
+        assets: [{ id: "legacy-image", filename: "legacy.png", mimeType: "image/png" }],
+      },
+    } as Project;
+
+    expect(() => getProjectThumbnailCacheKey(legacyProject)).not.toThrow();
+  });
 });

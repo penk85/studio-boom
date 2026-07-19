@@ -20,7 +20,7 @@ export function getProjectThumbnailCacheKey(project: Project): string {
 
   for (const asset of [...project.hf.assets].sort((a, b) => a.id.localeCompare(b.id))) {
     hash = hashText(hash, asset.id);
-    hash = hashText(hash, asset.kind);
+    hash = hashText(hash, asset.kind ?? "");
     hash = hashText(hash, asset.mimeType ?? "");
     hash = hashText(hash, asset.filename ?? "");
   }
