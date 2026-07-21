@@ -14,7 +14,7 @@ export default function App() {
   const [view, setView] = useState<AppView>("dashboard");
   const modal = useStudio((s) => s.currentModal);
   const closeModal = useStudio((s) => s.closeModal);
-  const saveProject = useStudio((s) => s.saveProject);
+  const closeProject = useStudio((s) => s.closeProject);
   // Reading the store here applies the persisted [data-theme] app-wide,
   // including on the dashboard before the studio (and its TopBar) mounts.
   const setTheme = useTheme((s) => s.setTheme);
@@ -37,7 +37,7 @@ export default function App() {
   };
 
   const openDashboard = async () => {
-    await saveProject();
+    await closeProject();
     setView("dashboard");
   };
 

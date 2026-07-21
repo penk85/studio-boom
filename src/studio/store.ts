@@ -33,6 +33,7 @@ import {
   type StudioTimelineElement,
 } from "./hyperframes/html";
 import { normalizeNativeHyperframesHtml } from "./hyperframes/native";
+import { projectEditLock } from "./project-lock";
 import {
   addMotionCheckpointToClip,
   addMotionStepToClip,
@@ -1118,6 +1119,7 @@ interface StudioState {
   loadProject: (id: string) => Promise<void>;
   newProject: () => Promise<void>;
   saveProject: (expectedGeneration?: number) => Promise<void>;
+  closeProject: () => Promise<void>;
   refreshCharacterCompositions: (options?: ProjectMutationOptions) => Project | null;
 
   selectClip: (id: string | null) => void;
@@ -1375,69 +1377,87 @@ export const useStudio = create<StudioState>((set, get) => ({
   },
 
   async loadProject(id) {
-    const storedProject = (await db.projects.get(id)) as unknown;
-    if (!storedProject) throw new Error(`Project "${id}" was not found.`);
-    const currentProject = requireCurrentProjectShape(storedProject, id);
+    const alreadyOwned = projectEditLock.owns(id);
+    await projectEditLock.acquire(id);
+    try {
+      const storedProject = (await db.projects.get(id)) as unknown;
+      if (!storedProject) throw new Error(`Project "${id}" was not found.`);
+      const currentProject = requireCurrentProjectShape(storedProject, id);
 
-    const [allCharacters, allPresets, allMedia] = await Promise.all([
-      db.characters.toArray(),
-      db.motionPresets.toArray(),
-      db.media.toArray(),
-    ]);
-    const characters = new Map(allCharacters.map((c) => [c.id, c]));
-    const motionPresets = new Map(allPresets.map((p) => [p.id, p]));
-    const mediaAssets = new Map(allMedia.map((m) => [m.id, m]));
+      const [allCharacters, allPresets, allMedia] = await Promise.all([
+        db.characters.toArray(),
+        db.motionPresets.toArray(),
+        db.media.toArray(),
+      ]);
+      const characters = new Map(allCharacters.map((c) => [c.id, c]));
+      const motionPresets = new Map(allPresets.map((p) => [p.id, p]));
+      const mediaAssets = new Map(allMedia.map((m) => [m.id, m]));
 
-    let project = rebuildCharacterCompositions(
-      syncProjectRenderTrackIndices(currentProject),
-      characters,
-      mediaAssets,
-      motionPresets,
-    );
-    if (project !== currentProject) {
-      project = { ...project, updatedAt: Date.now() };
-      await db.projects.put(project);
+      let project = rebuildCharacterCompositions(
+        syncProjectRenderTrackIndices(currentProject),
+        characters,
+        mediaAssets,
+        motionPresets,
+      );
+      if (project !== currentProject) {
+        project = { ...project, updatedAt: Date.now() };
+        await db.projects.put(project);
+      }
+      set({
+        project,
+        tracks: project.editorMeta.tracks,
+        characters,
+        motionPresets,
+        mediaAssets,
+        activeSceneId: deriveProjectScenes(project)[0]?.id ?? null,
+        selectedClipId: null,
+        selectedClipIds: [],
+        selectedKeyframe: null,
+        selectedSpeechId: null,
+        historyPast: [],
+        historyFuture: [],
+        saveStatus: "saved",
+        lastSavedAt: Date.now(),
+        saveError: null,
+      });
+    } catch (error) {
+      if (!alreadyOwned) await projectEditLock.release(id);
+      throw error;
     }
-    set({
-      project,
-      tracks: project.editorMeta.tracks,
-      characters,
-      motionPresets,
-      mediaAssets,
-      activeSceneId: deriveProjectScenes(project)[0]?.id ?? null,
-      selectedClipId: null,
-      selectedKeyframe: null,
-      historyPast: [],
-      historyFuture: [],
-      saveStatus: "saved",
-      lastSavedAt: Date.now(),
-      saveError: null,
-    });
   },
 
   async newProject() {
     const project = createBlankProject();
-    await db.projects.put(project);
-    set({
-      project,
-      tracks: project.editorMeta.tracks,
-      characters: new Map(),
-      motionPresets: new Map(),
-      mediaAssets: new Map(),
-      activeSceneId: deriveProjectScenes(project)[0]?.id ?? null,
-      selectedClipId: null,
-      selectedKeyframe: null,
-      historyPast: [],
-      historyFuture: [],
-      saveStatus: "saved",
-      lastSavedAt: Date.now(),
-      saveError: null,
-    });
+    await projectEditLock.acquire(project.id);
+    try {
+      await db.projects.put(project);
+      set({
+        project,
+        tracks: project.editorMeta.tracks,
+        characters: new Map(),
+        motionPresets: new Map(),
+        mediaAssets: new Map(),
+        activeSceneId: deriveProjectScenes(project)[0]?.id ?? null,
+        selectedClipId: null,
+        selectedClipIds: [],
+        selectedKeyframe: null,
+        selectedSpeechId: null,
+        historyPast: [],
+        historyFuture: [],
+        saveStatus: "saved",
+        lastSavedAt: Date.now(),
+        saveError: null,
+      });
+    } catch (error) {
+      await projectEditLock.release(project.id);
+      throw error;
+    }
   },
 
   async saveProject(expectedGeneration) {
     const p = get().project;
     if (!p) return;
+    projectEditLock.assertCanWrite(p.id);
     const generation = expectedGeneration ?? saveGeneration;
     if (expectedGeneration === undefined) clearTimeout(saveTimer);
     set({ saveStatus: "saving", saveError: null });
@@ -1461,6 +1481,30 @@ export const useStudio = create<StudioState>((set, get) => ({
       }
       throw error;
     }
+  },
+
+  async closeProject() {
+    const projectId = get().project?.id;
+    if (!projectId) return;
+    await get().saveProject();
+    await projectEditLock.release(projectId);
+    set({
+      project: null,
+      tracks: [],
+      characters: new Map(),
+      motionPresets: new Map(),
+      mediaAssets: new Map(),
+      selectedClipId: null,
+      selectedClipIds: [],
+      selectedKeyframe: null,
+      activeSceneId: null,
+      selectedSpeechId: null,
+      historyPast: [],
+      historyFuture: [],
+      saveStatus: "saved",
+      saveError: null,
+      currentModal: null,
+    });
   },
 
   refreshCharacterCompositions(options) {

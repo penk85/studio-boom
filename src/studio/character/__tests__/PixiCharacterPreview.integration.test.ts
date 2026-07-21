@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const componentPath = join(process.cwd(), "src/studio/character/PixiCharacterPreview.tsx");
 const runtimePath = join(process.cwd(), "src/studio/character/pixi-preview-runtime.ts");
+const assetsPath = join(process.cwd(), "src/studio/character/pixi-preview-assets.ts");
 
 describe("PixiCharacterPreview source integration", () => {
   it("reuses a built scene when only recorder timeline data changes", () => {
@@ -26,6 +27,17 @@ describe("PixiCharacterPreview source integration", () => {
     expect(runtime).toContain(
       "app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true })",
     );
+    expect(runtime).toContain("await textureLease?.release()");
+  });
+
+  it("releases shared Pixi Assets only after preview scene teardown", () => {
+    const runtime = readFileSync(runtimePath, "utf8");
+    const assets = readFileSync(assetsPath, "utf8");
+
+    expect(runtime).toContain("acquirePixiPreviewTextures");
+    expect(runtime).toContain("void lease?.release()");
+    expect(assets).toContain("createPreviewAssetLeaseManager<Texture>");
+    expect(assets).toContain("Assets.unload(key)");
   });
 
   it("falls back to sprites when the active renderer has no mesh pipe", () => {
@@ -42,11 +54,11 @@ describe("PixiCharacterPreview source integration", () => {
   });
 
   it("rasterizes SVG layers at their scene output size", () => {
-    const runtime = readFileSync(runtimePath, "utf8");
+    const assets = readFileSync(assetsPath, "utf8");
 
-    expect(runtime).toContain(
+    expect(assets).toContain(
       "{ width: asset.rasterWidth, height: asset.rasterHeight, resolution: 1 }",
     );
-    expect(runtime).not.toContain("{ resolution: 2 }");
+    expect(assets).not.toContain("{ resolution: 2 }");
   });
 });

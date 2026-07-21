@@ -10,6 +10,8 @@ describe("Inspector source integration", () => {
 
     expect(source).toContain("<CompositionSourceInspector");
     expect(source).toContain("onApply={(html) => updateCompositionHtml");
+    expect(source).toContain("<SourceTrustConfirmation");
+    expect(source).toContain('previewStatus === "ready" && sourceTrusted');
     expect(source).toContain("<RootElementSourceInspector");
     expect(source).toContain("readRootElementSource(rootHtml, clip.id)");
     expect(source).toContain("readOnly");

@@ -51,7 +51,8 @@ Working now:
   HyperFrames composition blocks.
 - Text presets for titles, captions, and lower thirds, with text styling in the Inspector.
 - Paste/import of custom HyperFrames composition blocks through Library -> Blocks,
-  with validation, sandbox preview, and repair-prompt copying.
+  with validation, sandbox preview, explicit source trust confirmation, and
+  repair-prompt copying.
 - Source inspection for selected composition clips and primitive root elements.
 - Stage selection, drag, resize, rotate, layer ordering, and keyboard nudging on the
   real HyperFrames iframe element.
@@ -225,9 +226,28 @@ the Inspector.
 Custom blocks are self-contained HyperFrames compositions. Use Library -> Blocks to
 paste HTML, validate it, preview it, and add it to the timeline. Studio Boom stores
 the block in `project.hf.compositionHtml` and hosts it with one root composition clip.
+The Add action remains disabled until the sandbox preview succeeds and you confirm
+that you trust the executable source.
 
 For selected composition clips, the Inspector exposes a Source panel. Source edits
-must validate and preview before they update `project.hf.compositionHtml`.
+must validate, run through the sandbox preview, and receive explicit trust confirmation
+before they update `project.hf.compositionHtml`.
+
+## Security And Imported Source
+
+HyperFrames compositions are executable HTML, not passive documents. Inline scripts,
+event handlers, nested frames, and other browser features can run JavaScript. The
+editable Stage intentionally uses the installed HyperFrames Studio same-origin iframe
+bridge so selection, computed-style inspection, and live transforms can operate on the
+real composition DOM. Consequently, source running in the Stage can access Studio
+Boom's IndexedDB projects and its local API endpoints.
+
+Library block, pasted root-project, and Inspector composition-source previews run first
+in an origin-isolated iframe (`sandbox="allow-scripts"` without `allow-same-origin`).
+Moving that source into the editable Stage requires an explicit trust confirmation. ZIP
+imports also require the confirmation before their files are persisted and opened. Only
+import, add, or apply HTML and ZIP projects that you created yourself or received from
+someone you trust.
 
 ## Architecture
 

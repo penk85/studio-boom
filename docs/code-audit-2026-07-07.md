@@ -14,6 +14,13 @@ green), `npx tsc --noEmit` (13 known baseline errors), `npx eslint .`
 **Tree state at audit time:** commit `ed41ff0` plus a ~1,400-line uncommitted
 diff (in-progress flexible-limb "mesh locks" feature; reviewed in §5).
 
+**Status update (2026-07-19):** H1–H4 and M1–M5 have been addressed. Project
+editing now takes an origin-scoped Web Lock before load-time writes; Dashboard
+rename, duplicate, and delete use the same exclusive boundary and re-read the
+latest stored project after acquiring it. A second tab is refused while the
+first edits, then can open the project after the first saves and returns to the
+Dashboard. M6 and M8 are mitigated below; M7 and the Low findings remain open.
+
 Severity scale: **High** = data loss, security exposure, or broken gate.
 **Medium** = will bite users/devs under normal use as the app grows.
 **Low** = smell or foot-gun; cheap to fix, not urgent. Each finding has a
@@ -214,6 +221,13 @@ Timeline's speech drags (`onVoiceHistoryCheckpoint` + per-move
 
 ### M6. GPU textures are cached forever within a session
 
+**Addressed 2026-07-20:** editor-side Pixi character previews now acquire
+reference-counted leases for each resolved asset URL. Concurrent Character
+Editor and Action/Expression Recorder previews continue sharing Pixi's cache;
+scene teardown unloads through `Assets.unload` only after the last preview
+releases the URL. Failed loads and scene-construction failures release their
+partial leases, and the lease coordinator survives Vite hot replacement.
+
 - **Where:** `src/studio/character/pixi-preview-runtime.ts`
   (`loadPreviewTextures` → `Assets.load`); no `Assets.unload` anywhere in
   `src/`.
@@ -251,8 +265,18 @@ Timeline's speech drags (`onVoiceHistoryCheckpoint` + per-move
 
 ### M8. Same-origin `srcdoc` means pasted blocks run with full app privileges
 
+**Mitigated 2026-07-19, architectural remainder documented:** Library block,
+pasted root-project, and Inspector composition-source previews run with
+`sandbox="allow-scripts"` and no `allow-same-origin`. Adding a block, applying
+composition source, or importing HTML/ZIP now requires explicit confirmation
+that the user trusts the executable source; changing the source clears that
+confirmation. The editable Stage remains same-origin because the installed
+`@hyperframes/studio` picker, computed-style reader, timeline bridge, and live
+edit path require direct iframe DOM access. Fully isolating the Stage therefore
+remains a larger postMessage-boundary project, not a safe local attribute change.
+
 - **Where:** `Stage.tsx` (player srcdoc), Library → Blocks paste flow,
-  `project-import.ts` (imported `.hf` zips).
+  Inspector → Source, `project-import.ts` (imported `.hf` zips).
 - **What:** `srcdoc` iframes are same-origin with the editor. That is a
   _requirement_ for the player bridge (`window.__timelines`, picker API), but
   it also means any pasted custom block or imported project executes arbitrary

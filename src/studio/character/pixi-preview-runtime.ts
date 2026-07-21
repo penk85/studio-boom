@@ -1,6 +1,5 @@
 import {
   Application,
-  Assets,
   Container,
   Graphics,
   MeshPlane,
@@ -11,6 +10,7 @@ import {
 } from "pixi.js";
 import { bendPlanePositions, clampBendDegrees } from "./mesh-deform";
 import { createLimbRuntime, type LimbRopeEntry } from "./limb-runtime";
+import { acquirePixiPreviewTextures, type PixiPreviewTextureLease } from "./pixi-preview-assets";
 import type {
   CharacterSceneAsset,
   CharacterSceneGraph,
@@ -67,6 +67,7 @@ export async function createPixiCharacterPreview(
 ): Promise<PixiCharacterPreviewController> {
   const app = new Application();
   let initialized = false;
+  let textureLease: PixiPreviewTextureLease | null = null;
   try {
     await app.init({
       width: payload.scene.output.width,
@@ -85,7 +86,8 @@ export async function createPixiCharacterPreview(
     app.canvas.style.width = "100%";
     app.canvas.style.height = "100%";
 
-    const textures = await loadPreviewTextures(payload.scene, options.resolveAssetRef);
+    textureLease = await acquirePixiPreviewTextures(payload.scene, options.resolveAssetRef);
+    const textures = textureLease.textures;
     const { nodes, meshEntries, meshEntriesByNodeId, ropeEntries, ropeEntriesByNodeId } =
       buildPixiScene(app, payload.scene, textures);
     const ctx: PixiCharacterPreviewContext = {
@@ -118,47 +120,26 @@ export async function createPixiCharacterPreview(
       destroy() {
         if (destroyed) return;
         destroyed = true;
-        app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true });
+        const lease = textureLease;
+        textureLease = null;
+        try {
+          app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true });
+        } finally {
+          void lease?.release();
+        }
       },
     };
   } catch (error) {
     if (initialized) {
-      app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true });
+      try {
+        app.destroy({ removeView: true, releaseGlobalResources: false }, { children: true });
+      } catch (destroyError) {
+        console.warn("Failed to destroy a broken Pixi character preview", destroyError);
+      }
     }
+    await textureLease?.release();
     throw error;
   }
-}
-
-async function loadPreviewTextures(
-  scene: CharacterSceneGraph,
-  resolveAssetRef: PixiCharacterPreviewOptions["resolveAssetRef"],
-): Promise<Record<string, Texture>> {
-  const textures: Record<string, Texture> = {};
-  Assets.setPreferences({ preferCreateImageBitmap: false });
-  await Promise.all(
-    scene.assets.map(async (asset) => {
-      const resolved = (await resolveAssetRef?.(asset)) ?? asset.ref;
-      try {
-        textures[asset.id] = await Assets.load<Texture>({
-          src: resolved,
-          parser: asset.parser || "texture",
-          // Full-canvas SVG layers can be several times larger than the
-          // composition. Rasterize at their actual output size so each layer
-          // consumes only the pixels the video can display.
-          data:
-            asset.parser === "svg"
-              ? { width: asset.rasterWidth, height: asset.rasterHeight, resolution: 1 }
-              : { autoGenerateMipmaps: true },
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(
-          `Failed to load character texture ${asset.id} for parts ${asset.partIds.join(", ")}: ${message}`,
-        );
-      }
-    }),
-  );
-  return textures;
 }
 
 function buildPixiScene(

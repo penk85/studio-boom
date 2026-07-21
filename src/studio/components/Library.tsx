@@ -28,6 +28,7 @@ import type { PresenterVariant } from "../character/presenter";
 import { defaultPoseForCharacter } from "../character/pose-presets";
 import { ensureMotionPresetsSeeded } from "../presets/seed";
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
+import { SourceTrustConfirmation } from "./SourceTrustConfirmation";
 import {
   buildCharacterRuntime,
   resolveRuntimeSlotPart,
@@ -588,6 +589,7 @@ function BlocksTab() {
   const [previewStatus, setPreviewStatus] = useState<"idle" | "loading" | "ready" | "error">(
     "idle",
   );
+  const [sourceTrusted, setSourceTrusted] = useState(false);
   const canPreviewBlock = Boolean(
     project && source.trim() && validated?.ok && validated.html && validated.compositionId,
   );
@@ -597,7 +599,8 @@ function BlocksTab() {
     validated?.ok &&
     validated.html &&
     validated.compositionId &&
-    previewStatus === "ready",
+    previewStatus === "ready" &&
+    sourceTrusted,
   );
   const previewWidth = validated?.width ?? project?.hf.width ?? 1920;
   const previewHeight = validated?.height ?? project?.hf.height ?? 1080;
@@ -630,7 +633,7 @@ function BlocksTab() {
   );
 
   const addBlock = () => {
-    if (!project) return;
+    if (!project || !sourceTrusted) return;
     const result = validated;
     if (!result?.ok || !result.compositionId || !result.html) return;
 
@@ -664,6 +667,7 @@ function BlocksTab() {
       setValidated(null);
       setPreviewProject(null);
       setPreviewStatus("idle");
+      setSourceTrusted(false);
     } catch (error) {
       setErrors([error instanceof Error ? error.message : String(error)]);
       setValidated(null);
@@ -686,6 +690,7 @@ function BlocksTab() {
           setValidated(null);
           setPreviewProject(null);
           setPreviewStatus("idle");
+          setSourceTrusted(false);
         }}
         rows={12}
         spellCheck={false}
@@ -726,6 +731,7 @@ function BlocksTab() {
           onStatusChange={handlePreviewStatusChange}
         />
       )}
+      <SourceTrustConfirmation confirmed={sourceTrusted} onConfirmedChange={setSourceTrusted} />
       <div className="grid grid-cols-3 gap-2">
         <button
           type="button"

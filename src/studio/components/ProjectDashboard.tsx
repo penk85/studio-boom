@@ -29,9 +29,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { db, isCurrentProjectShape } from "../db";
+import { db, isCurrentProjectShape, requireCurrentProjectShape } from "../db";
 import { renderProjectThumbnail, renderProjectToMp4 } from "../export/render-client";
 import { createDuplicatedProject, createUniqueProjectName } from "../project-actions";
+import { projectEditLock } from "../project-lock";
 import {
   createProjectFromHyperframesHtml,
   createProjectFromHyperframesZip,
@@ -39,6 +40,8 @@ import {
 } from "../project-import";
 import { getProjectThumbnailCacheKey } from "../project-thumbnail-cache";
 import type { Project } from "../types";
+import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
+import { SOURCE_TRUST_REQUIRED_MESSAGE, SourceTrustConfirmation } from "./SourceTrustConfirmation";
 
 interface ProjectDashboardProps {
   onCreateBlankProject: () => Promise<void>;
@@ -64,6 +67,13 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
   const [importSource, setImportSource] = useState("");
   const [importZipFile, setImportZipFile] = useState<File | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [importTrustConfirmed, setImportTrustConfirmed] = useState(false);
+  const [preparedHtmlImport, setPreparedHtmlImport] = useState<ImportedHyperframesProject | null>(
+    null,
+  );
+  const [importPreviewStatus, setImportPreviewStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
   const [openError, setOpenError] = useState<string | null>(null);
 
   const projects = useMemo(
@@ -139,14 +149,20 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
     }
 
     setProjectAction(project.id, "renaming");
+    setOpenError(null);
     try {
-      await db.projects.put({
-        ...project,
-        name,
-        updatedAt: Date.now(),
-        hf: { ...project.hf, name },
+      await projectEditLock.runExclusive(project.id, async () => {
+        const current = await readStoredProject(project.id);
+        await db.projects.put({
+          ...current,
+          name,
+          updatedAt: Date.now(),
+          hf: { ...current.hf, name },
+        });
       });
       cancelRename();
+    } catch (error) {
+      setOpenError(error instanceof Error ? error.message : String(error));
     } finally {
       setProjectAction(project.id, null);
     }
@@ -154,28 +170,34 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
 
   const duplicateProject = async (project: Project) => {
     setProjectAction(project.id, "duplicating");
+    setOpenError(null);
     try {
-      const name = createUniqueProjectName(
-        `${project.name} Copy`,
-        projects.map((existing) => existing.name),
-      );
-      const duplicate = createDuplicatedProject(project, { name });
-      const sourceCacheKey = getProjectThumbnailCacheKey(project);
-      const duplicateCacheKey = getProjectThumbnailCacheKey(duplicate);
+      await projectEditLock.runExclusive(project.id, async () => {
+        const current = await readStoredProject(project.id);
+        const name = createUniqueProjectName(
+          `${current.name} Copy`,
+          projects.map((existing) => existing.name),
+        );
+        const duplicate = createDuplicatedProject(current, { name });
+        const sourceCacheKey = getProjectThumbnailCacheKey(current);
+        const duplicateCacheKey = getProjectThumbnailCacheKey(duplicate);
 
-      await db.transaction("rw", db.projects, db.projectThumbnails, async () => {
-        await db.projects.add(duplicate);
-        const cachedThumbnail = await db.projectThumbnails.get(project.id);
-        if (cachedThumbnail?.cacheKey === sourceCacheKey) {
-          await db.projectThumbnails.put({
-            projectId: duplicate.id,
-            cacheKey: duplicateCacheKey,
-            blob: cachedThumbnail.blob,
-            mimeType: cachedThumbnail.mimeType,
-            generatedAt: Date.now(),
-          });
-        }
+        await db.transaction("rw", db.projects, db.projectThumbnails, async () => {
+          await db.projects.add(duplicate);
+          const cachedThumbnail = await db.projectThumbnails.get(project.id);
+          if (cachedThumbnail?.cacheKey === sourceCacheKey) {
+            await db.projectThumbnails.put({
+              projectId: duplicate.id,
+              cacheKey: duplicateCacheKey,
+              blob: cachedThumbnail.blob,
+              mimeType: cachedThumbnail.mimeType,
+              generatedAt: Date.now(),
+            });
+          }
+        });
       });
+    } catch (error) {
+      setOpenError(error instanceof Error ? error.message : String(error));
     } finally {
       setProjectAction(project.id, null);
     }
@@ -185,10 +207,13 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
     if (!window.confirm(`Delete "${project.name}"? This cannot be undone.`)) return;
 
     setProjectAction(project.id, "deleting");
+    setOpenError(null);
     try {
-      await db.transaction("rw", db.projects, db.projectThumbnails, async () => {
-        await db.projects.delete(project.id);
-        await db.projectThumbnails.delete(project.id);
+      await projectEditLock.runExclusive(project.id, async () => {
+        await db.transaction("rw", db.projects, db.projectThumbnails, async () => {
+          await db.projects.delete(project.id);
+          await db.projectThumbnails.delete(project.id);
+        });
       });
       setRenderErrors((state) => {
         const next = { ...state };
@@ -196,6 +221,8 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
         return next;
       });
       if (renamingId === project.id) cancelRename();
+    } catch (error) {
+      setOpenError(error instanceof Error ? error.message : String(error));
     } finally {
       setProjectAction(project.id, null);
     }
@@ -211,16 +238,40 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
     }
   };
 
+  const previewHyperframesProject = () => {
+    setImportError(null);
+    setPreparedHtmlImport(null);
+    setImportPreviewStatus("loading");
+    try {
+      setPreparedHtmlImport(
+        createProjectFromHyperframesHtml(importSource, {
+          name: importName,
+        }),
+      );
+    } catch (error) {
+      setImportPreviewStatus("error");
+      setImportError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const importHyperframesProject = async () => {
+    if (!importTrustConfirmed) {
+      setImportError(SOURCE_TRUST_REQUIRED_MESSAGE);
+      return;
+    }
+    if (!preparedHtmlImport || importPreviewStatus !== "ready") {
+      setImportError("Preview this HTML successfully before importing it.");
+      return;
+    }
     setImportingProject(true);
     setImportError(null);
     try {
-      const imported = createProjectFromHyperframesHtml(importSource, {
-        name: importName,
-      });
-      await persistImportedProject(imported);
-      await onOpenProject(imported.project.id);
+      await persistImportedProject(preparedHtmlImport);
+      await onOpenProject(preparedHtmlImport.project.id);
       setNewProjectOpen(false);
+      setPreparedHtmlImport(null);
+      setImportPreviewStatus("idle");
+      setImportTrustConfirmed(false);
     } catch (error) {
       setImportError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -230,6 +281,10 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
 
   const importHyperframesZipProject = async () => {
     if (!importZipFile) return;
+    if (!importTrustConfirmed) {
+      setImportError(SOURCE_TRUST_REQUIRED_MESSAGE);
+      return;
+    }
     setImportingProject(true);
     setImportError(null);
     try {
@@ -239,6 +294,7 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
       await persistImportedProject(imported);
       await onOpenProject(imported.project.id);
       setNewProjectOpen(false);
+      setImportTrustConfirmed(false);
     } catch (error) {
       setImportError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -249,9 +305,36 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
   const setZipFile = (file: File | null) => {
     setImportZipFile(file);
     setImportError(null);
+    setImportTrustConfirmed(false);
+    setPreparedHtmlImport(null);
+    setImportPreviewStatus("idle");
     if (file && (!importName.trim() || importName === "Imported HyperFrames")) {
       setImportName(file.name.replace(/\.[^/.]+$/, "") || "Imported HyperFrames");
     }
+  };
+
+  const setHtmlImportSource = (source: string) => {
+    setImportSource(source);
+    setImportError(null);
+    setImportTrustConfirmed(false);
+    setPreparedHtmlImport(null);
+    setImportPreviewStatus("idle");
+  };
+
+  const setImportProjectName = (name: string) => {
+    setImportName(name);
+    setImportError(null);
+    setPreparedHtmlImport(null);
+    setImportPreviewStatus("idle");
+  };
+
+  const setNewProjectDialogOpen = (open: boolean) => {
+    setNewProjectOpen(open);
+    if (open) return;
+    setImportError(null);
+    setImportTrustConfirmed(false);
+    setPreparedHtmlImport(null);
+    setImportPreviewStatus("idle");
   };
 
   return (
@@ -547,24 +630,33 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
       <NewProjectDialog
         open={newProjectOpen}
         creatingBlankProject={creatingBlankProject}
-        onOpenChange={setNewProjectOpen}
+        onOpenChange={setNewProjectDialogOpen}
         onCreateBlankProject={createBlankProject}
         importingProject={importingProject}
         importName={importName}
         importSource={importSource}
         importZipFile={importZipFile}
         importError={importError}
-        onImportNameChange={setImportName}
-        onImportSourceChange={(source) => {
-          setImportSource(source);
-          setImportError(null);
-        }}
+        importPreviewProject={preparedHtmlImport?.project ?? null}
+        importPreviewStatus={importPreviewStatus}
+        importTrustConfirmed={importTrustConfirmed}
+        onImportNameChange={setImportProjectName}
+        onImportSourceChange={setHtmlImportSource}
         onImportZipFileChange={setZipFile}
+        onImportPreview={previewHyperframesProject}
+        onImportPreviewStatusChange={setImportPreviewStatus}
+        onImportTrustConfirmedChange={setImportTrustConfirmed}
         onImportHyperframesProject={importHyperframesProject}
         onImportHyperframesZipProject={importHyperframesZipProject}
       />
     </main>
   );
+}
+
+async function readStoredProject(projectId: string): Promise<Project> {
+  const storedProject = (await db.projects.get(projectId)) as unknown;
+  if (!storedProject) throw new Error(`Project "${projectId}" was not found.`);
+  return requireCurrentProjectShape(storedProject, projectId);
 }
 
 async function persistImportedProject(imported: ImportedHyperframesProject): Promise<void> {
@@ -585,11 +677,17 @@ function NewProjectDialog({
   importSource,
   importZipFile,
   importError,
+  importPreviewProject,
+  importPreviewStatus,
+  importTrustConfirmed,
   onOpenChange,
   onCreateBlankProject,
   onImportNameChange,
   onImportSourceChange,
   onImportZipFileChange,
+  onImportPreview,
+  onImportPreviewStatusChange,
+  onImportTrustConfirmedChange,
   onImportHyperframesProject,
   onImportHyperframesZipProject,
 }: {
@@ -600,11 +698,17 @@ function NewProjectDialog({
   importSource: string;
   importZipFile: File | null;
   importError: string | null;
+  importPreviewProject: Project | null;
+  importPreviewStatus: "idle" | "loading" | "ready" | "error";
+  importTrustConfirmed: boolean;
   onOpenChange: (open: boolean) => void;
   onCreateBlankProject: () => Promise<void>;
   onImportNameChange: (name: string) => void;
   onImportSourceChange: (source: string) => void;
   onImportZipFileChange: (file: File | null) => void;
+  onImportPreview: () => void;
+  onImportPreviewStatusChange: (status: "idle" | "loading" | "ready" | "error") => void;
+  onImportTrustConfirmedChange: (confirmed: boolean) => void;
   onImportHyperframesProject: () => Promise<void>;
   onImportHyperframesZipProject: () => Promise<void>;
 }) {
@@ -616,7 +720,7 @@ function NewProjectDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
         {mode === "choose" ? (
           <>
             <DialogHeader>
@@ -668,9 +772,14 @@ function NewProjectDialog({
             file={importZipFile}
             error={importError}
             importing={importingProject}
-            onBack={() => setMode("choose")}
+            trustConfirmed={importTrustConfirmed}
+            onBack={() => {
+              onImportTrustConfirmedChange(false);
+              setMode("choose");
+            }}
             onNameChange={onImportNameChange}
             onFileChange={onImportZipFileChange}
+            onTrustConfirmedChange={onImportTrustConfirmedChange}
             onImport={() => void onImportHyperframesZipProject()}
           />
         ) : (
@@ -679,9 +788,18 @@ function NewProjectDialog({
             source={importSource}
             error={importError}
             importing={importingProject}
-            onBack={() => setMode("choose")}
+            previewProject={importPreviewProject}
+            previewStatus={importPreviewStatus}
+            trustConfirmed={importTrustConfirmed}
+            onBack={() => {
+              onImportTrustConfirmedChange(false);
+              setMode("choose");
+            }}
             onNameChange={onImportNameChange}
             onSourceChange={onImportSourceChange}
+            onPreview={onImportPreview}
+            onPreviewStatusChange={onImportPreviewStatusChange}
+            onTrustConfirmedChange={onImportTrustConfirmedChange}
             onImport={() => void onImportHyperframesProject()}
           />
         )}
@@ -695,18 +813,22 @@ function ImportZipPanel({
   file,
   error,
   importing,
+  trustConfirmed,
   onBack,
   onNameChange,
   onFileChange,
+  onTrustConfirmedChange,
   onImport,
 }: {
   projectName: string;
   file: File | null;
   error: string | null;
   importing: boolean;
+  trustConfirmed: boolean;
   onBack: () => void;
   onNameChange: (name: string) => void;
   onFileChange: (file: File | null) => void;
+  onTrustConfirmedChange: (confirmed: boolean) => void;
   onImport: () => void;
 }) {
   return (
@@ -763,9 +885,18 @@ function ImportZipPanel({
             <pre className="whitespace-pre-wrap font-sans">{error}</pre>
           </div>
         )}
+        <SourceTrustConfirmation
+          confirmed={trustConfirmed}
+          onConfirmedChange={onTrustConfirmedChange}
+        />
       </div>
       <div className="flex items-center justify-end gap-3">
-        <Button type="button" size="sm" disabled={importing || !file} onClick={onImport}>
+        <Button
+          type="button"
+          size="sm"
+          disabled={importing || !file || !trustConfirmed}
+          onClick={onImport}
+        >
           {importing ? <Loader2 className="animate-spin" size={14} /> : <Upload size={14} />}
           Import ZIP
         </Button>
@@ -779,18 +910,30 @@ function PasteHyperframesPanel({
   source,
   error,
   importing,
+  previewProject,
+  previewStatus,
+  trustConfirmed,
   onBack,
   onNameChange,
   onSourceChange,
+  onPreview,
+  onPreviewStatusChange,
+  onTrustConfirmedChange,
   onImport,
 }: {
   projectName: string;
   source: string;
   error: string | null;
   importing: boolean;
+  previewProject: Project | null;
+  previewStatus: "idle" | "loading" | "ready" | "error";
+  trustConfirmed: boolean;
   onBack: () => void;
   onNameChange: (name: string) => void;
   onSourceChange: (source: string) => void;
+  onPreview: () => void;
+  onPreviewStatusChange: (status: "idle" | "loading" | "ready" | "error") => void;
+  onTrustConfirmedChange: (confirmed: boolean) => void;
   onImport: () => void;
 }) {
   return (
@@ -835,9 +978,42 @@ function PasteHyperframesPanel({
             <pre className="whitespace-pre-wrap font-sans">{error}</pre>
           </div>
         )}
+        {previewProject && (
+          <HyperFramesPreviewPanel
+            project={previewProject}
+            width={previewProject.hf.width}
+            height={previewProject.hf.height}
+            seekTime={Math.min(previewProject.hf.duration * 0.35, 1)}
+            title="Sandboxed imported project preview"
+            onStatusChange={onPreviewStatusChange}
+          />
+        )}
+        <SourceTrustConfirmation
+          confirmed={trustConfirmed}
+          onConfirmedChange={onTrustConfirmedChange}
+        />
       </div>
       <div className="flex items-center justify-end gap-3">
-        <Button type="button" size="sm" disabled={importing || !source.trim()} onClick={onImport}>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={importing || !source.trim() || previewStatus === "loading"}
+          onClick={onPreview}
+        >
+          {previewStatus === "loading" ? (
+            <Loader2 className="animate-spin" size={14} />
+          ) : (
+            <Film size={14} />
+          )}
+          Preview safely
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          disabled={importing || !source.trim() || previewStatus !== "ready" || !trustConfirmed}
+          onClick={onImport}
+        >
           {importing ? <Loader2 className="animate-spin" size={14} /> : <Code2 size={14} />}
           Import
         </Button>

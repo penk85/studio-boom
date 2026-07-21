@@ -57,6 +57,7 @@ import {
   type ClipMotionCheckpoint,
 } from "../hyperframes/keyframes";
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
+import { SourceTrustConfirmation } from "./SourceTrustConfirmation";
 import { buildSceneEditingProject } from "../scenes";
 import {
   CHARACTER_ANGLES,
@@ -1194,6 +1195,7 @@ function CompositionSourceInspector({
   const [previewStatus, setPreviewStatus] = useState<"idle" | "loading" | "ready" | "error">(
     "idle",
   );
+  const [sourceTrusted, setSourceTrusted] = useState(false);
   const validationDefaults = useMemo(
     () => ({
       compositionId: clip.compositionId,
@@ -1210,7 +1212,7 @@ function CompositionSourceInspector({
   const isEditingStoredSource = draft === source;
   const validatedHtml = validated?.ok && validated.html ? validated.html : null;
   const canPreview = Boolean(validatedHtml);
-  const canApply = Boolean(validatedHtml && previewStatus === "ready");
+  const canApply = Boolean(validatedHtml && previewStatus === "ready" && sourceTrusted);
   const handlePreviewStatusChange = useCallback(
     (status: "idle" | "loading" | "ready" | "error") => setPreviewStatus(status),
     [],
@@ -1222,6 +1224,7 @@ function CompositionSourceInspector({
     setValidated(null);
     setPreviewProject(null);
     setPreviewStatus("idle");
+    setSourceTrusted(false);
   }, [source, clip.compositionId]);
 
   const validate = () => {
@@ -1239,17 +1242,19 @@ function CompositionSourceInspector({
   };
 
   const apply = () => {
-    if (!validatedHtml || previewStatus !== "ready") return;
+    if (!validatedHtml || previewStatus !== "ready" || !sourceTrusted) return;
     try {
       onApply(validatedHtml);
       setValidated(null);
       setPreviewProject(null);
       setPreviewStatus("idle");
+      setSourceTrusted(false);
     } catch (error) {
       setErrors([error instanceof Error ? error.message : String(error)]);
       setValidated(null);
       setPreviewProject(null);
       setPreviewStatus("idle");
+      setSourceTrusted(false);
     }
   };
 
@@ -1263,6 +1268,7 @@ function CompositionSourceInspector({
           setValidated(null);
           setPreviewProject(null);
           setPreviewStatus("idle");
+          setSourceTrusted(false);
         }}
         rows={10}
         spellCheck={false}
@@ -1324,6 +1330,9 @@ function CompositionSourceInspector({
           />
         </div>
       )}
+      <div className="mt-2">
+        <SourceTrustConfirmation confirmed={sourceTrusted} onConfirmedChange={setSourceTrusted} />
+      </div>
       <div className="mt-2 grid grid-cols-3 gap-2">
         <button
           type="button"
