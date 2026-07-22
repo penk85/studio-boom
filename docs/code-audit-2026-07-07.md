@@ -244,8 +244,27 @@ partial leases, and the lease coordinator survives Vite hot replacement.
 
 ### M7. Monolithic component files concentrate change risk
 
-- **Where:** `CharacterEditor.tsx` **7,894 lines / 73 top-level functions**,
-  with the main component spanning ~354–3,682 (≈3,300 lines).
+**Reduction started 2026-07-21:** the character artwork intake workflow moved
+from `CharacterEditor.tsx` into `CharacterArtworkImport.tsx`, while filename
+inference and placement defaults moved into the unit-tested
+`character-part-import.ts` helper. The unused 150-line `EyePresetSelector` and
+its orphaned preset generator were deleted. The slot-aware layer/variant rail
+then moved into `CharacterLayerList.tsx`, including its private hierarchy and
+ordering logic. Variant thumbnails, key diagnostics, rig health, and pin
+controls now live together in `CharacterVariantControls.tsx` instead of being
+scattered through the editor. Canvas and skeleton setup then moved to
+`CharacterRigSetupControls.tsx`, backed by shared fields in
+`CharacterInspectorFields.tsx`. The next larger pass separated the part, group,
+movement, and flexible-mesh inspectors into focused modules behind
+`CharacterInspectorPanels.tsx`; shared preview helpers and option sets are now
+pure modules rather than component-local logic. `CharacterEditor.tsx` fell from
+8,297 to 5,130 lines without changing the persisted character model or
+renderer. M7 remains open: the main component, overlays, recorder, store,
+Timeline, and Stage still need staged extractions rather than a single broad
+rewrite.
+
+- **Where:** `CharacterEditor.tsx` **5,130 lines / 38 top-level functions**,
+  with the main component spanning ~226–3,605 (≈3,380 lines).
   `MotionPresetRecorder.tsx` 4,022 (growing in the current WIP),
   `store.ts` 3,083, `Timeline.tsx` 2,907, `Stage.tsx` 2,630.
 - **What:** these five files are where nearly every regression this quarter

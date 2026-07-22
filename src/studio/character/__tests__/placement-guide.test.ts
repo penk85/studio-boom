@@ -101,6 +101,34 @@ describe("smartImportPlacement", () => {
     expect(placement!.y + placement!.height / 2).toBeCloseTo(194, 0);
   });
 
+  it("inherits the reference variant's joint pivot", () => {
+    const straight = makePart("arm", "arm-straight-media", {
+      id: "arm-straight",
+      slotId: "slot:left-arm",
+      side: "left",
+      x: 198,
+      y: 276,
+      width: 50,
+      height: 154,
+      pivot: { x: 232, y: 292 },
+      zIndex: 4,
+    });
+
+    const placement = smartImportPlacement({
+      slotParts: [straight],
+      role: "arm",
+      side: "left",
+      artWidth: 100,
+      artHeight: 200,
+      ...canvas,
+    });
+
+    expect(placement).toMatchObject({
+      mode: "variant",
+      pivot: { x: 232, y: 292 },
+    });
+  });
+
   it("uses alpha bounds of the imported art when they exist", () => {
     const open = makePart("eye", "eye-open-media", {
       id: "eye-open",

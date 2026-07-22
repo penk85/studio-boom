@@ -1,5 +1,10 @@
 import type { CharacterPart, CharacterPartAlphaBounds, PartRole } from "../types";
-import { defaultVariantForSlotParts, partMatchesVariant } from "./character-utils";
+import { pivotForPart } from "./alpha-bounds";
+import {
+  anchorPartForVariant,
+  defaultVariantForSlotParts,
+  partMatchesVariant,
+} from "./character-utils";
 import { unionCanvasAlphaRect } from "./variant-align";
 
 /**
@@ -181,14 +186,16 @@ export type SmartImportPlacement = {
   y: number;
   width: number;
   height: number;
+  /** Existing slot joint retained by newly imported variants. */
+  pivot?: { x: number; y: number };
   mode: "variant" | "zone";
 };
 
 /**
  * Where newly imported art should land so correct assembly is the default:
  * - A new variant for an occupied slot sizes to the default variant's
- *   visible-pixel width and centers on its visible-pixel center, so blinks and
- *   viseme swaps line up without manual alignment.
+ *   visible-pixel width, centers on its visible-pixel center, and inherits its
+ *   joint pivot so rig placement does not move the imported art afterward.
  * - Art for an empty slot fits into that role's guide zone.
  * - Returns null when there is no reference and no zone (caller keeps the
  *   plain centered-on-canvas default).
@@ -203,6 +210,8 @@ export function smartImportPlacement(args: SmartImportPlacementArgs): SmartImpor
     const referenceParts = referenceKey
       ? visibleSlotParts.filter((part) => partMatchesVariant(part, referenceKey))
       : visibleSlotParts;
+    const referenceAnchor =
+      anchorPartForVariant(visibleSlotParts, referenceKey) ?? referenceParts[0];
     const reference = unionCanvasAlphaRect(
       referenceParts.length ? referenceParts : visibleSlotParts,
     );
@@ -230,6 +239,7 @@ export function smartImportPlacement(args: SmartImportPlacementArgs): SmartImpor
         y: Math.round(reference.y + reference.height / 2 - alphaCenterY),
         width,
         height,
+        pivot: pivotForPart(referenceAnchor),
         mode: "variant",
       };
     }

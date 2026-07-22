@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CharacterPreset, CharacterReach } from "../../types";
 import { createBlankCharacter, makePart } from "../character-utils";
 import { effectiveReachForSlot } from "../motion-constraints";
+import { smartImportPlacement } from "../placement-guide";
 import { buildDefaultRig } from "../rig";
 import {
   buildCharacterRuntime,
@@ -257,6 +258,62 @@ describe("character runtime resolver", () => {
 
     expect(resolveRuntimeSlotPart(slot, runtime)?.id).toBe(rest.id);
     expect(resolveRuntimeSlotPart(slot, runtime, "raised")?.id).toBe(raised.id);
+  });
+
+  it("does not move imported limb artwork after aligning it to an existing variant", () => {
+    const body = makePart("body", "body-media", {
+      id: "body",
+      x: 150,
+      y: 120,
+      width: 260,
+      height: 360,
+    });
+    const straight = makePart("arm", "arm-straight-media", {
+      id: "arm-straight",
+      slotId: "slot:left-arm",
+      side: "left",
+      pose: "straight",
+      x: 198,
+      y: 276,
+      width: 50,
+      height: 154,
+      pivot: { x: 232, y: 292 },
+    });
+    const placement = smartImportPlacement({
+      slotParts: [straight],
+      role: "arm",
+      side: "left",
+      artWidth: 100,
+      artHeight: 200,
+      canvasWidth: 600,
+      canvasHeight: 900,
+    });
+    if (!placement) throw new Error("Expected variant placement.");
+    const bent = makePart("arm", "arm-bent-media", {
+      id: "arm-bent",
+      slotId: "slot:left-arm",
+      side: "left",
+      pose: "bent",
+      x: placement.x,
+      y: placement.y,
+      width: placement.width,
+      height: placement.height,
+      pivot: placement.pivot,
+    });
+    const character = {
+      ...createBlankCharacter("Imported arm variant"),
+      parts: [body, straight, bent],
+    };
+    const runtime = buildCharacterRuntime({
+      ...character,
+      rig: buildDefaultRig(character),
+    });
+    const slot = runtime.slotById.get("slot:left-arm");
+    if (!slot) throw new Error("Expected left arm slot.");
+
+    const rendered = runtimePartPlacement(slot, bent, runtime, { poseKey: "bent" });
+    expect(rendered.x).toBeCloseTo(bent.x);
+    expect(rendered.y).toBeCloseTo(bent.y);
   });
 
   it("uses the active parent variant socket for child placement", () => {

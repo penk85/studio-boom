@@ -1,4 +1,4 @@
-import type { MouthViseme, EyeState } from "../types";
+import type { MouthViseme } from "../types";
 
 // Darken a hex color by a factor (0..1). Used for mouth interiors / shading.
 function darken(hex: string, factor: number): string {
@@ -13,89 +13,6 @@ function darken(hex: string, factor: number): string {
 
 const TEETH = "#fdfdf6";
 const TONGUE = "#ef7d8c";
-// Closed/winking eyelids read as a dark lash line, independent of the iris color.
-const LID = "#2a2a2a";
-
-// SVG preset shapes for eyes with color support. All states share a 0 0 100 100
-// viewBox so swapped variants stay aligned in the same slot.
-export const EYE_PRESETS = [
-  {
-    id: "circle",
-    label: "Circle",
-    generateForState: (eyeState: EyeState, color: string) => {
-      if (eyeState === "closed") {
-        return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <path d="M 22 52 Q 50 60 78 52" stroke="${LID}" stroke-width="7" fill="none" stroke-linecap="round"/>
-</svg>`;
-      }
-      if (eyeState === "half") {
-        return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <path d="M 20 50 A 30 30 0 0 1 80 50 Z" fill="${color}"/>
-  <circle cx="58" cy="46" r="7" fill="${TEETH}" opacity="0.7"/>
-</svg>`;
-      }
-      if (eyeState === "wink") {
-        return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <path d="M 20 56 Q 50 40 80 56" stroke="${LID}" stroke-width="7" fill="none" stroke-linecap="round"/>
-</svg>`;
-      }
-      return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <circle cx="50" cy="50" r="42" fill="${color}"/>
-  <circle cx="62" cy="38" r="12" fill="${TEETH}" opacity="0.65"/>
-</svg>`;
-    },
-  },
-  {
-    id: "oval",
-    label: "Oval",
-    generateForState: (eyeState: EyeState, color: string) => {
-      if (eyeState === "closed") {
-        return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <path d="M 24 52 Q 50 58 76 52" stroke="${LID}" stroke-width="6" fill="none" stroke-linecap="round"/>
-</svg>`;
-      }
-      if (eyeState === "half") {
-        return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <path d="M 26 50 A 24 30 0 0 1 74 50 Z" fill="${color}"/>
-  <circle cx="56" cy="46" r="6" fill="${TEETH}" opacity="0.7"/>
-</svg>`;
-      }
-      if (eyeState === "wink") {
-        return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <path d="M 24 56 Q 50 42 76 56" stroke="${LID}" stroke-width="6" fill="none" stroke-linecap="round"/>
-</svg>`;
-      }
-      return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <ellipse cx="50" cy="50" rx="30" ry="42" fill="${color}"/>
-  <circle cx="60" cy="38" r="10" fill="${TEETH}" opacity="0.6"/>
-</svg>`;
-    },
-  },
-  {
-    id: "simple-dot",
-    label: "Dot",
-    generateForState: (eyeState: EyeState, color: string) => {
-      if (eyeState === "closed") {
-        return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <line x1="28" y1="50" x2="72" y2="50" stroke="${LID}" stroke-width="6" stroke-linecap="round"/>
-</svg>`;
-      }
-      if (eyeState === "half") {
-        return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <path d="M 30 50 A 20 20 0 0 1 70 50 Z" fill="${color}"/>
-</svg>`;
-      }
-      if (eyeState === "wink") {
-        return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <path d="M 30 54 Q 50 44 70 54" stroke="${LID}" stroke-width="6" fill="none" stroke-linecap="round"/>
-</svg>`;
-      }
-      return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <circle cx="50" cy="50" r="30" fill="${color}"/>
-</svg>`;
-    },
-  },
-] as const;
 
 // Mouth presets. "Cartoon" produces anatomically-correct lip-sync shapes per
 // viseme; the others are simpler abstract styles that still vary per viseme.

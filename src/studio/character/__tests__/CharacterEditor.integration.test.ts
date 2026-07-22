@@ -3,10 +3,37 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const editorPath = join(process.cwd(), "src/studio/character/CharacterEditor.tsx");
+const artworkImportPath = join(process.cwd(), "src/studio/character/CharacterArtworkImport.tsx");
+const layerListPath = join(process.cwd(), "src/studio/character/CharacterLayerList.tsx");
+const variantControlsPath = join(
+  process.cwd(),
+  "src/studio/character/CharacterVariantControls.tsx",
+);
+const inspectorFieldsPath = join(
+  process.cwd(),
+  "src/studio/character/CharacterInspectorFields.tsx",
+);
+const rigSetupPath = join(process.cwd(), "src/studio/character/CharacterRigSetupControls.tsx");
+const inspectorPanelsPath = join(
+  process.cwd(),
+  "src/studio/character/CharacterInspectorPanels.tsx",
+);
+const partInspectorPath = join(process.cwd(), "src/studio/character/CharacterPartInspector.tsx");
+const groupInspectorPath = join(process.cwd(), "src/studio/character/CharacterGroupInspector.tsx");
+const movementInspectorPath = join(
+  process.cwd(),
+  "src/studio/character/CharacterMovementInspector.tsx",
+);
+const flexibleSectionPath = join(
+  process.cwd(),
+  "src/studio/character/CharacterFlexibleSection.tsx",
+);
+const partImportPath = join(process.cwd(), "src/studio/character/character-part-import.ts");
 
 describe("CharacterEditor source integration", () => {
   it("works in Build / Rig / Pose phases with the legacy panels removed", () => {
     const source = readFileSync(editorPath, "utf8");
+    const rigSetupSource = readFileSync(rigSetupPath, "utf8");
 
     // Phase scaffold: one switch drives panels, overlays, and the pose toolbar.
     expect(source).toContain('useState<"build" | "rig" | "pose">');
@@ -20,10 +47,30 @@ describe("CharacterEditor source integration", () => {
     expect(source).not.toContain("characterRigPrompt");
     expect(source).not.toContain("exportData");
     // Reset escape hatch survives, with a two-step confirm instead of a native dialog.
-    expect(source).toContain("Reset skeleton to default");
-    expect(source).toContain("function ConfirmButton");
+    expect(rigSetupSource).toContain("Reset skeleton to default");
+    expect(rigSetupSource).toContain("function ConfirmButton");
     expect(source).not.toContain("window.confirm");
     expect(source).not.toContain("window.prompt");
+  });
+
+  it("keeps canvas and skeleton setup behind shared inspector fields", () => {
+    const source = readFileSync(editorPath, "utf8");
+    const inspectorFieldsSource = readFileSync(inspectorFieldsPath, "utf8");
+    const rigSetupSource = readFileSync(rigSetupPath, "utf8");
+
+    expect(source).toContain('from "./CharacterRigSetupControls"');
+    expect(source).toContain("<CanvasSection");
+    expect(source).toContain("<SkeletonCard");
+    expect(inspectorFieldsSource).toContain("export function Field");
+    expect(inspectorFieldsSource).toContain("export function NumberField");
+    expect(rigSetupSource).toContain('from "./CharacterInspectorFields"');
+    expect(rigSetupSource).toContain("export function CanvasSection");
+    expect(rigSetupSource).toContain("export function SkeletonCard");
+    expect(rigSetupSource).toContain('{ label: "Portrait", width: 600, height: 900 }');
+    expect(rigSetupSource).toContain('{ label: "Square", width: 1000, height: 1000 }');
+    expect(source).not.toContain("function CanvasSection");
+    expect(source).not.toContain("function SkeletonCard");
+    expect(source).not.toContain("function NumberField");
   });
 
   it("explains every armed mode through the single ModeBanner", () => {
@@ -64,13 +111,63 @@ describe("CharacterEditor source integration", () => {
 
   it("keeps the effortless layer wired", () => {
     const source = readFileSync(editorPath, "utf8");
+    const partInspectorSource = readFileSync(partInspectorPath, "utf8");
+    const groupInspectorSource = readFileSync(groupInspectorPath, "utf8");
+    const variantControlsSource = readFileSync(variantControlsPath, "utf8");
     // Autosave honesty: Done button + live save indicator.
     expect(source).toContain('useState<"saved" | "saving">');
     expect(source).toContain("✓ Saved");
     // Hover identification, breadcrumbs, and thumbnails.
     expect(source).toContain("handleCanvasHover");
-    expect(source).toContain("Select the whole layer group");
-    expect(source).toContain("function VariantGridButton");
+    expect(partInspectorSource).toContain("Select the whole layer group");
+    expect(groupInspectorSource).toContain('from "./CharacterVariantControls"');
+    expect(groupInspectorSource).toContain("<VariantGridButton");
+    expect(variantControlsSource).toContain("export function VariantGridButton");
+  });
+
+  it("keeps variant diagnostics and pin controls behind one presentation boundary", () => {
+    const source = readFileSync(editorPath, "utf8");
+    const inspectorSources =
+      readFileSync(partInspectorPath, "utf8") + readFileSync(groupInspectorPath, "utf8");
+    const variantControlsSource = readFileSync(variantControlsPath, "utf8");
+
+    expect(source).toContain("<RigHealthPanel");
+    expect(inspectorSources).toContain("<VariantKeyChip");
+    expect(inspectorSources).toContain("<VariantAnchorSection");
+    expect(source).toContain("ANCHOR_SOURCE_COLORS[source]");
+    expect(variantControlsSource).toContain("export function RigHealthPanel");
+    expect(variantControlsSource).toContain("export function VariantKeyChip");
+    expect(variantControlsSource).toContain("export function VariantAnchorSection");
+    expect(variantControlsSource).toContain("export const ANCHOR_SOURCE_COLORS");
+    expect(source).not.toContain("function RigHealthPanel");
+    expect(source).not.toContain("function VariantKeyChip");
+    expect(source).not.toContain("function VariantAnchorSection");
+  });
+
+  it("keeps part, group, and movement inspectors behind one callback-only boundary", () => {
+    const source = readFileSync(editorPath, "utf8");
+    const inspectorPanelsSource = readFileSync(inspectorPanelsPath, "utf8");
+    const partInspectorSource = readFileSync(partInspectorPath, "utf8");
+    const groupInspectorSource = readFileSync(groupInspectorPath, "utf8");
+    const movementInspectorSource = readFileSync(movementInspectorPath, "utf8");
+
+    expect(source).toContain('from "./CharacterInspectorPanels"');
+    expect(source).toContain("<Inspector");
+    expect(source).toContain("<GroupInspector");
+    expect(source).toContain("<RestrictMovementPanel");
+    expect(inspectorPanelsSource).toContain('export { Inspector } from "./CharacterPartInspector"');
+    expect(inspectorPanelsSource).toContain(
+      'export { GroupInspector } from "./CharacterGroupInspector"',
+    );
+    expect(inspectorPanelsSource).toContain(
+      'export { RestrictMovementPanel } from "./CharacterMovementInspector"',
+    );
+    expect(partInspectorSource).toContain("export function Inspector");
+    expect(groupInspectorSource).toContain("export function GroupInspector");
+    expect(movementInspectorSource).toContain("export function RestrictMovementPanel");
+    expect(source).not.toContain("function Inspector");
+    expect(source).not.toContain("function GroupInspector");
+    expect(source).not.toContain("function RestrictMovementPanel");
   });
 
   it("keeps canvas variant visibility scoped to the active angle", () => {
@@ -110,14 +207,30 @@ describe("CharacterEditor source integration", () => {
 
   it("consolidates the parts rail into one list with per-slot variant upload", () => {
     const source = readFileSync(editorPath, "utf8");
+    const artworkImportSource = readFileSync(artworkImportPath, "utf8");
+    const layerListSource = readFileSync(layerListPath, "utf8");
 
     // One rail: the layer list plus a single add-part menu; the legacy
     // structure/body-map/upload panels are gone.
-    expect(source).toContain("function AddPartMenu");
-    expect(source).toContain("listCharacterSlots(doc, { includeEmpty: true })");
+    expect(source).toContain("<AddPartMenu");
+    expect(source).toContain('from "./CharacterArtworkImport"');
+    expect(source).toContain("<CharacterLayerList");
+    expect(source).toContain('from "./CharacterLayerList"');
+    expect(artworkImportSource).toContain("export function AddPartMenu");
+    expect(artworkImportSource).toContain("listCharacterSlots(doc, { includeEmpty: true })");
+    expect(artworkImportSource).toContain("export function SlotUpload");
+    expect(artworkImportSource).toContain("<MouthPresetSelector");
+    expect(layerListSource).toContain("export function CharacterLayerList");
+    expect(layerListSource).toContain("listCharacterSlots({ parts, slots }");
+    expect(layerListSource).toContain("parentSlotIdForEditorRelation");
+    expect(layerListSource).toContain("orderCharacterVariants(group.slotParts)");
     expect(source).toContain("withUpdatedCharacterSlot");
     expect(source).toContain("const armPartImport");
     expect(source).toContain("onAddVariant");
+    expect(source).toContain("pivot: smartPlacement.pivot");
+    expect(source).not.toContain("function LayerList");
+    expect(source).not.toContain("function LayerPartRow");
+    expect(source).not.toContain("function EyePresetSelector");
     expect(source).not.toContain("function BodyMapPanel");
     expect(source).not.toContain("function UploadSlots");
     expect(source).not.toContain("function StructureEditor");
@@ -126,6 +239,9 @@ describe("CharacterEditor source integration", () => {
 
   it("offers a slot-level Flexible limb-path control reachable from both inspectors", () => {
     const source = readFileSync(editorPath, "utf8");
+    const flexibleSectionSource = readFileSync(flexibleSectionPath, "utf8");
+    const inspectorSources =
+      readFileSync(partInspectorPath, "utf8") + readFileSync(groupInspectorPath, "utf8");
 
     // Flexible is slot-level (every variant gets the same deform model), face
     // roles are excluded, and new saves use the point-based limb path model
@@ -133,31 +249,33 @@ describe("CharacterEditor source integration", () => {
     expect(source).toContain("const setSlotDeform");
     expect(source).toContain('kind: "set-slot-deform"');
     expect(source).not.toContain("getPartSlotId(part) === slotId ? { ...part, deform } : part");
-    expect(source).toContain("defaultLimbPathDeformForPart");
-    expect(source).toContain("defaultLimbPathDeformForSlot");
-    expect(source).toContain("Reset to artwork");
-    expect(source).toContain("Fit mesh to rig");
-    expect(source).toContain("const neutralDeform");
-    expect(source).toContain("const fittedDeform");
+    expect(flexibleSectionSource).toContain("defaultLimbPathDeformForPart");
+    expect(flexibleSectionSource).toContain("defaultLimbPathDeformForSlot");
+    expect(flexibleSectionSource).toContain("Reset to artwork");
+    expect(flexibleSectionSource).toContain("Fit mesh to rig");
+    expect(flexibleSectionSource).toContain("const neutralDeform");
+    expect(flexibleSectionSource).toContain("const fittedDeform");
     expect(source).toContain("const selectedDeformPathPart");
     expect(source).toContain("function DeformPathOverlay");
     expect(source).toContain("function deformPathSamples");
-    expect(source).toContain("onSetDeform(e.target.checked ? neutralDeform() : undefined)");
-    expect(source).toContain("onClick={() => onSetDeform(neutralDeform())}");
-    expect(source).toContain("onClick={() => onSetDeform(fittedDeform())}");
+    expect(flexibleSectionSource).toContain(
+      "onSetDeform(e.target.checked ? neutralDeform() : undefined)",
+    );
+    expect(flexibleSectionSource).toContain("onClick={() => onSetDeform(neutralDeform())}");
+    expect(flexibleSectionSource).toContain("onClick={() => onSetDeform(fittedDeform())}");
     expect(source).not.toContain("function FlexiblePathOverlay");
     expect(source).not.toContain("startFlexiblePathDrag");
     expect(source).not.toContain("onDeformEditStart");
     expect(source).not.toContain("span>Curve</span>");
     expect(source).not.toContain("MAX_BEND_DEGREES");
-    expect(source).toContain("const faceRole");
+    expect(flexibleSectionSource).toContain("const faceRole");
 
     // The control is one shared component rendered by BOTH the part Inspector
     // (single-image limbs) and the GroupInspector (multi-variant slots) — a
     // plain one-image arm must be able to reach it, not just multi-variant
     // slots. Two render sites.
-    expect(source).toContain("function FlexibleSection");
-    expect(source.match(/<FlexibleSection/g)?.length).toBe(2);
+    expect(flexibleSectionSource).toContain("export function FlexibleSection");
+    expect(inspectorSources.match(/<FlexibleSection/g)?.length).toBe(2);
   });
 
   it("uses authored bounds for editor art bounds and host clamping", () => {
@@ -181,6 +299,7 @@ describe("CharacterEditor source integration", () => {
 
   it("supports both skeleton calibration and moving artwork with pin-driven joint drags", () => {
     const source = readFileSync(editorPath, "utf8");
+    const rigSetupSource = readFileSync(rigSetupPath, "utf8");
 
     expect(source).toContain('useState<BoneDragMode>("calibrate")');
     expect(source).toContain('kind: "move-bone-rest"');
@@ -189,7 +308,7 @@ describe("CharacterEditor source integration", () => {
     expect(source).toContain("Move art");
     expect(source).toContain("Drag bones onto the artwork while images stay pinned");
     expect(source).toContain("syncLiveCharacterPreset(latest)");
-    expect(source).toContain('kind: "set-bone-rest-transform"');
+    expect(rigSetupSource).toContain('kind: "set-bone-rest-transform"');
     expect(source).not.toContain("const shouldMoveArt = false");
     expect(source).not.toContain("Bones drive the skeleton only; artwork stays put");
     expect(source).not.toContain("applyLiveBoneTransform");
@@ -198,24 +317,27 @@ describe("CharacterEditor source integration", () => {
 
   it("keeps rig captions quiet and derives upload occupancy from semantic slots", () => {
     const source = readFileSync(editorPath, "utf8");
+    const artworkImportSource = readFileSync(artworkImportPath, "utf8");
+    const partImportSource = readFileSync(partImportPath, "utf8");
 
     expect(source).toContain("group-hover:opacity-100");
     expect(source).toContain("setShowAnchors(false)");
     expect(source).toContain("showAnchors && !focusEditing");
-    expect(source).toContain("matchesSlotDefinition(part, def)");
-    expect(source).toContain("defaultSlotIdForDefinition(def)");
-    expect(source).toContain("defaultSlotIdForRole(role, undefined, side)");
+    expect(artworkImportSource).toContain("matchesSlotDefinition(part, definition)");
+    expect(artworkImportSource).toContain("defaultSlotIdForRole(definition.role");
+    expect(partImportSource).toContain("defaultSlotIdForRole(role, undefined, side)");
     expect(source).toContain("semanticSlotChanged");
     expect(source).toContain("slotLabelForRoleSide(nextRole, nextSide)");
-    expect(source).toContain('aria-label="Artwork assigned"');
+    expect(artworkImportSource).toContain('aria-label="Artwork assigned"');
   });
 
   it("offers a full-frame fit action for the active angle", () => {
     const source = readFileSync(editorPath, "utf8");
+    const rigSetupSource = readFileSync(rigSetupPath, "utf8");
 
     expect(source).toContain("fitActiveAngleToCanvas");
     expect(source).toContain("fitPartsToCanvasFrame");
     expect(source).toContain("unionFrameBounds(scopedParts)");
-    expect(source).toContain("Fit active angle to canvas");
+    expect(rigSetupSource).toContain("Fit active angle to canvas");
   });
 });
