@@ -28,6 +28,8 @@ const flexibleSectionPath = join(
   process.cwd(),
   "src/studio/character/CharacterFlexibleSection.tsx",
 );
+const overlaysPath = join(process.cwd(), "src/studio/character/CharacterEditorOverlays.tsx");
+const editorGeometryPath = join(process.cwd(), "src/studio/character/character-editor-geometry.ts");
 const partImportPath = join(process.cwd(), "src/studio/character/character-part-import.ts");
 
 describe("CharacterEditor source integration", () => {
@@ -130,11 +132,12 @@ describe("CharacterEditor source integration", () => {
     const inspectorSources =
       readFileSync(partInspectorPath, "utf8") + readFileSync(groupInspectorPath, "utf8");
     const variantControlsSource = readFileSync(variantControlsPath, "utf8");
+    const overlaysSource = readFileSync(overlaysPath, "utf8");
 
     expect(source).toContain("<RigHealthPanel");
     expect(inspectorSources).toContain("<VariantKeyChip");
     expect(inspectorSources).toContain("<VariantAnchorSection");
-    expect(source).toContain("ANCHOR_SOURCE_COLORS[source]");
+    expect(overlaysSource).toContain("ANCHOR_SOURCE_COLORS[source]");
     expect(variantControlsSource).toContain("export function RigHealthPanel");
     expect(variantControlsSource).toContain("export function VariantKeyChip");
     expect(variantControlsSource).toContain("export function VariantAnchorSection");
@@ -240,6 +243,7 @@ describe("CharacterEditor source integration", () => {
   it("offers a slot-level Flexible limb-path control reachable from both inspectors", () => {
     const source = readFileSync(editorPath, "utf8");
     const flexibleSectionSource = readFileSync(flexibleSectionPath, "utf8");
+    const overlaysSource = readFileSync(overlaysPath, "utf8");
     const inspectorSources =
       readFileSync(partInspectorPath, "utf8") + readFileSync(groupInspectorPath, "utf8");
 
@@ -256,8 +260,8 @@ describe("CharacterEditor source integration", () => {
     expect(flexibleSectionSource).toContain("const neutralDeform");
     expect(flexibleSectionSource).toContain("const fittedDeform");
     expect(source).toContain("const selectedDeformPathPart");
-    expect(source).toContain("function DeformPathOverlay");
-    expect(source).toContain("function deformPathSamples");
+    expect(overlaysSource).toContain("export function DeformPathOverlay");
+    expect(overlaysSource).toContain("function deformPathSamples");
     expect(flexibleSectionSource).toContain(
       "onSetDeform(e.target.checked ? neutralDeform() : undefined)",
     );
@@ -279,22 +283,52 @@ describe("CharacterEditor source integration", () => {
   });
 
   it("uses authored bounds for editor art bounds and host clamping", () => {
-    const source = readFileSync(editorPath, "utf8");
+    const geometrySource = readFileSync(editorGeometryPath, "utf8");
 
-    expect(source).toContain("function unionEditorArtBounds");
-    expect(source).toContain("localAuthoredBounds(p) ?? localAlphaBounds(p)");
-    expect(source).toContain("localRectCanvasBounds(p, a)");
-    expect(source).toContain("function unionHostClampBounds");
-    expect(source).toContain("const subject = unionHostClampBounds(slotParts, constraint.mode)");
-    expect(source).toContain("const host = unionHostClampBounds(hostParts, constraint.mode)");
+    expect(geometrySource).toContain("function unionEditorArtBounds");
+    expect(geometrySource).toContain("localAuthoredBounds(p) ?? localAlphaBounds(p)");
+    expect(geometrySource).toContain("localRectCanvasBounds(p, a)");
+    expect(geometrySource).toContain("function unionHostClampBounds");
+    expect(geometrySource).toContain(
+      "const subject = unionHostClampBounds(slotParts, constraint.mode)",
+    );
+    expect(geometrySource).toContain(
+      "const host = unionHostClampBounds(hostParts, constraint.mode)",
+    );
   });
 
   it("uses the shared reach clamp for editor drag boundaries", () => {
-    const source = readFileSync(editorPath, "utf8");
+    const geometrySource = readFileSync(editorGeometryPath, "utf8");
 
-    expect(source).toContain("function clampSlotDragDelta");
-    expect(source).toContain("const reachLimited = clampMotionDeltaToReach(reach, dx, dy, 0)");
-    expect(source).toContain("return { dx: nextDx, dy: nextDy, clamped }");
+    expect(geometrySource).toContain("function clampSlotDragDelta");
+    expect(geometrySource).toContain(
+      "const reachLimited = clampMotionDeltaToReach(reach, dx, dy, 0)",
+    );
+    expect(geometrySource).toContain("return { dx: nextDx, dy: nextDy, clamped }");
+  });
+
+  it("keeps editor chrome and its transform geometry behind focused boundaries", () => {
+    const source = readFileSync(editorPath, "utf8");
+    const overlaysSource = readFileSync(overlaysPath, "utf8");
+    const geometrySource = readFileSync(editorGeometryPath, "utf8");
+
+    expect(source).toContain('from "./CharacterEditorOverlays"');
+    expect(source).toContain('from "./character-editor-geometry"');
+    expect(overlaysSource).toContain("export function ReachOverlay");
+    expect(overlaysSource).toContain("export function DeformPathOverlay");
+    expect(overlaysSource).toContain("export function RotationReachOverlay");
+    expect(overlaysSource).toContain("export function VariantAnchorOverlay");
+    expect(overlaysSource).toContain("export function RigBonesOverlay");
+    expect(overlaysSource).toContain("export function GroupControlsOverlay");
+    expect(geometrySource).toContain("export function convexHull");
+    expect(geometrySource).toContain("export function composeEditorPartTransform");
+    expect(geometrySource).toContain("export function normalizePartPatch");
+    expect(source).not.toContain("function ReachOverlay");
+    expect(source).not.toContain("function DeformPathOverlay");
+    expect(source).not.toContain("function RotationReachOverlay");
+    expect(source).not.toContain("function VariantAnchorOverlay");
+    expect(source).not.toContain("function RigBonesOverlay");
+    expect(source).not.toContain("function GroupControlsOverlay");
   });
 
   it("supports both skeleton calibration and moving artwork with pin-driven joint drags", () => {
@@ -317,10 +351,11 @@ describe("CharacterEditor source integration", () => {
 
   it("keeps rig captions quiet and derives upload occupancy from semantic slots", () => {
     const source = readFileSync(editorPath, "utf8");
+    const overlaysSource = readFileSync(overlaysPath, "utf8");
     const artworkImportSource = readFileSync(artworkImportPath, "utf8");
     const partImportSource = readFileSync(partImportPath, "utf8");
 
-    expect(source).toContain("group-hover:opacity-100");
+    expect(overlaysSource).toContain("group-hover:opacity-100");
     expect(source).toContain("setShowAnchors(false)");
     expect(source).toContain("showAnchors && !focusEditing");
     expect(artworkImportSource).toContain("matchesSlotDefinition(part, definition)");
@@ -334,10 +369,11 @@ describe("CharacterEditor source integration", () => {
   it("offers a full-frame fit action for the active angle", () => {
     const source = readFileSync(editorPath, "utf8");
     const rigSetupSource = readFileSync(rigSetupPath, "utf8");
+    const geometrySource = readFileSync(editorGeometryPath, "utf8");
 
     expect(source).toContain("fitActiveAngleToCanvas");
     expect(source).toContain("fitPartsToCanvasFrame");
-    expect(source).toContain("unionFrameBounds(scopedParts)");
+    expect(geometrySource).toContain("unionFrameBounds(scopedParts)");
     expect(rigSetupSource).toContain("Fit active angle to canvas");
   });
 });

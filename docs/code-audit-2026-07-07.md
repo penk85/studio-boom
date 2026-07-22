@@ -257,25 +257,26 @@ scattered through the editor. Canvas and skeleton setup then moved to
 `CharacterInspectorFields.tsx`. The next larger pass separated the part, group,
 movement, and flexible-mesh inspectors into focused modules behind
 `CharacterInspectorPanels.tsx`; shared preview helpers and option sets are now
-pure modules rather than component-local logic. `CharacterEditor.tsx` fell from
-8,297 to 5,130 lines without changing the persisted character model or
-renderer. M7 remains open: the main component, overlays, recorder, store,
-Timeline, and Stage still need staged extractions rather than a single broad
-rewrite.
+pure modules rather than component-local logic. Character rigging, reach, mesh,
+and group-transform chrome now lives in `CharacterEditorOverlays.tsx`, while
+the transform, bounds, fitting, and constraint calculations are isolated in
+the unit-tested `character-editor-geometry.ts`. `CharacterEditor.tsx` fell from
+8,297 to 4,019 lines without changing the persisted character model or
+renderer. M7 remains open: the main component, recorder, store, Timeline, and
+Stage still need staged extractions rather than a single broad rewrite.
 
-- **Where:** `CharacterEditor.tsx` **5,130 lines / 38 top-level functions**,
-  with the main component spanning ~226–3,605 (≈3,380 lines).
-  `MotionPresetRecorder.tsx` 4,022 (growing in the current WIP),
-  `store.ts` 3,083, `Timeline.tsx` 2,907, `Stage.tsx` 2,630.
+- **Where:** `CharacterEditor.tsx` **4,019 lines / 14 top-level functions**,
+  with the main component spanning ~229–3,605 (≈3,377 lines).
+  `MotionPresetRecorder.tsx` 3,762, `store.ts` 3,153, `Timeline.tsx` 2,908,
+  `Stage.tsx` 2,633.
 - **What:** these five files are where nearly every regression this quarter
   will land. The source-contract integration tests (which `readFileSync`
   these files and assert markers) make _within-file_ churn safe-ish but make
   _splitting_ the files feel expensive, so they keep growing.
-- **Failure scenario:** hook-order bugs and stale-closure bugs are already
-  appearing at the edges — the two current `react-hooks/exhaustive-deps`
-  warnings are both in `CharacterEditor.tsx` (1022: unnecessary
-  `previewTick` dep; 6802: dep-less `useLayoutEffect`, deliberately guarded
-  by an identity check but dependent on that guard staying intact).
+- **Failure scenario:** hook-order bugs and stale-closure bugs remain likely at
+  the edges. `PartLayer` still has a deliberately dep-less `useLayoutEffect`
+  with an explicit lint suppression; an identity check prevents its state
+  update from looping, but correctness depends on that guard staying intact.
 - **Recommendation:** adopt a "no new top-level sections in these files" rule:
   new panels/overlays go in sibling modules (the codebase already does this
   well elsewhere — `stage-helpers.ts`, `transform-box.ts`). Update the
