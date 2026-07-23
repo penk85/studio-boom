@@ -3,7 +3,7 @@
 import { create } from "zustand";
 import { removeElementFromHtml } from "@hyperframes/core";
 import type { TimelineElement } from "@hyperframes/core";
-import { db, deleteMediaIfUnused, requireCurrentProjectShape, uid } from "./db";
+import { db, deleteMediaIfUnused, requireCurrentProjectShape, revokeAllMediaUrls, uid } from "./db";
 import type {
   AnyClip,
   CharacterClipMeta,
@@ -1488,6 +1488,7 @@ export const useStudio = create<StudioState>((set, get) => ({
     if (!projectId) return;
     await get().saveProject();
     await projectEditLock.release(projectId);
+    revokeAllMediaUrls();
     set({
       project: null,
       tracks: [],

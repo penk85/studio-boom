@@ -1,11 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   collectCharacterMediaUsages,
   collectProjectMediaUsages,
+  db,
+  getMediaUrl,
   isCurrentProjectShape,
   requireCurrentProjectShape,
+  revokeAllMediaUrls,
+  revokeMediaUrl,
 } from "../db";
-import type { CharacterPreset, Project } from "../types";
+import type { CharacterPreset, MediaBlobRow, Project } from "../types";
 
 describe("isCurrentProjectShape", () => {
   it("rejects non-current project rows at the load guard boundary", () => {
@@ -164,5 +168,62 @@ describe("collectCharacterMediaUsages", () => {
         detail: "Forearm",
       },
     ]);
+  });
+});
+
+describe("media Blob URL lifecycle", () => {
+  afterEach(() => {
+    revokeAllMediaUrls();
+    vi.restoreAllMocks();
+  });
+
+  it("reuses one object URL for concurrent requests and releases it on session close", async () => {
+    const row = {
+      id: "media-1",
+      blob: new Blob(["image"]),
+    } satisfies MediaBlobRow;
+    let resolveRow: (value: MediaBlobRow) => void = () => undefined;
+    const rowPromise = new Promise<MediaBlobRow>((resolve) => {
+      resolveRow = resolve;
+    });
+    vi.spyOn(db.mediaBlobs, "get").mockImplementation(
+      () => rowPromise as unknown as ReturnType<typeof db.mediaBlobs.get>,
+    );
+    const createObjectUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:media-1");
+    const revokeObjectUrl = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+
+    const first = getMediaUrl(row.id);
+    const second = getMediaUrl(row.id);
+    resolveRow(row);
+
+    await expect(first).resolves.toBe("blob:media-1");
+    await expect(second).resolves.toBe("blob:media-1");
+    expect(createObjectUrl).toHaveBeenCalledTimes(1);
+
+    revokeAllMediaUrls();
+    expect(revokeObjectUrl).toHaveBeenCalledOnce();
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:media-1");
+  });
+
+  it("does not recreate a deleted media URL after an in-flight lookup finishes", async () => {
+    const row = {
+      id: "media-late",
+      blob: new Blob(["image"]),
+    } satisfies MediaBlobRow;
+    let resolveRow: (value: MediaBlobRow) => void = () => undefined;
+    const rowPromise = new Promise<MediaBlobRow>((resolve) => {
+      resolveRow = resolve;
+    });
+    vi.spyOn(db.mediaBlobs, "get").mockImplementation(
+      () => rowPromise as unknown as ReturnType<typeof db.mediaBlobs.get>,
+    );
+    const createObjectUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:late");
+
+    const pending = getMediaUrl(row.id);
+    revokeMediaUrl(row.id);
+    resolveRow(row);
+
+    await expect(pending).resolves.toBeNull();
+    expect(createObjectUrl).not.toHaveBeenCalled();
   });
 });

@@ -31,6 +31,7 @@ describe("project lock wiring", () => {
     expect(closeProjectSource.indexOf("await get().saveProject()")).toBeLessThan(
       closeProjectSource.indexOf("await projectEditLock.release(projectId)"),
     );
+    expect(closeProjectSource).toContain("revokeAllMediaUrls()");
     expect(appSource).toContain("await closeProject()");
     expect(appSource).not.toContain('await saveProject();\n    setView("dashboard")');
   });

@@ -4,7 +4,8 @@ import type { HFAsset, Project } from "../types";
 import { findInlineScripts } from "./script-blocks";
 
 // Media URLs are cached process-wide in db.ts:blobUrlCache and freed when the
-// underlying media row is deleted. The preview pipeline does not own them.
+// project session closes or the underlying media row is deleted. The preview
+// pipeline does not own them.
 export async function resolvePreviewHtml(project: Project): Promise<string> {
   const { assets } = project.hf;
   const assetEntries = await Promise.all(

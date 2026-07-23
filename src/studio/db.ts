@@ -65,20 +65,41 @@ export const uid = () => {
 
 /** Get a Blob URL for a media asset, caching by id. */
 const blobUrlCache = new Map<string, string>();
+const blobUrlRevisions = new Map<string, number>();
+let blobUrlCacheEpoch = 0;
+
 export async function getMediaUrl(id: string): Promise<string | null> {
-  if (blobUrlCache.has(id)) return blobUrlCache.get(id)!;
+  const cached = blobUrlCache.get(id);
+  if (cached) return cached;
+  const epoch = blobUrlCacheEpoch;
+  const revision = blobUrlRevisions.get(id) ?? 0;
   const row = await db.mediaBlobs.get(id);
-  if (!row) return null;
+  if (!row || epoch !== blobUrlCacheEpoch || revision !== (blobUrlRevisions.get(id) ?? 0)) {
+    return null;
+  }
+  // Concurrent misses may have loaded the same blob while this request awaited IndexedDB.
+  const loadedWhileWaiting = blobUrlCache.get(id);
+  if (loadedWhileWaiting) return loadedWhileWaiting;
   const url = URL.createObjectURL(row.blob);
   blobUrlCache.set(id, url);
   return url;
 }
+
 export function revokeMediaUrl(id: string) {
   const u = blobUrlCache.get(id);
   if (u) {
     URL.revokeObjectURL(u);
     blobUrlCache.delete(id);
   }
+  blobUrlRevisions.set(id, (blobUrlRevisions.get(id) ?? 0) + 1);
+}
+
+/** Release every process-wide media URL when the active project session closes. */
+export function revokeAllMediaUrls() {
+  blobUrlCacheEpoch += 1;
+  blobUrlRevisions.clear();
+  for (const url of blobUrlCache.values()) URL.revokeObjectURL(url);
+  blobUrlCache.clear();
 }
 
 /** Probe a file for natural dimensions / duration before insert. */
@@ -158,10 +179,16 @@ export async function importMediaFile(
 
 export async function deleteMedia(id: string) {
   revokeMediaUrl(id);
-  await db.transaction("rw", db.media, db.mediaBlobs, async () => {
-    await db.media.delete(id);
-    await db.mediaBlobs.delete(id);
-  });
+  try {
+    await db.transaction("rw", db.media, db.mediaBlobs, async () => {
+      await db.media.delete(id);
+      await db.mediaBlobs.delete(id);
+    });
+  } finally {
+    // Invalidate a lookup that may have started after the first revocation but
+    // before the IndexedDB deletion completed.
+    revokeMediaUrl(id);
+  }
 }
 
 /**

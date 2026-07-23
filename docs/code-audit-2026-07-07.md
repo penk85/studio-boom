@@ -20,7 +20,9 @@ rename, duplicate, and delete use the same exclusive boundary and re-read the
 latest stored project after acquiring it. A second tab is refused while the
 first edits, then can open the project after the first saves and returns to the
 Dashboard. M6 and M8 are mitigated below; M7 and M9 remain open. L1-L3 and L6
-were addressed on 2026-07-22; L4, L5, L8, L9, and part of L7 remain open.
+were addressed on 2026-07-22, and L8 was addressed on 2026-07-23. L4, L5, and
+part of L7 remain open; L9 was verified as a future-path guard rather than a
+currently reachable defect.
 
 Severity scale: **High** = data loss, security exposure, or broken gate.
 **Medium** = will bite users/devs under normal use as the app grows.
@@ -368,16 +370,18 @@ release available according to npm.
   temporary settings file is no longer present. The old user-owned stash and
   the two unreferenced `character-previews/` SVG assets were deliberately left
   untouched pending an explicit decision about their value.
-- **L8. `blobUrlCache` never shrinks within a session** (`db.ts:67`) — bounded
-  by media count and revoked on delete; fine today, but if projects ever hold
-  hundreds of videos, add revoke-on-project-close.
-- **L9. SVG-only enforcement for character parts lives at one entry point** —
-  `importMediaFile(file, { scope: "character-part" })` throws for non-SVG
-  (`db.ts:130-135`), and the CharacterEditor upload path uses that scope. If
-  any future path lets a _library_ image (PNG) be assigned to a slot directly,
-  the invariant silently disappears — consider asserting SVG-ness where parts
-  are attached, not only where files are uploaded [VERIFY current
-  reachability].
+- **L8. `blobUrlCache` session retention — addressed 2026-07-23.** Closing a
+  project now revokes and clears every cached media URL. Per-media revisions
+  and a session epoch also prevent an in-flight IndexedDB lookup from
+  recreating a URL after deletion/close, while a post-await cache check avoids
+  leaking duplicate URLs from concurrent misses.
+- **L9. SVG-only enforcement at one entry point — verified 2026-07-23; no
+  current bypass.** Every current part-attachment path either imports through
+  `importMediaFile(file, { scope: "character-part" })` or duplicates/mirrors
+  already validated part art. There is no library-media-to-slot path today, so
+  a second rejection at save time would add legacy-character risk without
+  closing a reachable bug. If such an assignment path is added, it must assert
+  SVG media at that new attachment boundary.
 
 ---
 
