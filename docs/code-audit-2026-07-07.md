@@ -19,7 +19,8 @@ editing now takes an origin-scoped Web Lock before load-time writes; Dashboard
 rename, duplicate, and delete use the same exclusive boundary and re-read the
 latest stored project after acquiring it. A second tab is refused while the
 first edits, then can open the project after the first saves and returns to the
-Dashboard. M6 and M8 are mitigated below; M7 and the Low findings remain open.
+Dashboard. M6 and M8 are mitigated below; M7 and M9 remain open. L1-L3 and L6
+were addressed on 2026-07-22; L4, L5, L8, L9, and part of L7 remain open.
 
 Severity scale: **High** = data loss, security exposure, or broken gate.
 **Medium** = will bite users/devs under normal use as the app grows.
@@ -311,26 +312,43 @@ remains a larger postMessage-boundary project, not a safe local attribute change
   - `about:srcdoc` origin isolation) even if final playback stays same-origin.
     Long-term: consider `sandbox` + a postMessage player bridge.
 
+### M9. The pinned dependency graph carries current security advisories
+
+**Found 2026-07-22; upgrade requires an isolated compatibility pass.**
+`npm audit --omit=dev` reports 14 vulnerable dependency entries (9 high,
+4 moderate, 1 low, 0 critical). Most arrive through the pinned HyperFrames CLI
+and engine family rather than Studio application code: Hono/node-server,
+`sharp`, `adm-zip`/ONNX Runtime, `protobufjs`, `js-yaml`, and `ws`. Vite 7.3.2
+also has Windows-specific development-server advisories and has a patched 7.x
+release available according to npm.
+
+- **Actual exposure:** Studio is bound to `127.0.0.1` and currently runs on
+  Linux, which materially limits the Vite and Windows path-traversal findings.
+  Several Hono advisories concern middleware or deployment adapters Studio does
+  not use directly. The image/archive/parser denial-of-service findings remain
+  relevant if untrusted input reaches the HyperFrames CLI during import or
+  render, although the app's explicit trust prompts reduce that path.
+- **Recommendation:** upgrade Vite within its current major as one isolated
+  dependency change. Upgrade `hyperframes` and every `@hyperframes/*` package
+  together only after checking their published compatibility, then rerun
+  preview/export parity and MP4 rendering. Do not use a blanket
+  `npm audit fix`; it cannot resolve the current HyperFrames tree safely and
+  would obscure which runtime contract changed.
+
 ---
 
 ## 3. Low
 
-- **L1. `"sideEffects": false` in `package.json`** — false for this app
-  (side-effect imports: `import "@hyperframes/player"` in `Stage.tsx`,
-  `import "./styles.css"` in `main.tsx`). The current Vite build is verified
-  unaffected (`dist/assets/index-*.css` exists), but it's a latent tree-shake
-  foot-gun for any future bundling change. Either delete the field or list the
-  side-effectful files.
-- **L2. `define: { "process.env.NODE_ENV": JSON.stringify("production") }`**
-  (`vite.config.ts:24`) applies in dev too. Vite pre-bundles React itself with
-  the correct mode, so React dev warnings likely survive [VERIFY by checking a
-  known dev-only warning fires under `npm run dev`], but any _source-compiled_
-  library branching on `NODE_ENV` will take production paths during
-  development. Scope the shim (it exists for HyperFrames deps) rather than
-  defining it globally.
-- **L3. `vite-tsconfig-paths` sits in `dependencies`** — build-time tooling;
-  belongs in `devDependencies`. Cosmetic (nothing consumes this package's
-  manifest), but it misstates the runtime surface.
+- **L1. Incorrect `"sideEffects": false` — addressed 2026-07-22.** The field
+  was removed because this app intentionally has side-effect imports
+  (`@hyperframes/player` and `styles.css`).
+- **L2. Development forced to production `NODE_ENV` — addressed 2026-07-22.**
+  The hardcoded replacement was removed; Vite now supplies its mode-correct
+  value. The other browser compatibility definitions remain for bundled
+  HyperFrames dependencies.
+- **L3. `vite-tsconfig-paths` dependency classification — addressed
+  2026-07-22.** The build-time plugin and its lockfile-only dependency chain
+  now sit in `devDependencies`.
 - **L4. Unused-code detection is fully off** —
   `@typescript-eslint/no-unused-vars: "off"` and `noUnusedLocals: false`.
   Deliberate (AGENTS.md documents it), but with 80k lines and no periodic
@@ -342,14 +360,14 @@ remains a larger postMessage-boundary project, not a safe local attribute change
   plumbing, clearly commented. Keep it read-only: the moment something
   _rewrites_ scripts via these regexes, move it behind the core GSAP script
   helpers.
-- **L6. Baseline lint debt** — 4 auto-fixable Prettier errors
-  (`StageMoveable.tsx:130`, `keyframes.ts:1271,1273`, `transform.ts:91`).
-  One `npx eslint . --fix` commit clears it; do it separately from feature
-  work so blame stays clean.
-- **L7. Housekeeping** — stale `bun.lockb` + `bunfig.toml` (npm is canonical);
-  a stray `.claude/settings.local.json.tmp.29358.*` temp file; an old stash
-  (`WIP on export-button`); `character-previews/` (two SVGs) is referenced by
-  nothing in `src/` [VERIFY: delete or wire up].
+- **L6. Baseline lint debt — addressed 2026-07-22.** The four Prettier errors
+  in `StageMoveable.tsx`, `keyframes.ts`, and `transform.ts` were formatted;
+  project-wide lint is now expected to be clean.
+- **L7. Housekeeping — partially addressed 2026-07-22.** The stale tracked
+  `bun.lockb` and `bunfig.toml` were removed; npm remains canonical. The stray
+  temporary settings file is no longer present. The old user-owned stash and
+  the two unreferenced `character-previews/` SVG assets were deliberately left
+  untouched pending an explicit decision about their value.
 - **L8. `blobUrlCache` never shrinks within a session** (`db.ts:67`) — bounded
   by media count and revoked on delete; fine today, but if projects ever hold
   hundreds of videos, add revoke-on-project-close.

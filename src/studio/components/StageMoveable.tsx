@@ -127,9 +127,7 @@ export function StageMoveable({
             applyEdit({ x: desired.x, y: desired.y }, { persist: true });
             return;
           }
-          const snapped = snapMove
-            ? snapMove(desired)
-            : { x: desired.x, y: desired.y, guides: [] };
+          const snapped = snapMove ? snapMove(desired) : { x: desired.x, y: desired.y, guides: [] };
           onSnapGuidesChange?.(snapped.guides);
           applyEdit({ x: snapped.x, y: snapped.y }, { persist: false });
           // Track the snapped position so the box follows the element when a snap nudges it.

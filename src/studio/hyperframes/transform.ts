@@ -88,7 +88,8 @@ export function toGsapTransformVars(
   if (force.includes("rotation") || values.rotation !== 0) vars.rotation = values.rotation;
   const sx = values.scale * values.scaleX;
   const sy = values.scale * values.scaleY;
-  const forceScale = force.includes("scale") || force.includes("scaleX") || force.includes("scaleY");
+  const forceScale =
+    force.includes("scale") || force.includes("scaleX") || force.includes("scaleY");
   if (sx !== sy) {
     // Per-axis (a mirror is present): set scaleX/scaleY explicitly so gsap doesn't collapse them.
     vars.scaleX = sx;

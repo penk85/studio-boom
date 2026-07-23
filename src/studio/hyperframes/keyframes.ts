@@ -1268,9 +1268,13 @@ function compilePropertyKeyframes(args: {
     const position = args.clipStart + previousTime;
     const duration = Math.max(0, keyframe.time - previousTime);
     if (duration <= TIME_EPSILON) {
-      lines.push(formatSet(args.selector, withFlip(nextVars, args.base), args.clipStart + keyframe.time));
+      lines.push(
+        formatSet(args.selector, withFlip(nextVars, args.base), args.clipStart + keyframe.time),
+      );
     } else {
-      lines.push(formatTo(args.selector, withFlip(nextVars, args.base), position, duration, keyframe.ease));
+      lines.push(
+        formatTo(args.selector, withFlip(nextVars, args.base), position, duration, keyframe.ease),
+      );
     }
     previousTime = keyframe.time;
     previousVars = nextVars;

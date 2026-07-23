@@ -21,7 +21,8 @@ export default defineConfig(({ mode }) => {
     {
       plugins,
       define: {
-        "process.env.NODE_ENV": JSON.stringify("production"),
+        // Vite supplies mode-correct NODE_ENV; these remaining Node globals are browser shims for
+        // bundled HyperFrames dependencies.
         "process.platform": JSON.stringify("browser"),
         "process.version": JSON.stringify(""),
         "process.env": "{}",

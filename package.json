@@ -1,7 +1,6 @@
 {
   "name": "studio-boom",
   "private": true,
-  "sideEffects": false,
   "type": "module",
   "packageManager": "npm@10.9.7",
   "engines": {
@@ -47,7 +46,6 @@
     "tailwind-merge": "^3.5.0",
     "tailwindcss": "^4.2.1",
     "tw-animate-css": "^1.3.4",
-    "vite-tsconfig-paths": "^6.0.2",
     "zustand": "^5.0.12"
   },
   "devDependencies": {
@@ -68,6 +66,7 @@
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.56.1",
     "vite": "^7.3.1",
+    "vite-tsconfig-paths": "^6.0.2",
     "vitest": "^4.1.5"
   }
 }
