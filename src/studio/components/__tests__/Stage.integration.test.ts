@@ -3,6 +3,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const stagePath = join(process.cwd(), "src/studio/components/Stage.tsx");
+const overlaysPath = join(process.cwd(), "src/studio/components/StageOverlays.tsx");
+const interactionsPath = join(process.cwd(), "src/studio/components/stage-interactions.ts");
+const motionPathsPath = join(process.cwd(), "src/studio/components/stage-motion-paths.ts");
 const previewPath = join(process.cwd(), "src/studio/hyperframes/preview.ts");
 const renderPluginPath = join(process.cwd(), "src/studio/hyperframes/render-plugin.ts");
 
@@ -23,6 +26,8 @@ describe("Stage HyperFrames Studio integration", () => {
 
   it("keeps stage interaction attached to the real player while drawing editor-only chrome", () => {
     const source = readFileSync(stagePath, "utf8");
+    const overlaysSource = readFileSync(overlaysPath, "utf8");
+    const interactionsSource = readFileSync(interactionsPath, "utf8");
 
     // Base transform edits (move/resize/rotate) route through the ONE stage-edit pipeline —
     // no scattered player-editing calls, no direct updateClip for base transforms.
@@ -57,10 +62,10 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(source).toContain('doc.addEventListener("click", handleClick, true)');
     expect(source).toContain("resolveTargetClipId(");
     expect(source).toContain("<StageClickOverlay");
-    expect(source).toContain('data-stage-click-target=""');
+    expect(overlaysSource).toContain('data-stage-click-target=""');
     // Figma-style select/drag: the overlay rects are pure hit targets and the controller
     // reads the full z-stack under the pointer to drill, prefer the selection, and lock.
-    expect(source).toContain("data-clip-id={clip.id}");
+    expect(overlaysSource).toContain("data-clip-id={clip.id}");
     expect(source).toContain("useSelectDrag(");
     expect(source).toContain("hitTestClipIdsAtPoint(");
     expect(source).toContain("onCanvasPointerDown={onCanvasPointerDown}");
@@ -72,20 +77,20 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(source).toContain("paths={motionPaths}");
     expect(source).toContain("onCheckpointPointerDown=");
     expect(source).toContain("onPathPointerDown=");
-    expect(source).toContain('data-stage-motion-path=""');
+    expect(overlaysSource).toContain('data-stage-motion-path=""');
     expect(source).toContain("getStageMotionPaths(");
-    expect(source).toContain('data-stage-motion-checkpoint=""');
-    expect(source).toContain('data-stage-motion-line-hit=""');
+    expect(overlaysSource).toContain('data-stage-motion-checkpoint=""');
+    expect(overlaysSource).toContain('data-stage-motion-line-hit=""');
     expect(source).toContain('data-stage-move-handle=""');
-    expect(source).toContain("resizeCompositionRect({");
-    expect(source).toContain("scaleCompositionRectFromHandleRect(");
+    expect(interactionsSource).toContain("resizeCompositionRect({");
+    expect(interactionsSource).toContain("scaleCompositionRectFromHandleRect(");
     expect(source).toContain("roundCompositionRect(previewClip)");
     expect(source).toContain("width: finalClip.width");
     expect(source).toContain("height: finalClip.height");
     expect(source).toContain("<SelectionCorner");
     expect(source).toContain('data-stage-rotate-handle=""');
     expect(source).toContain("getRotationPreview(");
-    expect(source).toContain("snapRotationDegrees(");
+    expect(interactionsSource).toContain("snapRotationDegrees(");
     expect(source).toContain("transform: `rotate(${previewRotation}deg)`");
     expect(source).toContain("compositionDeltaToLocal(");
     expect(source).toContain("getLayerShortcut(event)");
@@ -111,6 +116,29 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(source).toContain("snapGroupMove={snapGroupMove}");
     expect(source).toContain("onSnapGuidesChange={setMoveableSnapGuides}");
     expect(source).toContain('drag?.type === "move" ? drag.snapGuides : moveableSnapGuides');
+  });
+
+  it("keeps extracted Stage concerns behind focused sibling modules", () => {
+    const source = readFileSync(stagePath, "utf8");
+    const overlaysSource = readFileSync(overlaysPath, "utf8");
+    const interactionsSource = readFileSync(interactionsPath, "utf8");
+    const motionPathsSource = readFileSync(motionPathsPath, "utf8");
+
+    expect(source).toContain('from "./StageOverlays"');
+    expect(source).toContain('from "./stage-interactions"');
+    expect(source).toContain('from "./stage-motion-paths"');
+    expect(overlaysSource).toContain("export function MotionPathOverlay");
+    expect(overlaysSource).toContain("export function StageClickOverlay");
+    expect(overlaysSource).toContain("export function StageSnapGuideOverlay");
+    expect(overlaysSource).toContain("export function SelectionCorner");
+    expect(interactionsSource).toContain("export function getMovePreview");
+    expect(interactionsSource).toContain("export function buildMoveSnapTargets");
+    expect(interactionsSource).toContain("export function getLayerShortcut");
+    expect(motionPathsSource).toContain("export function getStageMotionPaths");
+    expect(motionPathsSource).toContain("export function motionPathData");
+    expect(source).not.toContain("function MotionPathOverlay");
+    expect(source).not.toContain("function getMovePreview");
+    expect(source).not.toContain("function getStageMotionPaths");
   });
 
   it("stages srcdoc previews through the same HyperFrames project-file bundling contract", () => {

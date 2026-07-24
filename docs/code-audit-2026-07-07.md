@@ -268,10 +268,18 @@ the unit-tested `character-editor-geometry.ts`. `CharacterEditor.tsx` fell from
 renderer. M7 remains open: the main component, recorder, store, Timeline, and
 Stage still need staged extractions rather than a single broad rewrite.
 
+**Further reduced 2026-07-24:** Stage's editor-only SVG overlays moved into
+`StageOverlays.tsx`, motion-path derivation moved into
+`stage-motion-paths.ts`, and selection/snap/transform/keyboard calculations
+moved into the unit-tested `stage-interactions.ts`. `Stage.tsx` fell from
+2,633 to 1,617 lines while retaining playback state, interaction ownership,
+and all movie mutations. The remaining Stage controller is still substantial,
+but its previously mixed presentation and pure geometry tails are now isolated.
+
 - **Where:** `CharacterEditor.tsx` **4,019 lines / 14 top-level functions**,
   with the main component spanning ~229–3,605 (≈3,377 lines).
-  `MotionPresetRecorder.tsx` 3,762, `store.ts` 3,153, `Timeline.tsx` 2,908,
-  `Stage.tsx` 2,633.
+  `MotionPresetRecorder.tsx` 3,762, `store.ts` 3,154, `Timeline.tsx` 2,908,
+  `Stage.tsx` 1,617.
 - **What:** these five files are where nearly every regression this quarter
   will land. The source-contract integration tests (which `readFileSync`
   these files and assert markers) make _within-file_ churn safe-ish but make
