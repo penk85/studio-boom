@@ -324,13 +324,14 @@ remains a larger postMessage-boundary project, not a safe local attribute change
 
 ### M9. The pinned dependency graph carries current security advisories
 
-**Found 2026-07-22; upgrade requires an isolated compatibility pass.**
-`npm audit --omit=dev` reports 14 vulnerable dependency entries (9 high,
-4 moderate, 1 low, 0 critical). Most arrive through the pinned HyperFrames CLI
-and engine family rather than Studio application code: Hono/node-server,
-`sharp`, `adm-zip`/ONNX Runtime, `protobufjs`, `js-yaml`, and `ws`. Vite 7.3.2
-also has Windows-specific development-server advisories and has a patched 7.x
-release available according to npm.
+**Partially addressed 2026-07-24; remaining upgrades require isolated
+compatibility passes.** Vite was upgraded from 7.3.2 to 7.3.6 within its
+existing major, clearing both Vite advisories. `npm audit --omit=dev` now
+reports 13 vulnerable dependency entries (9 high, 3 moderate, 1 low,
+0 critical). Most arrive through the pinned HyperFrames CLI and engine family
+rather than Studio application code: Hono/node-server, `sharp`,
+`adm-zip`/ONNX Runtime, `protobufjs`, `js-yaml`, and `ws`. Vite's transitive
+`esbuild` also retains a Windows-specific development-server advisory.
 
 - **Actual exposure:** Studio is bound to `127.0.0.1` and currently runs on
   Linux, which materially limits the Vite and Windows path-traversal findings.
@@ -338,10 +339,10 @@ release available according to npm.
   not use directly. The image/archive/parser denial-of-service findings remain
   relevant if untrusted input reaches the HyperFrames CLI during import or
   render, although the app's explicit trust prompts reduce that path.
-- **Recommendation:** upgrade Vite within its current major as one isolated
-  dependency change. Upgrade `hyperframes` and every `@hyperframes/*` package
+- **Recommendation:** upgrade `hyperframes` and every `@hyperframes/*` package
   together only after checking their published compatibility, then rerun
-  preview/export parity and MP4 rendering. Do not use a blanket
+  preview/export parity and MP4 rendering. Handle the remaining transitive
+  packages through those owners where possible. Do not use a blanket
   `npm audit fix`; it cannot resolve the current HyperFrames tree safely and
   would obscure which runtime contract changed.
 
