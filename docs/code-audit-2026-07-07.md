@@ -276,9 +276,16 @@ moved into the unit-tested `stage-interactions.ts`. `Stage.tsx` fell from
 and all movie mutations. The remaining Stage controller is still substantial,
 but its previously mixed presentation and pure geometry tails are now isolated.
 
+**Timeline reduced 2026-07-24:** scene-strip/ruler UI moved into
+`TimelineSceneStrip.tsx`, draggable and trimmable parent clips moved into
+`TimelineClipBlock.tsx`, and composition diagnostics, scene-time projection,
+lane targeting, and expanded-row packing moved into unit-tested pure modules.
+`Timeline.tsx` fell from 2,908 to 1,890 lines while retaining seek/playback
+state and all store-mutation wiring.
+
 - **Where:** `CharacterEditor.tsx` **4,019 lines / 14 top-level functions**,
   with the main component spanning ~229–3,605 (≈3,377 lines).
-  `MotionPresetRecorder.tsx` 3,762, `store.ts` 3,154, `Timeline.tsx` 2,908,
+  `MotionPresetRecorder.tsx` 3,762, `store.ts` 3,154, `Timeline.tsx` 1,890,
   `Stage.tsx` 1,617.
 - **What:** these five files are where nearly every regression this quarter
   will land. The source-contract integration tests (which `readFileSync`

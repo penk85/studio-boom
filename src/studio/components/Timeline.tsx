@@ -1,19 +1,12 @@
 // Timeline — multi-track strip with draggable clips, ruler, playhead.
 import {
-  ChevronDown,
-  ChevronRight,
-  Copy,
-  GripVertical,
   Lock,
   Mic2,
   Minus,
   Plus,
   SkipBack,
   SlidersHorizontal,
-  TriangleAlert,
-  Trash2,
   Unlock,
-  Volume2,
   VolumeX,
   X,
 } from "lucide-react";
@@ -23,35 +16,19 @@ import {
   useMemo,
   useRef,
   useState,
-  type RefObject,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { PlayerControls, liveTime, usePlayerStore } from "@hyperframes/studio";
 import { db, uid } from "../db";
-import {
-  ACTION_CATEGORY_COLORS,
-  ACTION_CATEGORY_DOT_COLORS,
-  ACTION_LANE_DOT_COLORS,
-  ACTION_LANE_LABELS,
-  ACTION_LANE_ORDER,
-  type ActionLaneKind,
-  actionBadgeFallback,
-  actionLaneForPreset,
-  actionTitle,
-} from "../presets/action-terminology";
+import { ACTION_CATEGORY_COLORS } from "../presets/action-terminology";
 import { generateMotionOccurrences } from "../presets/apply";
 import { resolveExclusiveMotionOverlaps } from "../presets/motion-scheduling";
 import { useStudio, type ProjectMutationOptions } from "../store";
 import { useHfMediaHealth } from "../hooks/useHfMediaHealth";
-import {
-  extractCompositionOutline,
-  type CompositionOutlineItem,
-} from "../hyperframes/composition-outline";
-import { validateCompositionSourceHtml } from "../hyperframes/composition-source";
+import type { CompositionOutlineItem } from "../hyperframes/composition-outline";
 import { type ClipMotionCheckpoint, type ClipMotionEndpoint } from "../hyperframes/keyframes";
 import type {
-  MotionCategory,
   MotionPreset,
   AnyClip,
   AppliedMotion,
@@ -60,31 +37,45 @@ import type {
   ClipMotionStep,
   CompositionClip,
   EditorClip,
-  MediaAsset,
-  Project,
 } from "../types";
 import {
   deriveProjectScenes,
   deriveProjectTimelineClips,
-  type ProjectScene,
   type ProjectTimelineClip,
 } from "../scenes";
-import { characterSpeeches, isCharacterCompositionClip } from "../types";
+import { isCharacterCompositionClip } from "../types";
 import { fmtTime } from "../timeline-utils";
-
-const TRACK_HEIGHT = 44;
-const COMPOSITION_OUTLINE_PARENT_HEIGHT = 24;
-const COMPOSITION_OUTLINE_ROW_HEIGHT = 26;
-const VISUAL_MOTION_ROW_HEIGHT = 30;
-const VISUAL_MOTION_PARENT_HEIGHT = 24;
-const MOTION_ROW_HEIGHT = 28;
-const MOTION_PARENT_HEIGHT = 24;
-const RULER_HEIGHT = 28;
-const CLIP_DRAG_THRESHOLD_PX = 4;
+import { TimelineClipBlock } from "./TimelineClipBlock";
+import { SceneBoundaryOverlay, SceneStrip, TimelineRuler } from "./TimelineSceneStrip";
+import {
+  CLIP_DRAG_THRESHOLD_PX,
+  COMPOSITION_OUTLINE_PARENT_HEIGHT,
+  COMPOSITION_OUTLINE_ROW_HEIGHT,
+  MOTION_PARENT_HEIGHT,
+  MOTION_ROW_HEIGHT,
+  RULER_HEIGHT,
+  TRACK_HEIGHT,
+  VISUAL_MOTION_PARENT_HEIGHT,
+  VISUAL_MOTION_ROW_HEIGHT,
+} from "./timeline-constants";
+import {
+  buildCompositionOutlines,
+  buildCompositionSourceErrors,
+  isKeyframeEditableClip,
+  toSceneLocalClipPatch,
+} from "./timeline-clip-utils";
+import {
+  buildExpandedClipLayout,
+  buildTrackLayout,
+  compositionOutlineLaneHeight,
+  packVisualMotionRows,
+  visualMotionLaneHeight,
+  type ExpandedClipLayout,
+  type TimelineCharacterClip,
+  type VoiceLaneSummary,
+} from "./timeline-layout";
 const SEEK_DRAG_EDGE_ZONE_PX = 40;
 const SEEK_DRAG_MAX_SCROLL_PX = 12;
-
-type TimelineCharacterClip = ProjectTimelineClip & CharacterCompositionClip;
 
 interface TimelineProps {
   togglePlay: () => void;
@@ -600,7 +591,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
               className="sticky top-0 z-10 border-b border-border bg-panel-2"
               style={{ height: RULER_HEIGHT }}
             >
-              <Ruler duration={rootProject.hf.duration} zoom={zoom} />
+              <TimelineRuler duration={rootProject.hf.duration} zoom={zoom} />
             </div>
 
             <SceneBoundaryOverlay scenes={scenes} zoom={zoom} top={RULER_HEIGHT} />
@@ -643,14 +634,13 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                       const compositionSourceErrors =
                         compositionSourceErrorsByClipId.get(c.id) ?? [];
                       return (
-                        <ClipBlock
+                        <TimelineClipBlock
                           key={c.id}
                           clip={c}
                           missingMediaIds={missingMediaIds}
                           compositionSourceErrors={compositionSourceErrors}
                           zoom={zoom}
                           selected={c.id === selectedId}
-                          tracks={tracks.length}
                           duration={rootProject.hf.duration}
                           laneTops={laneTops}
                           top={laneTop + 4}
@@ -815,821 +805,6 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
         </div>
       </div>
     </div>
-  );
-}
-
-function Ruler({ duration, zoom }: { duration: number; zoom: number }) {
-  const step = zoom < 40 ? 5 : zoom < 80 ? 2 : 1;
-  const ticks: number[] = [];
-  for (let s = 0; s <= duration; s += step) ticks.push(s);
-  return (
-    <div className="relative h-full">
-      {ticks.map((s) => (
-        <div
-          key={s}
-          className="absolute top-0 h-full border-l border-border text-[10px] text-muted-foreground"
-          style={{ left: s * zoom, paddingLeft: 4 }}
-        >
-          {s}s
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function SceneBoundaryOverlay({
-  scenes,
-  zoom,
-  top,
-}: {
-  scenes: ProjectScene[];
-  zoom: number;
-  top: number;
-}) {
-  return (
-    <div
-      aria-hidden="true"
-      className="pointer-events-none absolute bottom-0 left-0 right-0 z-30"
-      style={{ top }}
-    >
-      {scenes.slice(1).map((scene) => (
-        <div
-          key={scene.id}
-          className="absolute bottom-0 top-0 border-l border-primary/80"
-          style={{
-            left: scene.start * zoom,
-            boxShadow: "0 0 0 1px color-mix(in oklch, var(--color-primary) 24%, transparent)",
-          }}
-        >
-          <span className="absolute left-1 top-1 rounded-sm bg-panel/95 px-1 py-0.5 text-[10px] font-medium text-foreground shadow">
-            {scene.name || `Scene ${scene.index + 1}`}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function SceneStrip({
-  scenes,
-  activeSceneId,
-  zoom,
-  scrollRef,
-  onScrollLeft,
-  onProjectView,
-  onSelectScene,
-  onAddScene,
-  onDuplicateScene,
-  onRemoveScene,
-  onMoveScene,
-  onResizeScene,
-  onHistoryCheckpoint,
-}: {
-  scenes: ProjectScene[];
-  activeSceneId: string | null;
-  zoom: number;
-  scrollRef: RefObject<HTMLDivElement | null>;
-  onScrollLeft: (scrollLeft: number) => void;
-  onProjectView: () => void;
-  onSelectScene: (sceneId: string) => void;
-  onAddScene: () => void;
-  onDuplicateScene: (sceneId: string) => void;
-  onRemoveScene: (sceneId: string) => void;
-  onMoveScene: (sceneId: string, toIndex: number) => void;
-  onResizeScene: (sceneId: string, duration: number, options?: ProjectMutationOptions) => void;
-  onHistoryCheckpoint: () => void;
-}) {
-  const [dragSceneId, setDragSceneId] = useState<string | null>(null);
-  const [contextMenu, setContextMenu] = useState<{
-    sceneId: string;
-    x: number;
-    y: number;
-  } | null>(null);
-  const totalWidth = Math.max(480, scenes.reduce((sum, scene) => sum + scene.duration, 0) * zoom);
-  const contextScene = contextMenu
-    ? (scenes.find((scene) => scene.id === contextMenu.sceneId) ?? null)
-    : null;
-
-  useEffect(() => {
-    if (!contextMenu) return;
-    const close = () => setContextMenu(null);
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") close();
-    };
-    window.addEventListener("click", close);
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [contextMenu]);
-
-  const confirmRemoveScene = (scene: ProjectScene) => {
-    setContextMenu(null);
-    if (scenes.length <= 1) return;
-    const label = scene.name || `Scene ${scene.index + 1}`;
-    if (!window.confirm(`Delete "${label}" and all content inside it? This cannot be undone.`)) {
-      return;
-    }
-    onRemoveScene(scene.id);
-  };
-
-  return (
-    <div className="relative flex h-12 shrink-0 border-b border-border bg-panel-2 text-xs">
-      <div className="flex w-40 shrink-0 items-center gap-1 border-r border-border px-2">
-        <button
-          type="button"
-          onClick={onProjectView}
-          className={`rounded border px-2 py-1 text-[11px] ${
-            activeSceneId === null
-              ? "border-primary bg-primary text-primary-foreground"
-              : "border-border bg-panel text-muted-foreground hover:text-foreground"
-          }`}
-          title="Project timeline"
-        >
-          Project
-        </button>
-        <button
-          type="button"
-          onClick={onAddScene}
-          className="flex h-6 w-6 items-center justify-center rounded border border-border bg-panel text-muted-foreground hover:text-foreground"
-          aria-label="Add scene"
-          title="Add scene"
-        >
-          <Plus size={13} />
-        </button>
-      </div>
-      <div
-        ref={scrollRef}
-        onScroll={(event) => onScrollLeft(event.currentTarget.scrollLeft)}
-        className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden"
-      >
-        <div className="relative h-full" style={{ width: totalWidth }}>
-          {scenes.map((scene) => {
-            const active = scene.id === activeSceneId;
-            const left = scene.start * zoom;
-            const width = Math.max(48, scene.duration * zoom);
-            const contentOverflow = scene.contentOverflow > 0.03;
-            return (
-              <div
-                key={scene.id}
-                draggable
-                onDragStart={(event) => {
-                  setDragSceneId(scene.id);
-                  event.dataTransfer.effectAllowed = "move";
-                }}
-                onDragOver={(event) => {
-                  event.preventDefault();
-                  event.dataTransfer.dropEffect = "move";
-                }}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  if (dragSceneId && dragSceneId !== scene.id)
-                    onMoveScene(dragSceneId, scene.index);
-                  setDragSceneId(null);
-                }}
-                onDragEnd={() => setDragSceneId(null)}
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setContextMenu({ sceneId: scene.id, x: event.clientX, y: event.clientY });
-                }}
-                className={`group absolute top-1 flex h-10 items-center overflow-hidden rounded border ${
-                  active
-                    ? "border-primary bg-primary/20 ring-1 ring-primary"
-                    : contentOverflow
-                      ? "border-amber-500/60 bg-amber-500/10 hover:border-amber-400"
-                      : "border-border bg-panel hover:border-primary/70"
-                }`}
-                style={{
-                  left,
-                  width,
-                  backgroundImage: contentOverflow
-                    ? "repeating-linear-gradient(135deg, transparent 0, transparent 8px, rgba(245, 158, 11, 0.18) 8px, rgba(245, 158, 11, 0.18) 12px)"
-                    : undefined,
-                }}
-              >
-                <button
-                  type="button"
-                  onClick={() => onSelectScene(scene.id)}
-                  className="flex h-full min-w-0 flex-1 items-center gap-1 px-2 text-left"
-                  title={
-                    contentOverflow
-                      ? `Scene content extends to ${formatSeconds(scene.contentEnd)}`
-                      : `Scene ${scene.index + 1}`
-                  }
-                >
-                  <GripVertical size={13} className="shrink-0 text-muted-foreground" />
-                  <span className="min-w-0 truncate font-medium text-foreground">
-                    {scene.name || `Scene ${scene.index + 1}`}
-                  </span>
-                  <span className="shrink-0 text-[10px] text-muted-foreground">
-                    {formatSeconds(scene.duration)}
-                  </span>
-                </button>
-                {contentOverflow && (
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onResizeScene(scene.id, scene.contentEnd);
-                    }}
-                    className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded border border-amber-500/60 bg-panel text-amber-300 hover:bg-amber-500/10"
-                    aria-label={`Extend scene ${scene.index + 1} to fit content`}
-                    title={`Extend to fit content (${formatSeconds(scene.contentEnd)})`}
-                  >
-                    <TriangleAlert size={12} />
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onDuplicateScene(scene.id);
-                  }}
-                  className="mr-1 hidden h-6 w-6 shrink-0 items-center justify-center rounded border border-border bg-panel text-muted-foreground hover:text-foreground group-hover:flex"
-                  aria-label={`Duplicate scene ${scene.index + 1}`}
-                  title="Duplicate scene"
-                >
-                  <Copy size={12} />
-                </button>
-                <div
-                  role="separator"
-                  aria-orientation="vertical"
-                  onMouseDown={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    const startX = event.clientX;
-                    const startDuration = scene.duration;
-                    onHistoryCheckpoint();
-                    const move = (moveEvent: MouseEvent) => {
-                      const nextDuration = Math.max(
-                        0.2,
-                        startDuration + (moveEvent.clientX - startX) / zoom,
-                      );
-                      onResizeScene(scene.id, nextDuration, { history: false });
-                    };
-                    const up = () => {
-                      window.removeEventListener("mousemove", move);
-                      window.removeEventListener("mouseup", up);
-                    };
-                    window.addEventListener("mousemove", move);
-                    window.addEventListener("mouseup", up);
-                  }}
-                  className="h-full w-2 shrink-0 cursor-ew-resize bg-black/20 opacity-0 group-hover:opacity-100"
-                  title="Resize scene"
-                />
-              </div>
-            );
-          })}
-        </div>
-      </div>
-      {contextMenu && contextScene && (
-        <div
-          role="menu"
-          className="fixed z-50 min-w-40 rounded border border-border bg-panel p-1 text-xs shadow-xl"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
-          onClick={(event) => event.stopPropagation()}
-        >
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              setContextMenu(null);
-              onDuplicateScene(contextScene.id);
-            }}
-            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-foreground hover:bg-panel-2"
-          >
-            <Copy size={13} />
-            Duplicate scene
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            disabled={scenes.length <= 1}
-            onClick={() => confirmRemoveScene(contextScene)}
-            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-destructive hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Trash2 size={13} />
-            Delete scene
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function buildCompositionSourceErrors(
-  project: Project,
-  clips: EditorClip[],
-): Map<string, string[]> {
-  const errorsByClipId = new Map<string, string[]>();
-  for (const clip of clips) {
-    if (clip.kind !== "composition" || !clip.compositionId) continue;
-    const source = project.hf.compositionHtml[clip.compositionId];
-    if (!source) {
-      errorsByClipId.set(clip.id, [`Missing source for composition "${clip.compositionId}".`]);
-      continue;
-    }
-    const result = validateCompositionSourceHtml(source, {
-      compositionId: clip.compositionId,
-      duration: clip.duration,
-      width: clip.width || project.hf.width,
-      height: clip.height || project.hf.height,
-      isSubComposition: true,
-    });
-    if (!result.ok) errorsByClipId.set(clip.id, result.errors);
-  }
-  return errorsByClipId;
-}
-
-function buildCompositionOutlines(
-  project: Project,
-  clips: EditorClip[],
-): Map<string, CompositionOutlineItem[]> {
-  const outlines = new Map<string, CompositionOutlineItem[]>();
-  for (const clip of clips) {
-    if (clip.kind !== "composition" || isCharacterCompositionClip(clip) || !clip.compositionId) {
-      continue;
-    }
-    const source = project.hf.compositionHtml[clip.compositionId];
-    if (!source) continue;
-    const outline = extractCompositionOutline(source, {
-      compositionId: clip.compositionId,
-      duration: clip.duration,
-    });
-    if (outline.length > 0) outlines.set(clip.id, outline);
-  }
-  return outlines;
-}
-
-function toSceneLocalClipPatch(
-  clip: ProjectTimelineClip,
-  patch: Partial<AnyClip>,
-): Partial<AnyClip> {
-  if (!clip.sceneId || patch.start === undefined) return patch;
-  return {
-    ...patch,
-    start: Math.max(0, patch.start - clip.sceneStart),
-  };
-}
-
-function ClipBlock({
-  clip,
-  missingMediaIds,
-  compositionSourceErrors,
-  zoom,
-  selected,
-  onSelect,
-  onChange,
-  onHistoryCheckpoint,
-  onDelete,
-  duration,
-  laneTops,
-  top,
-  presetMap,
-  expanded,
-  onToggleExpanded,
-}: {
-  clip: EditorClip;
-  missingMediaIds: string[];
-  compositionSourceErrors: string[];
-  zoom: number;
-  selected: boolean;
-  tracks: number;
-  duration: number;
-  laneTops: number[];
-  top: number;
-  onSelect: () => void;
-  onChange: (p: Partial<AnyClip>, options?: ProjectMutationOptions) => void;
-  onHistoryCheckpoint: () => void;
-  onDelete: () => void;
-  presetMap: Map<string, MotionPreset>;
-  expanded: boolean;
-  onToggleExpanded: () => void;
-}) {
-  const isCharacterClip = isCharacterCompositionClip(clip);
-  const canExpand = isKeyframeEditableClip(clip);
-  const color =
-    clip.kind === "audio"
-      ? "bg-clip-audio"
-      : isCharacterClip
-        ? "bg-clip-character"
-        : clip.kind === "text"
-          ? "bg-fuchsia-500"
-          : clip.kind === "composition"
-            ? "bg-indigo-500"
-            : clip.kind === "video"
-              ? "bg-clip"
-              : "bg-clip-bg";
-
-  const lane = clip.laneIndex ?? 0;
-  const clipMotions = isCharacterClip ? (clip.character.motions ?? []) : [];
-  const missingMediaTitle =
-    missingMediaIds.length > 0 ? `Missing media: ${missingMediaIds.join(", ")}` : undefined;
-  const malformedCompositionTitle =
-    compositionSourceErrors.length > 0
-      ? `Malformed composition source:\n${compositionSourceErrors.join("\n")}`
-      : undefined;
-  const motionTitle = characterActionTitle(clipMotions, presetMap);
-  const motionBadge = characterActionBadge(clipMotions, presetMap);
-  const clipVolume = clip.volume ?? 1;
-  const clipTitle = [
-    clip.name,
-    clip.kind === "audio" ? `Volume ${Math.round(clipVolume * 100)}%` : undefined,
-    missingMediaTitle,
-    malformedCompositionTitle,
-    motionTitle,
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  const onMouseDown = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    onSelect();
-    if (e.button !== 0) return;
-    const sx = e.clientX,
-      sy = e.clientY;
-    const ostart = clip.start;
-    const olane = lane;
-    const oLaneTop = laneTops[olane] ?? olane * TRACK_HEIGHT;
-    let dragging = false;
-    let checkpointed = false;
-    const move = (ev: MouseEvent) => {
-      const dx = ev.clientX - sx;
-      const dy = ev.clientY - sy;
-      if (!dragging && Math.hypot(dx, dy) < CLIP_DRAG_THRESHOLD_PX) return;
-      dragging = true;
-      if (!checkpointed) {
-        onHistoryCheckpoint();
-        checkpointed = true;
-      }
-      const ns = Math.max(0, Math.min(duration - clip.duration, ostart + (ev.clientX - sx) / zoom));
-      // Snap vertical drag to nearest lane within the track.
-      const newLane = nearestLaneIndex(laneTops, oLaneTop + dy + TRACK_HEIGHT / 2);
-      onChange({ start: ns, laneIndex: newLane }, { history: false });
-    };
-    const up = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-  };
-
-  // Audio/video clips trim against their source: the out-point can't exceed the
-  // source length, and trimming the left edge moves the in-point (mediaStartTime).
-  const isTrimMedia = clip.kind === "audio" || clip.kind === "video";
-  const sourceDuration = clip.sourceDuration;
-
-  const onResizeRight = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const sx = e.clientX,
-      od = clip.duration;
-    const mediaStart = clip.mediaStartTime ?? 0;
-    let checkpointed = false;
-    const move = (ev: MouseEvent) => {
-      if (!checkpointed) {
-        onHistoryCheckpoint();
-        checkpointed = true;
-      }
-      let nd = Math.max(0.1, Math.min(duration - clip.start, od + (ev.clientX - sx) / zoom));
-      if (isTrimMedia && sourceDuration != null) {
-        nd = Math.min(nd, Math.max(0.1, sourceDuration - mediaStart));
-      }
-      onChange({ duration: nd }, { history: false });
-    };
-    const up = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-  };
-
-  const onResizeLeft = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const sx = e.clientX,
-      ostart = clip.start,
-      od = clip.duration,
-      oMediaStart = clip.mediaStartTime ?? 0;
-    let checkpointed = false;
-    const move = (ev: MouseEvent) => {
-      if (!checkpointed) {
-        onHistoryCheckpoint();
-        checkpointed = true;
-      }
-      const dx = (ev.clientX - sx) / zoom;
-      // Don't extend earlier than the source's own start (in-point can't go below 0).
-      const minStart = isTrimMedia ? Math.max(0, ostart - oMediaStart) : 0;
-      const ns = Math.max(minStart, Math.min(ostart + od - 0.1, ostart + dx));
-      const nd = od - (ns - ostart);
-      if (isTrimMedia) {
-        const newMediaStart = Math.max(0, oMediaStart + (ns - ostart));
-        onChange({ start: ns, duration: nd, mediaStartTime: newMediaStart }, { history: false });
-      } else {
-        onChange({ start: ns, duration: nd }, { history: false });
-      }
-    };
-    const up = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-  };
-
-  return (
-    <div
-      data-timeline-clip-id={clip.id}
-      role="button"
-      aria-label={`Select ${clip.name}`}
-      onMouseDown={onMouseDown}
-      onClick={(e) => {
-        e.stopPropagation();
-        onSelect();
-      }}
-      onKeyDown={(e) => {
-        if (e.key === "Delete" || e.key === "Backspace") onDelete();
-      }}
-      tabIndex={0}
-      className={`group absolute cursor-grab overflow-hidden rounded ${color} ${
-        selected ? "ring-2 ring-primary" : "ring-1 ring-black/30"
-      }`}
-      style={{
-        left: clip.start * zoom,
-        width: Math.max(8, clip.duration * zoom),
-        top,
-        height: TRACK_HEIGHT - 8,
-      }}
-      title={clipTitle}
-    >
-      <div className="flex h-full items-center gap-1 px-2 text-[11px] font-medium text-foreground/95 mix-blend-luminosity">
-        {canExpand && (
-          <button
-            type="button"
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggleExpanded();
-            }}
-            className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-black/20"
-            aria-label={expanded ? "Collapse clip details" : "Expand clip details"}
-            title={expanded ? "Hide details" : "Show details"}
-          >
-            {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-          </button>
-        )}
-        {clip.kind === "audio" &&
-          (clipVolume === 0 ? (
-            <VolumeX size={12} className="shrink-0" />
-          ) : (
-            <Volume2 size={12} className="shrink-0" />
-          ))}
-        <span className="min-w-0 flex-1 truncate">{clip.name}</span>
-        {clip.kind === "audio" && clipVolume < 1 && (
-          <span className="shrink-0 text-[10px] text-foreground/80">
-            {Math.round(clipVolume * 100)}%
-          </span>
-        )}
-        {(missingMediaIds.length > 0 ||
-          compositionSourceErrors.length > 0 ||
-          clipMotions.length > 0) && (
-          <span className="ml-auto flex shrink-0 items-center gap-1">
-            {missingMediaIds.length > 0 && (
-              <TriangleAlert
-                size={13}
-                className="text-amber-200 drop-shadow"
-                aria-label={missingMediaTitle}
-              />
-            )}
-            {compositionSourceErrors.length > 0 && (
-              <TriangleAlert
-                size={13}
-                className="text-red-200 drop-shadow"
-                aria-label="Malformed composition source"
-              />
-            )}
-            {motionBadge && (
-              <span
-                className="flex max-w-28 shrink items-center gap-1 rounded bg-black/25 px-1.5 py-0.5 text-[9px] leading-none text-foreground/95 shadow-sm"
-                title={motionBadge.title}
-              >
-                <span
-                  aria-hidden="true"
-                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                    ACTION_CATEGORY_DOT_COLORS[motionBadge.category]
-                  }`}
-                />
-                <span className="truncate">{motionBadge.label}</span>
-              </span>
-            )}
-          </span>
-        )}
-      </div>
-      <div
-        onMouseDown={onResizeLeft}
-        title={isTrimMedia ? "Trim start (in-point)" : "Resize start"}
-        className="absolute left-0 top-0 z-10 flex h-full w-2.5 cursor-ew-resize items-center justify-center rounded-l bg-black/45 opacity-0 group-hover:opacity-100"
-      >
-        <span className="h-1/2 w-0.5 rounded-full bg-white/80" />
-      </div>
-      <div
-        onMouseDown={onResizeRight}
-        title={isTrimMedia ? "Trim end (out-point)" : "Resize end"}
-        className="absolute right-0 top-0 z-10 flex h-full w-2.5 cursor-ew-resize items-center justify-center rounded-r bg-black/45 opacity-0 group-hover:opacity-100"
-      >
-        <span className="h-1/2 w-0.5 rounded-full bg-white/80" />
-      </div>
-    </div>
-  );
-}
-
-function characterActionBadge(
-  motions: AppliedMotion[],
-  presetMap: Map<string, MotionPreset>,
-): { label: string; title: string; category: MotionCategory } | null {
-  if (motions.length === 0) return null;
-  const firstPreset = presetMap.get(motions[0]?.presetId ?? "");
-  return {
-    label: characterActionBadgeLabel(motions, presetMap),
-    title: characterActionTitle(motions, presetMap) ?? "Action",
-    category: firstPreset?.category ?? "custom",
-  };
-}
-
-function characterActionBadgeLabel(
-  motions: AppliedMotion[],
-  presetMap: Map<string, MotionPreset>,
-): string {
-  if (motions.length === 0) return "";
-  const firstName = presetMap.get(motions[0]?.presetId ?? "")?.name;
-  if (motions.length === 1) return firstName ?? actionBadgeFallback(1);
-  return firstName ? `${firstName} +${motions.length - 1}` : actionBadgeFallback(motions.length);
-}
-
-function characterActionTitle(
-  motions: AppliedMotion[],
-  presetMap: Map<string, MotionPreset>,
-): string | undefined {
-  if (motions.length === 0) return undefined;
-  const names = motions.map(
-    (motion, index) => presetMap.get(motion.presetId)?.name ?? `Action ${index + 1}`,
-  );
-  const lanes = new Set(
-    motions.map((motion) => actionLaneForPreset(presetMap.get(motion.presetId))),
-  );
-  if (lanes.size === 1) {
-    const lane = Array.from(lanes)[0];
-    return `${ACTION_LANE_LABELS[lane]}: ${names.join(", ")}`;
-  }
-  return actionTitle(names);
-}
-
-interface ExpandedClipRow {
-  clip: TimelineCharacterClip;
-  layout: ExpandedClipLayout;
-  top: number;
-}
-
-interface ExpandedKeyframeRow {
-  clip: ProjectTimelineClip;
-  top: number;
-}
-
-interface ExpandedCompositionOutlineRow {
-  clip: ProjectTimelineClip;
-  outline: CompositionOutlineItem[];
-  top: number;
-}
-
-interface VisualMotionPacking {
-  rowByMotionId: Map<string, number>;
-  rowCount: number;
-  overlappingMotionIds: Set<string>;
-}
-
-interface LaneLayout {
-  index: number;
-  top: number;
-  visualMotionRows: ExpandedKeyframeRow[];
-  compositionOutlineRows: ExpandedCompositionOutlineRow[];
-  motionRows: ExpandedClipRow[];
-}
-
-interface TrackLayout {
-  lanes: LaneLayout[];
-  height: number;
-}
-
-function buildTrackLayout({
-  trackIndex,
-  laneCount,
-  expandedMotionClips,
-  expandedCompositionOutlines,
-  compositionOutlinesByClipId,
-  expandedCharacters,
-  expandedLayouts,
-}: {
-  trackIndex: number;
-  laneCount: number;
-  expandedMotionClips: ProjectTimelineClip[];
-  expandedCompositionOutlines: ProjectTimelineClip[];
-  compositionOutlinesByClipId: Map<string, CompositionOutlineItem[]>;
-  expandedCharacters: TimelineCharacterClip[];
-  expandedLayouts: Map<string, ExpandedClipLayout>;
-}): TrackLayout {
-  let top = 0;
-  const lanes: LaneLayout[] = [];
-  for (let laneIndex = 0; laneIndex < laneCount; laneIndex++) {
-    const visualMotionRows: ExpandedKeyframeRow[] = [];
-    const compositionOutlineRows: ExpandedCompositionOutlineRow[] = [];
-    const motionRows: ExpandedClipRow[] = [];
-    const laneTop = top;
-    top += TRACK_HEIGHT;
-    const expandedMotionsInLane = expandedMotionClips
-      .filter(
-        (clip) => clip.trackIndex === trackIndex && Math.max(0, clip.laneIndex ?? 0) === laneIndex,
-      )
-      .sort((a, b) => a.start - b.start || a.id.localeCompare(b.id));
-    for (const clip of expandedMotionsInLane) {
-      visualMotionRows.push({ clip, top });
-      top += visualMotionLaneHeight(clip);
-    }
-    const expandedOutlinesInLane = expandedCompositionOutlines
-      .filter(
-        (clip) => clip.trackIndex === trackIndex && Math.max(0, clip.laneIndex ?? 0) === laneIndex,
-      )
-      .sort((a, b) => a.start - b.start || a.id.localeCompare(b.id));
-    for (const clip of expandedOutlinesInLane) {
-      const outline = compositionOutlinesByClipId.get(clip.id) ?? [];
-      if (outline.length === 0) continue;
-      compositionOutlineRows.push({ clip, outline, top });
-      top += compositionOutlineLaneHeight(outline);
-    }
-    const expandedInLane = expandedCharacters
-      .filter(
-        (clip) => clip.trackIndex === trackIndex && Math.max(0, clip.laneIndex ?? 0) === laneIndex,
-      )
-      .sort((a, b) => a.start - b.start || a.id.localeCompare(b.id));
-    for (const clip of expandedInLane) {
-      const layout = expandedLayouts.get(clip.id);
-      if (!layout) continue;
-      motionRows.push({ clip, layout, top });
-      top += layout.height;
-    }
-    lanes.push({
-      index: laneIndex,
-      top: laneTop,
-      visualMotionRows,
-      compositionOutlineRows,
-      motionRows,
-    });
-  }
-  return { lanes, height: top };
-}
-
-function packVisualMotionRows(motions: ClipMotionStep[]): VisualMotionPacking {
-  const rowByMotionId = new Map<string, number>();
-  const overlappingMotionIds = new Set<string>();
-  const rowEndTimes: number[] = [];
-  const sorted = [...motions].sort(
-    (a, b) => a.startTime - b.startTime || a.endTime - b.endTime || a.id.localeCompare(b.id),
-  );
-
-  for (const motion of sorted) {
-    let rowIndex = rowEndTimes.findIndex((endTime) => endTime <= motion.startTime + 0.001);
-    if (rowIndex < 0) rowIndex = rowEndTimes.length;
-    rowEndTimes[rowIndex] = motion.endTime;
-    rowByMotionId.set(motion.id, rowIndex);
-  }
-
-  for (let i = 0; i < sorted.length; i += 1) {
-    const a = sorted[i]!;
-    for (let j = i + 1; j < sorted.length; j += 1) {
-      const b = sorted[j]!;
-      if (a.startTime < b.endTime - 0.001 && b.startTime < a.endTime - 0.001) {
-        overlappingMotionIds.add(a.id);
-        overlappingMotionIds.add(b.id);
-      }
-    }
-  }
-
-  return {
-    rowByMotionId,
-    rowCount: Math.max(1, rowEndTimes.length),
-    overlappingMotionIds,
-  };
-}
-
-function visualMotionLaneHeight(clip?: EditorClip): number {
-  const rowCount = clip ? packVisualMotionRows(clip.motionSteps).rowCount : 1;
-  return VISUAL_MOTION_PARENT_HEIGHT + rowCount * VISUAL_MOTION_ROW_HEIGHT;
-}
-
-function compositionOutlineLaneHeight(outline: CompositionOutlineItem[]): number {
-  return (
-    COMPOSITION_OUTLINE_PARENT_HEIGHT + Math.max(1, outline.length) * COMPOSITION_OUTLINE_ROW_HEIGHT
   );
 }
 
@@ -2191,10 +1366,6 @@ function CheckpointMark({
   );
 }
 
-function isKeyframeEditableClip(clip: EditorClip): boolean {
-  return clip.kind !== "audio";
-}
-
 function pointTimeForMotion(motion: ClipMotionStep, localPlayheadTime: number) {
   const inset = Math.min(0.1, Math.max(0, (motion.endTime - motion.startTime) / 4));
   const min = motion.startTime + inset;
@@ -2225,50 +1396,6 @@ function selectionForMotionEndpoint(
     keyframeId: endpoint === "begin" ? motion.startKeyframeId : motion.endKeyframeId,
     property: "position",
   };
-}
-
-function nearestLaneIndex(laneTops: number[], y: number) {
-  if (laneTops.length === 0) return 0;
-  let bestIndex = 0;
-  let bestDistance = Number.POSITIVE_INFINITY;
-  laneTops.forEach((top, index) => {
-    const distance = Math.abs(y - (top + TRACK_HEIGHT / 2));
-    if (distance < bestDistance) {
-      bestIndex = index;
-      bestDistance = distance;
-    }
-  });
-  return bestIndex;
-}
-
-interface PackedMotion {
-  motion: AppliedMotion;
-  preset?: MotionPreset;
-}
-
-interface MotionGroupLayout {
-  id: ActionLaneKind;
-  label: string;
-  dotClass: string;
-  rows: PackedMotion[][];
-}
-
-interface ExpandedClipLayout {
-  voices: VoiceLaneSummary[];
-  groups: MotionGroupLayout[];
-  height: number;
-}
-
-interface VoiceLaneSummary {
-  id: string;
-  start: number;
-  name: string;
-  duration: number;
-  volume: number;
-  /** In-point into the source audio (s); 0 = no trim. */
-  mediaStart: number;
-  /** Full source audio length (s), used to bound trim; undefined when unknown. */
-  sourceDuration?: number;
 }
 
 function CharacterMotionHeader({
@@ -2730,151 +1857,6 @@ function VoiceBlock({
         <X size={10} />
       </button>
     </div>
-  );
-}
-
-function buildExpandedClipLayout(
-  clip: CharacterCompositionClip,
-  presetMap: Map<string, MotionPreset>,
-  mediaAssets: Map<string, MediaAsset>,
-): ExpandedClipLayout {
-  const motions = clip.character.motions ?? [];
-  const voices = voicesForCharacterClip(clip, mediaAssets);
-  const voiceRows = voices.length > 0 ? 1 : 0;
-  if (motions.length === 0) {
-    if (voiceRows > 0) {
-      return { voices, groups: [], height: MOTION_PARENT_HEIGHT + MOTION_ROW_HEIGHT };
-    }
-    const emptyGroup: MotionGroupLayout = {
-      id: "action",
-      label: ACTION_LANE_LABELS.action,
-      dotClass: ACTION_LANE_DOT_COLORS.action,
-      rows: [[]],
-    };
-    return {
-      voices,
-      groups: [emptyGroup],
-      height: MOTION_PARENT_HEIGHT + MOTION_ROW_HEIGHT,
-    };
-  }
-
-  const groups = ACTION_LANE_ORDER.flatMap((lane) => {
-    const laneMotions = motions
-      .filter((motion) => actionLaneForPreset(presetMap.get(motion.presetId)) === lane)
-      .map((motion) => ({ motion, preset: presetMap.get(motion.presetId) }));
-    if (laneMotions.length === 0) return [];
-    return [
-      {
-        id: lane,
-        label: ACTION_LANE_LABELS[lane],
-        dotClass: ACTION_LANE_DOT_COLORS[lane],
-        rows: packMotionsForRows(laneMotions, clip),
-      },
-    ];
-  });
-
-  const rowCount = groups.reduce((sum, group) => sum + group.rows.length, 0);
-  return {
-    voices,
-    groups,
-    height:
-      MOTION_PARENT_HEIGHT +
-      voiceRows * MOTION_ROW_HEIGHT +
-      Math.max(1, rowCount) * MOTION_ROW_HEIGHT,
-  };
-}
-
-// One voice bar per speech (start + own audio length). The bar spans the audio's
-// length, not the whole character clip — VoiceBlock clamps width + flags "trim".
-function voicesForCharacterClip(
-  clip: CharacterCompositionClip,
-  mediaAssets: Map<string, MediaAsset>,
-): VoiceLaneSummary[] {
-  return characterSpeeches(clip.character).map((speech) => {
-    const asset = mediaAssets.get(speech.audioId);
-    const line = asset?.voiceLine?.text?.trim() ?? clip.character.voiceLine?.text?.trim();
-    const sourceDuration = asset?.duration && asset.duration > 0 ? asset.duration : undefined;
-    const mediaStart = Math.max(0, speech.mediaStartTime ?? 0);
-    // Trimmed length when set; otherwise the remaining source after the in-point.
-    const duration =
-      speech.duration ??
-      (sourceDuration !== undefined ? sourceDuration - mediaStart : clip.duration);
-    return {
-      id: speech.id,
-      start: speech.start,
-      name: line ? `Voice: ${line}` : (asset?.name ?? "Voice / lip sync"),
-      duration,
-      volume: speech.volume ?? 1,
-      mediaStart,
-      sourceDuration,
-    };
-  });
-}
-
-function packMotionsForRows(
-  motions: PackedMotion[],
-  clip: CharacterCompositionClip,
-): PackedMotion[][] {
-  const sorted = [...motions].sort((a, b) => {
-    const aDur = motionDuration(a.motion, a.preset);
-    const bDur = motionDuration(b.motion, b.preset);
-    return (
-      a.motion.offset - b.motion.offset ||
-      aDur - bDur ||
-      (a.preset?.name ?? "").localeCompare(b.preset?.name ?? "") ||
-      a.motion.id.localeCompare(b.motion.id)
-    );
-  });
-  const rows: PackedMotion[][] = [];
-  const rowIntervals: TimeSpan[][] = [];
-
-  for (const item of sorted) {
-    const intervals = intervalsForMotion(item.motion, item.preset, clip.duration);
-    let rowIndex = rows.findIndex(
-      (_, index) => !intervalsOverlapAny(intervals, rowIntervals[index]),
-    );
-    if (rowIndex === -1) {
-      rowIndex = rows.length;
-      rows.push([]);
-      rowIntervals.push([]);
-    }
-    rows[rowIndex].push(item);
-    rowIntervals[rowIndex].push(...intervals);
-  }
-
-  return rows.length > 0 ? rows : [[]];
-}
-
-interface TimeSpan {
-  start: number;
-  end: number;
-}
-
-function intervalsForMotion(
-  motion: AppliedMotion,
-  preset: MotionPreset | undefined,
-  clipDuration: number,
-): TimeSpan[] {
-  const duration = motionDuration(motion, preset);
-  const occurrences = preset
-    ? generateMotionOccurrences(motion, preset, clipDuration)
-    : [{ start: motion.offset, end: motion.offset + duration }];
-  const visible = occurrences
-    .map((occurrence) => ({
-      start: Math.max(0, occurrence.start),
-      end: Math.min(clipDuration, occurrence.end),
-    }))
-    .filter((interval) => interval.end > interval.start);
-  return visible.length > 0 ? visible : [{ start: motion.offset, end: motion.offset + duration }];
-}
-
-function motionDuration(motion: AppliedMotion, preset: MotionPreset | undefined) {
-  return Math.max(0.05, motion.duration ?? preset?.duration ?? 1);
-}
-
-function intervalsOverlapAny(intervals: TimeSpan[], existing: TimeSpan[]) {
-  return intervals.some((next) =>
-    existing.some((current) => next.start < current.end && current.start < next.end),
   );
 }
 
