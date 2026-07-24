@@ -3,10 +3,14 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const recorderPath = join(process.cwd(), "src/studio/presets/MotionPresetRecorder.tsx");
+const panelsPath = join(process.cwd(), "src/studio/presets/MotionPresetRecorderPanels.tsx");
+const statePath = join(process.cwd(), "src/studio/presets/motion-recorder-state.ts");
 
 describe("MotionPresetRecorder source integration", () => {
   it("previews stamped playback through a persistent Pixi render payload", () => {
     const source = readFileSync(recorderPath, "utf8");
+    const panelsSource = readFileSync(panelsPath, "utf8");
+    const stateSource = readFileSync(statePath, "utf8");
 
     expect(source).toContain("buildCharacterRenderPayload");
     expect(source).toContain("const mediaAssets = useStudio((state) => state.mediaAssets)");
@@ -29,7 +33,7 @@ describe("MotionPresetRecorder source integration", () => {
     expect(source).toContain("useMediaUrl(part.mediaId)");
     expect(source).toContain('maxWidth: "none"');
     expect(source).toContain('maxHeight: "none"');
-    expect(source).toContain("function KeyposeStrip");
+    expect(panelsSource).toContain("export function KeyposeStrip");
     expect(source).toContain("beforeunload");
     expect(source).toContain("Save the action without the current unstamped pose edits?");
     // Playback seeking renders the stamped Pixi payload directly, but the pose
@@ -59,9 +63,9 @@ describe("MotionPresetRecorder source integration", () => {
     expect(source).toContain("Time already stamped");
     expect(source).toContain("No changes to update");
     expect(source).toContain("const initialRecorderKeyposes = useMemo");
-    expect(source).toContain("function initialRestKeypose");
-    expect(source).toContain("function ensureInitialRestKeypose");
-    expect(source).toContain("return [initialRestKeypose(), ...sorted]");
+    expect(stateSource).toContain("export function initialRestKeypose");
+    expect(stateSource).toContain("export function ensureInitialRestKeypose");
+    expect(stateSource).toContain("return [initialRestKeypose(), ...sorted]");
     expect(source).toContain("function RecorderPixiPreview");
     expect(source).toContain("selectAdjacentKeypose");
     expect(source).not.toContain("preset={draftPreviewPreset}");
@@ -77,6 +81,7 @@ describe("MotionPresetRecorder source integration", () => {
 
   it("clamps interactive edits through the shared motion-constraint boundary", () => {
     const source = readFileSync(recorderPath, "utf8");
+    const panelsSource = readFileSync(panelsPath, "utf8");
 
     // Every override edit (slider, rotate drag, plane drag) routes through resolveMotionDelta,
     // so the editor enforces the same reach/rotation limits as compiled playback.
@@ -97,7 +102,7 @@ describe("MotionPresetRecorder source integration", () => {
     expect(source).toContain("allowOutOfBounds: allowOutOfBounds?.length");
     // The override panel surfaces the effective limit and the per-slot toggle.
     expect(source).toContain("effectiveReachForSlot");
-    expect(source).toContain("Allow out of bounds");
+    expect(panelsSource).toContain("Allow out of bounds");
   });
 
   it("lets the generated character composition own variant anchors", () => {
@@ -163,30 +168,32 @@ describe("MotionPresetRecorder source integration", () => {
 
   it("keeps Flexible mesh authoring out of the action editor", () => {
     const source = readFileSync(recorderPath, "utf8");
+    const panelsSource = readFileSync(panelsPath, "utf8");
+    const stateSource = readFileSync(statePath, "utf8");
 
     // The action editor may animate an already-flexible limb, but structural
     // mesh setup belongs to the character builder.
     expect(source).not.toContain("roleSupportsBend(selectedSlot.role)");
     expect(source).not.toContain("defaultFlexibleDeformForRecorderPart");
-    expect(source).toContain("function recorderActionLimbPathForPart");
-    expect(source).toContain("const neutral = defaultLimbPathDeformForPart(part)");
-    expect(source).toContain("...deform");
-    expect(source).toContain("width: deform.width ?? neutral.width");
+    expect(stateSource).toContain("export function recorderActionLimbPathForPart");
+    expect(stateSource).toContain("const neutral = defaultLimbPathDeformForPart(part)");
+    expect(stateSource).toContain("...deform");
+    expect(stateSource).toContain("width: deform.width ?? neutral.width");
     expect(source).toContain("const flexibleActionPath");
-    expect(source).toContain("function constrainFlexibleCurvePatch");
+    expect(stateSource).toContain("export function constrainFlexibleCurvePatch");
     expect(source).not.toContain("registrationForPart(part)");
     expect(source).not.toContain('kind: "set-slot-deform"');
     expect(source).not.toContain("onCharacterChange(result.character)");
     expect(source).not.toContain("〰 Flexible");
     expect(source).not.toContain("checked={!!part?.deform}");
     expect(source).not.toContain("onSetFlexible");
-    expect(source).toContain('label="Bend"');
-    expect(source).toContain('label="Reach"');
-    expect(source).toContain("flexibleActionControlState");
-    expect(source).toContain("flexibleBendPatch");
-    expect(source).toContain("flexibleReachPatch");
-    expect(source).toContain("onReset={() => onChange({ pathCurveX: 0, pathCurveY: 0 })}");
-    expect(source).toContain("onReset={() => onChange({ pathEndX: 0, pathEndY: 0 })}");
+    expect(panelsSource).toContain('label="Bend"');
+    expect(panelsSource).toContain('label="Reach"');
+    expect(panelsSource).toContain("flexibleActionControlState");
+    expect(panelsSource).toContain("flexibleBendPatch");
+    expect(panelsSource).toContain("flexibleReachPatch");
+    expect(panelsSource).toContain("onReset={() => onChange({ pathCurveX: 0, pathCurveY: 0 })}");
+    expect(panelsSource).toContain("onReset={() => onChange({ pathEndX: 0, pathEndY: 0 })}");
     expect(source).not.toContain("MAX_BEND_DEGREES");
     expect(source).toContain("pathEndX");
     expect(source).toContain("pathCurveX");
@@ -212,10 +219,10 @@ describe("MotionPresetRecorder source integration", () => {
     );
     expect(source).toContain("const livePreviewPreset = useMemo");
     expect(source).toContain("preset={livePreviewPreset}");
-    expect(source).toContain("Mirror");
-    expect(source).toContain("Flip");
-    expect(source).toContain("toggleSignedScale");
-    expect(source).toContain("signedScaleValue");
+    expect(panelsSource).toContain("Mirror");
+    expect(panelsSource).toContain("Flip");
+    expect(stateSource).toContain("toggleSignedScale");
+    expect(stateSource).toContain("signedScaleValue");
   });
 
   it("keeps action-editor selection boxes hidden while preserving canvas drag and rotate", () => {
@@ -231,5 +238,27 @@ describe("MotionPresetRecorder source integration", () => {
     expect(source).toContain("startRotationDrag");
     expect(source).toContain("onPointerDown={startRotationDrag}");
     expect(source).toContain("<RotateCw");
+  });
+
+  it("keeps recorder state and panels behind focused sibling modules", () => {
+    const source = readFileSync(recorderPath, "utf8");
+    const panelsSource = readFileSync(panelsPath, "utf8");
+    const stateSource = readFileSync(statePath, "utf8");
+
+    expect(source).toContain('from "./MotionPresetRecorderPanels"');
+    expect(source).toContain('from "./motion-recorder-state"');
+    expect(source).toContain("<KeyposeStrip");
+    expect(source).toContain("<PartList");
+    expect(source).toContain("<PropertiesPanel");
+    expect(panelsSource).toContain("export function KeyposeStrip");
+    expect(panelsSource).toContain("export function PartList");
+    expect(panelsSource).toContain("export function PropertiesPanel");
+    expect(stateSource).toContain("export function initialKeyposesForPreset");
+    expect(stateSource).toContain("export function defaultOverride");
+    expect(stateSource).toContain("export function recorderOverrideMapsEqual");
+    expect(source).not.toContain("function KeyposeStrip");
+    expect(source).not.toContain("function PropertiesPanel");
+    expect(source).not.toContain("function initialKeyposesForPreset");
+    expect(source).not.toContain("function defaultOverride");
   });
 });

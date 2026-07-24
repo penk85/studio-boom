@@ -283,9 +283,17 @@ lane targeting, and expanded-row packing moved into unit-tested pure modules.
 `Timeline.tsx` fell from 2,908 to 1,890 lines while retaining seek/playback
 state and all store-mutation wiring.
 
+**Recorder reduced 2026-07-24:** keyframe-stamp, part-list, and transform
+property panels moved into `MotionPresetRecorderPanels.tsx`. Pure keypose
+loading/navigation, override comparison/defaults, signed scaling, variant
+options, and flexible-curve constraints moved into the unit-tested
+`motion-recorder-state.ts`. `MotionPresetRecorder.tsx` fell from 3,762 to
+2,641 lines; its Pixi preview, draft controller, and constraint application
+remain owned by the main recorder.
+
 - **Where:** `CharacterEditor.tsx` **4,019 lines / 14 top-level functions**,
   with the main component spanning ~229–3,605 (≈3,377 lines).
-  `MotionPresetRecorder.tsx` 3,762, `store.ts` 3,154, `Timeline.tsx` 1,890,
+  `MotionPresetRecorder.tsx` 2,641, `store.ts` 3,154, `Timeline.tsx` 1,890,
   `Stage.tsx` 1,617.
 - **What:** these five files are where nearly every regression this quarter
   will land. The source-contract integration tests (which `readFileSync`
