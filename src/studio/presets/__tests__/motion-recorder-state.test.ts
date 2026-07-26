@@ -6,6 +6,7 @@ import {
   defaultOverride,
   ensureInitialRestKeypose,
   isDirtyOverride,
+  recorderPreviewPreset,
   recorderOverrideMapsEqual,
   scaleMagnitude,
   signedScaleValue,
@@ -43,6 +44,28 @@ describe("motion recorder state", () => {
     expect(adjacentKeyposeIndex(keyposes, null, 0.5, 1)).toBe(1);
     expect(adjacentKeyposeIndex(keyposes, null, 1.5, -1)).toBe(1);
     expect(adjacentKeyposeIndex(keyposes, 2, 2, 1)).toBe(-1);
+  });
+
+  it("builds an isolated, sorted draft preview preset", () => {
+    const keyposes: RecordedKeypose[] = [
+      { t: 1, parts: [{ partRole: "arm", slotId: "arm-left", dx: 4 }] },
+      { t: 0, parts: [] },
+    ];
+
+    const preset = recorderPreviewPreset({
+      name: "  ",
+      category: "full-body",
+      region: "",
+      duration: 0,
+      keyposes,
+      allowOutOfBounds: ["arm-left"],
+    });
+
+    expect(preset.name).toBe("Draft action");
+    expect(preset.duration).toBe(0.1);
+    expect(preset.keyposes?.map((keypose) => keypose.t)).toEqual([0, 1]);
+    expect(preset.keyposes?.[1]).not.toBe(keyposes[0]);
+    expect(preset.allowOutOfBounds).toEqual(["arm-left"]);
   });
 
   it("compares complete override maps and detects meaningful edits", () => {

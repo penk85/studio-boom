@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   type DrillPick,
   exceedsDragThreshold,
@@ -6,7 +6,7 @@ import {
   resolveDrillSelection,
 } from "../interaction/select-drag";
 import { startWindowPointerDrag } from "../interaction/pointer-drag";
-import { ChevronDown, ChevronRight, Eye, EyeOff, Lock, Redo2, Undo2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Eye, EyeOff, Lock } from "lucide-react";
 import { db, getMediaUrl, importMediaFile, uid } from "../db";
 import { useStudio } from "../store";
 import {
@@ -29,8 +29,6 @@ import {
   variantKeyForPart,
   variantLabelForPart,
 } from "./character-utils";
-import { TransformMoveable } from "../interaction/TransformMoveable";
-import type { ScreenRect } from "../interaction/transform-box";
 import {
   buildRigHealthReport,
   collectVariantKeyIssues,
@@ -67,7 +65,6 @@ import {
 import type {
   CharacterAngle,
   CharacterPart,
-  CharacterPartBounds,
   CharacterPartDeform,
   CharacterPosePreset,
   CharacterPreset,
@@ -104,7 +101,6 @@ import {
   rotatePointAroundAnchor,
   type CharacterSceneCommand,
 } from "./scene-commands";
-import { runtimeAncestorMotionTargets } from "./motion-targets";
 import { CharacterPinRigError, upgradeCharacterRigV2, validateCharacterPinRig } from "./rig-v2";
 import { AddPartMenu } from "./CharacterArtworkImport";
 import { CharacterLayerList } from "./CharacterLayerList";
@@ -125,6 +121,8 @@ import {
 } from "./CharacterInspectorPanels";
 import { CanvasSection, SkeletonCard } from "./CharacterRigSetupControls";
 import { RigHealthPanel } from "./CharacterVariantControls";
+import { CharacterPartMoveable, PartLayer } from "./CharacterEditorCanvasChrome";
+import { CharacterAnglePoseToolbar, CharacterEditorHeader } from "./CharacterEditorToolbar";
 import {
   defaultImportedVariantKind,
   detectImportedEyeState,
@@ -137,7 +135,12 @@ import {
   slotIdForImportedPart,
   type CharacterPartImportOptions,
 } from "./character-part-import";
-import { wordToVisemes, type PreviewState } from "./character-editor-preview";
+import {
+  activePreviewVariantForPart,
+  previewDelta,
+  wordToVisemes,
+  type PreviewState,
+} from "./character-editor-preview";
 import {
   canvasPointToPartLocal,
   clampSlotDragDelta,
@@ -148,7 +151,6 @@ import {
   partIdsForSlotSubtree,
   unionAlphaBounds,
   unionSelectionBounds,
-  type EditorPartTransform,
   type ResizeCorner,
 } from "./character-editor-geometry";
 
@@ -2645,322 +2647,54 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
-      <header className="flex items-center gap-3 border-b border-border bg-panel px-4 py-2">
-        <button
-          onClick={onClose}
-          className="rounded border border-border px-2 py-1 text-xs hover:bg-panel-2"
-        >
-          ← Studio
-        </button>
-        <input
-          value={doc.name}
-          onChange={(e) => updateDoc({ name: e.target.value })}
-          className="min-w-0 rounded border border-transparent bg-transparent px-2 py-1 text-sm font-semibold hover:border-border focus:border-primary focus:outline-none"
-        />
-        <div className="flex items-center justify-center">
-          <div className="flex overflow-hidden rounded border border-border">
-            {(
-              [
-                { phase: "build", label: "Build", hint: "Upload and arrange artwork" },
-                { phase: "rig", label: "Rig", hint: "Skeleton, anchors, and movement limits" },
-                { phase: "pose", label: "Pose", hint: "Variants and saved poses" },
-              ] as const
-            ).map(({ phase, label, hint }) => (
-              <button
-                key={phase}
-                type="button"
-                aria-pressed={editorPhase === phase}
-                onClick={() => switchPhase(phase)}
-                className={`px-3 py-1 text-xs ${
-                  editorPhase === phase
-                    ? "bg-primary/25 text-foreground"
-                    : "text-muted-foreground hover:bg-panel-2"
-                }`}
-                title={hint}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="ml-auto flex items-center gap-2">
-          <button
-            type="button"
-            onClick={undoCharacterHistory}
-            disabled={historyPast.length === 0}
-            className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-panel-2 disabled:opacity-40"
-            title="Undo"
-          >
-            <Undo2 size={13} />
-            Undo
-          </button>
-          <button
-            type="button"
-            onClick={redoCharacterHistory}
-            disabled={historyFuture.length === 0}
-            className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs hover:bg-panel-2 disabled:opacity-40"
-            title="Redo"
-          >
-            <Redo2 size={13} />
-            Redo
-          </button>
-          <span
-            className={`text-[10px] ${
-              saveState === "saved" ? "text-emerald-400" : "text-muted-foreground"
-            }`}
-            title="The editor saves automatically as you work"
-          >
-            {saveState === "saved" ? "✓ Saved" : "Saving…"}
-          </span>
-          <button
-            onClick={async () => {
-              const saved = await saveCharacter(doc);
-              useStudio.getState().registerCharacterPreset(saved);
-              setDoc(saved);
-              onClose();
-            }}
-            className="rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-90"
-            title="Everything is already saved — this just closes the editor"
-          >
-            Done
-          </button>
-        </div>
-      </header>
-
-      {/* Angle → pose toolbar: the angle picks the rig, the pose picks the limb arrangement. */}
-      <div className="flex items-stretch border-b border-border bg-panel text-xs">
-        {/* Angle tabs — each angle is a separate artwork/rig workspace */}
-        <div className="flex items-stretch">
-          {availableCharacterAngles(doc).map((angle) => {
-            const active = normalizeCharacterRig(doc).activeAngle === angle;
-            const canDelete = active && availableCharacterAngles(doc).length > 1;
-            const confirmingDelete = pendingDeleteAngle === angle;
-            return (
-              <span key={angle} className="relative flex items-stretch">
-                <button
-                  type="button"
-                  onClick={() => setActiveAngleFromToolbar(angle)}
-                  className={`border-b-2 py-2 pl-4 text-[11px] font-medium transition-colors ${
-                    canDelete ? "pr-1" : "pr-4"
-                  } ${
-                    active
-                      ? "border-primary text-foreground"
-                      : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"
-                  }`}
-                  title={`Switch to ${ANGLE_LABELS[angle]} view`}
-                >
-                  {ANGLE_LABELS[angle]}
-                </button>
-                {canDelete && (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (confirmingDelete) {
-                        deleteAngle(angle);
-                      } else {
-                        setPendingDeleteAngle(angle);
-                      }
-                    }}
-                    onBlur={() => {
-                      setTimeout(() => setPendingDeleteAngle((p) => (p === angle ? null : p)), 200);
-                    }}
-                    className={`border-b-2 border-primary py-2 pr-2 text-[10px] transition-colors ${
-                      confirmingDelete
-                        ? "text-destructive"
-                        : "text-muted-foreground/40 hover:text-muted-foreground"
-                    }`}
-                    title={
-                      confirmingDelete
-                        ? "Click again to confirm deletion"
-                        : `Delete ${ANGLE_LABELS[angle]} angle`
-                    }
-                  >
-                    {confirmingDelete ? "delete?" : "×"}
-                  </button>
-                )}
-              </span>
-            );
-          })}
-        </div>
-        {CHARACTER_ANGLES.some((angle) => !availableCharacterAngles(doc).includes(angle)) && (
-          <span className="relative flex items-center">
-            <button
-              type="button"
-              onClick={() => setAddAngleMenuOpen((open) => !open)}
-              className="border-b-2 border-transparent px-3 py-2 text-[11px] text-muted-foreground hover:text-foreground"
-              title="Add another view of this character — it starts with its own empty set of drawings"
-            >
-              + Add angle
-            </button>
-            {addAngleMenuOpen && (
-              <div className="absolute left-0 top-full z-[70] mt-1 min-w-32 rounded border border-border bg-panel p-1 text-[11px] shadow-xl">
-                {CHARACTER_ANGLES.filter(
-                  (angle) => !availableCharacterAngles(doc).includes(angle),
-                ).map((angle) => (
-                  <button
-                    key={angle}
-                    type="button"
-                    onClick={() => {
-                      setAddAngleMenuOpen(false);
-                      setActiveAngleFromToolbar(angle);
-                      switchPhase("build");
-                    }}
-                    className="block w-full rounded px-2 py-1 text-left hover:bg-panel-2"
-                  >
-                    {ANGLE_LABELS[angle]}
-                  </button>
-                ))}
-              </div>
-            )}
-          </span>
-        )}
-        {editorPhase === "pose" && (
-          <div className="flex min-w-0 flex-1 items-center gap-1 border-l border-border px-4">
-            <span className="mr-1 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">
-              Pose
-            </span>
-            <button
-              type="button"
-              onClick={showRestPose}
-              className={`rounded-full border px-2.5 py-0.5 text-[11px] ${
-                activePoseId === null
-                  ? "border-primary bg-primary/20 text-foreground"
-                  : "border-border text-muted-foreground hover:bg-panel-2"
-              }`}
-              title="Show the raw rest art with no pose applied"
-            >
-              Rest
-            </button>
-            {(doc.posePresets ?? []).map((preset) => {
-              const rigAngle = normalizeCharacterRig(doc).activeAngle;
-              const availableHere = !preset.angleIds?.length || preset.angleIds.includes(rigAngle);
-              const isActive = preset.id === activePoseId;
-              const isDefault = preset.id === doc.defaultPoseId;
-              return (
-                <span key={preset.id} className="relative inline-flex">
-                  <button
-                    type="button"
-                    disabled={!availableHere}
-                    onClick={() => applyPose(preset)}
-                    className={`rounded-full border px-2.5 py-0.5 text-[11px] ${
-                      isActive
-                        ? "border-primary bg-primary/20 text-foreground"
-                        : "border-border text-muted-foreground hover:bg-panel-2"
-                    } ${availableHere ? "" : "opacity-40"}`}
-                    title={
-                      availableHere
-                        ? `Apply ${preset.name}`
-                        : `Saved for ${(preset.angleIds ?? []).map((a) => ANGLE_LABELS[a]).join(", ")}`
-                    }
-                  >
-                    {preset.name}
-                    {isDefault && <span className="ml-1 text-amber-300">★</span>}
-                    {isActive && poseModified && (
-                      <span
-                        className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-amber-400 align-middle"
-                        title="Edited since this pose was applied"
-                      />
-                    )}
-                  </button>
-                  {isActive && (
-                    <button
-                      type="button"
-                      onClick={() => setPoseMenuId(poseMenuId === preset.id ? null : preset.id)}
-                      className="ml-0.5 rounded px-1 text-muted-foreground hover:text-foreground"
-                      title="Pose options"
-                    >
-                      …
-                    </button>
-                  )}
-                  {poseMenuId === preset.id && (
-                    <div className="absolute left-0 top-full z-[70] mt-1 min-w-36 rounded border border-border bg-panel p-1 text-[11px] shadow-xl">
-                      {[
-                        { label: "Rename", action: () => renamePose(preset.id) },
-                        {
-                          label: isDefault ? "Default pose ✓" : "Set as default",
-                          action: () => setDefaultPose(preset.id),
-                        },
-                        {
-                          label: preset.angleIds?.length
-                            ? "Available on all angles"
-                            : `Only ${ANGLE_LABELS[rigAngle]}`,
-                          action: () => togglePoseAngleScope(preset.id),
-                        },
-                        { label: "Delete", action: () => deletePose(preset.id), danger: true },
-                      ].map((item) => (
-                        <button
-                          key={item.label}
-                          type="button"
-                          onClick={() => {
-                            setPoseMenuId(null);
-                            item.action();
-                          }}
-                          className={`block w-full rounded px-2 py-1 text-left hover:bg-panel-2 ${
-                            item.danger ? "text-destructive" : ""
-                          }`}
-                        >
-                          {item.label}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </span>
-              );
-            })}
-            {poseModified && activePose && (
-              <button
-                type="button"
-                onClick={updateActivePose}
-                className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300 hover:bg-amber-500/20"
-                title={`Save the current arrangement into "${activePose.name}"`}
-              >
-                Update {activePose.name}
-              </button>
-            )}
-            <span className="relative inline-flex">
-              <button
-                type="button"
-                onClick={savePoseAsNew}
-                className="rounded border border-dashed border-border px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
-                title="Save the current arrangement as a new pose"
-              >
-                + Save pose
-              </button>
-              {posePrompt && (
-                <div className="absolute right-0 top-full z-[70] mt-1 flex items-center gap-1 rounded border border-border bg-panel p-1.5 shadow-xl">
-                  <input
-                    autoFocus
-                    value={posePromptValue}
-                    onChange={(e) => setPosePromptValue(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") confirmPosePrompt();
-                      if (e.key === "Escape") setPosePrompt(null);
-                    }}
-                    onFocus={(e) => e.target.select()}
-                    placeholder="Pose name"
-                    className="w-32 rounded border border-border bg-input px-2 py-0.5 text-[11px]"
-                  />
-                  <button
-                    type="button"
-                    onClick={confirmPosePrompt}
-                    className="rounded border border-primary/50 bg-primary/15 px-2 py-0.5 text-[11px]"
-                  >
-                    {posePrompt.kind === "new" ? "Save" : "Rename"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPosePrompt(null)}
-                    className="rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground"
-                  >
-                    ✕
-                  </button>
-                </div>
-              )}
-            </span>
-          </div>
-        )}
-      </div>
+      <CharacterEditorHeader
+        name={doc.name}
+        phase={editorPhase}
+        canUndo={historyPast.length > 0}
+        canRedo={historyFuture.length > 0}
+        saveState={saveState}
+        onClose={onClose}
+        onNameChange={(name) => updateDoc({ name })}
+        onPhaseChange={switchPhase}
+        onUndo={undoCharacterHistory}
+        onRedo={redoCharacterHistory}
+        onDone={() => {
+          void saveCharacter(doc).then((saved) => {
+            useStudio.getState().registerCharacterPreset(saved);
+            setDoc(saved);
+            onClose();
+          });
+        }}
+      />
+      <CharacterAnglePoseToolbar
+        doc={doc}
+        phase={editorPhase}
+        activePoseId={activePoseId}
+        activePose={activePose}
+        poseModified={poseModified}
+        poseMenuId={poseMenuId}
+        posePrompt={posePrompt}
+        posePromptValue={posePromptValue}
+        pendingDeleteAngle={pendingDeleteAngle}
+        addAngleMenuOpen={addAngleMenuOpen}
+        onActiveAngleChange={setActiveAngleFromToolbar}
+        onPhaseChange={switchPhase}
+        onPendingDeleteAngleChange={setPendingDeleteAngle}
+        onDeleteAngle={deleteAngle}
+        onAddAngleMenuOpenChange={setAddAngleMenuOpen}
+        onShowRestPose={showRestPose}
+        onApplyPose={applyPose}
+        onPoseMenuIdChange={setPoseMenuId}
+        onRenamePose={renamePose}
+        onSetDefaultPose={setDefaultPose}
+        onTogglePoseAngleScope={togglePoseAngleScope}
+        onDeletePose={deletePose}
+        onUpdateActivePose={updateActivePose}
+        onSavePoseAsNew={savePoseAsNew}
+        onPosePromptValueChange={setPosePromptValue}
+        onConfirmPosePrompt={confirmPosePrompt}
+        onCancelPosePrompt={() => setPosePrompt(null)}
+      />
 
       <div className="flex min-h-0 flex-1">
         <aside className="flex w-72 shrink-0 flex-col border-r border-border bg-panel text-xs">
@@ -3604,416 +3338,3 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     </div>
   );
 }
-
-function PartLayer({
-  part,
-  selected,
-  dimmed = false,
-  blurred = false,
-  ghosted = false,
-  preview,
-  previewParentPart,
-  allParts,
-  runtime,
-  previewVariantKey,
-  shift,
-  placement,
-}: {
-  part: CharacterPart;
-  selected: boolean;
-  dimmed?: boolean;
-  blurred?: boolean;
-  /**
-   * A sibling variant of this slot is selected: render this variant as a crisp faint ghost
-   * so the selected variant can be aligned against it (instead of hiding it, or stacking
-   * the default at full opacity).
-   */
-  ghosted?: boolean;
-  preview: PreviewState | null;
-  previewParentPart?: CharacterPart;
-  allParts: CharacterPart[];
-  runtime: CharacterRuntime;
-  /** The slot's in-place variant preview key — wins over the default variant resolution. */
-  previewVariantKey?: string;
-  /** Variant-preview re-anchor offset (canvas px) + rotation when a parent previews a variant. */
-  shift?: { dx: number; dy: number; rotation?: number };
-  /** Resolved registration/pin placement shared with generated output. */
-  placement?: RuntimePartPlacement;
-}) {
-  const sameSlotParts = allParts.filter(
-    (candidate) => getPartSlotId(candidate) === getPartSlotId(part),
-  );
-  const ghost = ghosted && sameSlotParts.length > 1 && part.visible;
-  const activeVariant =
-    sameSlotParts.length > 1
-      ? (previewVariantKey ??
-        activePreviewVariantForPart(part, preview) ??
-        defaultVariantForSlotParts(sameSlotParts, part.role))
-      : undefined;
-  if (sameSlotParts.length > 1 && !selected && !ghost) {
-    if (activeVariant && !partMatchesVariant(part, activeVariant)) return null;
-  }
-  if (!part.visible && !selected && !previewVariantKey) return null;
-
-  const baseTransform = previewDelta(part, preview, previewParentPart, allParts, runtime);
-  const previewTransform = composeEditorPartTransform(part, baseTransform, shift, placement);
-  const baseOpacity = part.visible ? previewTransform.opacity : 0.28;
-  // In movement-range focus mode, fade everything except the layer being edited. While the
-  // active layer is being edited, the others get a slight blur (and a touch of fade) instead.
-  // Ghosted sibling variants stay crisp (no blur) so misaligned variant art can be
-  // aligned against them by eye.
-  const opacity = ghost
-    ? baseOpacity * 0.35
-    : dimmed
-      ? baseOpacity * 0.12
-      : blurred
-        ? baseOpacity * 0.7
-        : baseOpacity;
-  const pivot = pivotForPart(part);
-
-  return (
-    <>
-      {part.bounds && selected && <BoundsOverlay bounds={part.bounds} zIndex={part.zIndex - 1} />}
-      <div
-        className="absolute select-none"
-        style={{
-          left: part.x + previewTransform.dx,
-          top: part.y + previewTransform.dy,
-          width: part.width,
-          height: part.height,
-          zIndex: placement?.drawOrder ?? part.zIndex,
-          opacity,
-          filter: !ghost && blurred && !dimmed ? "blur(2px)" : undefined,
-          transition: "filter 120ms ease",
-          pointerEvents: "none",
-          transform: `rotate(${part.rotation + previewTransform.rotation}deg) scale(${previewTransform.scale}, ${previewTransform.scaleY ?? previewTransform.scale})`,
-          transformOrigin: `${((pivot.x - part.x) / part.width) * 100}% ${((pivot.y - part.y) / part.height) * 100}%`,
-        }}
-        data-character-editor-chrome="part-frame"
-        aria-label={selected ? `${part.name} selection frame` : undefined}
-      />
-    </>
-  );
-}
-
-/**
- * Selection chrome for the selected part — a thin adapter over the shared
- * `TransformMoveable` (the same control the Stage and motion recorder use). The box hugs the
- * part's SELECTION bounds (`editorSelectionBounds`, i.e. alpha/art in "art" mode, the full
- * transparent frame in "frame" mode) instead of the raw image frame, so it no longer spans the
- * canvas or eats clicks meant for layers underneath. Every gesture converts back to canvas units
- * through one patch path: one undo snapshot at gesture start, history-off part patches while it runs.
- */
-function CharacterPartMoveable({
-  part,
-  previewTransform,
-  canvasRef,
-  wrapRef,
-  scale,
-  boundsMode,
-  onBegin,
-  onPatch,
-  onEnd,
-}: {
-  part: CharacterPart;
-  previewTransform: EditorPartTransform;
-  canvasRef: React.RefObject<HTMLDivElement | null>;
-  wrapRef: React.RefObject<HTMLDivElement | null>;
-  scale: number;
-  boundsMode: EditorBoundsMode;
-  onBegin: () => void;
-  onPatch: (patch: Partial<CharacterPart>) => void;
-  onEnd: () => void;
-}) {
-  // The editor canvas's top-left within the wrap element — the origin all screen rects are
-  // measured from. Re-measured every render (cheap) and only committed when it actually changes;
-  // updates from a layout effect are flushed by React before paint, so there is no visible flash.
-  const [origin, setOrigin] = useState<{ x: number; y: number } | null>(null);
-  const viewScale = Math.max(0.0001, scale);
-
-  // Re-measure after every render because surrounding editor chrome can move without changing refs.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useLayoutEffect(() => {
-    const canvas = canvasRef.current;
-    const wrap = wrapRef.current;
-    if (!canvas || !wrap) return;
-    const canvasBox = canvas.getBoundingClientRect();
-    const wrapBox = wrap.getBoundingClientRect();
-    const x = canvasBox.left - wrapBox.left;
-    const y = canvasBox.top - wrapBox.top;
-    setOrigin((prev) => (prev && prev.x === x && prev.y === y ? prev : { x, y }));
-  });
-
-  if (!origin) return null;
-
-  const dx = previewTransform.dx;
-  const dy = previewTransform.dy;
-  const toScreen = (rect: { x: number; y: number; width: number; height: number }): ScreenRect => ({
-    left: origin.x + rect.x * viewScale,
-    top: origin.y + rect.y * viewScale,
-    width: Math.max(1, rect.width * viewScale),
-    height: Math.max(1, rect.height * viewScale),
-  });
-  // A screen frame rect back to a part patch (canvas units, preview shift removed).
-  const frameToCanvasPatch = (frame: ScreenRect) => ({
-    x: Math.round((frame.left - origin.x) / viewScale - dx),
-    y: Math.round((frame.top - origin.y) / viewScale - dy),
-    width: Math.max(1, Math.round(frame.width / viewScale)),
-    height: Math.max(1, Math.round(frame.height / viewScale)),
-  });
-
-  const sel = editorSelectionBounds(part, boundsMode);
-  const contentRect = toScreen({
-    x: part.x + dx + sel.x,
-    y: part.y + dy + sel.y,
-    width: sel.width,
-    height: sel.height,
-  });
-  const frameRect = toScreen({
-    x: part.x + dx,
-    y: part.y + dy,
-    width: part.width,
-    height: part.height,
-  });
-  const pivotCanvas = pivotForPart(part);
-  const pivot = {
-    x: origin.x + (pivotCanvas.x + dx) * viewScale,
-    y: origin.y + (pivotCanvas.y + dy) * viewScale,
-  };
-
-  return (
-    <TransformMoveable
-      contentRect={contentRect}
-      frameRect={frameRect}
-      rotationDeg={part.rotation + previewTransform.rotation}
-      pivot={pivot}
-      onInteractingChange={(interacting) => (interacting ? onBegin() : onEnd())}
-      onMove={(frame) => {
-        const patch = frameToCanvasPatch(frame);
-        onPatch({ x: patch.x, y: patch.y });
-      }}
-      onResize={(frame) => {
-        const patch = frameToCanvasPatch(frame);
-        onPatch(patch);
-      }}
-      onRotate={(deg) => {
-        onPatch({ rotation: Math.round((deg - previewTransform.rotation) * 10) / 10 });
-      }}
-    />
-  );
-}
-
-function BoundsOverlay({ bounds, zIndex }: { bounds: CharacterPartBounds; zIndex: number }) {
-  return (
-    <div
-      className="pointer-events-none absolute border border-dashed border-primary/70 bg-primary/10"
-      style={{
-        left: bounds.x,
-        top: bounds.y,
-        width: bounds.width,
-        height: bounds.height,
-        borderRadius: bounds.type === "ellipse" ? "9999px" : 4,
-        zIndex,
-      }}
-    />
-  );
-}
-
-function editorPartPivot(part: CharacterPart) {
-  return (
-    part.pivot ?? {
-      x: part.x + part.width * part.anchorX,
-      y: part.y + part.height * part.anchorY,
-    }
-  );
-}
-
-function editorTransformPointAroundPivot(
-  point: { x: number; y: number },
-  pivot: { x: number; y: number },
-  motion: { dx: number; dy: number; scale: number; rotation: number },
-) {
-  const radians = (motion.rotation * Math.PI) / 180;
-  const cos = Math.cos(radians);
-  const sin = Math.sin(radians);
-  const relX = (point.x - pivot.x) * motion.scale;
-  const relY = (point.y - pivot.y) * motion.scale;
-  return {
-    x: pivot.x + motion.dx + relX * cos - relY * sin,
-    y: pivot.y + motion.dy + relX * sin + relY * cos,
-  };
-}
-
-function previewDelta(
-  part: CharacterPart,
-  preview: PreviewState | null,
-  previewParentPart?: CharacterPart,
-  allParts: CharacterPart[] = [],
-  runtime?: CharacterRuntime,
-) {
-  if (!preview) return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: 1, opacity: 1 };
-  const targetsPart = part.id === preview.targetPartId || part.slotId === preview.targetSlotId;
-  const elapsed = Date.now() - preview.startedAt;
-  const t = Math.min(1, elapsed / preview.durationMs);
-  const wave = Math.sin(t * Math.PI * 2);
-  if (!targetsPart) {
-    const ancestor =
-      previewTargetAncestor(part, preview, allParts, runtime) ??
-      (isLegacyHeadPreviewChild(part, preview) ? previewParentPart : undefined);
-    const motion = ancestor ? previewMotionForPart(ancestor, preview, t, wave) : null;
-    if (!ancestor || !motion || !hasGeometricPreviewMotion(motion)) {
-      return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: 1, opacity: 1 };
-    }
-    const childPivot = editorPartPivot(part);
-    const transformedPivot = editorTransformPointAroundPivot(
-      childPivot,
-      editorPartPivot(ancestor),
-      motion,
-    );
-    return {
-      dx: transformedPivot.x - childPivot.x,
-      dy: transformedPivot.y - childPivot.y,
-      rotation: motion.rotation,
-      scale: 1,
-      scaleY: 1,
-      opacity: 1,
-    };
-  }
-  return previewMotionForPart(part, preview, t, wave);
-}
-
-function activePreviewVariantForPart(
-  part: CharacterPart,
-  preview: PreviewState | null,
-): string | undefined {
-  if (!preview || preview.targetSlotId !== getPartSlotId(part)) return undefined;
-  if (preview.kind === "blink" && part.role === "eye") {
-    const elapsed = Date.now() - preview.startedAt;
-    const t = Math.min(1, elapsed / preview.durationMs);
-    return t > 0.35 && t < 0.55 ? "closed" : "open";
-  }
-  if (preview.kind === "talk" && part.role === "mouth") {
-    if (preview.forcedViseme) return preview.forcedViseme;
-    const elapsed = Date.now() - preview.startedAt;
-    const t = Math.min(1, elapsed / preview.durationMs);
-    const visemes = preview.visemes ?? ["rest", "A", "E", "O", "MBP"];
-    const idx = Math.floor(t * visemes.length * 1.1) % visemes.length;
-    return visemes[idx];
-  }
-  return undefined;
-}
-
-function previewMotionForPart(part: CharacterPart, preview: PreviewState, t: number, wave: number) {
-  if (preview.kind === "blink" && part.role === "eye") {
-    const closedMoment = t > 0.35 && t < 0.55;
-    if (part.eyeState || part.variant) {
-      const target = closedMoment ? "closed" : "open";
-      const shouldShow = partMatchesVariant(part, target);
-      return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: 1, opacity: shouldShow ? 1 : 0 };
-    }
-    return { dx: 0, dy: 0, rotation: 0, scale: 1, scaleY: closedMoment ? 0.12 : 1, opacity: 1 };
-  }
-  if (
-    preview.kind === "wave" &&
-    (part.role === "arm" ||
-      part.role === "upperArm" ||
-      part.role === "lowerArm" ||
-      part.motionBehavior === "rotate")
-  ) {
-    return { dx: 0, dy: 0, rotation: wave * 18, scale: 1, opacity: 1 };
-  }
-  if (
-    preview.kind === "kick" &&
-    (part.role === "leg" ||
-      part.role === "upperLeg" ||
-      part.role === "lowerLeg" ||
-      part.role === "foot")
-  ) {
-    return {
-      dx: Math.round(Math.abs(wave) * 10),
-      dy: 0,
-      rotation: wave * 12,
-      scale: 1,
-      opacity: 1,
-    };
-  }
-  if (preview.kind === "nod" && part.role === "head") {
-    return { dx: 0, dy: Math.round(Math.abs(wave) * 8), rotation: wave * 3, scale: 1, opacity: 1 };
-  }
-  if (preview.kind === "bounce" && part.role === "hair") {
-    return { dx: 0, dy: Math.round(wave * 6), rotation: wave * 2, scale: 1, opacity: 1 };
-  }
-  if (preview.kind === "raise" && part.role === "eyebrow") {
-    return { dx: 0, dy: Math.round(-Math.abs(wave) * 12), rotation: 0, scale: 1, opacity: 1 };
-  }
-  if (preview.kind === "talk" && part.role === "mouth") {
-    const active =
-      preview.forcedViseme ??
-      (() => {
-        const visemes = preview.visemes ?? ["rest", "A", "E", "O", "MBP"];
-        const idx = Math.floor(t * visemes.length * 1.1) % visemes.length;
-        return visemes[idx];
-      })();
-    return {
-      dx: 0,
-      dy: 0,
-      rotation: 0,
-      scale: 1,
-      opacity: !part.variant && !part.viseme ? 1 : partMatchesVariant(part, active) ? 1 : 0,
-    };
-  }
-  return { dx: 0, dy: 0, rotation: 0, scale: 1, opacity: 1 };
-}
-
-function isLegacyHeadPreviewChild(part: CharacterPart, preview: PreviewState) {
-  return (
-    preview.kind === "nod" &&
-    preview.targetRole === "head" &&
-    (part.role === "eye" ||
-      part.role === "eyebrow" ||
-      part.role === "mouth" ||
-      part.role === "hair")
-  );
-}
-
-function hasGeometricPreviewMotion(motion: ReturnType<typeof previewMotionForPart>) {
-  return (
-    motion.dx !== 0 ||
-    motion.dy !== 0 ||
-    motion.rotation !== 0 ||
-    motion.scale !== 1 ||
-    (motion.scaleY ?? motion.scale) !== 1
-  );
-}
-
-function previewTargetAncestor(
-  part: CharacterPart,
-  preview: PreviewState,
-  allParts: CharacterPart[],
-  runtime?: CharacterRuntime,
-): CharacterPart | undefined {
-  if (
-    runtime &&
-    runtimeAncestorMotionTargets(runtime, getPartSlotId(part)).some(
-      (target) => target.slotId === preview.targetSlotId,
-    )
-  ) {
-    return allParts.find(
-      (candidate) =>
-        candidate.id === preview.targetPartId || getPartSlotId(candidate) === preview.targetSlotId,
-    );
-  }
-  const byId = new Map(allParts.map((candidate) => [candidate.id, candidate]));
-  let current = part.parentId ? byId.get(part.parentId) : undefined;
-  const seen = new Set<ID>();
-  while (current && !seen.has(current.id)) {
-    if (current.id === preview.targetPartId || current.slotId === preview.targetSlotId) {
-      return current;
-    }
-    seen.add(current.id);
-    current = current.parentId ? byId.get(current.parentId) : undefined;
-  }
-  return undefined;
-}
-
-/** Axis-aligned union of the parts' frame rectangles, in canvas space. */

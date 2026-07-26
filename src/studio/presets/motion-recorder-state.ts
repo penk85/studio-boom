@@ -11,6 +11,7 @@ import type {
   MotionCategory,
   MotionKeyframe,
   MotionPreset,
+  MotionRegion,
   MotionTrack,
   PartRole,
   RecordedKeypose,
@@ -52,6 +53,37 @@ export interface FlexiblePointChange {
   point: "end" | "curve";
   patch: Partial<RecorderPartState>;
   canvasDelta: { x: number; y: number };
+}
+
+export function recorderPreviewPreset({
+  name,
+  category,
+  region,
+  duration,
+  keyposes,
+  allowOutOfBounds,
+}: {
+  name: string;
+  category: MotionCategory;
+  region: MotionRegion | "";
+  duration: number;
+  keyposes: RecordedKeypose[];
+  allowOutOfBounds?: string[];
+}): MotionPreset {
+  return {
+    id: "__recorder_draft_motion",
+    name: name.trim() || "Draft action",
+    category,
+    region: region || undefined,
+    duration: Math.max(0.1, duration),
+    loop: false,
+    tracks: [],
+    keyposes: cloneKeyposes(keyposes).sort((a, b) => a.t - b.t),
+    allowOutOfBounds: allowOutOfBounds?.length ? [...allowOutOfBounds] : undefined,
+    builtin: false,
+    createdAt: 0,
+    updatedAt: 0,
+  };
 }
 
 const MOTION_VALUE_KEYS = [

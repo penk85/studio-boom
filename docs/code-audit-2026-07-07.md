@@ -288,12 +288,25 @@ property panels moved into `MotionPresetRecorderPanels.tsx`. Pure keypose
 loading/navigation, override comparison/defaults, signed scaling, variant
 options, and flexible-curve constraints moved into the unit-tested
 `motion-recorder-state.ts`. `MotionPresetRecorder.tsx` fell from 3,762 to
-2,641 lines; its Pixi preview, draft controller, and constraint application
-remain owned by the main recorder.
+2,641 lines. A second pass moved its persistent Pixi playback wrapper, React
+draft/onion layers, anchor debugger, and flexible/rotation chrome into
+`MotionPresetRecorderPreview.tsx`; constraint and rig-frame calculations now
+live in `motion-recorder-geometry.ts`, and both canvas paths share the tested
+RAF coalescer in `motion-recorder-interactions.ts`.
+`MotionPresetRecorder.tsx` is now 1,585 lines and retains the draft controller,
+save/load workflow, and user-action orchestration.
 
-- **Where:** `CharacterEditor.tsx` **4,019 lines / 14 top-level functions**,
-  with the main component spanning ~229–3,605 (≈3,377 lines).
-  `MotionPresetRecorder.tsx` 2,641, `store.ts` 3,154, `Timeline.tsx` 1,890,
+**Character Editor reduced again 2026-07-24:** the header and angle/pose
+toolbar moved into `CharacterEditorToolbar.tsx`, while selection frames and
+the shared transform adapter moved into `CharacterEditorCanvasChrome.tsx`.
+Timestamp-based preview motion and variant selection now live with the other
+unit-tested helpers in `character-editor-preview.ts`. `CharacterEditor.tsx`
+fell from 4,019 to 3,340 lines without moving persistence, scene commands, or
+the persistent Pixi preview lifecycle.
+
+- **Where:** `CharacterEditor.tsx` **3,340 lines / 1 top-level component**,
+  with the main component spanning ~231–3,339 (≈3,109 lines).
+  `MotionPresetRecorder.tsx` 1,585, `store.ts` 3,154, `Timeline.tsx` 1,890,
   `Stage.tsx` 1,617.
 - **What:** these five files are where nearly every regression this quarter
   will land. The source-contract integration tests (which `readFileSync`

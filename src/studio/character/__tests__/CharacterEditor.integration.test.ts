@@ -29,6 +29,12 @@ const flexibleSectionPath = join(
   "src/studio/character/CharacterFlexibleSection.tsx",
 );
 const overlaysPath = join(process.cwd(), "src/studio/character/CharacterEditorOverlays.tsx");
+const canvasChromePath = join(
+  process.cwd(),
+  "src/studio/character/CharacterEditorCanvasChrome.tsx",
+);
+const toolbarPath = join(process.cwd(), "src/studio/character/CharacterEditorToolbar.tsx");
+const editorPreviewPath = join(process.cwd(), "src/studio/character/character-editor-preview.ts");
 const editorGeometryPath = join(process.cwd(), "src/studio/character/character-editor-geometry.ts");
 const partImportPath = join(process.cwd(), "src/studio/character/character-part-import.ts");
 
@@ -36,11 +42,12 @@ describe("CharacterEditor source integration", () => {
   it("works in Build / Rig / Pose phases with the legacy panels removed", () => {
     const source = readFileSync(editorPath, "utf8");
     const rigSetupSource = readFileSync(rigSetupPath, "utf8");
+    const toolbarSource = readFileSync(toolbarPath, "utf8");
 
     // Phase scaffold: one switch drives panels, overlays, and the pose toolbar.
     expect(source).toContain('useState<"build" | "rig" | "pose">');
     expect(source).toContain("const switchPhase");
-    expect(source).toContain('{editorPhase === "pose" && (');
+    expect(toolbarSource).toContain('{phase === "pose" && (');
     expect(source).toContain('{editorPhase === "build" && (');
     expect(source).toContain('{editorPhase === "rig" && (');
 
@@ -73,6 +80,22 @@ describe("CharacterEditor source integration", () => {
     expect(source).not.toContain("function CanvasSection");
     expect(source).not.toContain("function SkeletonCard");
     expect(source).not.toContain("function NumberField");
+  });
+
+  it("keeps header and angle/pose presentation behind a callback-only boundary", () => {
+    const source = readFileSync(editorPath, "utf8");
+    const toolbarSource = readFileSync(toolbarPath, "utf8");
+
+    expect(source).toContain('from "./CharacterEditorToolbar"');
+    expect(source).toContain("<CharacterEditorHeader");
+    expect(source).toContain("<CharacterAnglePoseToolbar");
+    expect(source).toContain("void saveCharacter(doc).then");
+    expect(toolbarSource).toContain("export function CharacterEditorHeader");
+    expect(toolbarSource).toContain("export function CharacterAnglePoseToolbar");
+    expect(toolbarSource).toContain("onDone: () => void");
+    expect(toolbarSource).not.toContain("useStudio");
+    expect(toolbarSource).not.toContain("saveCharacter");
+    expect(toolbarSource).not.toContain("../db");
   });
 
   it("explains every armed mode through the single ModeBanner", () => {
@@ -116,9 +139,10 @@ describe("CharacterEditor source integration", () => {
     const partInspectorSource = readFileSync(partInspectorPath, "utf8");
     const groupInspectorSource = readFileSync(groupInspectorPath, "utf8");
     const variantControlsSource = readFileSync(variantControlsPath, "utf8");
+    const toolbarSource = readFileSync(toolbarPath, "utf8");
     // Autosave honesty: Done button + live save indicator.
     expect(source).toContain('useState<"saved" | "saving">');
-    expect(source).toContain("✓ Saved");
+    expect(toolbarSource).toContain("✓ Saved");
     // Hover identification, breadcrumbs, and thumbnails.
     expect(source).toContain("handleCanvasHover");
     expect(partInspectorSource).toContain("Select the whole layer group");
@@ -184,6 +208,9 @@ describe("CharacterEditor source integration", () => {
 
   it("uses Pixi as the editor artwork renderer while React owns chrome only", () => {
     const source = readFileSync(editorPath, "utf8");
+    const canvasChromeSource = readFileSync(canvasChromePath, "utf8");
+    const editorPreviewSource = readFileSync(editorPreviewPath, "utf8");
+    const renderSources = `${source}\n${canvasChromeSource}\n${editorPreviewSource}`;
 
     expect(source).toContain("buildCharacterRenderPayload");
     expect(source).toContain("const mediaAssets = useStudio((state) => state.mediaAssets)");
@@ -191,11 +218,11 @@ describe("CharacterEditor source integration", () => {
     expect(source).toContain("<PixiCharacterPreview");
     expect(source).toContain("resolveCharacterEditorPreviewAssetRef");
     expect(source).toContain("previewVariant(slotId, variantKeyForPart(part))");
-    expect(source).toContain('data-character-editor-chrome="part-frame"');
+    expect(canvasChromeSource).toContain('data-character-editor-chrome="part-frame"');
     expect(source).toContain("applyCharacterSceneCommand");
-    expect(source).not.toContain("pixiEditorPreviewActive");
-    expect(source).not.toContain("pixiBacked=");
-    expect(source).not.toContain("drawnByPixi");
+    expect(renderSources).not.toContain("pixiEditorPreviewActive");
+    expect(renderSources).not.toContain("pixiBacked=");
+    expect(renderSources).not.toContain("drawnByPixi");
     expect(source).toContain("error instanceof CharacterPinRigError");
     expect(source).toContain("renderBlockingRigIssues");
     expect(source).toContain("Render preview paused.");
@@ -204,6 +231,7 @@ describe("CharacterEditor source integration", () => {
     expect(source).toContain("armRenderBlockingRigFix");
     expect(source).toContain("Show rig tools");
     expect(source).toContain("CharacterPartMoveable");
+    expect(canvasChromeSource).toContain("export function CharacterPartMoveable");
     expect(source).toContain("RigBonesOverlay");
     expect(source).toContain("VariantAnchorOverlay");
   });
@@ -310,9 +338,13 @@ describe("CharacterEditor source integration", () => {
   it("keeps editor chrome and its transform geometry behind focused boundaries", () => {
     const source = readFileSync(editorPath, "utf8");
     const overlaysSource = readFileSync(overlaysPath, "utf8");
+    const canvasChromeSource = readFileSync(canvasChromePath, "utf8");
     const geometrySource = readFileSync(editorGeometryPath, "utf8");
+    const previewSource = readFileSync(editorPreviewPath, "utf8");
 
     expect(source).toContain('from "./CharacterEditorOverlays"');
+    expect(source).toContain('from "./CharacterEditorCanvasChrome"');
+    expect(source).toContain('from "./CharacterEditorToolbar"');
     expect(source).toContain('from "./character-editor-geometry"');
     expect(overlaysSource).toContain("export function ReachOverlay");
     expect(overlaysSource).toContain("export function DeformPathOverlay");
@@ -323,12 +355,19 @@ describe("CharacterEditor source integration", () => {
     expect(geometrySource).toContain("export function convexHull");
     expect(geometrySource).toContain("export function composeEditorPartTransform");
     expect(geometrySource).toContain("export function normalizePartPatch");
+    expect(canvasChromeSource).toContain("export function PartLayer");
+    expect(canvasChromeSource).toContain("export function CharacterPartMoveable");
+    expect(previewSource).toContain("export function previewDelta");
+    expect(previewSource).toContain("export function activePreviewVariantForPart");
     expect(source).not.toContain("function ReachOverlay");
     expect(source).not.toContain("function DeformPathOverlay");
     expect(source).not.toContain("function RotationReachOverlay");
     expect(source).not.toContain("function VariantAnchorOverlay");
     expect(source).not.toContain("function RigBonesOverlay");
     expect(source).not.toContain("function GroupControlsOverlay");
+    expect(source).not.toContain("function PartLayer");
+    expect(source).not.toContain("function CharacterPartMoveable");
+    expect(source).not.toContain("function previewDelta");
   });
 
   it("supports both skeleton calibration and moving artwork with pin-driven joint drags", () => {
