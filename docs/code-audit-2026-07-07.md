@@ -304,9 +304,17 @@ unit-tested helpers in `character-editor-preview.ts`. `CharacterEditor.tsx`
 fell from 4,019 to 3,340 lines without moving persistence, scene commands, or
 the persistent Pixi preview lifecycle.
 
+**Store reduced 2026-07-26:** pure project transformations moved out of the
+Zustand action module: asset-manifest upkeep is in `project-assets.ts`,
+editor-timeline projection is in `project-timeline.ts`, scene and nested source
+operations are in `hyperframes/project-source.ts`, and character composition
+rebuilds are in `character/project-compositions.ts`. `store.ts` fell from 3,154
+to 2,296 lines while retaining mutation ordering, history, save scheduling, and
+all Zustand state ownership.
+
 - **Where:** `CharacterEditor.tsx` **3,340 lines / 1 top-level component**,
   with the main component spanning ~231–3,339 (≈3,109 lines).
-  `MotionPresetRecorder.tsx` 1,585, `store.ts` 3,154, `Timeline.tsx` 1,890,
+  `MotionPresetRecorder.tsx` 1,585, `store.ts` 2,296, `Timeline.tsx` 1,890,
   `Stage.tsx` 1,617.
 - **What:** these five files are where nearly every regression this quarter
   will land. The source-contract integration tests (which `readFileSync`
