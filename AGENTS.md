@@ -8,7 +8,8 @@ Flag any conflict you find instead of silently picking one.
 
 Deep dives live in `docs/` (`ai-generated-hyperframes-clips-roadmap.md`,
 `character-rig-architecture.md`, `character-json-rig-motion-architecture.md`,
-`native-hyperframes-workflow-audit.md`). Known defects, risks, and smells are
+`native-hyperframes-workflow-audit.md`, `hyperframes-upgrade-safety-plan.md`).
+Known defects, risks, and smells are
 catalogued with severity and fix order in `docs/code-audit-2026-07-07.md` —
 check it before "fixing" something that is already documented there.
 
@@ -25,21 +26,22 @@ The movie itself is **not React state**. It is `project.hf` — three fields:
 keyed by id), and `assets` (blob manifest). Editing, stage preview, playback,
 and MP4 export all read and write that same source. Everything else is chrome.
 
-| Area                      | Owns                                                                                                                               |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `src/studio/store.ts`     | Zustand store: every project mutation, undo/redo, debounced save (3k lines — the heart)                                            |
-| `src/studio/types.ts`     | `Project`, `EditorClip`, character/preset types, `deriveEditorClips`                                                               |
-| `src/studio/db.ts`        | Dexie (IndexedDB) persistence: projects, media blobs, characters, presets, voices                                                  |
-| `src/studio/hyperframes/` | Boundary adapters over `@hyperframes/core`: HTML parse/mutate, keyframes, normalization, export validation, Vite render middleware |
-| `src/studio/components/`  | Editor UI: `Stage`, `Timeline`, `Inspector`, `Library`, dashboard                                                                  |
-| `src/studio/character/`   | Character rigs, renderer-neutral scene graph, Pixi composition builder + editor preview runtime                                    |
-| `src/studio/presets/`     | Action/Expression presets, recorder, terminology                                                                                   |
-| `src/studio/lipsync/`     | ElevenLabs TTS/alignment client helpers, viseme mapping                                                                            |
-| `src/studio/interaction/` | Shared selection/transform box (react-moveable) used by Stage, character editor, and recorder                                      |
-| `src/studio/export/`      | Stages `project.hf` into HyperFrames CLI project files for MP4 render                                                              |
-| `src/studio/scenes.ts`    | Scene layer: root hosts scene composition clips; editing targets the active scene                                                  |
-| `src/components/ui/`      | shadcn/ui primitives (new-york style) — generic, no studio logic                                                                   |
-| `src/shims/`              | Browser shims for node builtins (`path`, `fs`, `url`, `esbuild`) required by bundled HyperFrames deps                              |
+| Area                        | Owns                                                                                                                               |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `src/studio/store.ts`       | Zustand runtime: every project mutation, undo/redo, debounced save (~2.1k lines — the heart)                                       |
+| `src/studio/store-types.ts` | Public Zustand state/action contract; contains no runtime ownership                                                                |
+| `src/studio/types.ts`       | `Project`, `EditorClip`, character/preset types, `deriveEditorClips`                                                               |
+| `src/studio/db.ts`          | Dexie (IndexedDB) persistence: projects, media blobs, characters, presets, voices                                                  |
+| `src/studio/hyperframes/`   | Boundary adapters over `@hyperframes/core`: HTML parse/mutate, keyframes, normalization, export validation, Vite render middleware |
+| `src/studio/components/`    | Editor UI: `Stage`, `Timeline`, `Inspector`, `Library`, dashboard                                                                  |
+| `src/studio/character/`     | Character rigs, renderer-neutral scene graph, Pixi composition builder + editor preview runtime                                    |
+| `src/studio/presets/`       | Action/Expression presets, recorder, terminology                                                                                   |
+| `src/studio/lipsync/`       | ElevenLabs TTS/alignment client helpers, viseme mapping                                                                            |
+| `src/studio/interaction/`   | Shared selection/transform box (react-moveable) used by Stage, character editor, and recorder                                      |
+| `src/studio/export/`        | Stages `project.hf` into HyperFrames CLI project files for MP4 render                                                              |
+| `src/studio/scenes.ts`      | Scene layer: root hosts scene composition clips; editing targets the active scene                                                  |
+| `src/components/ui/`        | shadcn/ui primitives (new-york style) — generic, no studio logic                                                                   |
+| `src/shims/`                | Browser shims for node builtins (`path`, `fs`, `url`, `esbuild`) required by bundled HyperFrames deps                              |
 
 App flow: `src/main.tsx` → `src/App.tsx` (two-view SPA, no router:
 `dashboard` ↔ `studio`) → `src/studio/Studio.tsx` (three-pane shell, owns the
@@ -52,9 +54,8 @@ single `useTimelinePlayer()` call).
 Pinned toolchain — `engine-strict=true` makes mismatches fail at install:
 
 - Node **22.22.2** (`.nvmrc`), npm **10.9.7** (`packageManager` in `package.json`)
-- Package manager is **npm**. `bun.lockb` and `bunfig.toml` are stale leftovers
-  (untouched since April 2026; `package-lock.json` is current). Never run bun
-  here, never commit `bun.lockb` changes. [VERIFY: delete the bun files]
+- Package manager is **npm**. The stale Bun files were removed in July 2026;
+  `package-lock.json` is canonical. Never run Bun or recreate Bun lock/config files.
 
 ```bash
 nvm use                  # picks up 22.22.2
@@ -75,25 +76,15 @@ npx eslint . --fix       # autofix lint + formatting
 npm run format           # prettier --write . (rarely needed; lint --fix covers it)
 ```
 
-### Known baseline failures (as of 2026-07-07)
+### Current quality baseline (2026-07-26)
 
-Verify against these before blaming your own change — and never add to them:
+- `npx tsc --noEmit` is clean. The former `activeSceneId` interface hole is fixed.
+- `npm run lint` is clean project-wide.
+- `npx vitest run` is expected to be fully green. Record exact counts in the
+  audit after a full run; counts grow as tests are added and are not a contract.
 
-- `npx tsc --noEmit` reports **13 pre-existing errors, all in
-  `src/studio/store.ts`**, all one root cause: `activeSceneId` is used in state
-  but missing from the `StudioState` interface (declared in `HistoryEntry` at
-  `store.ts:1062`, absent from the interface starting `store.ts:1075`). Runtime
-  is unaffected. The fix is one line (`activeSceneId: string | null;` in
-  `StudioState`) but land it as its own commit, not inside a feature diff.
-  [VERIFY: human should confirm and land this fix]
-- `npm run lint` reports **4 auto-fixable prettier errors**
-  (`StageMoveable.tsx`, `keyframes.ts` ×2, `transform.ts`) and 2 react-hooks
-  warnings. Files **you** touch must come out lint-clean.
-- `npx vitest run` is fully green: 60 files / 621 tests, ~35 s.
-
-Definition of done for any change: `npx vitest run` green, `npx tsc --noEmit`
-introduces **zero new** errors, touched files lint-clean — plus §10's human
-handoff for anything user-visible.
+Definition of done for any change: `npx vitest run`, `npx tsc --noEmit`, and
+`npm run lint` all green — plus §10's human handoff for anything user-visible.
 
 ---
 
@@ -153,7 +144,7 @@ handoff for anything user-visible.
 ## 4. The canonical edit flow (memorize this)
 
 Every mutation that changes the movie follows one shape. Reference
-implementation: `applyClipLayerMove` in `store.ts:1277`.
+implementation: `applyClipLayerMove` in `store.ts`.
 
 ```ts
 const state = get();
@@ -250,8 +241,8 @@ The repo's four test idioms — pick the one that matches your change:
    helpers get called. This is the **only** place core is mocked — everywhere
    else uses the real package, which works because `vitest.config.ts` inlines
    `@hyperframes/core` and `@hyperframes/studio` through Vite. (The `CLAUDE.md`
-   line saying core must always be mocked predates that config — real-core is
-   the canonical pattern now. [VERIFY: update CLAUDE.md wording])
+   guidance now matches this: real-core is canonical, while store call-counting
+   tests intentionally mock the boundary.)
 3. **Source-contract "integration" tests**
    (`*.integration.test.ts`, e.g. `Inspector.integration.test.ts`): they
    `readFileSync` the component's `.tsx` source and assert wiring markers
@@ -287,10 +278,11 @@ change touching those is **not done** until a human confirms it per §10.
 
 ### Add a store mutation that edits the movie
 
-1. Add the signature to the `StudioState` interface (`store.ts:1075`), with
+1. Add the signature to the `StudioState` interface in `store-types.ts`, with
    `options?: ProjectMutationOptions` if UI may drive it interactively.
-2. Implement using the §4 shape exactly (checkpoint → boundary mutation →
-   `commitEditingRootHtml` → `set` → `scheduleSave`).
+2. Implement the runtime action in `store.ts` using the §4 shape exactly
+   (checkpoint → boundary mutation → `commitEditingRootHtml` → `set` →
+   `scheduleSave`).
 3. Test in `src/studio/__tests__/store.test.ts` (mock-core call counting) or,
    if the interesting logic is HTML-shaping, extract it into
    `src/studio/hyperframes/` and unit-test it there with real core.
@@ -419,7 +411,7 @@ End **every** change with a plain-language summary containing:
 1. **What changed** — files and behavior, one short paragraph.
 2. **What was verified automatically** — the exact commands run
    (`npx vitest run`, `npx tsc --noEmit`, `npm run lint`) and their results,
-   including "no new tsc errors beyond the store.ts baseline".
+   including whether each command was clean.
 3. **Manual test steps** — for anything UI- or output-affecting, explicit
    steps a human can follow blind:
    - which command starts the app (`npm run dev`, open
@@ -441,19 +433,19 @@ End **every** change with a plain-language summary containing:
 Adding or upgrading anything requires human sign-off first. The installed
 majors you must write against (see `package.json` for exact ranges):
 
-| Package           | Version                                                 | Watch out for                                                                                                                                               |
-| ----------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| react / react-dom | 19.x                                                    | —                                                                                                                                                           |
-| zustand           | 5.x                                                     | `create<T>()(...)`-style store already set up; extend, don't re-create                                                                                      |
-| dexie             | 4.x                                                     | schema versioning rules in §7                                                                                                                               |
-| pixi.js           | **8.x**                                                 | v8 API only: `new Application()` + `await app.init()`, `Assets.load`, `MeshRope`/`MeshPlane`. No v7 idioms. Consult `.claude/skills/pixijs-*`               |
-| gsap              | 3.x                                                     | inside compositions it must stay seek-driven/deterministic                                                                                                  |
-| tailwindcss       | **4.x**                                                 | CSS-first; no config file; `@theme inline` in `src/styles.css`                                                                                              |
-| @hyperframes/\*   | **0.5.3** (core, studio, player, producer, engine, CLI) | pinned family — upgrade all together, then re-audit the `hyperframes/html.ts` + `native.ts` patch layers, which exist specifically to paper over 0.5.3 gaps |
-| eslint            | 9.x flat config                                         | edit `eslint.config.js`, not `.eslintrc`                                                                                                                    |
-| vitest            | 4.x                                                     | config in `vitest.config.ts`; keep `server.deps.inline` for hyperframes packages                                                                            |
-| react-moveable    | 0.56.x                                                  | only via `interaction/TransformMoveable`                                                                                                                    |
-| vite              | 7.x                                                     | dev-server middleware pattern in `render-plugin.ts`                                                                                                         |
+| Package           | Version                                                           | Watch out for                                                                                                                                                |
+| ----------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| react / react-dom | 19.x                                                              | —                                                                                                                                                            |
+| zustand           | 5.x                                                               | `create<T>()(...)`-style store already set up; extend, don't re-create                                                                                       |
+| dexie             | 4.x                                                               | schema versioning rules in §7                                                                                                                                |
+| pixi.js           | **8.x**                                                           | v8 API only: `new Application()` + `await app.init()`, `Assets.load`, `MeshRope`/`MeshPlane`. No v7 idioms. Consult `.claude/skills/pixijs-*`                |
+| gsap              | 3.x                                                               | inside compositions it must stay seek-driven/deterministic                                                                                                   |
+| tailwindcss       | **4.x**                                                           | CSS-first; no config file; `@theme inline` in `src/styles.css`                                                                                               |
+| @hyperframes/\*   | **0.5.3 installed** (core, studio, player, producer, engine, CLI) | Upgrade the family together in a dedicated pass; follow `docs/hyperframes-upgrade-safety-plan.md` and re-audit the `hyperframes/html.ts` + `native.ts` seams |
+| eslint            | 9.x flat config                                                   | edit `eslint.config.js`, not `.eslintrc`                                                                                                                     |
+| vitest            | 4.x                                                               | config in `vitest.config.ts`; keep `server.deps.inline` for hyperframes packages                                                                             |
+| react-moveable    | 0.56.x                                                            | only via `interaction/TransformMoveable`                                                                                                                     |
+| vite              | 7.x                                                               | dev-server middleware pattern in `render-plugin.ts`                                                                                                          |
 
 Banned/discouraged: bun (stale artifacts only), any second animation runtime in
 editor code, routing libraries (two-view SPA is deliberate), state libraries
@@ -467,9 +459,10 @@ never import `node:fs`/`node:path`/etc. in app code; only
 
 ## 12. Danger zones
 
-- **`src/studio/store.ts` (3k lines).** Every mutation, the save-generation
-  guard, and undo live here. Deviating from the §4 shape breaks undo or
-  autosave silently. Also currently carries the known tsc baseline (§2).
+- **`src/studio/store.ts` (~2.1k lines).** Every runtime mutation, the
+  save-generation guard, and undo live here; `store-types.ts` contains only the
+  public type contract. Deviating from the §4 shape breaks undo or autosave
+  silently.
 - **`character/pixi-composition.ts` inline script + `mesh-deform.ts`.**
   Functions from `mesh-deform.ts` are embedded into generated HTML via
   `Function.prototype.toString()` — they must stay fully self-contained: no
@@ -489,8 +482,9 @@ never import `node:fs`/`node:path`/etc. in app code; only
 - **Source-contract integration tests** fail on refactors that are otherwise
   correct — update markers deliberately, in the same commit.
 - **`dist/` is build output** — never edit it. `character-previews/` holds
-  two starter-character SVGs that nothing in `src/` references today — leave
-  it alone. [VERIFY: possibly deletable]
+  two starter-character SVGs that nothing in `src/` references today. Leave
+  them alone until the product owner explicitly decides whether they are useful
+  examples or removable assets.
 
 ---
 

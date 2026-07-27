@@ -12,6 +12,14 @@ user edit -> project.hf -> Stage preview
 `project.hf.rootHtml`, `project.hf.compositionHtml`, and `project.hf.assets` are the
 movie. `editorMeta` is editor-only intent and UI state.
 
+## Compatibility Baseline
+
+All installed HyperFrames packages currently resolve to 0.5.3. The `html.ts`
+and `native.ts` adapters intentionally cover gaps in that baseline and must not
+be removed opportunistically. The next family upgrade should happen as an
+isolated compatibility project following
+[hyperframes-upgrade-safety-plan.md](./hyperframes-upgrade-safety-plan.md).
+
 ## Layer Classification
 
 - Necessary adapter: `Stage.tsx` resolves `asset:<id>` and composition file references to local blob URLs for browser preview.
@@ -110,6 +118,9 @@ movie. `editorMeta` is editor-only intent and UI state.
 
 ## Next Priorities
 
+- Dedicated HyperFrames-family compatibility pass: research a single compatible
+  target for core/engine/player/producer/studio/CLI, then execute the automated
+  and manual matrix in `hyperframes-upgrade-safety-plan.md`.
 - Source-visible custom HyperFrames blocks: polish the existing Blocks tab and
   Inspector source panels while keeping all generated output in `project.hf`.
 - Upstream primitive audit: revisit HyperFrames Studio picker, property-panel,
@@ -173,4 +184,5 @@ whose native `data-volume` stays `≤ 1`. Costs: per-clip re-encode, possible cl
 on amplification, and a derived blob to manage. Revisit if/when HyperFrames adds
 audio-volume automation, or build the gain/envelope-baking pipeline here. Applies to
 both regular audio clips and character speech. See the volume/trim work in
-`store.ts`, `character/composition.ts`, and `components/Timeline.tsx`.
+`store.ts`, `character/composition.ts`, and
+`components/TimelineCharacterTracks.tsx`.

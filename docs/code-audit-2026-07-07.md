@@ -4,25 +4,35 @@ Full-repo review and audit: correctness, data safety, security, performance,
 memory/resource lifecycle, and maintainability. Companion to `AGENTS.md`
 (operational rules) and `CLAUDE.md` (architecture contract).
 
-**Scope & method.** Manual review of the store, persistence, boundary adapters,
+**Original scope & method.** Manual review of the store, persistence, boundary adapters,
 Vite middleware, Stage/Timeline/Inspector/CharacterEditor/Recorder, the Pixi
-character pipeline, export/import, and the current uncommitted working-tree
-diff. Verified against live runs: `npx vitest run` (60 files / 621 tests,
-green), `npx tsc --noEmit` (13 known baseline errors), `npx eslint .`
-(4 auto-fixable errors, 2 warnings).
+character pipeline, export/import, and the then-current uncommitted working-tree
+diff. At audit time, verification was 60 files / 621 tests green, with 13 known
+TypeScript errors and four formatting errors. Those gate failures were
+subsequently fixed; this paragraph is historical evidence, not the current
+baseline.
 
-**Tree state at audit time:** commit `ed41ff0` plus a ~1,400-line uncommitted
+**Historical tree state at audit time:** commit `ed41ff0` plus a ~1,400-line uncommitted
 diff (in-progress flexible-limb "mesh locks" feature; reviewed in §5).
 
-**Status update (2026-07-19):** H1–H4 and M1–M5 have been addressed. Project
+**Current status (2026-07-26):** H1–H4 and M1–M6 are addressed. Project
 editing now takes an origin-scoped Web Lock before load-time writes; Dashboard
 rename, duplicate, and delete use the same exclusive boundary and re-read the
 latest stored project after acquiring it. A second tab is refused while the
 first edits, then can open the project after the first saves and returns to the
-Dashboard. M6 and M8 are mitigated below; M7 and M9 remain open. L1-L3 and L6
-were addressed on 2026-07-22, and L8 was addressed on 2026-07-23. L4, L5, and
-part of L7 remain open; L9 was verified as a future-path guard rather than a
-currently reachable defect.
+Dashboard. M7's dedicated cleanup is complete for this cycle: its remaining
+controller-heavy files have explicit ownership, and Character Editor's safe
+document, resource, and interaction seams have been extracted without creating
+a second renderer or prop-dump façade. M8 is mitigated with an explicitly
+documented architectural remainder. M9 is reserved for the dedicated compatibility process in
+`docs/hyperframes-upgrade-safety-plan.md`. L1-L3, L6, and L8 are addressed; L4,
+L5, and part of L7 remain open. L9 is a future-path guard rather than a currently
+reachable defect.
+
+**Current validation (2026-07-26):** `npx vitest run` passes 84 files / 746
+tests; `npx tsc --noEmit`, `npm run lint`, `npm run build`, and
+`git diff --check` are clean. The build retains only the known dependency
+annotation and large-chunk warnings.
 
 Severity scale: **High** = data loss, security exposure, or broken gate.
 **Medium** = will bite users/devs under normal use as the app grows.
@@ -34,6 +44,10 @@ failure scenario so it can be re-verified or dismissed deliberately.
 ## 1. High
 
 ### H1. `loadProject` silently deletes projects that fail the shape guard
+
+**Addressed 2026-07-19:** incompatible project rows are preserved instead of
+deleted, and source-contract coverage prevents the destructive load path from
+returning.
 
 - **Where:** `src/studio/store.ts:1358-1366`
 - **What:** if `isCurrentProjectShape(storedProject)` returns false, the code
@@ -53,6 +67,10 @@ failure scenario so it can be re-verified or dismissed deliberately.
   migration plan.
 
 ### H2. Dev middleware is network-exposed with no origin checks
+
+**Addressed 2026-07-19:** Vite binds to `127.0.0.1` by default and the local API
+middleware rejects requests from untrusted origins. Integration tests lock the
+host/origin boundary.
 
 - **Where:** `vite.config.ts:20` (`server: { host: "::", port: 8080 }`) +
   `src/studio/hyperframes/render-plugin.ts:61-113` (no Origin/Host validation,
@@ -84,6 +102,10 @@ failure scenario so it can be re-verified or dismissed deliberately.
 
 ### H3. Render temp artifacts are never deleted from disk
 
+**Addressed 2026-07-19:** result eviction/expiry and failed renders clean staged
+directories, and stale temp roots are swept. Render-plugin tests cover the
+cleanup lifecycle.
+
 - **Where:** `src/studio/hyperframes/render-plugin.ts:29-54, 330-353`
 - **What:** every render/thumbnail stages the _entire_ project (all media
   blobs) into `tmpdir()/studio-boom-hyperframes/<uuid>/` and writes an MP4.
@@ -99,6 +121,9 @@ failure scenario so it can be re-verified or dismissed deliberately.
   would clean up after crashes.
 
 ### H4. Typecheck gate is broken by a known one-line hole
+
+**Addressed 2026-07-22:** `activeSceneId` is part of the state contract and
+`npx tsc --noEmit` is clean. The public contract now lives in `store-types.ts`.
 
 - **Where:** `src/studio/store.ts:1075` (interface), errors at 13 sites.
 - **What:** `activeSceneId` is used in state and in
@@ -118,6 +143,10 @@ failure scenario so it can be re-verified or dismissed deliberately.
 ## 2. Medium
 
 ### M1. Per-keystroke / per-tick commits flood undo and thrash the preview
+
+**Addressed 2026-07-19:** continuous speech/text controls checkpoint once and
+use history-disabled intermediate updates or local drafts, preserving useful
+undo granularity and avoiding unnecessary reload/rebuild churn.
 
 The store's `updateClip` checkpoints history and rebuilds on every call unless
 told otherwise. Three UI surfaces call it in tight loops with **no**
@@ -148,6 +177,9 @@ Timeline's speech drags (`onVoiceHistoryCheckpoint` + per-move
 
 ### M2. Failed Pixi preview init leaks the WebGL context
 
+**Addressed 2026-07-19:** failed preview initialization destroys the Pixi
+application and releases partially acquired texture leases before rethrowing.
+
 - **Where:** `src/studio/character/pixi-preview-runtime.ts`,
   `createPixiCharacterPreview` (~line 96).
 - **What:** `new Application()` + `await app.init()` succeed, then
@@ -169,6 +201,10 @@ Timeline's speech drags (`onVoiceHistoryCheckpoint` + per-move
   recreated too).
 
 ### M3. Stage srcdoc effect: comment and dependencies disagree; every save re-resolves
+
+**Addressed 2026-07-19:** the resolve effect is keyed to the rendered
+`project.hf` reference and reads the latest project from the store, so timestamp
+only saves do not trigger redundant source resolution.
 
 - **Where:** `src/studio/components/Stage.tsx:678-717`
 - **What:** the comment says the resolve effect is "Keyed on `project.hf`, NOT
@@ -194,6 +230,10 @@ Timeline's speech drags (`onVoiceHistoryCheckpoint` + per-move
 
 ### M4. `updateClip` is a monolith; interactive paths pay for everything
 
+**Addressed 2026-07-19:** character composition rebuilds are gated by
+`characterCompositionPatchRequiresRebuild`; position, timing placement,
+opacity, rotation, and other host-only changes keep the cheap HTML patch path.
+
 - **Where:** `src/studio/store.ts:2034-2125`
 - **What:** one function updates editor meta, mutates HTML, recomputes render
   track indices, **rebuilds the character composition**, and prunes assets —
@@ -209,6 +249,9 @@ Timeline's speech drags (`onVoiceHistoryCheckpoint` + per-move
   `history: false` bursts and run one rebuild on commit.
 
 ### M5. No multi-tab coordination — silent last-write-wins
+
+**Addressed 2026-07-19:** project editing and Dashboard mutations use the shared
+origin-scoped Web Lock boundary and re-read stored state after acquiring it.
 
 - **Where:** `src/studio/db.ts` / `store.ts` (absence); no `BroadcastChannel`,
   `navigator.locks`, or Dexie observability anywhere in `src/`.
@@ -265,8 +308,8 @@ and group-transform chrome now lives in `CharacterEditorOverlays.tsx`, while
 the transform, bounds, fitting, and constraint calculations are isolated in
 the unit-tested `character-editor-geometry.ts`. `CharacterEditor.tsx` fell from
 8,297 to 4,019 lines without changing the persisted character model or
-renderer. M7 remains open: the main component, recorder, store, Timeline, and
-Stage still need staged extractions rather than a single broad rewrite.
+renderer. At that checkpoint M7 remained open; the later staged reductions are
+recorded below.
 
 **Further reduced 2026-07-24:** Stage's editor-only SVG overlays moved into
 `StageOverlays.tsx`, motion-path derivation moved into
@@ -304,6 +347,18 @@ unit-tested helpers in `character-editor-preview.ts`. `CharacterEditor.tsx`
 fell from 4,019 to 3,340 lines without moving persistence, scene commands, or
 the persistent Pixi preview lifecycle.
 
+**Character Editor dedicated controller pass 2026-07-26:** undo/redo,
+autosave, and current-document refs moved into the tested
+`use-character-document.ts`; async alpha-bounds/mask work moved into
+`use-character-artwork-analysis.ts`; mouth-test timers, fetch cancellation,
+AudioContext/source teardown, and RAF ownership moved into
+`use-character-preview-controller.ts`. Canvas hit testing and group
+resize/rotation snapshots are now pure, unit-tested functions in
+`character-editor-interactions.ts`. All editor gestures use the shared
+`startWindowPointerDrag` lifecycle, including pointer-cancel and window-blur
+cleanup. `CharacterEditor.tsx` is now 2,994 lines; it retains scene-command and
+gesture orchestration rather than hiding the same coupling behind a giant hook.
+
 **Store reduced 2026-07-26:** pure project transformations moved out of the
 Zustand action module: asset-manifest upkeep is in `project-assets.ts`,
 editor-timeline projection is in `project-timeline.ts`, scene and nested source
@@ -312,9 +367,17 @@ rebuilds are in `character/project-compositions.ts`. `store.ts` fell from 3,154
 to 2,296 lines while retaining mutation ordering, history, save scheduling, and
 all Zustand state ownership.
 
-- **Where:** `CharacterEditor.tsx` **3,340 lines / 1 top-level component**,
-  with the main component spanning ~231–3,339 (≈3,109 lines).
-  `MotionPresetRecorder.tsx` 1,585, `store.ts` 2,296, `Timeline.tsx` 1,890,
+**Timeline and Store reduced again 2026-07-26:** composition-outline rows,
+visual stage-motion rows, and character Action/Expression/speech rows moved
+into `TimelineCompositionOutline.tsx`, `TimelineVisualMotionTracks.tsx`, and
+`TimelineCharacterTracks.tsx`. `Timeline.tsx` now owns seek/playback/store
+orchestration in 795 lines instead of 1,890. The complete public Zustand
+contract moved to the type-only `store-types.ts`; runtime actions, history, and
+autosave remain in `store.ts`, now 2,085 lines.
+
+- **Where:** `CharacterEditor.tsx` **2,994 lines / 1 top-level component**,
+  with the main component spanning ~235–2,993 (≈2,759 lines).
+  `MotionPresetRecorder.tsx` 1,585, `store.ts` 2,085, `Timeline.tsx` 795,
   `Stage.tsx` 1,617.
 - **What:** these five files are where nearly every regression this quarter
   will land. The source-contract integration tests (which `readFileSync`
@@ -329,6 +392,15 @@ all Zustand state ownership.
   well elsewhere — `stage-helpers.ts`, `transform-box.ts`). Update the
   integration tests' paths as sections move; the markers themselves are
   path-agnostic strings.
+
+**Current assessment:** M7 is substantially mitigated and accepted as a
+documented residual rather than an urgent cleanup queue. Timeline no longer
+qualifies as a monolithic controller. Recorder, Stage, and Store have clear
+ownership after their extractions. Character Editor's history, resource
+lifecycle, hit testing, and reusable transform math are isolated; its remaining
+scene-command/gesture orchestration is still substantial but cohesive. Split it
+further only alongside a feature that supplies a real boundary, not to chase a
+line-count target with a giant hook or callback interface.
 
 ### M8. Same-origin `srcdoc` means pasted blocks run with full app privileges
 
@@ -360,14 +432,14 @@ remains a larger postMessage-boundary project, not a safe local attribute change
 
 ### M9. The pinned dependency graph carries current security advisories
 
-**Partially addressed 2026-07-24; remaining upgrades require isolated
-compatibility passes.** Vite was upgraded from 7.3.2 to 7.3.6 within its
+**Partially addressed 2026-07-24; audit count re-verified 2026-07-26; remaining
+upgrades require isolated compatibility passes.** Vite was upgraded from 7.3.2 to 7.3.6 within its
 existing major, clearing both Vite advisories. `npm audit --omit=dev` now
 reports 13 vulnerable dependency entries (9 high, 3 moderate, 1 low,
 0 critical). Most arrive through the pinned HyperFrames CLI and engine family
 rather than Studio application code: Hono/node-server, `sharp`,
-`adm-zip`/ONNX Runtime, `protobufjs`, `js-yaml`, and `ws`. Vite's transitive
-`esbuild` also retains a Windows-specific development-server advisory.
+`adm-zip`/ONNX Runtime, `protobufjs`, `js-yaml`, `postcss`, and `ws`. Vite's
+transitive `esbuild` also retains a Windows-specific development-server advisory.
 
 - **Actual exposure:** Studio is bound to `127.0.0.1` and currently runs on
   Linux, which materially limits the Vite and Windows path-traversal findings.
@@ -380,7 +452,9 @@ rather than Studio application code: Hono/node-server, `sharp`,
   preview/export parity and MP4 rendering. Handle the remaining transitive
   packages through those owners where possible. Do not use a blanket
   `npm audit fix`; it cannot resolve the current HyperFrames tree safely and
-  would obscure which runtime contract changed.
+  would obscure which runtime contract changed. The isolated research,
+  automated gate, adapter audit, and manual render matrix are specified in
+  `docs/hyperframes-upgrade-safety-plan.md`.
 
 ---
 
@@ -454,7 +528,11 @@ rather than Studio application code: Hono/node-server, `sharp`,
   semantics, late-resolution destroy) is careful — the gap is only the init
   _failure_ path (M2).
 
-## 5. The uncommitted working-tree diff (reviewed as of this audit)
+## 5. Historical uncommitted diff at audit time
+
+This section is retained as audit history; it is no longer the working-tree
+state. The flexible-limb work was committed and subsequently exercised through
+the staged mesh debugging and parity passes.
 
 13 files, ~1,430 insertions: an in-progress flexible-limb "mesh locks"
 feature (locks pin part of a limb path; attachments follow the deformed path).
@@ -467,22 +545,19 @@ feature (locks pin part of a limb path; attachments follow the deformed path).
   functions are correctly self-contained (only `Math`/`Number`).
 - New tests came with it (`mesh-deform.test.ts` +27, recorder integration
   +41) and the full suite is green with the diff applied.
-- **Risk:** ~1,400 lines of the most fragile subsystem sitting uncommitted.
-  Recommend committing (even to a branch) promptly; an accidental
-  `git checkout .` erases days of work. Note the recorder diff drops
-  `TransformMoveable` usage from `MotionPresetRecorder.tsx` — confirm that's
-  intentional scope (the shared-box unification was a deliberate 2026-07-06
-  decision) before it lands.
+- **Historical risk:** ~1,400 lines of the most fragile subsystem were
+  uncommitted at the time. That risk is closed; current work should still be
+  committed at each human-approved checkpoint.
 
-## 6. Suggested fix order
+## 6. Current remaining order
 
-1. **H1** quarantine-not-delete (small diff, removes the standing data-loss
-   trap) — then **H4** the one-line `activeSceneId` fix to restore the tsc
-   gate.
-2. **H3** temp-dir cleanup + **H2** bind `127.0.0.1` by default (both are
-   contained inside `render-plugin.ts`/`vite.config.ts`).
-3. **M1** commit-granularity fixes (text draft state, slider options) — the
-   biggest day-to-day UX win, patterns already exist in-repo.
-4. **M2** Pixi init try/catch (three lines, prevents the scariest-looking
-   symptom).
-5. **M3** srcdoc deps cleanup, then the rest of Medium as capacity allows.
+1. Manually verify and commit the final M7 Character Editor/controller checkpoint.
+2. Run the HyperFrames-family upgrade as a dedicated compatibility project
+   following `hyperframes-upgrade-safety-plan.md`; do not mix it with product
+   work.
+3. Add periodic dead-code/duplicate-export review for L4 without weakening the
+   normal build gates or adding an unapproved dependency.
+4. Decide explicitly whether the two unreferenced `character-previews/` assets
+   are examples worth keeping; do not delete user-facing assets speculatively.
+5. Treat the remaining M8 same-origin Stage boundary as an architectural
+   project requiring a postMessage player bridge, not a cleanup patch.

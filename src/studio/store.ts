@@ -6,14 +6,10 @@ import { db, deleteMediaIfUnused, requireCurrentProjectShape, revokeAllMediaUrls
 import type {
   AnyClip,
   CompositionClip,
-  CharacterPreset,
-  ClipKeyframeProperty,
   ClipKeyframeSelection,
   ClipEditorMeta,
   HyperFramesProject,
-  MediaAsset,
   MediaClip,
-  MotionPreset,
   Project,
   ProjectEditorMeta,
   TextClip,
@@ -41,8 +37,6 @@ import {
   storedValuesFromDisplayValues,
   updateKeyframeProperty,
   upsertKeyframeProperty,
-  type ClipKeyframeDisplayValues,
-  type ClipMotionEndpoint,
 } from "./hyperframes/keyframes";
 import {
   createRootCompositionHtml,
@@ -93,9 +87,21 @@ import {
   syncProjectRenderTrackIndices,
   type LayerPlacement,
 } from "./project-timeline";
+import type {
+  ClipKeyframeValuePatch,
+  HistoryEntry,
+  ProjectMutationOptions,
+  StudioState,
+} from "./store-types";
 
 export { characterCompositionPatchRequiresRebuild } from "./character/project-compositions";
 export { syncProjectRenderTrackIndices } from "./project-timeline";
+export type {
+  ClipKeyframeValuePatch,
+  ProjectMutationOptions,
+  SaveStatus,
+  StudioState,
+} from "./store-types";
 
 // ─── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -207,221 +213,6 @@ function createDefaultTracks(): TrackMeta[] {
 }
 
 // ─── Store ────────────────────────────────────────────────────────────────────
-
-type ModalState = null | { type: "character-editor"; characterId: string } | { type: "presets" };
-
-interface HistoryEntry {
-  project: Project;
-  selectedClipId: string | null;
-  selectedClipIds: string[];
-  selectedKeyframe: ClipKeyframeSelection | null;
-  activeSceneId: string | null;
-}
-
-export interface ProjectMutationOptions {
-  history?: boolean;
-}
-
-export type SaveStatus = "saved" | "saving" | "error";
-
-export type ClipKeyframeValuePatch = ClipKeyframeDisplayValues & {
-  ease?: string;
-};
-
-interface StudioState {
-  project: Project | null;
-  tracks: TrackMeta[];
-
-  // Preloaded reference data (for character editor, asset gallery)
-  characters: Map<string, CharacterPreset>;
-  motionPresets: Map<string, MotionPreset>;
-  mediaAssets: Map<string, MediaAsset>;
-
-  /** The primary/active clip — drives the single-clip Inspector and legacy single-select UI. */
-  selectedClipId: string | null;
-  /** The full multi-selection set (marquee / shift-click). Always contains selectedClipId when non-empty. */
-  selectedClipIds: string[];
-  selectedKeyframe: ClipKeyframeSelection | null;
-  activeSceneId: string | null;
-  /** Speech selected inside the character Speech inspector tab. */
-  selectedSpeechId: string | null;
-  /** Bumped to request the inspector jump to the Speech tab (e.g. from the timeline). */
-  speechFocusRequest: number;
-  zoom: number;
-  historyPast: HistoryEntry[];
-  historyFuture: HistoryEntry[];
-  saveStatus: SaveStatus;
-  lastSavedAt: number | null;
-  saveError: string | null;
-
-  currentModal: ModalState;
-  openModal: (modal: Exclude<ModalState, null>) => void;
-  closeModal: () => void;
-
-  loadProject: (id: string) => Promise<void>;
-  newProject: () => Promise<void>;
-  saveProject: (expectedGeneration?: number) => Promise<void>;
-  closeProject: () => Promise<void>;
-  refreshCharacterCompositions: (options?: ProjectMutationOptions) => Project | null;
-
-  selectClip: (id: string | null) => void;
-  /** Replace the multi-selection with `ids`; the last id becomes the primary/active clip. */
-  selectClips: (ids: string[]) => void;
-  /** Add/remove a clip from the multi-selection (shift/⌘-click); it becomes primary when added. */
-  toggleClipInSelection: (id: string) => void;
-  /** Clear the whole selection. */
-  clearSelection: () => void;
-  setActiveScene: (sceneId: string | null) => void;
-  selectKeyframe: (selection: ClipKeyframeSelection | null) => void;
-  /** Select a speech within the currently open character Speech tab. */
-  selectSpeech: (speechId: string | null) => void;
-  /** Open a character's Speech tab focused on a specific speech (timeline shortcut). */
-  openSpeechSettings: (clipId: string, speechId: string) => void;
-  checkpointHistory: () => void;
-  undo: () => void;
-  redo: () => void;
-
-  addClip: (clip: AnyClip) => void;
-  addScene: () => void;
-  duplicateScene: (sceneId: string) => void;
-  removeScene: (sceneId: string) => void;
-  moveScene: (sceneId: string, toIndex: number) => void;
-  resizeScene: (sceneId: string, duration: number, options?: ProjectMutationOptions) => void;
-  updateClip: (id: string, patch: Partial<AnyClip>, options?: ProjectMutationOptions) => void;
-  /** Append an existing audio asset (library voice) as a new speech on a character
-   *  clip, after the last one. Lip-sync data is reused from the asset — no regen. */
-  attachVoiceToCharacter: (clipId: string, audioId: string) => void;
-  /** Move a speech to a new start time (s) within the character clip. */
-  moveSpeech: (
-    clipId: string,
-    speechId: string,
-    start: number,
-    options?: ProjectMutationOptions,
-  ) => void;
-  /** Set a speech's playback volume (0–1). */
-  setSpeechVolume: (
-    clipId: string,
-    speechId: string,
-    volume: number,
-    options?: ProjectMutationOptions,
-  ) => void;
-  /** Trim a speech: in-point (`mediaStartTime`), trimmed `duration`, and/or `start`,
-   *  bounded by the source audio length and the host clip. */
-  trimSpeech: (
-    clipId: string,
-    speechId: string,
-    patch: { start?: number; mediaStartTime?: number; duration?: number },
-    options?: ProjectMutationOptions,
-  ) => void;
-  /** Remove a speech from a character clip (keeps the audio in the library). */
-  removeSpeech: (clipId: string, speechId: string) => void;
-  /** Rebuild every character clip whose speeches reference this audio asset (used
-   *  after the asset's visemes change). */
-  rebuildClipsUsingAudio: (audioId: string) => void;
-  removeClip: (id: string) => void;
-  bringClipForward: (id: string) => void;
-  sendClipBackward: (id: string) => void;
-  bringClipToFront: (id: string) => void;
-  sendClipToBack: (id: string) => void;
-  /** Toggle a clip's editor lock. Locked clips ignore canvas clicks but stay list-selectable. */
-  toggleClipLock: (id: string) => void;
-  /** Lock or unlock an entire editor track; cascades to every clip on that track. */
-  setTrackLock: (trackIndex: number, locked: boolean) => void;
-  /** True when a clip is locked directly or inherits lock from its track. */
-  isClipLocked: (id: string) => boolean;
-  upsertClipKeyframe: (
-    clipId: string,
-    property: ClipKeyframeProperty,
-    time: number,
-    values: ClipKeyframeValuePatch,
-    options?: ProjectMutationOptions,
-  ) => string | null;
-  updateClipKeyframe: (
-    selection: ClipKeyframeSelection,
-    patch: ClipKeyframeValuePatch,
-    options?: ProjectMutationOptions,
-  ) => void;
-  moveClipKeyframe: (
-    selection: ClipKeyframeSelection,
-    time: number,
-    options?: ProjectMutationOptions,
-  ) => void;
-  removeClipKeyframe: (selection: ClipKeyframeSelection, options?: ProjectMutationOptions) => void;
-  addClipMotionStep: (
-    clipId: string,
-    time: number,
-    options?: ProjectMutationOptions,
-  ) => ClipKeyframeSelection | null;
-  addClipMotionCheckpoint: (
-    clipId: string,
-    motionId: string,
-    time: number,
-    options?: ProjectMutationOptions,
-  ) => ClipKeyframeSelection | null;
-  moveClipMotionCheckpoint: (
-    clipId: string,
-    motionId: string,
-    checkpointId: string,
-    time: number,
-    options?: ProjectMutationOptions,
-  ) => ClipKeyframeSelection | null;
-  removeClipMotionCheckpoint: (
-    clipId: string,
-    motionId: string,
-    checkpointId: string,
-    options?: ProjectMutationOptions,
-  ) => void;
-  moveClipMotionStep: (
-    clipId: string,
-    motionId: string,
-    patch: { startTime?: number; endTime?: number; selectEndpoint?: ClipMotionEndpoint },
-    options?: ProjectMutationOptions,
-  ) => ClipKeyframeSelection | null;
-  renameClipMotionStep: (
-    clipId: string,
-    motionId: string,
-    name: string,
-    options?: ProjectMutationOptions,
-  ) => void;
-  setClipMotionStepPathStyle: (
-    clipId: string,
-    motionId: string,
-    pathStyle: "linear" | "smooth",
-    options?: ProjectMutationOptions,
-  ) => void;
-  removeClipMotionStep: (
-    clipId: string,
-    motionId: string,
-    options?: ProjectMutationOptions,
-  ) => void;
-
-  /** Directly replace rootHtml (used by Stage's useElementPicker onSyncFiles). */
-  updateRootHtml: (html: string, options?: ProjectMutationOptions) => void;
-  updateCompositionHtml: (
-    compositionId: string,
-    html: string,
-    options?: ProjectMutationOptions,
-  ) => void;
-  repairTimelineLanes: () => boolean;
-
-  addMediaToTimeline: (asset: MediaAsset, trackIndex?: number, insertAtTime?: number) => void;
-  registerMediaAsset: (asset: MediaAsset) => void;
-  syncMediaAssets: (assets: MediaAsset[]) => void;
-  registerCharacterPreset: (character: CharacterPreset) => void;
-  unregisterCharacterPreset: (id: string) => void;
-  syncCharacterPresets: (characters: CharacterPreset[]) => void;
-  registerMotionPreset: (preset: MotionPreset) => void;
-  syncMotionPresets: (presets: MotionPreset[]) => void;
-
-  addLane: (trackIndex: number) => void;
-  removeLane: (trackIndex: number, laneIndex: number) => void;
-
-  setProjectMeta: (
-    patch: Partial<Pick<HyperFramesProject, "name" | "width" | "height" | "fps" | "duration">>,
-    options?: ProjectMutationOptions,
-  ) => void;
-  setZoom: (z: number) => void;
-}
 
 const HISTORY_LIMIT = 50;
 let saveTimer: number | undefined;
@@ -2289,8 +2080,6 @@ export const useStudio = create<StudioState>((set, get) => ({
     set({ zoom: Math.max(10, Math.min(400, z)) });
   },
 }));
-
-export type { StudioState };
 
 // Re-export Track for files that still import it from store
 export type { Track };

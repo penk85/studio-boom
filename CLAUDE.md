@@ -333,33 +333,42 @@ ClipEditorMeta {
 
 ## Important files
 
-| File                                             | Role                                                                                                                                           |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/studio/types.ts`                            | `Project`, `HFAsset`, `ProjectEditorMeta`, `ClipEditorMeta`, `deriveEditorClips`                                                               |
-| `src/studio/store.ts`                            | Zustand store: edit actions, HTML mutation, UI state                                                                                           |
-| `src/studio/db.ts`                               | Dexie: project and blob persistence                                                                                                            |
-| `src/studio/character/`                          | Character builder utilities and rig definitions                                                                                                |
-| `src/studio/lipsync/elevenlabs.ts`               | Speech generation/import/alignment helpers; saves reusable audio media and rebuilds character speech                                           |
-| `src/studio/lipsync/tts.functions.ts`            | Browser-side calls to local `/api/elevenlabs/*` endpoints                                                                                      |
-| `src/studio/hyperframes/render-plugin.ts`        | Local render/preview-bundle middleware plus server-side ElevenLabs proxy                                                                       |
-| `src/studio/components/Stage.tsx`                | HyperFrames player iframe via `srcdoc`, `resolveIframe`, `useElementPicker`, editor chrome only                                                |
-| `src/studio/components/Timeline.tsx`             | Timeline UI; `PlayerControls`                                                                                                                  |
-| `src/studio/components/VoiceLipSyncPanel.tsx`    | Character Speech inspector tab: voice library, TTS, upload, forced alignment, speech placement                                                 |
-| `src/studio/components/Library.tsx`              | Media, text presets, characters, action/expression presets, and custom HyperFrames block import                                                |
-| `src/studio/Studio.tsx`                          | Calls `useTimelinePlayer()` once; distributes `iframeRef`, `togglePlay`, `seek`                                                                |
-| `src/studio/hyperframes/assets.ts`               | Generic `project.hf.assets` registration/pruning helpers                                                                                       |
-| `src/studio/hyperframes/html.ts`                 | Parser adapter for current `@hyperframes/core` boundary behavior                                                                               |
-| `src/studio/hyperframes/native.ts`               | Native HTML normalization boundary for root/stage/viewport metadata and export parity                                                          |
-| `src/studio/hyperframes/player-editing.ts`       | Live player edit boundary for real iframe elements during stage manipulation                                                                   |
-| `src/studio/hyperframes/root-composition.ts`     | Root composition creation and root metadata updates                                                                                            |
-| `src/studio/character/composition.ts`            | Character composition entry point; builds the Pixi-backed HyperFrames character source                                                         |
-| `src/studio/character/scene.ts`                  | Renderer-neutral character scene graph: bones, slots, parts, assets, pivots, placements, and motion targets                                    |
-| `src/studio/character/timeline-scene.ts`         | Renderer-neutral character timeline payload consumed by Pixi composition source                                                                |
-| `src/studio/character/pixi-composition.ts`       | Pixi-backed character composition builder; registers a synchronous HyperFrames timeline and Pixi readiness gate                                |
-| `src/studio/character/pixi-preview-runtime.ts`   | Shared editor-side Pixi runtime (same semantics as the composition script); drives `PixiCharacterPreview` in the editor and recorder           |
-| `src/studio/character/mesh-deform.ts`            | Legacy Plane-bend math for old saved flexible parts; embedded only for compatibility with legacy `mode: "bend"` mesh nodes                     |
-| `src/studio/presets/action-terminology.ts`       | Shared Action/Expression labels, lanes, regions, exclusivity, and role-to-region rules                                                         |
-| `docs/ai-generated-hyperframes-clips-roadmap.md` | Roadmap for AI-generated clips, source-visible custom HyperFrames blocks, native text/composition clip support, and nested composition editing |
+| File                                                       | Role                                                                                                                                                              |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/studio/types.ts`                                      | `Project`, `HFAsset`, `ProjectEditorMeta`, `ClipEditorMeta`, `deriveEditorClips`                                                                                  |
+| `src/studio/store.ts`                                      | Zustand runtime: edit actions, history, save scheduling, and UI state ownership                                                                                   |
+| `src/studio/store-types.ts`                                | Public Zustand state/action type contract                                                                                                                         |
+| `src/studio/project-assets.ts`                             | Canonical asset-manifest registration and pruning                                                                                                                 |
+| `src/studio/project-timeline.ts`                           | Pure editor-lane/render-track and timeline-element projection                                                                                                     |
+| `src/studio/db.ts`                                         | Dexie: project and blob persistence                                                                                                                               |
+| `src/studio/character/`                                    | Character builder utilities and rig definitions                                                                                                                   |
+| `src/studio/lipsync/elevenlabs.ts`                         | Speech generation/import/alignment helpers; saves reusable audio media and rebuilds character speech                                                              |
+| `src/studio/lipsync/tts.functions.ts`                      | Browser-side calls to local `/api/elevenlabs/*` endpoints                                                                                                         |
+| `src/studio/hyperframes/render-plugin.ts`                  | Local render/preview-bundle middleware plus server-side ElevenLabs proxy                                                                                          |
+| `src/studio/components/Stage.tsx`                          | HyperFrames player iframe via `srcdoc`, `resolveIframe`, `useElementPicker`, editor chrome only                                                                   |
+| `src/studio/components/Timeline.tsx`                       | Timeline state, seek/playback orchestration, and `PlayerControls`; expanded rows live in focused `Timeline*Tracks.tsx` siblings                                   |
+| `src/studio/components/VoiceLipSyncPanel.tsx`              | Character Speech inspector tab: voice library, TTS, upload, forced alignment, speech placement                                                                    |
+| `src/studio/components/Library.tsx`                        | Media, text presets, characters, action/expression presets, and custom HyperFrames block import                                                                   |
+| `src/studio/Studio.tsx`                                    | Calls `useTimelinePlayer()` once; distributes `iframeRef`, `togglePlay`, `seek`                                                                                   |
+| `src/studio/hyperframes/assets.ts`                         | Generic `project.hf.assets` registration/pruning helpers                                                                                                          |
+| `src/studio/hyperframes/html.ts`                           | Parser adapter for current `@hyperframes/core` boundary behavior                                                                                                  |
+| `src/studio/hyperframes/native.ts`                         | Native HTML normalization boundary for root/stage/viewport metadata and export parity                                                                             |
+| `src/studio/hyperframes/player-editing.ts`                 | Live player edit boundary for real iframe elements during stage manipulation                                                                                      |
+| `src/studio/hyperframes/project-source.ts`                 | Scene-aware HTML commits, composition validation/cloning, and scene source synchronization                                                                        |
+| `src/studio/hyperframes/root-composition.ts`               | Root composition creation and root metadata updates                                                                                                               |
+| `src/studio/character/composition.ts`                      | Character composition entry point; builds the Pixi-backed HyperFrames character source                                                                            |
+| `src/studio/character/CharacterEditor.tsx`                 | Character authoring orchestrator; persistence/resource lifecycles and pure pointer calculations live in focused `use-character-*` / `character-editor-*` siblings |
+| `src/studio/character/scene.ts`                            | Renderer-neutral character scene graph: bones, slots, parts, assets, pivots, placements, and motion targets                                                       |
+| `src/studio/character/timeline-scene.ts`                   | Renderer-neutral character timeline payload consumed by Pixi composition source                                                                                   |
+| `src/studio/character/pixi-composition.ts`                 | Pixi-backed character composition builder; registers a synchronous HyperFrames timeline and Pixi readiness gate                                                   |
+| `src/studio/character/pixi-preview-runtime.ts`             | Shared editor-side Pixi runtime (same semantics as the composition script); drives `PixiCharacterPreview` in the editor and recorder                              |
+| `src/studio/character/use-character-document.ts`           | Character Editor document refs, bounded undo/redo, keyboard history, debounced save, and explicit save-now lifecycle                                              |
+| `src/studio/character/use-character-preview-controller.ts` | Character Editor preview timing plus cancellable Web Audio/RAF mouth-test lifecycle                                                                               |
+| `src/studio/character/use-character-artwork-analysis.ts`   | Async alpha-bounds backfill and cached pixel hit masks for Character Editor artwork                                                                               |
+| `src/studio/character/character-editor-interactions.ts`    | Pure canvas hit testing and group resize/rotate snapshot calculations                                                                                             |
+| `src/studio/character/mesh-deform.ts`                      | Legacy Plane-bend math for old saved flexible parts; embedded only for compatibility with legacy `mode: "bend"` mesh nodes                                        |
+| `src/studio/presets/action-terminology.ts`                 | Shared Action/Expression labels, lanes, regions, exclusivity, and role-to-region rules                                                                            |
+| `docs/ai-generated-hyperframes-clips-roadmap.md`           | Roadmap for AI-generated clips, source-visible custom HyperFrames blocks, native text/composition clip support, and nested composition editing                    |
 
 ---
 
@@ -378,7 +387,9 @@ ClipEditorMeta {
 - Never create a second `useTimelinePlayer()` call. It is called once in `Studio.tsx`
   and the returned `iframeRef` / `togglePlay` / `seek` are passed as props.
 - Always use `@hyperframes/core` functions to mutate HTML — never string-splice.
-- `@hyperframes/core` does not load in raw Node.js ESM (extensionless imports). Mock
-  it in Vitest tests using `vi.mock('@hyperframes/core', ...)`.
+- `@hyperframes/core` does not load in raw Node.js ESM because of extensionless
+  imports. Vitest inlines the HyperFrames packages through Vite, so real-core
+  tests are canonical. Mock core only where a test intentionally counts boundary
+  calls (the store suite is the existing example).
 - Keep provider API keys server-side. ElevenLabs uses `ELEVENLABS_API_KEY` through
   the local Vite middleware; do not read it from client code or a `VITE_` variable.

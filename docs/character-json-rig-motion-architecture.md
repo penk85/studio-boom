@@ -930,8 +930,9 @@ The incorrect shape double-counts once the head is nested under the body.
 - Action/Expression JSON validates target resolution, keyframe values, variants,
   regions, and per-action bounds overrides.
 - Pixi character source stages identically for preview and export, packages local
-  Pixi runtime/assets, registers a synchronous timeline, and stays mesh-free by
-  default.
+  Pixi runtime/assets, registers a synchronous timeline, keeps ordinary parts
+  rigid by default, and renders opt-in `limb-path`/legacy `bend` meshes through
+  the same stored composition source.
 - A semantic Action resolves correctly for `front` and fails with a clear message
   for an unmapped side angle.
 - Built-in Jump moves the head exactly once through parent inheritance.

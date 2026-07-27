@@ -25,7 +25,6 @@ import {
   claimSharedPartsForAngles,
   partAvailableForAngle,
   removePartFromAngle,
-  saveCharacter,
   variantKeyForPart,
   variantLabelForPart,
 } from "./character-utils";
@@ -52,15 +51,11 @@ import {
   seedDefaultPosePreset,
 } from "./pose-presets";
 import {
-  alphaMaskContains,
-  createAlphaHitMaskFromBlob,
   editorControlBounds,
   editorSelectionBounds,
   localAlphaBounds,
   measureAlphaBoundsFromBlob,
   pivotForPart,
-  pointInEditorHitBounds,
-  type AlphaHitMask,
 } from "./alpha-bounds";
 import type {
   CharacterAngle,
@@ -70,7 +65,6 @@ import type {
   CharacterPreset,
   CharacterSlot,
   ID,
-  MouthViseme,
   PartRole,
 } from "../types";
 import {
@@ -153,6 +147,18 @@ import {
   unionSelectionBounds,
   type ResizeCorner,
 } from "./character-editor-geometry";
+import {
+  hitTestCharacterEditorParts,
+  resizeAnchorForCorner,
+  resizeScaleForPointerDelta,
+  restoreCharacterPartsFromSnapshot,
+  rotateCharacterPartsFromSnapshot,
+  scaleCharacterPartsFromSnapshot,
+  snapshotCharacterPartTransforms,
+} from "./character-editor-interactions";
+import { useCharacterPreviewController } from "./use-character-preview-controller";
+import { useCharacterDocument } from "./use-character-document";
+import { useCharacterArtworkAnalysis } from "./use-character-artwork-analysis";
 
 interface Props {
   characterId: string;
@@ -200,8 +206,6 @@ function renderBlockingRigFixForIssue(
   };
 }
 
-const HISTORY_LIMIT = 60;
-
 // Lip-sync test clips: drop audio files into ./lipsync-samples and they appear
 // automatically as test buttons on the mouth group inspector. (Vite glob — no
 // manifest to edit.)
@@ -230,7 +234,6 @@ interface RangeEdit {
 }
 export function CharacterEditor({ characterId, onClose }: Props) {
   const mediaAssets = useStudio((state) => state.mediaAssets);
-  const [doc, setDoc] = useState<CharacterPreset | null>(null);
   const [selectedPartId, setSelectedPartId] = useState<ID | null>(null);
   const [selectedSlotId, setSelectedSlotId] = useState<ID | null>(null);
   const [selectedBoneId, setSelectedBoneId] = useState<ID | null>(null);
@@ -253,30 +256,44 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   const [reachDraft, setReachDraft] = useState<{ x: number; y: number }[] | null>(null);
   // Live rotation reach (min/max degrees from rest) while twisting the layer.
   const [rotDraft, setRotDraft] = useState<{ min: number; max: number } | null>(null);
-  const [preview, setPreview] = useState<PreviewState | null>(null);
   // True while a layer is actively being dragged / resized / rotated, so the other layers
   // can blur to keep focus on it. Set at gesture start; cleared globally on pointerup below.
   const [interacting, setInteracting] = useState(false);
-  const [previewTick, setPreviewTick] = useState(0);
   const [status, setStatus] = useState<string | null>(null);
-  const [mouthTestPlaying, setMouthTestPlaying] = useState(false);
-  const [historyPast, setHistoryPast] = useState<CharacterPreset[]>([]);
-  const [historyFuture, setHistoryFuture] = useState<CharacterPreset[]>([]);
+  const {
+    doc,
+    setDoc,
+    saveState,
+    canUndo,
+    canRedo,
+    pushUndoSnapshot,
+    resetHistory,
+    undoCharacterHistory,
+    redoCharacterHistory,
+    saveNow,
+  } = useCharacterDocument({
+    onRestore: (next) => {
+      setSelectedPartId((id) => (id && next.parts.some((part) => part.id === id) ? id : null));
+      setSelectedSlotId((id) => (id && findCharacterSlot(next, id) ? id : null));
+      setSelectedBoneId((id) =>
+        id && normalizeCharacterRig(next).bones.some((bone) => bone.id === id) ? id : null,
+      );
+    },
+    onStatus: setStatus,
+  });
+  const alphaMaskForPart = useCharacterArtworkAnalysis(doc, setDoc);
+  const {
+    preview,
+    setPreview,
+    previewTick,
+    mouthTestPlaying,
+    playMouthClip: playMouthPreviewClip,
+    stopMouthTestAudio,
+  } = useCharacterPreviewController({ onError: setStatus });
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
-  const mouthAudioCtxRef = useRef<AudioContext | null>(null);
-  const mouthAudioRafRef = useRef<number | null>(null);
-  const alphaBackfillRef = useRef<Set<string>>(new Set());
-  const alphaMaskRef = useRef<Map<string, AlphaHitMask>>(new Map());
-  const alphaMaskLoadingRef = useRef<Set<string>>(new Set());
   // Remembers the last canvas click so a repeat click in the same spot drills the z-stack.
   const canvasLastPickRef = useRef<DrillPick | null>(null);
-  const docRef = useRef<CharacterPreset | null>(null);
-  const historyPastRef = useRef<CharacterPreset[]>([]);
-  const historyFutureRef = useRef<CharacterPreset[]>([]);
-  const undoHistoryRef = useRef<() => void>(() => {});
-  const redoHistoryRef = useRef<() => void>(() => {});
-  const [, setAlphaMaskTick] = useState(0);
 
   // Leave reach-edit focus mode whenever the selection changes.
   useEffect(() => {
@@ -305,35 +322,9 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       setVariantPreview(defaultPose ? applyPosePreset(seeded, defaultPose) : {});
       setActivePoseId(defaultPose?.id ?? null);
       setEditorPhase(seeded.parts.length === 0 ? "build" : "pose");
-      setHistoryPast([]);
-      setHistoryFuture([]);
+      resetHistory();
     })();
-  }, [characterId]);
-
-  useEffect(() => {
-    docRef.current = doc;
-  }, [doc]);
-
-  useEffect(() => {
-    historyPastRef.current = historyPast;
-  }, [historyPast]);
-
-  useEffect(() => {
-    historyFutureRef.current = historyFuture;
-  }, [historyFuture]);
-
-  const [saveState, setSaveState] = useState<"saved" | "saving">("saved");
-  useEffect(() => {
-    if (!doc) return;
-    setSaveState("saving");
-    const t = window.setTimeout(() => {
-      void saveCharacter(doc).then((saved) => {
-        useStudio.getState().registerCharacterPreset(saved);
-        setSaveState("saved");
-      });
-    }, 450);
-    return () => window.clearTimeout(t);
-  }, [doc]);
+  }, [characterId, resetHistory, setDoc]);
 
   // Per-part variant key problems (near-miss pairing, id-fallback keys) surfaced as chips/dots.
   const variantKeyIssues = useMemo(
@@ -686,120 +677,6 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     return () => ro.disconnect();
   }, [doc]);
 
-  useEffect(() => {
-    if (!doc) return;
-    const missing = doc.parts.filter(
-      (part) => !part.alphaBounds && !alphaBackfillRef.current.has(part.id),
-    );
-    if (missing.length === 0) return;
-    for (const part of missing) alphaBackfillRef.current.add(part.id);
-    let alive = true;
-    void (async () => {
-      const measured = await Promise.all(
-        missing.map(async (part) => {
-          const [blobRow, media] = await Promise.all([
-            db.mediaBlobs.get(part.mediaId),
-            db.media.get(part.mediaId),
-          ]);
-          if (!blobRow?.blob) return null;
-          const alphaBounds = await measureAlphaBoundsFromBlob(
-            blobRow.blob,
-            media?.width ?? part.width,
-            media?.height ?? part.height,
-          );
-          return { id: part.id, alphaBounds };
-        }),
-      );
-      const patches = measured.filter(Boolean) as NonNullable<(typeof measured)[number]>[];
-      if (!alive || patches.length === 0) return;
-      setDoc((current) => {
-        if (!current) return current;
-        const patchMap = new Map(patches.map((patch) => [patch.id, patch.alphaBounds] as const));
-        return {
-          ...current,
-          parts: current.parts.map((part) => {
-            const alphaBounds = patchMap.get(part.id);
-            if (!alphaBounds || part.alphaBounds) return part;
-            return normalizePartPatch({ ...part, alphaBounds }, { alphaBounds });
-          }),
-          updatedAt: Date.now(),
-        };
-      });
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [doc]);
-
-  useEffect(() => {
-    if (!doc) return;
-    const missingMasks = doc.parts.filter(
-      (part) => !alphaMaskRef.current.has(part.id) && !alphaMaskLoadingRef.current.has(part.id),
-    );
-    if (missingMasks.length === 0) return;
-    for (const part of missingMasks) alphaMaskLoadingRef.current.add(part.id);
-    let alive = true;
-    void (async () => {
-      const masks = await Promise.all(
-        missingMasks.map(async (part) => {
-          const [blobRow, media] = await Promise.all([
-            db.mediaBlobs.get(part.mediaId),
-            db.media.get(part.mediaId),
-          ]);
-          if (!blobRow?.blob) return null;
-          const mask = await createAlphaHitMaskFromBlob(
-            blobRow.blob,
-            media?.width ?? part.width,
-            media?.height ?? part.height,
-          );
-          return mask ? { id: part.id, mask } : null;
-        }),
-      );
-      if (!alive) return;
-      for (const item of masks) {
-        if (item) alphaMaskRef.current.set(item.id, item.mask);
-      }
-      setAlphaMaskTick((tick) => tick + 1);
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [doc]);
-
-  useEffect(() => {
-    if (!preview) return;
-    // Audio-driven tests update the preview each frame and clear it on playback end.
-    if (preview.audioDriven) return;
-    const t = window.setTimeout(() => setPreview(null), preview.durationMs);
-    const interval = window.setInterval(() => setPreviewTick((n) => n + 1), 50);
-    return () => {
-      window.clearTimeout(t);
-      window.clearInterval(interval);
-    };
-  }, [preview]);
-
-  undoHistoryRef.current = undoCharacterHistory;
-  redoHistoryRef.current = redoCharacterHistory;
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
-      const key = event.key.toLowerCase();
-      if (key === "z" && event.shiftKey) {
-        event.preventDefault();
-        redoHistoryRef.current();
-      } else if (key === "z") {
-        event.preventDefault();
-        undoHistoryRef.current();
-      } else if (key === "y") {
-        event.preventDefault();
-        redoHistoryRef.current();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
-
   // Any pointer release ends the active drag/resize/rotate — clear the focus-blur flag once,
   // centrally, so each gesture only has to switch it on.
   useEffect(() => {
@@ -813,45 +690,6 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   }, []);
 
   const editorRuntime = useMemo(() => (doc ? buildCharacterRuntime(doc) : null), [doc]);
-
-  function restoreCharacterSnapshot(next: CharacterPreset) {
-    setDoc(next);
-    setSelectedPartId((id) => (id && next.parts.some((part) => part.id === id) ? id : null));
-    setSelectedSlotId((id) => (id && findCharacterSlot(next, id) ? id : null));
-    setSelectedBoneId((id) =>
-      id && normalizeCharacterRig(next).bones.some((bone) => bone.id === id) ? id : null,
-    );
-  }
-
-  function undoCharacterHistory() {
-    const current = docRef.current;
-    const past = historyPastRef.current;
-    if (!current || past.length === 0) return;
-    const previous = past[past.length - 1];
-    const nextPast = past.slice(0, -1);
-    const nextFuture = [current, ...historyFutureRef.current].slice(0, HISTORY_LIMIT);
-    setHistoryPast(nextPast);
-    setHistoryFuture(nextFuture);
-    historyPastRef.current = nextPast;
-    historyFutureRef.current = nextFuture;
-    restoreCharacterSnapshot(previous);
-    setStatus("Undone");
-  }
-
-  function redoCharacterHistory() {
-    const current = docRef.current;
-    const future = historyFutureRef.current;
-    if (!current || future.length === 0) return;
-    const next = future[0];
-    const nextPast = [...historyPastRef.current, current].slice(-HISTORY_LIMIT);
-    const nextFuture = future.slice(1);
-    setHistoryPast(nextPast);
-    setHistoryFuture(nextFuture);
-    historyPastRef.current = nextPast;
-    historyFutureRef.current = nextFuture;
-    restoreCharacterSnapshot(next);
-    setStatus("Redone");
-  }
 
   const renderBlockingRigIssues = useMemo(
     () =>
@@ -923,16 +761,6 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         ? normalizeCharacterRig(normalized)
         : rebuildRigPreservingConstraints(normalized),
     };
-  };
-
-  const pushUndoSnapshot = () => {
-    if (!docRef.current) return;
-    const snapshot = docRef.current;
-    const nextPast = [...historyPastRef.current, snapshot].slice(-HISTORY_LIMIT);
-    setHistoryPast(nextPast);
-    setHistoryFuture([]);
-    historyPastRef.current = nextPast;
-    historyFutureRef.current = [];
   };
 
   const updateDoc = (patch: Partial<CharacterPreset>, options: { history?: boolean } = {}) => {
@@ -1377,77 +1205,16 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     });
   };
 
-  const stopMouthTestAudio = () => {
-    if (mouthAudioRafRef.current) cancelAnimationFrame(mouthAudioRafRef.current);
-    mouthAudioRafRef.current = null;
-    void mouthAudioCtxRef.current?.close();
-    mouthAudioCtxRef.current = null;
-    setMouthTestPlaying(false);
-    setPreview(null);
-  };
-
   // Play a clip and drive the mouth slot's visemes. With `scriptedVisemes` the
   // sequence is timed to the clip's duration (correct shapes synced to audio);
   // without it, the mouth is driven by live amplitude (rough, for arbitrary clips).
-  const playMouthClip = async (slotId: ID, url: string, scriptedVisemes?: MouthViseme[]) => {
-    stopMouthTestAudio();
-    const repId = mouthSlotRepId(slotId);
-    try {
-      const buffer = await fetch(url).then((r) => r.arrayBuffer());
-      const ctx = new AudioContext();
-      mouthAudioCtxRef.current = ctx;
-      const audioBuffer = await ctx.decodeAudioData(buffer);
-      const durationMs = audioBuffer.duration * 1000;
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      let analyser: AnalyserNode | null = null;
-      let data: Uint8Array<ArrayBuffer> | null = null;
-      if (scriptedVisemes) {
-        source.connect(ctx.destination);
-      } else {
-        analyser = ctx.createAnalyser();
-        analyser.fftSize = 256;
-        data = new Uint8Array(analyser.frequencyBinCount);
-        source.connect(analyser);
-        analyser.connect(ctx.destination);
-      }
-      const startedAt = Date.now();
-      source.start();
-      setMouthTestPlaying(true);
-      setPreview({
-        kind: "talk",
-        targetPartId: repId,
-        targetSlotId: slotId,
-        targetRole: "mouth",
-        startedAt,
-        durationMs,
-        audioDriven: true,
-        forcedViseme: "rest",
-      });
-      const tick = () => {
-        let v: MouthViseme = "rest";
-        if (scriptedVisemes) {
-          const t = Math.min(1, (Date.now() - startedAt) / Math.max(1, durationMs));
-          const idx = Math.min(scriptedVisemes.length - 1, Math.floor(t * scriptedVisemes.length));
-          v = scriptedVisemes[idx] ?? "rest";
-        } else if (analyser && data) {
-          analyser.getByteFrequencyData(data);
-          const mean = data.reduce((s, x) => s + x, 0) / data.length;
-          if (mean > 55) v = "A";
-          else if (mean > 38) v = "E";
-          else if (mean > 22) v = "O";
-          else if (mean > 10) v = "MBP";
-        }
-        setPreview((p) => (p && p.audioDriven ? { ...p, forcedViseme: v } : p));
-        mouthAudioRafRef.current = requestAnimationFrame(tick);
-      };
-      mouthAudioRafRef.current = requestAnimationFrame(tick);
-      source.onended = stopMouthTestAudio;
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : "Could not play test audio.");
-      stopMouthTestAudio();
-    }
-  };
+  const playMouthClip = (slotId: ID, url: string, scriptedVisemes?: PreviewState["visemes"]) =>
+    playMouthPreviewClip({
+      slotId,
+      targetPartId: mouthSlotRepId(slotId),
+      url,
+      scriptedVisemes,
+    });
 
   // Each angle owns its drawings: the canvas and layer list show only the active angle's parts.
   const resolvedEditorRuntime = editorRuntime!;
@@ -1570,49 +1337,25 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   // Ordered stack of parts under a point, topmost first (alpha-exact before padded
   // hits), with locked parts excluded — the candidate list the select/drag model
   // drills through. `pickPartAt` keeps returning just the topmost for other callers.
-  const hitPartsAt = (point: { x: number; y: number }) => {
-    const exact: CharacterPart[] = [];
-    const padded: CharacterPart[] = [];
-    const candidates = visibleEditorParts
-      .filter((part) => (part.visible || part.id === selectedPartId) && !part.locked)
-      .slice()
-      .sort(
-        (a, b) =>
-          (runtimePlacementForPart(b)?.drawOrder ?? b.zIndex) -
-          (runtimePlacementForPart(a)?.drawOrder ?? a.zIndex),
-      );
-
-    for (const part of candidates) {
-      // Skip non-active variants: invisible slot siblings must not intercept clicks.
-      // Mirrors PartLayer's rendering decision so hit testing and drawing always agree.
-      if (part.id !== selectedPartId) {
+  const hitPartsAt = (point: { x: number; y: number }) =>
+    hitTestCharacterEditorParts({
+      parts: visibleEditorParts,
+      point,
+      selectedPartId,
+      viewportScale: scale,
+      boundsMode,
+      transformForPart: partPreviewTransform,
+      drawOrderForPart: (part) => runtimePlacementForPart(part)?.drawOrder ?? part.zIndex,
+      activeVariantForPart: (part, slotParts) => {
         const slotId = getPartSlotId(part);
-        const sameSlotParts = visibleEditorParts.filter((c) => getPartSlotId(c) === slotId);
-        if (sameSlotParts.length > 1) {
-          const activeVariant =
-            variantPreview[slotId] ??
-            activePreviewVariantForPart(part, preview) ??
-            defaultVariantForSlotParts(sameSlotParts, part.role);
-          if (activeVariant && !partMatchesVariant(part, activeVariant)) continue;
-        }
-      }
-      const transform = partPreviewTransform(part);
-      if (transform.opacity <= 0.05 && part.id !== selectedPartId) continue;
-      const local = canvasPointToPartLocal(part, point, transform);
-      const inEditorBounds = pointInEditorHitBounds(part, local, scale, boundsMode);
-      if (boundsMode === "frame") {
-        if (inEditorBounds) exact.push(part);
-      } else if (
-        inEditorBounds &&
-        alphaMaskContains(alphaMaskRef.current.get(part.id), part, local)
-      ) {
-        exact.push(part);
-      } else if (inEditorBounds) {
-        padded.push(part);
-      }
-    }
-    return [...exact, ...padded];
-  };
+        return (
+          variantPreview[slotId] ??
+          activePreviewVariantForPart(part, preview) ??
+          defaultVariantForSlotParts(slotParts, part.role)
+        );
+      },
+      alphaMaskForPart: (part) => alphaMaskForPart(part.id),
+    });
 
   const pickPartAt = (point: { x: number; y: number }) => hitPartsAt(point)[0] ?? null;
 
@@ -1836,13 +1579,11 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         return latestCharacter;
       });
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
+    const finish = () => {
+      setInteracting(false);
       syncLiveCharacterPreset(latestCharacter);
     };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    startWindowPointerDrag({ onMove: move, onEnd: finish, onCancel: finish });
   };
 
   // Drag every variant in a slot together by the same canvas delta.
@@ -1895,13 +1636,11 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         return latestCharacter;
       });
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
+    const finish = () => {
+      setInteracting(false);
       syncLiveCharacterPreset(latestCharacter);
     };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    startWindowPointerDrag({ onMove: move, onEnd: finish, onCancel: finish });
   };
 
   const startBoneDrag = (e: React.PointerEvent, boneId: ID) => {
@@ -1929,13 +1668,8 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       }).character;
       setDoc({ ...latest, updatedAt: Date.now() });
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      syncLiveCharacterPreset(latest);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    const finish = () => syncLiveCharacterPreset(latest);
+    startWindowPointerDrag({ onMove: move, onEnd: finish, onCancel: finish });
   };
 
   const toggleBones = () => {
@@ -1955,52 +1689,26 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     pushUndoSnapshot();
     const parts = partsInSlot(slotId);
     const box = unionSelectionBounds(parts, boundsMode);
-    const anchor = {
-      x: corner.includes("w") ? box.x + box.width : box.x,
-      y: corner.includes("n") ? box.y + box.height : box.y,
-    };
-    const snapshot = parts.map((p) => ({
-      id: p.id,
-      x: p.x,
-      y: p.y,
-      width: p.width,
-      height: p.height,
-      pivot: pivotForPart(p),
-    }));
+    const anchor = resizeAnchorForCorner(box, corner);
+    const snapshot = snapshotCharacterPartTransforms(parts);
     const sx = e.clientX;
     const sy = e.clientY;
     const move = (ev: PointerEvent) => {
       const dx = (ev.clientX - sx) / scale;
       const dy = (ev.clientY - sy) / scale;
-      const movingX = corner.includes("w") ? box.x + dx : box.x + box.width + dx;
-      const movingY = corner.includes("n") ? box.y + dy : box.y + box.height + dy;
-      const scaleX = Math.max(8, Math.abs(anchor.x - movingX)) / Math.max(1, box.width);
-      const scaleY = Math.max(8, Math.abs(anchor.y - movingY)) / Math.max(1, box.height);
+      const { scaleX, scaleY } = resizeScaleForPointerDelta(box, corner, anchor, dx, dy);
       setDoc((d) =>
         d
           ? withRig({
               ...d,
-              parts: d.parts.map((p) => {
-                const s = snapshot.find((q) => q.id === p.id);
-                if (!s) return p;
-                return {
-                  ...p,
-                  x: Math.round(anchor.x + (s.x - anchor.x) * scaleX),
-                  y: Math.round(anchor.y + (s.y - anchor.y) * scaleY),
-                  width: Math.max(4, Math.round(s.width * scaleX)),
-                  height: Math.max(4, Math.round(s.height * scaleY)),
-                  pivot: {
-                    x: Math.round(anchor.x + (s.pivot.x - anchor.x) * scaleX),
-                    y: Math.round(anchor.y + (s.pivot.y - anchor.y) * scaleY),
-                  },
-                };
-              }),
+              parts: scaleCharacterPartsFromSnapshot(d.parts, snapshot, anchor, scaleX, scaleY),
               updatedAt: Date.now(),
             })
           : d,
       );
     };
-    startWindowPointerDrag({ onMove: move });
+    const finish = () => setInteracting(false);
+    startWindowPointerDrag({ onMove: move, onEnd: finish, onCancel: finish });
   };
 
   const startGroupRotate = (e: React.PointerEvent, slotId: ID) => {
@@ -2022,15 +1730,9 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     const startAngle = Math.atan2(e.clientY - anchorScreen.y, e.clientX - anchorScreen.x);
     const angle = currentAngle();
     const targetIds = partIdsForSlotSubtree(doc.parts, normalizeCharacterRig(doc), slotId, angle);
-    const snapshot = doc.parts
-      .filter((part) => targetIds.has(part.id))
-      .map((part) => ({
-        id: part.id,
-        x: part.x,
-        y: part.y,
-        pivot: pivotForPart(part),
-        rotation: part.rotation,
-      }));
+    const snapshot = snapshotCharacterPartTransforms(
+      doc.parts.filter((part) => targetIds.has(part.id)),
+    );
     const move = (ev: PointerEvent) => {
       const nextAngle = Math.atan2(ev.clientY - anchorScreen.y, ev.clientX - anchorScreen.x);
       const degrees = ((nextAngle - startAngle) * 180) / Math.PI;
@@ -2038,26 +1740,14 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         d
           ? withRig({
               ...d,
-              parts: d.parts.map((part) => {
-                const base = snapshot.find((item) => item.id === part.id);
-                if (!base) return part;
-                const rotatedPivot = rotatePointAroundAnchor(base.pivot, anchor, degrees);
-                const dx = rotatedPivot.x - base.pivot.x;
-                const dy = rotatedPivot.y - base.pivot.y;
-                return {
-                  ...part,
-                  x: Math.round(base.x + dx),
-                  y: Math.round(base.y + dy),
-                  pivot: { x: Math.round(rotatedPivot.x), y: Math.round(rotatedPivot.y) },
-                  rotation: Math.round(base.rotation + degrees),
-                };
-              }),
+              parts: rotateCharacterPartsFromSnapshot(d.parts, snapshot, anchor, degrees),
               updatedAt: Date.now(),
             })
           : d,
       );
     };
-    startWindowPointerDrag({ onMove: move });
+    const finish = () => setInteracting(false);
+    startWindowPointerDrag({ onMove: move, onEnd: finish, onCancel: finish });
   };
 
   // Once a select-mode drag actually begins, dispatch to a slot-group drag (multi-variant
@@ -2121,11 +1811,9 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       const dy = (ev.clientY - startY) / scale;
       setAnchorDrag((current) => (current ? { ...current, dx, dy } : current));
     };
-    const onUp = (ev: PointerEvent) => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
+    const onEnd = (ev: PointerEvent | null) => {
       setAnchorDrag(null);
-      if (!startAnchor) return;
+      if (!ev || !startAnchor) return;
       const dx = (ev.clientX - startX) / scale;
       const dy = (ev.clientY - startY) / scale;
       commitSceneCommand(
@@ -2140,8 +1828,11 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       );
       setStatus(`Pin placed — ${childName} follows ${parentName} : ${context.variantKey}`);
     };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
+    startWindowPointerDrag({
+      onMove,
+      onEnd,
+      onCancel: () => setAnchorDrag(null),
+    });
   };
 
   const clearPin = (context: { parentSlotId: ID; variantKey: string; childSlotId: ID }) => {
@@ -2277,13 +1968,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     const anchor = pivotForPart(rep);
     const anchorScreen = { x: rect.left + anchor.x * scale, y: rect.top + anchor.y * scale };
     const startAngle = Math.atan2(e.clientY - anchorScreen.y, e.clientX - anchorScreen.x);
-    const snapshot = parts.map((p) => ({
-      id: p.id,
-      x: p.x,
-      y: p.y,
-      pivot: pivotForPart(p),
-      rotation: p.rotation,
-    }));
+    const snapshot = snapshotCharacterPartTransforms(parts);
     let minD = 0;
     let maxD = 0;
     pushUndoSnapshot();
@@ -2300,38 +1985,18 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       setRotDraft({ min: Math.round(minD), max: Math.round(maxD) });
       setDoc((d) => {
         if (!d) return d;
-        const byId = new Map(snapshot.map((s) => [s.id, s]));
         return {
           ...d,
-          parts: d.parts.map((part) => {
-            const base = byId.get(part.id);
-            if (!base) return part;
-            const rp = rotatePointAroundAnchor(base.pivot, anchor, degrees);
-            return {
-              ...part,
-              x: Math.round(base.x + (rp.x - base.pivot.x)),
-              y: Math.round(base.y + (rp.y - base.pivot.y)),
-              pivot: { x: Math.round(rp.x), y: Math.round(rp.y) },
-              rotation: Math.round(base.rotation + degrees),
-            };
-          }),
+          parts: rotateCharacterPartsFromSnapshot(d.parts, snapshot, anchor, degrees),
         };
       });
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
+    const finish = () => {
       const rotReach = { min: Math.round(minD), max: Math.round(maxD) };
       setRotDraft(rotReach);
       setDoc((d) => {
         if (!d) return d;
-        const byId = new Map(snapshot.map((s) => [s.id, s]));
-        const restored = d.parts.map((p) => {
-          const base = byId.get(p.id);
-          return base
-            ? { ...p, x: base.x, y: base.y, pivot: base.pivot, rotation: base.rotation }
-            : p;
-        });
+        const restored = restoreCharacterPartsFromSnapshot(d.parts, snapshot);
         return withRig(
           {
             ...d,
@@ -2348,8 +2013,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       });
       setStatus(`Twist set — ${rotReach.min}° to ${rotReach.max}°`);
     };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    startWindowPointerDrag({ onMove: move, onEnd: finish, onCancel: finish });
   };
 
   // Set the child bone's parent for the active angle. The bone graph is the hierarchy; parent
@@ -2416,9 +2080,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         ).character;
       });
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
+    const finish = () => {
       const hull = convexHull(samples);
       const center = slotRestCenter(parts);
       const deltas = hull.map((pt) => ({
@@ -2446,8 +2108,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       });
       setStatus("Reach set — sweep again to extend it");
     };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    startWindowPointerDrag({ onMove: move, onEnd: finish, onCancel: finish });
   };
 
   const handleCanvasPointerDown = (e: React.PointerEvent) => {
@@ -2540,21 +2201,17 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     const startY = e.clientY;
     let dragging = false;
 
-    const cleanup = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
+    let cancelPress = () => {};
     function onMove(ev: PointerEvent) {
       if (dragging || !subject) return;
       if (!exceedsDragThreshold({ x: startX, y: startY }, { x: ev.clientX, y: ev.clientY })) return;
       dragging = true;
-      cleanup();
+      cancelPress();
       // Deltas are measured from the original pointerdown, so handing off here is seamless.
       startCanvasDragForSubject(e, subject, dragPoint);
     }
-    function onUp() {
-      cleanup();
-      if (dragging) return;
+    function onEnd(event: PointerEvent | null) {
+      if (!event || dragging) return;
       const { id, nextPick } = resolveDrillSelection(
         candidateIds,
         canvasLastPickRef.current,
@@ -2576,8 +2233,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       if (slotId && !editingVariant && partsInSlot(slotId).length > 1) selectSlot(slotId);
       else selectPart(id);
     }
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
+    cancelPress = startWindowPointerDrag({ onMove, onEnd });
   };
 
   const handleCanvasPointerDownCapture = (e: React.PointerEvent) => {
@@ -2650,8 +2306,8 @@ export function CharacterEditor({ characterId, onClose }: Props) {
       <CharacterEditorHeader
         name={doc.name}
         phase={editorPhase}
-        canUndo={historyPast.length > 0}
-        canRedo={historyFuture.length > 0}
+        canUndo={canUndo}
+        canRedo={canRedo}
         saveState={saveState}
         onClose={onClose}
         onNameChange={(name) => updateDoc({ name })}
@@ -2659,10 +2315,8 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         onUndo={undoCharacterHistory}
         onRedo={redoCharacterHistory}
         onDone={() => {
-          void saveCharacter(doc).then((saved) => {
-            useStudio.getState().registerCharacterPreset(saved);
-            setDoc(saved);
-            onClose();
+          void saveNow().then((saved) => {
+            if (saved) onClose();
           });
         }}
       />

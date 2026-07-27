@@ -74,7 +74,7 @@ Working now:
   scene/timeline payload; DOM/React remains editor chrome for selection frames,
   handles, anchors, reach tools, thumbnails, and form controls.
 - Export-parity regression coverage for Pixi character source, local Pixi runtime
-  packaging, image/SVG asset refs, and the current mesh-free default render path.
+  packaging, image/SVG asset refs, rigid parts, and opt-in flexible meshes.
 - Character Actions and Expressions:
   - reusable body actions, facial expressions, head turns, and camera cues
   - separate timeline subtracks for Actions, Expressions, and Voice/lip sync
@@ -99,9 +99,9 @@ Still in progress:
 - Crop, mirror, richer keyframe editing, and shader transition support are deferred.
 - Flexible limb meshes are available as an opt-in per-slot character setting and
   are covered by preview/export parity tests. New flexible parts use a
-  point-path Pixi `MeshRope` model; current Pixi character parts still render as
-  sprites or vector nodes by default, and richer drag-handle authoring remains
-  in progress.
+  point-path `MeshSimple` ribbon (the scene graph retains the semantic
+  `meshKind: "rope"` label); ordinary parts remain sprites or vector nodes, and
+  legacy saved `bend` parts retain their `MeshPlane` compatibility path.
 - Pixi-native character authoring commands are still in progress. The editor
   artwork is Pixi-rendered, and slot move/scale/rotate, variant pin edits, bone
   rest edits, slot depth, host constraints, reach constraints, and Flexible
@@ -347,6 +347,12 @@ npm ci            # reproducible install from package-lock.json
 - GSAP - animation timelines inside composition HTML
 - Tailwind CSS - styling
 - ElevenLabs - optional speech generation and forced alignment
+
+The currently installed HyperFrames family is 0.5.3 across core, engine,
+player, producer, studio, and CLI. Upgrade those packages together in a
+dedicated compatibility pass using
+[docs/hyperframes-upgrade-safety-plan.md](docs/hyperframes-upgrade-safety-plan.md);
+do not let an unrelated install silently move only part of the family.
 
 ## Local Storage
 

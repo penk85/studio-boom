@@ -35,7 +35,24 @@ const canvasChromePath = join(
 );
 const toolbarPath = join(process.cwd(), "src/studio/character/CharacterEditorToolbar.tsx");
 const editorPreviewPath = join(process.cwd(), "src/studio/character/character-editor-preview.ts");
+const previewControllerPath = join(
+  process.cwd(),
+  "src/studio/character/use-character-preview-controller.ts",
+);
+const documentControllerPath = join(
+  process.cwd(),
+  "src/studio/character/use-character-document.ts",
+);
+const artworkAnalysisPath = join(
+  process.cwd(),
+  "src/studio/character/use-character-artwork-analysis.ts",
+);
 const editorGeometryPath = join(process.cwd(), "src/studio/character/character-editor-geometry.ts");
+const editorInteractionsPath = join(
+  process.cwd(),
+  "src/studio/character/character-editor-interactions.ts",
+);
+const pointerDragPath = join(process.cwd(), "src/studio/interaction/pointer-drag.ts");
 const partImportPath = join(process.cwd(), "src/studio/character/character-part-import.ts");
 
 describe("CharacterEditor source integration", () => {
@@ -85,11 +102,17 @@ describe("CharacterEditor source integration", () => {
   it("keeps header and angle/pose presentation behind a callback-only boundary", () => {
     const source = readFileSync(editorPath, "utf8");
     const toolbarSource = readFileSync(toolbarPath, "utf8");
+    const documentControllerSource = readFileSync(documentControllerPath, "utf8");
 
     expect(source).toContain('from "./CharacterEditorToolbar"');
+    expect(source).toContain('from "./use-character-document"');
     expect(source).toContain("<CharacterEditorHeader");
     expect(source).toContain("<CharacterAnglePoseToolbar");
-    expect(source).toContain("void saveCharacter(doc).then");
+    expect(source).toContain("void saveNow().then");
+    expect(documentControllerSource).toContain("export function useCharacterDocument");
+    expect(documentControllerSource).toContain("saveCharacter(doc).then");
+    expect(documentControllerSource).toContain("const undoCharacterHistory = useCallback");
+    expect(documentControllerSource).toContain("const redoCharacterHistory = useCallback");
     expect(toolbarSource).toContain("export function CharacterEditorHeader");
     expect(toolbarSource).toContain("export function CharacterAnglePoseToolbar");
     expect(toolbarSource).toContain("onDone: () => void");
@@ -140,8 +163,10 @@ describe("CharacterEditor source integration", () => {
     const groupInspectorSource = readFileSync(groupInspectorPath, "utf8");
     const variantControlsSource = readFileSync(variantControlsPath, "utf8");
     const toolbarSource = readFileSync(toolbarPath, "utf8");
+    const documentControllerSource = readFileSync(documentControllerPath, "utf8");
     // Autosave honesty: Done button + live save indicator.
-    expect(source).toContain('useState<"saved" | "saving">');
+    expect(documentControllerSource).toContain('useState<"saved" | "saving">');
+    expect(source).toContain("saveState={saveState}");
     expect(toolbarSource).toContain("✓ Saved");
     // Hover identification, breadcrumbs, and thumbnails.
     expect(source).toContain("handleCanvasHover");
@@ -210,9 +235,12 @@ describe("CharacterEditor source integration", () => {
     const source = readFileSync(editorPath, "utf8");
     const canvasChromeSource = readFileSync(canvasChromePath, "utf8");
     const editorPreviewSource = readFileSync(editorPreviewPath, "utf8");
+    const previewControllerSource = readFileSync(previewControllerPath, "utf8");
     const renderSources = `${source}\n${canvasChromeSource}\n${editorPreviewSource}`;
 
     expect(source).toContain("buildCharacterRenderPayload");
+    expect(source).toContain('from "./use-character-preview-controller"');
+    expect(source).toContain("useCharacterPreviewController");
     expect(source).toContain("const mediaAssets = useStudio((state) => state.mediaAssets)");
     expect(source).toContain("mediaAssets,");
     expect(source).toContain("<PixiCharacterPreview");
@@ -231,6 +259,10 @@ describe("CharacterEditor source integration", () => {
     expect(source).toContain("armRenderBlockingRigFix");
     expect(source).toContain("Show rig tools");
     expect(source).toContain("CharacterPartMoveable");
+    expect(previewControllerSource).toContain("abort.signal.aborted");
+    expect(previewControllerSource).toContain("stopAudioResources(false)");
+    expect(previewControllerSource).toContain("cancelAnimationFrame(audio.raf)");
+    expect(source).not.toContain("new AudioContext()");
     expect(canvasChromeSource).toContain("export function CharacterPartMoveable");
     expect(source).toContain("RigBonesOverlay");
     expect(source).toContain("VariantAnchorOverlay");
@@ -340,12 +372,18 @@ describe("CharacterEditor source integration", () => {
     const overlaysSource = readFileSync(overlaysPath, "utf8");
     const canvasChromeSource = readFileSync(canvasChromePath, "utf8");
     const geometrySource = readFileSync(editorGeometryPath, "utf8");
+    const interactionsSource = readFileSync(editorInteractionsPath, "utf8");
+    const pointerDragSource = readFileSync(pointerDragPath, "utf8");
+    const artworkAnalysisSource = readFileSync(artworkAnalysisPath, "utf8");
     const previewSource = readFileSync(editorPreviewPath, "utf8");
 
     expect(source).toContain('from "./CharacterEditorOverlays"');
     expect(source).toContain('from "./CharacterEditorCanvasChrome"');
     expect(source).toContain('from "./CharacterEditorToolbar"');
     expect(source).toContain('from "./character-editor-geometry"');
+    expect(source).toContain('from "./character-editor-interactions"');
+    expect(source).toContain('from "../interaction/pointer-drag"');
+    expect(source).toContain('from "./use-character-artwork-analysis"');
     expect(overlaysSource).toContain("export function ReachOverlay");
     expect(overlaysSource).toContain("export function DeformPathOverlay");
     expect(overlaysSource).toContain("export function RotationReachOverlay");
@@ -355,6 +393,16 @@ describe("CharacterEditor source integration", () => {
     expect(geometrySource).toContain("export function convexHull");
     expect(geometrySource).toContain("export function composeEditorPartTransform");
     expect(geometrySource).toContain("export function normalizePartPatch");
+    expect(interactionsSource).toContain("export function hitTestCharacterEditorParts");
+    expect(interactionsSource).toContain("export function scaleCharacterPartsFromSnapshot");
+    expect(interactionsSource).toContain("export function rotateCharacterPartsFromSnapshot");
+    expect(artworkAnalysisSource).toContain("export function useCharacterArtworkAnalysis");
+    expect(artworkAnalysisSource).toContain("measureAlphaBoundsFromBlob");
+    expect(artworkAnalysisSource).toContain("createAlphaHitMaskFromBlob");
+    expect(pointerDragSource).toContain('window.addEventListener("pointercancel", cancel)');
+    expect(pointerDragSource).toContain('window.addEventListener("blur", blur)');
+    expect(source.match(/startWindowPointerDrag/g)?.length).toBeGreaterThanOrEqual(9);
+    expect(source).not.toContain('window.addEventListener("pointermove"');
     expect(canvasChromeSource).toContain("export function PartLayer");
     expect(canvasChromeSource).toContain("export function CharacterPartMoveable");
     expect(previewSource).toContain("export function previewDelta");

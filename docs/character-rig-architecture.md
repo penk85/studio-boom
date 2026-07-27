@@ -44,9 +44,11 @@ still reference it build without that mouth until they get mouth image or SVG
 parts. Do not reintroduce DOM-only rig semantics; the rig concepts defined here
 are renderer-neutral and remain canonical.
 
-Mesh/stretch-limb deformation is not part of the baseline renderer yet. Textured
-parts render as sprites by default, and mesh work must stay behind dedicated
-preview/export parity tests.
+Mesh/stretch-limb deformation is opt-in. Textured parts remain sprites by
+default; new Flexible parts use the `limb-path` model rendered as a seek-updated
+Pixi `MeshSimple` ribbon, while legacy saved `mode: "bend"` parts use the
+compatibility `MeshPlane` path. Mesh work stays inside generated HyperFrames
+composition source and behind dedicated preview/export parity tests.
 
 ## 1. Angle
 

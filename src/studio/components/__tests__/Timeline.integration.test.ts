@@ -8,6 +8,18 @@ const sceneStripPath = join(process.cwd(), "src/studio/components/TimelineSceneS
 const constantsPath = join(process.cwd(), "src/studio/components/timeline-constants.ts");
 const clipUtilsPath = join(process.cwd(), "src/studio/components/timeline-clip-utils.ts");
 const layoutPath = join(process.cwd(), "src/studio/components/timeline-layout.ts");
+const compositionOutlinePath = join(
+  process.cwd(),
+  "src/studio/components/TimelineCompositionOutline.tsx",
+);
+const visualMotionPath = join(
+  process.cwd(),
+  "src/studio/components/TimelineVisualMotionTracks.tsx",
+);
+const characterTracksPath = join(
+  process.cwd(),
+  "src/studio/components/TimelineCharacterTracks.tsx",
+);
 
 describe("Timeline selection integration", () => {
   it("keeps timeline clips explicitly selectable apart from drag movement", () => {
@@ -39,21 +51,23 @@ describe("Timeline selection integration", () => {
 
   it("renders beginner motion lanes as draggable motion bars", () => {
     const source = readFileSync(timelinePath, "utf8");
+    const visualMotionSource = readFileSync(visualMotionPath, "utf8");
 
     expect(source).toContain("VisualMotionLaneSet");
-    expect(source).toContain("VisualMotionBlock");
-    expect(source).toContain("packVisualMotionRows");
-    expect(source).toContain("motion.label");
     expect(source).toContain("addClipMotionStep(row.clip.id, time)");
     expect(source).toContain("addClipMotionCheckpoint(row.clip.id, motionId, time)");
     expect(source).toContain("moveClipMotionCheckpoint(row.clip.id, motionId, checkpointId, time");
     expect(source).toContain(
       "moveClipMotionStep(row.clip.id, motionId, patch, { history: false })",
     );
-    expect(source).toContain("CheckpointMark");
-    expect(source).toContain('aria-label="Add point at playhead"');
-    expect(source).toContain("pointTimeForMotion(motion, localPlayheadTime)");
-    expect(source).toContain("selectionForMotionEndpoint");
+    expect(visualMotionSource).toContain("export function VisualMotionLaneSet");
+    expect(visualMotionSource).toContain("function VisualMotionBlock");
+    expect(visualMotionSource).toContain("packVisualMotionRows");
+    expect(visualMotionSource).toContain("motion.label");
+    expect(visualMotionSource).toContain("CheckpointMark");
+    expect(visualMotionSource).toContain('aria-label="Add point at playhead"');
+    expect(visualMotionSource).toContain("pointTimeForMotion(motion, localPlayheadTime)");
+    expect(visualMotionSource).toContain("selectionForMotionEndpoint");
   });
 
   it("labels applied character actions directly on the parent clip", () => {
@@ -74,9 +88,15 @@ describe("Timeline selection integration", () => {
     const sceneStripSource = readFileSync(sceneStripPath, "utf8");
     const clipUtilsSource = readFileSync(clipUtilsPath, "utf8");
     const layoutSource = readFileSync(layoutPath, "utf8");
+    const compositionOutlineSource = readFileSync(compositionOutlinePath, "utf8");
+    const visualMotionSource = readFileSync(visualMotionPath, "utf8");
+    const characterTracksSource = readFileSync(characterTracksPath, "utf8");
 
     expect(source).toContain('from "./TimelineClipBlock"');
     expect(source).toContain('from "./TimelineSceneStrip"');
+    expect(source).toContain('from "./TimelineCompositionOutline"');
+    expect(source).toContain('from "./TimelineVisualMotionTracks"');
+    expect(source).toContain('from "./TimelineCharacterTracks"');
     expect(source).toContain('from "./timeline-clip-utils"');
     expect(source).toContain('from "./timeline-layout"');
     expect(source).toContain("<TimelineClipBlock");
@@ -92,8 +112,14 @@ describe("Timeline selection integration", () => {
     expect(layoutSource).toContain("export function buildTrackLayout");
     expect(layoutSource).toContain("export function packVisualMotionRows");
     expect(layoutSource).toContain("export function buildExpandedClipLayout");
+    expect(compositionOutlineSource).toContain("export function CompositionOutlineLaneSet");
+    expect(visualMotionSource).toContain("export function VisualMotionLaneSet");
+    expect(characterTracksSource).toContain("export function MotionLaneSet");
     expect(source).not.toContain("function SceneStrip");
     expect(source).not.toContain("function ClipBlock");
+    expect(source).not.toContain("function CompositionOutlineLaneSet");
+    expect(source).not.toContain("function VisualMotionLaneSet");
+    expect(source).not.toContain("function MotionLaneSet");
     expect(source).not.toContain("function buildCompositionSourceErrors");
     expect(source).not.toContain("function buildTrackLayout");
     expect(source).not.toContain("function buildExpandedClipLayout");
