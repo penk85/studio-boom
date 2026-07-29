@@ -15,7 +15,7 @@ baseline.
 **Historical tree state at audit time:** commit `ed41ff0` plus a ~1,400-line uncommitted
 diff (in-progress flexible-limb "mesh locks" feature; reviewed in §5).
 
-**Current status (2026-07-26):** H1–H4 and M1–M6 are addressed. Project
+**Current status (2026-07-27):** H1–H4 and M1–M6 are addressed. Project
 editing now takes an origin-scoped Web Lock before load-time writes; Dashboard
 rename, duplicate, and delete use the same exclusive boundary and re-read the
 latest stored project after acquiring it. A second tab is refused while the
@@ -24,13 +24,15 @@ Dashboard. M7's dedicated cleanup is complete for this cycle: its remaining
 controller-heavy files have explicit ownership, and Character Editor's safe
 document, resource, and interaction seams have been extracted without creating
 a second renderer or prop-dump façade. M8 is mitigated with an explicitly
-documented architectural remainder. M9 is reserved for the dedicated compatibility process in
-`docs/hyperframes-upgrade-safety-plan.md`. L1-L3, L6, and L8 are addressed; L4,
+documented architectural remainder. M9's HyperFrames compatibility pass is
+complete; its remaining security remediation is approval-gated. L1-L3, L6, and L8 are addressed; L4,
 L5, and part of L7 remain open. L9 is a future-path guard rather than a currently
 reachable defect.
 
-**Current validation (2026-07-26):** `npx vitest run` passes 84 files / 746
-tests; `npx tsc --noEmit`, `npm run lint`, `npm run build`, and
+**Current validation (2026-07-28):** `npx vitest run --testTimeout=10000` passes
+85 files / 753 tests; the default 5-second run is CPU-sensitive under the full
+suite and can time out different store tests, while the isolated store file
+passes 50/50. `npx tsc --noEmit`, `npm run lint`, `npm run build`, and
 `git diff --check` are clean. The build retains only the known dependency
 annotation and large-chunk warnings.
 
@@ -430,31 +432,44 @@ remains a larger postMessage-boundary project, not a safe local attribute change
   - `about:srcdoc` origin isolation) even if final playback stays same-origin.
     Long-term: consider `sandbox` + a postMessage player bridge.
 
-### M9. The pinned dependency graph carries current security advisories
+### M9. The dependency graph carries unresolved security advisories
 
-**Partially addressed 2026-07-24; audit count re-verified 2026-07-26; remaining
-upgrades require isolated compatibility passes.** Vite was upgraded from 7.3.2 to 7.3.6 within its
-existing major, clearing both Vite advisories. `npm audit --omit=dev` now
-reports 13 vulnerable dependency entries (9 high, 3 moderate, 1 low,
-0 critical). Most arrive through the pinned HyperFrames CLI and engine family
-rather than Studio application code: Hono/node-server, `sharp`,
-`adm-zip`/ONNX Runtime, `protobufjs`, `js-yaml`, `postcss`, and `ws`. Vite's
-transitive `esbuild` also retains a Windows-specific development-server advisory.
+**Re-verified 2026-07-27 after the HyperFrames family upgrade from 0.5.3 to
+exact 0.7.73.** `npm audit --omit=dev` reports 11 vulnerable dependency entries:
+7 high, 3 moderate, 1 low, and 0 critical. The remaining paths are primarily
+transitive dependencies of the local HyperFrames CLI and engine:
 
-- **Actual exposure:** Studio is bound to `127.0.0.1` and currently runs on
-  Linux, which materially limits the Vite and Windows path-traversal findings.
-  Several Hono advisories concern middleware or deployment adapters Studio does
-  not use directly. The image/archive/parser denial-of-service findings remain
-  relevant if untrusted input reaches the HyperFrames CLI during import or
-  render, although the app's explicit trust prompts reduce that path.
-- **Recommendation:** upgrade `hyperframes` and every `@hyperframes/*` package
-  together only after checking their published compatibility, then rerun
-  preview/export parity and MP4 rendering. Handle the remaining transitive
-  packages through those owners where possible. Do not use a blanket
-  `npm audit fix`; it cannot resolve the current HyperFrames tree safely and
-  would obscure which runtime contract changed. The isolated research,
-  automated gate, adapter audit, and manual render matrix are specified in
-  `docs/hyperframes-upgrade-safety-plan.md`.
+- `@hono/node-server` is below the fixed 2.0.5 line, with no audit fix available
+  in the current graph.
+- `adm-zip` is below 0.6.0 through `hyperframes` and `onnxruntime-node`, with no
+  audit fix available in the current graph. `onnxruntime-node` is itself reported
+  through that path; `sharp` is also reported below its fixed line.
+- `hono`, `postcss`, `protobufjs`, and `esbuild` have fix-available advisory
+  paths, but they are transitive and a forced override could change HyperFrames
+  rendering, linting, bundling, or native tooling contracts.
+
+**Actual exposure:** Studio is local-first and its Vite server is bound to
+`127.0.0.1`; this materially limits remote exploitation and the Windows-specific
+Vite/esbuild development-server finding on the current Linux environment. The
+Hono server adapters are not used as a public deployment surface by Studio. The
+archive, image, parser, and native-runtime findings remain relevant when an
+untrusted project, custom block, media file, or render input reaches the local
+HyperFrames tooling. Imported/custom HTML remains a trust boundary because it
+executes in the preview document and can access same-origin Studio data.
+
+**Remediation proposal — pending explicit approval:** first evaluate a complete,
+family-synchronized HyperFrames release (the registry currently advertises
+0.7.76 for all six packages) and rerun the compatibility matrix. That release's
+published CLI metadata still pins `onnxruntime-node` 1.23.2 and ranges
+`adm-zip`/`sharp` below their audit fixes, so it is not a security resolution by
+itself. If the family owner does not publish fixed transitive ranges, consider a
+separate, narrowly scoped override set only for the fix-available packages after
+testing the CLI and browser build. No override is proposed for the no-fix paths;
+those require upstream releases or containment.
+
+Do not run a blanket `npm audit fix`, and do not change `package.json` or
+`package-lock.json` until the exact candidate set is approved. Until then, the
+findings are tracked rather than hidden behind incompatible transitive upgrades.
 
 ---
 

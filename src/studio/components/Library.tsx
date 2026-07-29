@@ -1,6 +1,6 @@
 // Library panel — Media, Characters (with editor), Motion Presets, Blocks (later).
 import { useLiveQuery } from "dexie-react-hooks";
-import { db, deleteMediaIfUnused, importMediaFile, mediaIdsForCharacter, uid } from "../db";
+import { db, deleteMediaIfUnused, importMediaFile, uid } from "../db";
 import { useStudio } from "../store";
 import type { CharacterPreset, CompositionClip, MediaAsset, TextClip } from "../types";
 import { deriveEditorClips, isCharacterCompositionClip } from "../types";
@@ -17,13 +17,18 @@ import {
   roleEnabledByManifest,
   variantKeyForPart,
 } from "../character/character-utils";
+import { deleteCharacterRecord, saveCharacter } from "../character/character-persistence";
 import {
   thumbnailFrameMatrix,
   thumbnailBoundsForFrames,
   type CharacterThumbnailFrame,
 } from "./character-thumbnail-bounds";
 import { matrixToCss } from "../character/geometry";
-import { createPresetCharacter, ensureStarterCharacterSeeded } from "../character/starter";
+import {
+  createPresetCharacter,
+  ensureStarterCharacterSeeded,
+  STARTER_CHARACTER_ID,
+} from "../character/starter";
 import type { PresenterVariant } from "../character/presenter";
 import { defaultPoseForCharacter } from "../character/pose-presets";
 import { ensureMotionPresetsSeeded } from "../presets/seed";
@@ -215,11 +220,13 @@ function CharactersTab() {
   }, [characters, queriedCharacters, syncCharacterPresets]);
 
   const openModal = useStudio((s) => s.openModal);
+  const [placingStarter, setPlacingStarter] = useState(false);
+  const [characterActionError, setCharacterActionError] = useState<string | null>(null);
 
   const newCharacter = async () => {
     const c = createBlankCharacter();
-    await db.characters.put(c);
-    registerCharacterPreset(c);
+    const saved = await saveCharacter(c);
+    registerCharacterPreset(saved);
     openModal({ type: "character-editor", characterId: c.id });
   };
 
@@ -238,7 +245,7 @@ function CharactersTab() {
     }
   };
 
-  const placeOnTimeline = (
+  const placeOnTimeline = async (
     characterId: string,
     name: string,
     canvasWidth = 600,
@@ -246,6 +253,7 @@ function CharactersTab() {
     character?: CharacterPreset,
   ) => {
     if (!project) return;
+    setCharacterActionError(null);
     const trackIndex = Math.max(
       0,
       tracks.findIndex((t) => t.kind === "character"),
@@ -281,10 +289,35 @@ function CharactersTab() {
       opacity: 1,
       zIndex: clips.length,
     };
-    addClip(clip);
+    try {
+      await addClip(clip);
+    } catch (error) {
+      setCharacterActionError(error instanceof Error ? error.message : String(error));
+    }
   };
 
-  const placePlaceholder = () => placeOnTimeline("stub", "Voice Character");
+  const placeStarterCharacter = async () => {
+    if (!project || placingStarter) return;
+    setPlacingStarter(true);
+    setCharacterActionError(null);
+    try {
+      const starter =
+        characters.find((character) => character.id === STARTER_CHARACTER_ID) ??
+        (await ensureStarterCharacterSeeded());
+      registerCharacterPreset(starter);
+      await placeOnTimeline(
+        starter.id,
+        starter.name,
+        starter.canvasWidth,
+        starter.canvasHeight,
+        starter,
+      );
+    } catch (error) {
+      setCharacterActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPlacingStarter(false);
+    }
+  };
 
   const deleteCharacter = async (id: string) => {
     const references = clips.filter(
@@ -311,9 +344,7 @@ function CharactersTab() {
             .join("\n")
         : "Delete this character from the library?";
     if (!confirm(message)) return;
-    const character = await db.characters.get(id);
-    const mediaIds = Array.from(mediaIdsForCharacter(character));
-    await db.characters.delete(id);
+    const mediaIds = Array.from(await deleteCharacterRecord(id));
     unregisterCharacterPreset(id);
     await Promise.all(
       mediaIds.map((mediaId) =>
@@ -335,14 +366,23 @@ function CharactersTab() {
           + New character
         </button>
         <button
-          onClick={placePlaceholder}
-          disabled={!project}
-          title="Drop a stub character clip on the timeline"
+          onClick={() => void placeStarterCharacter()}
+          disabled={!project || placingStarter}
+          title="Drop the built-in presenter character on the timeline"
           className="rounded border border-border px-2 py-2 text-[11px] text-foreground hover:bg-panel-2 disabled:opacity-50"
         >
-          Stub
+          {placingStarter ? "…" : "Starter"}
         </button>
       </div>
+
+      {characterActionError && (
+        <div
+          role="alert"
+          className="rounded border border-destructive/40 bg-destructive/10 p-2 text-[11px] text-destructive"
+        >
+          Could not add the character: {characterActionError}
+        </div>
+      )}
 
       <div className="flex items-center gap-2 rounded border border-border bg-panel-2 p-2">
         <span className="text-[11px] font-medium text-muted-foreground">Generate preset:</span>
@@ -393,7 +433,7 @@ function CharactersTab() {
               <button
                 onClick={() => {
                   registerCharacterPreset(c);
-                  placeOnTimeline(c.id, c.name, c.canvasWidth, c.canvasHeight, c);
+                  void placeOnTimeline(c.id, c.name, c.canvasWidth, c.canvasHeight, c);
                 }}
                 disabled={!project}
                 className="flex-1 rounded bg-primary/30 px-2 py-1 text-[11px] hover:bg-primary/50 disabled:opacity-50"
@@ -580,8 +620,8 @@ function BlocksTab() {
   const addClip = useStudio((s) => s.addClip);
   const [source, setSource] = useState("");
   const [errors, setErrors] = useState<string[]>([]);
-  const [validated, setValidated] = useState<ReturnType<
-    typeof validateCompositionSourceHtml
+  const [validated, setValidated] = useState<Awaited<
+    ReturnType<typeof validateCompositionSourceHtml>
   > | null>(null);
   const [previewProject, setPreviewProject] = useState<ReturnType<
     typeof buildCompositionPreviewProject
@@ -605,9 +645,9 @@ function BlocksTab() {
   const previewWidth = validated?.width ?? project?.hf.width ?? 1920;
   const previewHeight = validated?.height ?? project?.hf.height ?? 1080;
 
-  const validateSource = () => {
+  const validateSource = async () => {
     if (!project) return null;
-    const result = validateCompositionSourceHtml(source, {
+    const result = await validateCompositionSourceHtml(source, {
       compositionId: `ai_block_${Date.now()}`,
       duration: 4,
       width: project.hf.width,
@@ -632,7 +672,7 @@ function BlocksTab() {
     [],
   );
 
-  const addBlock = () => {
+  const addBlock = async () => {
     if (!project || !sourceTrusted) return;
     const result = validated;
     if (!result?.ok || !result.compositionId || !result.html) return;
@@ -645,7 +685,7 @@ function BlocksTab() {
     const height = result.height ?? project.hf.height;
 
     try {
-      addClip({
+      await addClip({
         id: uid(),
         kind: "composition",
         compositionId: result.compositionId,

@@ -923,7 +923,7 @@ describe("createBlankProject", () => {
     expect(currentEditingHtml()).toContain('data-x="240"');
   });
 
-  it("adds non-character composition clips with source html", () => {
+  it("adds non-character composition clips with source html", async () => {
     const project = createBlankProject("Composition clip");
     useStudio.setState({
       project,
@@ -962,7 +962,7 @@ describe("createBlankProject", () => {
       zIndex: 3,
     };
 
-    useStudio.getState().addClip(clip);
+    await useStudio.getState().addClip(clip);
 
     const state = useStudio.getState();
     const rootHtml = currentEditingHtml();
@@ -990,14 +990,14 @@ describe("createBlankProject", () => {
     expect(useStudio.getState().project!.hf.compositionHtml["ai-title"]).toContain("AI block");
   });
 
-  it("uses the source composition id when adding a composition clip without an explicit id", () => {
+  it("uses the source composition id when adding a composition clip without an explicit id", async () => {
     const project = createBlankProject("Composition clip source id");
     useStudio.setState({
       project,
       tracks: project.editorMeta.tracks,
     });
 
-    useStudio.getState().addClip({
+    await useStudio.getState().addClip({
       id: "composition-source-id",
       kind: "composition",
       compositionKind: "ai-block",
@@ -1035,7 +1035,7 @@ describe("createBlankProject", () => {
     );
   });
 
-  it("rejects composition source ids that disagree with the selected composition", () => {
+  it("rejects composition source ids that disagree with the selected composition", async () => {
     const project = createBlankProject("Mismatched composition id");
     useStudio.setState({
       project,
@@ -1072,7 +1072,7 @@ describe("createBlankProject", () => {
       zIndex: 0,
     };
 
-    expect(() => useStudio.getState().addClip(mismatchedClip)).toThrow(/does not match/);
+    await expect(useStudio.getState().addClip(mismatchedClip)).rejects.toThrow(/does not match/);
     expect(useStudio.getState().project!.hf.rootHtml).not.toContain("composition-mismatch");
 
     const validClip: CompositionClip = {
@@ -1092,9 +1092,9 @@ describe("createBlankProject", () => {
   </body>
 </html>`,
     };
-    useStudio.getState().addClip(validClip);
+    await useStudio.getState().addClip(validClip);
 
-    expect(() =>
+    await expect(
       useStudio.getState().updateCompositionHtml(
         "expected-id",
         `<!DOCTYPE html>
@@ -1110,13 +1110,13 @@ describe("createBlankProject", () => {
   </body>
 </html>`,
       ),
-    ).toThrow(/does not match/);
+    ).rejects.toThrow(/does not match/);
     expect(useStudio.getState().project!.hf.compositionHtml["expected-id"]).toContain(
       'window.__timelines["expected-id"]',
     );
   });
 
-  it("rejects invalid non-character composition source before inserting the clip", () => {
+  it("rejects invalid non-character composition source before inserting the clip", async () => {
     const project = createBlankProject("Bad composition clip");
     useStudio.setState({
       project,
@@ -1154,7 +1154,9 @@ describe("createBlankProject", () => {
       zIndex: 0,
     };
 
-    expect(() => useStudio.getState().addClip(clip)).toThrow(/Composition source is invalid/);
+    await expect(useStudio.getState().addClip(clip)).rejects.toThrow(
+      /Composition source is invalid/,
+    );
     expect(useStudio.getState().project!.hf.rootHtml).not.toContain("composition-bad");
     expect(useStudio.getState().project!.hf.compositionHtml["ai-bad"]).toBeUndefined();
   });

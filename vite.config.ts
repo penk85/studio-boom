@@ -36,6 +36,13 @@ export default defineConfig(({ mode }) => {
           ),
           path: fileURLToPath(new URL("./src/shims/path.ts", import.meta.url)),
           "node:path": fileURLToPath(new URL("./src/shims/path.ts", import.meta.url)),
+          fs: fileURLToPath(new URL("./src/shims/node-fs.ts", import.meta.url)),
+          child_process: fileURLToPath(
+            new URL("./src/shims/node-child-process.ts", import.meta.url),
+          ),
+          "node:child_process": fileURLToPath(
+            new URL("./src/shims/node-child-process.ts", import.meta.url),
+          ),
           "node:url": fileURLToPath(new URL("./src/shims/node-url.ts", import.meta.url)),
           "node:fs": fileURLToPath(new URL("./src/shims/node-fs.ts", import.meta.url)),
           esbuild: fileURLToPath(new URL("./src/shims/esbuild.ts", import.meta.url)),

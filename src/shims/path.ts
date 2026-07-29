@@ -5,9 +5,14 @@ function normalize(p: string): string {
   return p.replace(/\/+/g, SEP).replace(/\/$/, "") || SEP;
 }
 
+function splitPath(p: string): string[] {
+  return normalize(p).split(SEP).filter(Boolean);
+}
+
 export const posix = {
   join: (...parts: string[]) => normalize(parts.filter(Boolean).join(SEP)),
   resolve: (...parts: string[]) => normalize(parts.filter(Boolean).join(SEP)),
+  normalize,
   dirname: (p: string) => normalize(p).split(SEP).slice(0, -1).join(SEP) || SEP,
   basename: (p: string, ext?: string) => {
     const base = p.split(SEP).pop() ?? "";
@@ -23,9 +28,29 @@ export const posix = {
 
 export const join = posix.join;
 export const resolve = posix.resolve;
+export const isAbsolute = (p: string): boolean => p.startsWith(SEP);
+export const relative = (from: string, to: string): string => {
+  const fromParts = splitPath(from);
+  const toParts = splitPath(to);
+  let common = 0;
+  while (common < fromParts.length && fromParts[common] === toParts[common]) common += 1;
+  return [...fromParts.slice(common).map(() => ".."), ...toParts.slice(common)].join(SEP);
+};
 export const dirname = posix.dirname;
 export const basename = posix.basename;
 export const extname = posix.extname;
 export const sep = SEP;
+export const delimiter = ":";
 
-export default { posix, join, resolve, dirname, basename, extname, sep };
+export default {
+  posix,
+  join,
+  resolve,
+  isAbsolute,
+  relative,
+  dirname,
+  basename,
+  extname,
+  sep,
+  delimiter,
+};

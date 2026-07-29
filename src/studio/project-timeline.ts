@@ -2,7 +2,11 @@
 import type { TimelineElement } from "@hyperframes/core";
 import type { AnyClip, ClipEditorMeta, EditorClip, Project } from "./types";
 import { deriveEditorClips } from "./types";
-import { parseStudioHtml, type StudioTimelineElement } from "./hyperframes/html";
+import {
+  parseStudioHtml,
+  type StudioTimelineElement,
+  updateStudioRenderTrackIndicesInHtml,
+} from "./hyperframes/html";
 import { normalizeProjectRootHtml } from "./hyperframes/project-source";
 import type { ClipKeyframeDisplayValues } from "./hyperframes/keyframes";
 
@@ -100,29 +104,18 @@ function laneHasOverlap(
 }
 
 export function syncProjectRenderTrackIndices(project: Project): Project {
-  if (!project.hf.rootHtml || typeof DOMParser === "undefined") return project;
+  if (!project.hf.rootHtml) return project;
 
   project = repairProjectClipMetadataFromHtml(project);
   project = repairProjectTimelineLanes(project);
-  const doc = new DOMParser().parseFromString(project.hf.rootHtml, "text/html");
-  let changed = false;
-
+  const assignments = new Map<string, number>();
   for (const [clipId, meta] of Object.entries(project.editorMeta.clips)) {
-    const el = doc.getElementById(clipId);
-    if (!el) continue;
-    const renderTrackIndex = renderTrackIndexFor(meta.uiTrackIndex ?? 0, meta.uiLaneIndex ?? 0);
-    const nextValue = String(renderTrackIndex);
-    if (el.getAttribute("data-track-index") !== nextValue) {
-      el.setAttribute("data-track-index", nextValue);
-      changed = true;
-    }
+    assignments.set(clipId, renderTrackIndexFor(meta.uiTrackIndex ?? 0, meta.uiLaneIndex ?? 0));
   }
 
-  const normalizedRootHtml = normalizeProjectRootHtml(
-    project.hf,
-    "<!DOCTYPE html>\n" + doc.documentElement.outerHTML,
-  );
-  if (!changed && normalizedRootHtml === project.hf.rootHtml) return project;
+  const nextRootHtml = updateStudioRenderTrackIndicesInHtml(project.hf.rootHtml, assignments);
+  const normalizedRootHtml = normalizeProjectRootHtml(project.hf, nextRootHtml);
+  if (normalizedRootHtml === project.hf.rootHtml) return project;
   return {
     ...project,
     hf: {

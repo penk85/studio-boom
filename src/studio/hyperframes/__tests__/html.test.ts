@@ -1,7 +1,44 @@
 import { describe, expect, it } from "vitest";
-import { addStudioElementToHtml, parseStudioHtml, updateStudioElementInHtml } from "../html";
+import {
+  addStudioElementToHtml,
+  parseStudioHtml,
+  retargetCompositionIdInHtml,
+  readStudioElementHtml,
+  updateStudioRenderTrackIndicesInHtml,
+  updateStudioElementInHtml,
+} from "../html";
+
+describe("retargetCompositionIdInHtml", () => {
+  it("retargets composition markers and inline timeline keys", () => {
+    const updated = retargetCompositionIdInHtml(
+      `<!DOCTYPE html>
+<html data-composition-id="old-comp"><body>
+  <div id="stage" data-composition-id="old-comp"></div>
+  <script>window.__timelines = { "old-comp": tl };</script>
+  <template><div data-composition-id="old-comp"><script>window.__timelines['old-comp'] = tl;</script></div></template>
+</body></html>`,
+      "old-comp",
+      "new-comp",
+    );
+
+    expect(updated).toContain('data-composition-id="new-comp"');
+    expect(updated).toContain('"new-comp"');
+    expect(updated).toContain("'new-comp'");
+    expect(updated).not.toContain('"old-comp"');
+    expect(updated).not.toContain("'old-comp'");
+  });
+});
 
 describe("parseStudioHtml", () => {
+  it("reads a stored element through the HTML boundary", () => {
+    expect(
+      readStudioElementHtml(
+        `<!DOCTYPE html><html><body><div id="stage"><span>Stage</span></div></body></html>`,
+        "stage",
+      ),
+    ).toContain('<div id="stage"><span>Stage</span></div>');
+  });
+
   it("patches added elements with native placement attrs and visual styles", () => {
     const { html } = addStudioElementToHtml(
       `<!DOCTYPE html>
@@ -320,5 +357,26 @@ describe("parseStudioHtml", () => {
       sourceHeight: 180,
       opacity: 0.75,
     });
+  });
+});
+
+describe("updateStudioRenderTrackIndicesInHtml", () => {
+  it("updates render-track attrs without bypassing the HTML boundary", () => {
+    const html = `<!DOCTYPE html><html><body>
+      <div id="back" data-track-index="0"></div>
+      <div id="front" data-track-index="1"></div>
+    </body></html>`;
+
+    const updated = updateStudioRenderTrackIndicesInHtml(
+      html,
+      new Map([
+        ["back", 2],
+        ["front", 1],
+      ]),
+    );
+
+    expect(updated).toContain('<div id="back" data-track-index="2"></div>');
+    expect(updated).toContain('<div id="front" data-track-index="1"></div>');
+    expect(updateStudioRenderTrackIndicesInHtml(updated, new Map([["back", 2]]))).toBe(updated);
   });
 });

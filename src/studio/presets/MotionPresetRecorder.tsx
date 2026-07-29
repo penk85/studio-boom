@@ -10,9 +10,10 @@ import {
   RotateCcw,
   SkipBack,
 } from "lucide-react";
-import { db, uid } from "../db";
+import { uid } from "../db";
 import { useStudio } from "../store";
 import { defaultPoseForCharacter } from "../character/pose-presets";
+import { saveMotionPreset } from "./preset-persistence";
 import { effectiveReachForSlot } from "../character/motion-constraints";
 import {
   buildCharacterRuntime,
@@ -939,7 +940,7 @@ export function MotionPresetRecorder({
       createdAt: savingCopy ? now : (initialPreset?.createdAt ?? now),
       updatedAt: now,
     };
-    await db.motionPresets.put(preset);
+    await saveMotionPreset(preset);
     useStudio.getState().registerMotionPreset(preset);
     onSaved?.(preset);
     onClose();

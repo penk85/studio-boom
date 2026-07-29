@@ -1,4 +1,4 @@
-import { db, deleteMediaIfUnused, importMediaFile, mediaIdsForCharacter, uid } from "../db";
+import { importMediaFile, uid } from "../db";
 import type { CharacterPreset } from "../types";
 import {
   buildPresenterCharacter,
@@ -7,8 +7,9 @@ import {
   PRESENTER_VERSION,
   type PresenterVariant,
 } from "./presenter";
+import { loadCharacter, saveCharacter } from "./character-persistence";
 
-const STARTER_ID = "builtin-starter-character";
+export const STARTER_CHARACTER_ID = "builtin-starter-character";
 
 /** Up to date when the persisted copy was built by the current generator revision. */
 function isCurrentPresenter(character: CharacterPreset): boolean {
@@ -51,23 +52,12 @@ async function materializePresetCharacter(
  * pose presets. Replaces an out-of-date persisted copy in place and prunes its orphan art.
  */
 export async function ensureStarterCharacterSeeded(): Promise<CharacterPreset> {
-  const existing = await db.characters.get(STARTER_ID);
+  const existing = await loadCharacter(STARTER_CHARACTER_ID);
   if (existing && isCurrentPresenter(existing)) return existing;
 
-  const character = await materializePresetCharacter(STARTER_ID, "male");
+  const character = await materializePresetCharacter(STARTER_CHARACTER_ID, "male");
 
-  const previousMediaIds = mediaIdsForCharacter(existing);
-  await db.characters.put(character);
-
-  // Drop the replaced starter's now-unused part art.
-  const nextMediaIds = mediaIdsForCharacter(character);
-  await Promise.all(
-    Array.from(previousMediaIds)
-      .filter((id) => !nextMediaIds.has(id))
-      .map((id) => deleteMediaIfUnused(id, { internalOnly: true })),
-  );
-
-  return character;
+  return saveCharacter(character);
 }
 
 /**
@@ -77,6 +67,5 @@ export async function ensureStarterCharacterSeeded(): Promise<CharacterPreset> {
  */
 export async function createPresetCharacter(variant: PresenterVariant): Promise<CharacterPreset> {
   const character = await materializePresetCharacter(uid(), variant);
-  await db.characters.put(character);
-  return character;
+  return saveCharacter(character);
 }

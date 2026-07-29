@@ -78,6 +78,7 @@ import {
   syncSceneTimeline,
   type ValidCompositionSource,
 } from "./hyperframes/project-source";
+import { cloneProject } from "./project-utils";
 import {
   buildElementUpdates,
   buildTimelineElement,
@@ -259,10 +260,6 @@ const trackIndexFor = (tracks: TrackMeta[], kind: TrackKind) =>
     0,
     tracks.findIndex((t) => t.kind === kind),
   );
-
-function cloneProject(project: Project): Project {
-  return JSON.parse(JSON.stringify(project)) as Project;
-}
 
 function createHistoryEntry(state: StudioState): HistoryEntry | null {
   if (!state.project) return null;
@@ -577,9 +574,10 @@ export const useStudio = create<StudioState>((set, get) => ({
     scheduleSave(get, set);
   },
 
-  addClip(clip) {
+  async addClip(clip) {
     const state = get();
     const p = state.project;
+    const initialActiveSceneId = state.activeSceneId;
     const targetSceneId =
       state.activeSceneId ??
       (clip.kind !== "audio" && !(clip.kind === "composition" && clip.compositionKind === "scene")
@@ -597,7 +595,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       clip.compositionHtml !== undefined
     ) {
       const compositionId = clip.compositionId ?? `comp_${clip.id}`;
-      validatedCompositionSource = assertValidCompositionSourceHtml(
+      validatedCompositionSource = await assertValidCompositionSourceHtml(
         clip.compositionHtml,
         {
           compositionId,
@@ -608,6 +606,10 @@ export const useStudio = create<StudioState>((set, get) => ({
         clip.compositionId ? { expectedCompositionId: clip.compositionId } : {},
       );
     }
+
+    // HyperFrames 0.7 validation is asynchronous. Never commit a validated clip
+    // against a project or scene that changed while the linter was running.
+    if (get().project !== p || get().activeSceneId !== initialActiveSceneId) return;
 
     get().checkpointHistory();
 
@@ -629,8 +631,9 @@ export const useStudio = create<StudioState>((set, get) => ({
       nextClip = { ...clip, laneIndex: lane };
     }
 
-    const currentProject = get().project!;
-    const targetProject = getEditingProject(get()) ?? currentProject;
+    const currentState = get();
+    const currentProject = currentState.project!;
+    const targetProject = getEditingProject(currentState) ?? currentProject;
     const zIndex = nextClip.zIndex !== undefined ? nextClip.zIndex : currentClips.length;
 
     const compositionHtml = { ...currentProject.hf.compositionHtml };
@@ -660,7 +663,7 @@ export const useStudio = create<StudioState>((set, get) => ({
           throw new Error("Character composition clips require character metadata.");
         }
         meta.character = normalizeCharacterClipMeta(compositionClip.character);
-        const character = state.characters.get(meta.character.characterId);
+        const character = currentState.characters.get(meta.character.characterId);
         if (!character) {
           throw new Error(`Character preset "${meta.character.characterId}" is not available.`);
         }
@@ -672,15 +675,15 @@ export const useStudio = create<StudioState>((set, get) => ({
           height: compositionClip.height || currentProject.hf.height,
           character,
           meta: meta.character,
-          speeches: resolveSpeechesForBuild(meta.character, state.mediaAssets),
-          mediaAssets: state.mediaAssets,
-          motionPresets: state.motionPresets,
+          speeches: resolveSpeechesForBuild(meta.character, currentState.mediaAssets),
+          mediaAssets: currentState.mediaAssets,
+          motionPresets: currentState.motionPresets,
         });
-        hf = registerCharacterAssets(hf, character, meta.character, state.mediaAssets);
+        hf = registerCharacterAssets(hf, character, meta.character, currentState.mediaAssets);
       } else if (compositionClip.compositionHtml !== undefined) {
         const source =
           validatedCompositionSource ??
-          assertValidCompositionSourceHtml(
+          (await assertValidCompositionSourceHtml(
             compositionClip.compositionHtml,
             {
               compositionId,
@@ -689,7 +692,7 @@ export const useStudio = create<StudioState>((set, get) => ({
               height: compositionClip.height || currentProject.hf.height,
             },
             { expectedCompositionId: compositionId },
-          );
+          ));
         compositionHtml[compositionId] = source.html;
       }
     } else if (nextClip.kind === "text") {
@@ -700,7 +703,7 @@ export const useStudio = create<StudioState>((set, get) => ({
       const mediaClip = nextClip as MediaClip;
       meta.mediaId = mediaClip.mediaId;
 
-      hf = registerHfAsset(hf, state.mediaAssets.get(mediaClip.mediaId));
+      hf = registerHfAsset(hf, currentState.mediaAssets.get(mediaClip.mediaId));
     }
 
     const renderTrackIndex = renderTrackIndexFor(nextClip.trackIndex, nextClip.laneIndex ?? 0);
@@ -1781,11 +1784,11 @@ export const useStudio = create<StudioState>((set, get) => ({
     scheduleSave(get, set);
   },
 
-  updateCompositionHtml(compositionId, html, options) {
+  async updateCompositionHtml(compositionId, html, options) {
     const p = get().project;
     if (!p) return;
     const clip = findEditorClipByCompositionId(p, compositionId);
-    const source = assertValidCompositionSourceHtml(
+    const source = await assertValidCompositionSourceHtml(
       html,
       {
         compositionId,
@@ -1795,6 +1798,8 @@ export const useStudio = create<StudioState>((set, get) => ({
       },
       { expectedCompositionId: compositionId },
     );
+    // Do not overwrite a newer project edit while source validation is pending.
+    if (get().project !== p) return;
     if (options?.history !== false) get().checkpointHistory();
     set({
       project: {

@@ -10,7 +10,7 @@ import {
 } from "react";
 import { useStudio } from "../store";
 import type { CharacterPreset } from "../types";
-import { saveCharacter } from "./character-utils";
+import { saveCharacter } from "./character-persistence";
 
 const HISTORY_LIMIT = 60;
 

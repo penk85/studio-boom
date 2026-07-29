@@ -9,6 +9,17 @@ authoring, but they must not become a second movie model or a late export compil
 
 The packages below are the implementation — read them before writing any code.
 
+## Current package baseline (2026-07-27)
+
+The HyperFrames family is pinned together at exact version **0.7.73** across
+core, engine, player, producer, studio, and the CLI; Vite remains **7.3.6**.
+HyperFrames 0.7 validation is asynchronous and its StaticGuard contract requires
+each composition file to have exactly one `data-composition-id`, owned by the
+stage root. Studio Boom's `native.ts` normalization and composition-source
+validation preserve that contract. The current dependency advisories and the
+approval-gated remediation proposal are recorded in
+`docs/code-audit-2026-07-07.md`.
+
 ---
 
 ## Installed packages
@@ -54,7 +65,7 @@ HTML generation, GSAP, or element mutation code.**
 
 **Validation:**
 
-- `lintHyperframeHtml(html)` → lint findings
+- `await lintHyperframeHtml(html)` → lint findings
 
 ---
 

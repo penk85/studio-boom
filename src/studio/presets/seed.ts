@@ -2,8 +2,9 @@
 // These are character-agnostic: they target part roles and apply parent-relative
 // deltas. Under the skeleton runtime, parent motion belongs on parent controls;
 // children inherit it through the rig instead of restating the same transform.
-import { db, uid } from "../db";
+import { uid } from "../db";
 import type { MotionPreset, MotionTrack } from "../types";
+import { loadMotionPreset, saveMotionPreset } from "./preset-persistence";
 
 const now = () => Date.now();
 
@@ -402,12 +403,12 @@ export function ensureMotionPresetsSeeded(): Promise<void> {
   if (seedPromise) return seedPromise;
   seedPromise = (async () => {
     for (const p of BUILTIN_MOTION_PRESETS) {
-      const existing = await db.motionPresets.get(p.id);
+      const existing = await loadMotionPreset(p.id);
       if (!existing) {
-        await db.motionPresets.put(p);
+        await saveMotionPreset(p);
       } else if (existing.builtin) {
         // Refresh builtin definitions in case we ship updates.
-        await db.motionPresets.put({ ...p, createdAt: existing.createdAt });
+        await saveMotionPreset({ ...p, createdAt: existing.createdAt });
       }
     }
   })();

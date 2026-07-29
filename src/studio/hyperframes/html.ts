@@ -47,15 +47,15 @@ type StudioElementUpdates = Partial<StudioTimelineElement> & {
 };
 
 /**
- * Boundary adapter for @hyperframes/core@0.5.3.
- * Studio Boom stores native HyperFrames attrs; this patches the current parser
- * result until the upstream parser reads the native attrs Studio relies on.
+ * Boundary adapter for the HyperFrames core parser and mutation helpers.
+ * Studio Boom stores native HyperFrames attrs; this patches parser results so
+ * the editor's canonical source remains compatible with the current package.
  */
 export function parseStudioHtml(html: string): ParsedHtml {
-  const parsed = parseHtml(html);
-  if (!html || typeof DOMParser === "undefined") return parsed;
+  if (!html || typeof DOMParser === "undefined") return parseHtml(html);
 
   const doc = new DOMParser().parseFromString(html, "text/html");
+  const parsed = parseHtml(withCanonicalHyperframeIds(doc));
   const patchedElements = parsed.elements
     .filter((element) => !isCompositionRootMarker(element, doc))
     .map((element) => patchElementFromNativeAttrs(element, doc));
@@ -86,7 +86,8 @@ export function addStudioElementToHtml(
 
 /**
  * Calls the upstream mutation helper first, then patches the native attrs that
- * @hyperframes/core@0.5.3 declares in types but does not serialize yet.
+ * The current core helper declares these attrs in types but does not serialize
+ * every Studio-specific field yet.
  */
 export function updateStudioElementInHtml(
   html: string,
@@ -95,6 +96,145 @@ export function updateStudioElementInHtml(
 ): string {
   const coreHtml = updateElementInHtml(html, elementId, updates);
   return patchStudioElementInHtml(coreHtml, elementId, updates);
+}
+
+/**
+ * Retarget a composition source's declared id and inline timeline references.
+ * All callers use this boundary instead of rewriting serialized HTML directly.
+ */
+export function retargetCompositionIdInHtml(
+  html: string,
+  previousId: string,
+  nextId: string,
+): string {
+  if (!html || previousId === nextId) return html;
+
+  if (typeof DOMParser === "undefined") return html;
+
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  for (const element of compositionElements(doc)) {
+    if (element.getAttribute("data-composition-id") === previousId) {
+      element.setAttribute("data-composition-id", nextId);
+    }
+  }
+
+  for (const element of htmlReferenceElements(doc)) {
+    for (const attribute of ["data-composition-src", "data-composition-file", "src"]) {
+      if (element.getAttribute(attribute) === `compositions/${previousId}.html`) {
+        element.setAttribute(attribute, `compositions/${nextId}.html`);
+      }
+    }
+  }
+
+  for (const script of inlineCompositionScripts(doc)) {
+    script.textContent = replaceInlineTimelineId(script.textContent ?? "", previousId, nextId);
+  }
+
+  return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
+}
+
+/** Read one stored root element through the same DOM boundary used for edits. */
+export function readStudioElementHtml(html: string, elementId: string): string | null {
+  if (!html || typeof DOMParser === "undefined") return null;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  return doc.getElementById(elementId)?.outerHTML ?? null;
+}
+
+/** Update canonical render-track attrs through the shared HTML boundary. */
+export function updateStudioRenderTrackIndicesInHtml(
+  html: string,
+  assignments: ReadonlyMap<string, number>,
+): string {
+  if (!html || assignments.size === 0 || typeof DOMParser === "undefined") return html;
+
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  let changed = false;
+  for (const [elementId, renderTrackIndex] of assignments) {
+    const element = doc.getElementById(elementId);
+    if (!element) continue;
+    const nextValue = String(renderTrackIndex);
+    if (element.getAttribute("data-track-index") === nextValue) continue;
+    element.setAttribute("data-track-index", nextValue);
+    changed = true;
+  }
+
+  return changed ? "<!DOCTYPE html>\n" + doc.documentElement.outerHTML : html;
+}
+
+/** Clone a composition source while keeping element and nested composition rewrites in the boundary. */
+export function cloneStudioCompositionSource(
+  source: string,
+  options: {
+    sourceCompositionId: string;
+    targetCompositionId: string;
+    createElementId: () => string;
+    resolveNestedCompositionId: (sourceElementId: string, targetElementId: string) => string;
+  },
+): {
+  html: string;
+  idMap: Map<string, string>;
+  compositionIdMap: Map<string, string>;
+} {
+  const retargeted = retargetCompositionIdInHtml(
+    source,
+    options.sourceCompositionId,
+    options.targetCompositionId,
+  );
+  const idMap = new Map<string, string>();
+  const compositionIdMap = new Map<string, string>([
+    [options.sourceCompositionId, options.targetCompositionId],
+  ]);
+  if (typeof DOMParser === "undefined") {
+    return { html: retargeted, idMap, compositionIdMap };
+  }
+
+  const doc = new DOMParser().parseFromString(retargeted, "text/html");
+  for (const element of Array.from(doc.querySelectorAll<HTMLElement>("[id]"))) {
+    if (element.id === "stage") continue;
+
+    const sourceElementId = element.id;
+    const targetElementId = options.createElementId();
+    idMap.set(sourceElementId, targetElementId);
+    element.id = targetElementId;
+
+    const nestedCompositionId = element.getAttribute("data-composition-id");
+    if (nestedCompositionId && nestedCompositionId !== options.sourceCompositionId) {
+      const targetNestedCompositionId = options.resolveNestedCompositionId(
+        sourceElementId,
+        targetElementId,
+      );
+      compositionIdMap.set(nestedCompositionId, targetNestedCompositionId);
+      element.setAttribute("data-composition-id", targetNestedCompositionId);
+      element.setAttribute(
+        "data-composition-src",
+        `compositions/${targetNestedCompositionId}.html`,
+      );
+      const iframe = element.querySelector<HTMLIFrameElement>("iframe[src]");
+      if (iframe) {
+        iframe.setAttribute("src", `compositions/${targetNestedCompositionId}.html`);
+      }
+    }
+  }
+
+  const html = rewriteStudioSourceIds(
+    "<!DOCTYPE html>\n" + doc.documentElement.outerHTML,
+    idMap,
+    compositionIdMap,
+  );
+  return { html, idMap, compositionIdMap };
+}
+
+/** Rewrite serialized source references during a deliberate composition clone. */
+export function rewriteStudioSourceIds(
+  source: string,
+  idMap: Map<string, string>,
+  compositionIdMap: Map<string, string>,
+): string {
+  let next = source;
+  for (const [from, to] of [...compositionIdMap, ...idMap]) {
+    next = next.split(from).join(to);
+  }
+  return next;
 }
 
 function patchStudioElementInHtml(
@@ -108,6 +248,8 @@ function patchStudioElementInHtml(
   const doc = new DOMParser().parseFromString(coreHtml, "text/html");
   const el = doc.getElementById(elementId);
   if (!el) return coreHtml;
+
+  if (!el.hasAttribute("data-hf-id")) el.setAttribute("data-hf-id", elementId);
 
   if (updates.type !== undefined) el.setAttribute("data-type", updates.type);
   if ("compositionId" in updates && updates.compositionId !== undefined) {
@@ -161,6 +303,61 @@ function patchStudioElementInHtml(
 
   patchElementVisualStyle(el, updates);
 
+  return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
+}
+
+function inlineCompositionScripts(doc: Document): HTMLScriptElement[] {
+  const scripts = Array.from(doc.querySelectorAll<HTMLScriptElement>("script:not([src])"));
+  for (const template of Array.from(doc.querySelectorAll<HTMLTemplateElement>("template"))) {
+    scripts.push(
+      ...Array.from(template.content.querySelectorAll<HTMLScriptElement>("script:not([src])")),
+    );
+  }
+  return scripts;
+}
+
+function compositionElements(doc: Document): HTMLElement[] {
+  const elements = Array.from(doc.querySelectorAll<HTMLElement>("[data-composition-id]"));
+  for (const template of Array.from(doc.querySelectorAll<HTMLTemplateElement>("template"))) {
+    elements.push(
+      ...Array.from(template.content.querySelectorAll<HTMLElement>("[data-composition-id]")),
+    );
+  }
+  return elements;
+}
+
+function htmlReferenceElements(doc: Document): HTMLElement[] {
+  const elements = Array.from(
+    doc.querySelectorAll<HTMLElement>("[data-composition-src], [data-composition-file], [src]"),
+  );
+  for (const template of Array.from(doc.querySelectorAll<HTMLTemplateElement>("template"))) {
+    elements.push(
+      ...Array.from(
+        template.content.querySelectorAll<HTMLElement>(
+          "[data-composition-src], [data-composition-file], [src]",
+        ),
+      ),
+    );
+  }
+  return elements;
+}
+
+function replaceInlineTimelineId(source: string, previousId: string, nextId: string): string {
+  const previousJson = JSON.stringify(previousId);
+  const nextJson = JSON.stringify(nextId);
+  let next = source.split(previousJson).join(nextJson);
+  if (!previousId.includes("'")) {
+    next = next.split(`'${previousId}'`).join(`'${nextId}'`);
+  }
+  return next;
+}
+
+function withCanonicalHyperframeIds(doc: Document): string {
+  for (const element of Array.from(doc.querySelectorAll<HTMLElement>("[id]"))) {
+    if (!element.hasAttribute("data-hf-id")) {
+      element.setAttribute("data-hf-id", element.id);
+    }
+  }
   return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
 }
 

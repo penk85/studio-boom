@@ -21,7 +21,7 @@ interface RenderResult {
 
 type BundleToSingleHtml = (
   projectDir: string,
-  options?: { runtime?: "inline" | "external"; probeMediaDuration?: boolean },
+  options?: { runtime?: "inline" | "placeholder"; probeMediaDuration?: boolean },
 ) => Promise<string>;
 
 const GSAP_RUNTIME_FILENAME = "gsap.min.js";

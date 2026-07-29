@@ -5,7 +5,7 @@ import { usePlayerStore } from "@hyperframes/studio";
 import { db, uid } from "../db";
 import { useStudio } from "../store";
 import { ensureMotionPresetsSeeded } from "../presets/seed";
-import { saveCharacter } from "../character/character-utils";
+import { saveCharacter } from "../character/character-persistence";
 import { MotionPresetRecorder } from "../presets/MotionPresetRecorder";
 import {
   ACTION_CATEGORY_COLORS,

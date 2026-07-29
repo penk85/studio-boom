@@ -5,6 +5,10 @@ import { describe, expect, it } from "vitest";
 describe("project lock wiring", () => {
   const storeSource = readFileSync(join(process.cwd(), "src/studio/store.ts"), "utf8");
   const appSource = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+  const projectPersistenceSource = readFileSync(
+    join(process.cwd(), "src/studio/project-persistence.ts"),
+    "utf8",
+  );
   const dashboardSource = readFileSync(
     join(process.cwd(), "src/studio/components/ProjectDashboard.tsx"),
     "utf8",
@@ -37,7 +41,13 @@ describe("project lock wiring", () => {
   });
 
   it("routes destructive dashboard actions through the same project lock", () => {
-    expect(dashboardSource.match(/projectEditLock\.runExclusive\(project\.id/g)).toHaveLength(3);
-    expect(dashboardSource).toContain("const current = await readStoredProject(project.id)");
+    expect(
+      projectPersistenceSource.match(/projectEditLock\.runExclusive\(projectId/g),
+    ).toHaveLength(3);
+    expect(projectPersistenceSource).toContain(
+      "const current = await readStoredProject(projectId)",
+    );
+    expect(dashboardSource).not.toMatch(/db\.(projects|projectThumbnails)\.(put|add|delete)/);
+    expect(dashboardSource).not.toContain("projectEditLock");
   });
 });

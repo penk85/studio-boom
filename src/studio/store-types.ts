@@ -80,7 +80,7 @@ export interface StudioState {
   undo: () => void;
   redo: () => void;
 
-  addClip: (clip: AnyClip) => void;
+  addClip: (clip: AnyClip) => Promise<void>;
   addScene: () => void;
   duplicateScene: (sceneId: string) => void;
   removeScene: (sceneId: string) => void;
@@ -187,7 +187,7 @@ export interface StudioState {
     compositionId: string,
     html: string,
     options?: ProjectMutationOptions,
-  ) => void;
+  ) => Promise<void>;
   repairTimelineLanes: () => boolean;
 
   addMediaToTimeline: (asset: MediaAsset, trackIndex?: number, insertAtTime?: number) => void;

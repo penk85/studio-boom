@@ -7,7 +7,7 @@ import {
 } from "../interaction/select-drag";
 import { startWindowPointerDrag } from "../interaction/pointer-drag";
 import { ChevronDown, ChevronRight, Eye, EyeOff, Lock } from "lucide-react";
-import { db, getMediaUrl, importMediaFile, uid } from "../db";
+import { getMediaUrl, importMediaFile, uid } from "../db";
 import { useStudio } from "../store";
 import {
   createBlankCharacter,
@@ -28,6 +28,7 @@ import {
   variantKeyForPart,
   variantLabelForPart,
 } from "./character-utils";
+import { loadCharacter, saveCharacter } from "./character-persistence";
 import {
   buildRigHealthReport,
   collectVariantKeyIssues,
@@ -304,11 +305,11 @@ export function CharacterEditor({ characterId, onClose }: Props) {
 
   useEffect(() => {
     (async () => {
-      let row = await db.characters.get(characterId);
+      let row = await loadCharacter(characterId);
       if (!row) {
         row = createBlankCharacter();
         row.id = characterId;
-        await db.characters.put(row);
+        row = await saveCharacter(row);
         useStudio.getState().registerCharacterPreset(row);
       }
       const normalized = normalizeCharacterSlots(row);

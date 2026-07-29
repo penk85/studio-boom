@@ -29,16 +29,24 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { db, isCurrentProjectShape, requireCurrentProjectShape } from "../db";
 import { renderProjectThumbnail, renderProjectToMp4 } from "../export/render-client";
-import { createDuplicatedProject, createUniqueProjectName } from "../project-actions";
-import { projectEditLock } from "../project-lock";
+import { createUniqueProjectName } from "../project-actions";
 import {
   createProjectFromHyperframesHtml,
   createProjectFromHyperframesZip,
   type ImportedHyperframesProject,
 } from "../project-import";
 import { getProjectThumbnailCacheKey } from "../project-thumbnail-cache";
+import {
+  deleteStoredProject,
+  duplicateStoredProject,
+  isCurrentProjectShape,
+  listStoredProjects,
+  persistImportedProject,
+  readStoredProjectThumbnail,
+  renameStoredProject,
+  writeStoredProjectThumbnail,
+} from "../project-persistence";
 import type { Project } from "../types";
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
 import { SOURCE_TRUST_REQUIRED_MESSAGE, SourceTrustConfirmation } from "./SourceTrustConfirmation";
@@ -52,7 +60,7 @@ type ProjectRenderState = Record<string, "idle" | "rendering" | "error">;
 type ProjectActionState = Record<string, "renaming" | "duplicating" | "deleting">;
 
 export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: ProjectDashboardProps) {
-  const storedProjects = useLiveQuery(() => db.projects.orderBy("updatedAt").reverse().toArray());
+  const storedProjects = useLiveQuery(listStoredProjects, []);
   const [query, setQuery] = useState("");
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -151,15 +159,7 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
     setProjectAction(project.id, "renaming");
     setOpenError(null);
     try {
-      await projectEditLock.runExclusive(project.id, async () => {
-        const current = await readStoredProject(project.id);
-        await db.projects.put({
-          ...current,
-          name,
-          updatedAt: Date.now(),
-          hf: { ...current.hf, name },
-        });
-      });
+      await renameStoredProject(project.id, name);
       cancelRename();
     } catch (error) {
       setOpenError(error instanceof Error ? error.message : String(error));
@@ -172,30 +172,11 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
     setProjectAction(project.id, "duplicating");
     setOpenError(null);
     try {
-      await projectEditLock.runExclusive(project.id, async () => {
-        const current = await readStoredProject(project.id);
-        const name = createUniqueProjectName(
-          `${current.name} Copy`,
-          projects.map((existing) => existing.name),
-        );
-        const duplicate = createDuplicatedProject(current, { name });
-        const sourceCacheKey = getProjectThumbnailCacheKey(current);
-        const duplicateCacheKey = getProjectThumbnailCacheKey(duplicate);
-
-        await db.transaction("rw", db.projects, db.projectThumbnails, async () => {
-          await db.projects.add(duplicate);
-          const cachedThumbnail = await db.projectThumbnails.get(project.id);
-          if (cachedThumbnail?.cacheKey === sourceCacheKey) {
-            await db.projectThumbnails.put({
-              projectId: duplicate.id,
-              cacheKey: duplicateCacheKey,
-              blob: cachedThumbnail.blob,
-              mimeType: cachedThumbnail.mimeType,
-              generatedAt: Date.now(),
-            });
-          }
-        });
-      });
+      const name = createUniqueProjectName(
+        `${project.name} Copy`,
+        projects.map((existing) => existing.name),
+      );
+      await duplicateStoredProject(project.id, name);
     } catch (error) {
       setOpenError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -209,12 +190,7 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
     setProjectAction(project.id, "deleting");
     setOpenError(null);
     try {
-      await projectEditLock.runExclusive(project.id, async () => {
-        await db.transaction("rw", db.projects, db.projectThumbnails, async () => {
-          await db.projects.delete(project.id);
-          await db.projectThumbnails.delete(project.id);
-        });
-      });
+      await deleteStoredProject(project.id);
       setRenderErrors((state) => {
         const next = { ...state };
         delete next[project.id];
@@ -238,13 +214,13 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
     }
   };
 
-  const previewHyperframesProject = () => {
+  const previewHyperframesProject = async () => {
     setImportError(null);
     setPreparedHtmlImport(null);
     setImportPreviewStatus("loading");
     try {
       setPreparedHtmlImport(
-        createProjectFromHyperframesHtml(importSource, {
+        await createProjectFromHyperframesHtml(importSource, {
           name: importName,
         }),
       );
@@ -651,22 +627,6 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
       />
     </main>
   );
-}
-
-async function readStoredProject(projectId: string): Promise<Project> {
-  const storedProject = (await db.projects.get(projectId)) as unknown;
-  if (!storedProject) throw new Error(`Project "${projectId}" was not found.`);
-  return requireCurrentProjectShape(storedProject, projectId);
-}
-
-async function persistImportedProject(imported: ImportedHyperframesProject): Promise<void> {
-  await db.transaction("rw", db.projects, db.media, db.mediaBlobs, async () => {
-    await db.projects.add(imported.project);
-    if (imported.mediaFiles.length > 0) {
-      await db.media.bulkAdd(imported.mediaFiles.map(({ asset }) => asset));
-      await db.mediaBlobs.bulkAdd(imported.mediaFiles.map(({ mediaBlob }) => mediaBlob));
-    }
-  });
 }
 
 function NewProjectDialog({
@@ -1086,25 +1046,18 @@ function ProjectPreviewThumbnail({ project }: { project: Project }) {
     setThumbnailUrl(null);
     setFailed(false);
 
-    void db.projectThumbnails
-      .get(project.id)
+    void readStoredProjectThumbnail(project.id, cacheKey)
       .then(async (cached) => {
         if (cancelled) return;
-        if (cached?.cacheKey === cacheKey) {
-          showBlob(cached.blob);
+        if (cached) {
+          showBlob(cached);
           return;
         }
 
         const blob = await renderProjectThumbnail(project);
         if (cancelled) return;
         showBlob(blob);
-        await db.projectThumbnails.put({
-          projectId: project.id,
-          cacheKey,
-          blob,
-          mimeType: blob.type || "image/png",
-          generatedAt: Date.now(),
-        });
+        await writeStoredProjectThumbnail(project.id, cacheKey, blob);
       })
       .catch(() => {
         if (!cancelled) setFailed(true);

@@ -27,7 +27,8 @@ import {
   Volume2,
   WandSparkles,
 } from "lucide-react";
-import { db } from "../db";
+import { loadCharacter, saveCharacter } from "../character/character-persistence";
+import { readStudioElementHtml } from "../hyperframes/html";
 import { useStudio } from "../store";
 import type {
   AnyClip,
@@ -47,6 +48,7 @@ import { MotionPanel } from "./MotionPanel";
 import {
   buildCompositionRepairPrompt,
   validateCompositionSourceHtml,
+  validateCompositionSourceHtmlSync,
 } from "../hyperframes/composition-source";
 import { buildCompositionPreviewProject } from "../hyperframes/composition-preview-project";
 import {
@@ -103,7 +105,7 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
   const [activeTab, setActiveTab] = useState<InspectorTab>("clip");
   const characterId = characterClip?.character.characterId;
   const character = useLiveQuery<CharacterPreset | undefined>(
-    () => (characterId ? db.characters.get(characterId) : Promise.resolve(undefined)),
+    () => (characterId ? loadCharacter(characterId) : Promise.resolve(undefined)),
     [characterId],
   );
 
@@ -468,7 +470,7 @@ function CharacterRigPresetPanel({ character }: { character: CharacterPreset }) 
   const firstBinding = rig.slotBindings[0];
   const saveCharacterPatch = (patch: Partial<CharacterPreset>) => {
     const next: CharacterPreset = { ...character, ...patch, updatedAt: Date.now() };
-    void db.characters.put(next).then(() => registerCharacterPreset(next));
+    void saveCharacter(next).then(registerCharacterPreset);
   };
   const selectAngle = (activeAngle: CharacterAngle) => {
     const nextAngles = CHARACTER_ANGLES.filter(
@@ -1184,12 +1186,12 @@ function CompositionSourceInspector({
   source: string;
   projectWidth: number;
   projectHeight: number;
-  onApply: (html: string) => void;
+  onApply: (html: string) => void | Promise<void>;
 }) {
   const [draft, setDraft] = useState(source);
   const [errors, setErrors] = useState<string[]>([]);
-  const [validated, setValidated] = useState<ReturnType<
-    typeof validateCompositionSourceForClip
+  const [validated, setValidated] = useState<Awaited<
+    ReturnType<typeof validateCompositionSourceForClip>
   > | null>(null);
   const [previewProject, setPreviewProject] = useState<Project | null>(null);
   const [previewStatus, setPreviewStatus] = useState<"idle" | "loading" | "ready" | "error">(
@@ -1206,7 +1208,7 @@ function CompositionSourceInspector({
     [clip.compositionId, clip.duration, clip.width, clip.height, projectWidth, projectHeight],
   );
   const storedValidation = useMemo(
-    () => validateCompositionSourceForClip(source, clip.compositionId, validationDefaults),
+    () => validateCompositionSourceForClipSync(source, clip.compositionId, validationDefaults),
     [clip.compositionId, source, validationDefaults],
   );
   const isEditingStoredSource = draft === source;
@@ -1227,8 +1229,12 @@ function CompositionSourceInspector({
     setSourceTrusted(false);
   }, [source, clip.compositionId]);
 
-  const validate = () => {
-    const result = validateCompositionSourceForClip(draft, clip.compositionId, validationDefaults);
+  const validate = async () => {
+    const result = await validateCompositionSourceForClip(
+      draft,
+      clip.compositionId,
+      validationDefaults,
+    );
     setErrors(result.errors);
     setValidated(result.ok && result.html ? result : null);
     setPreviewProject(null);
@@ -1241,10 +1247,10 @@ function CompositionSourceInspector({
     setPreviewProject(buildCompositionPreviewProject(project, validated));
   };
 
-  const apply = () => {
+  const apply = async () => {
     if (!validatedHtml || previewStatus !== "ready" || !sourceTrusted) return;
     try {
-      onApply(validatedHtml);
+      await onApply(validatedHtml);
       setValidated(null);
       setPreviewProject(null);
       setPreviewStatus("idle");
@@ -1368,12 +1374,31 @@ function isPrimitiveSourceClip(clip: EditorClip): boolean {
   );
 }
 
-function validateCompositionSourceForClip(
+async function validateCompositionSourceForClip(
   html: string,
   expectedCompositionId: string,
   defaults: Parameters<typeof validateCompositionSourceHtml>[1],
 ) {
-  const result = validateCompositionSourceHtml(html, { ...defaults, isSubComposition: true });
+  const result = await validateCompositionSourceHtml(html, { ...defaults, isSubComposition: true });
+  return addExpectedCompositionIdError(result, expectedCompositionId);
+}
+
+function validateCompositionSourceForClipSync(
+  html: string,
+  expectedCompositionId: string,
+  defaults: Parameters<typeof validateCompositionSourceHtmlSync>[1],
+) {
+  const result = validateCompositionSourceHtmlSync(html, {
+    ...defaults,
+    isSubComposition: true,
+  });
+  return addExpectedCompositionIdError(result, expectedCompositionId);
+}
+
+function addExpectedCompositionIdError(
+  result: Awaited<ReturnType<typeof validateCompositionSourceHtmlSync>>,
+  expectedCompositionId: string,
+) {
   if (result.ok && result.compositionId !== expectedCompositionId) {
     return {
       ...result,
@@ -1389,9 +1414,7 @@ function validateCompositionSourceForClip(
 }
 
 function readRootElementSource(rootHtml: string, elementId: string): string | null {
-  if (typeof DOMParser === "undefined") return null;
-  const doc = new DOMParser().parseFromString(rootHtml, "text/html");
-  return doc.getElementById(elementId)?.outerHTML ?? null;
+  return readStudioElementHtml(rootHtml, elementId);
 }
 
 function TextInspector({

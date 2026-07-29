@@ -14,11 +14,25 @@ movie. `editorMeta` is editor-only intent and UI state.
 
 ## Compatibility Baseline
 
-All installed HyperFrames packages currently resolve to 0.5.3. The `html.ts`
-and `native.ts` adapters intentionally cover gaps in that baseline and must not
-be removed opportunistically. The next family upgrade should happen as an
-isolated compatibility project following
+All six installed HyperFrames packages currently resolve to exact 0.7.73, with
+Vite at 7.3.6. The 0.7 compatibility pass is complete. The `html.ts` and
+`native.ts` adapters remain load-bearing and must not be removed opportunistically;
+future family changes should follow
 [hyperframes-upgrade-safety-plan.md](./hyperframes-upgrade-safety-plan.md).
+
+### 0.7 Upgrade Closeout (2026-07-27)
+
+The current boundary matches the 0.7 contracts: parser-generated element
+identity is preserved through `data-hf-id`, linter calls are awaited, and each
+composition file has one `data-composition-id` on its stage root. In particular,
+`native.ts` moves a duplicate root marker to `#stage` during normalization so
+StaticGuard does not reject otherwise valid compositions. The regression is
+covered by `native.test.ts`.
+
+The automated gate is green: 84 test files / 746 tests pass, with clean
+typecheck, lint, production build, and diff checks. The remaining security audit
+findings are transitive HyperFrames/CLI dependency paths and are documented as
+an approval-gated follow-up in the code audit.
 
 ## Layer Classification
 
@@ -37,13 +51,14 @@ isolated compatibility project following
 - Upstream boundary adapter: `native.ts` / `normalizeNativeHyperframesHtml`
   normalizes HTML from current `@hyperframes/core` helpers into the native shape
   expected by the CLI/runtime without reading editor state. It also keeps root
-  composition dimensions, stage dimensions, and viewport metadata aligned for
-  export.
-- Upstream boundary adapter: `html.ts` / `parseStudioHtml` patches current parser
-  output from native `data-duration`/`data-track-index`/sizing attrs until
-  `@hyperframes/core` reads those attrs directly. It also owns the temporary
-  `data-rotation` base-transform seam until core exposes base rotation natively,
-  and persists visual clip layer order as CSS `z-index` in `rootHtml`.
+  composition dimensions, stage dimensions, viewport metadata, and the unique
+  0.7 composition-root marker aligned for export.
+- Upstream boundary adapter: `html.ts` / `parseStudioHtml` preserves parser
+  identity through `data-hf-id` and patches native
+  `data-duration`/`data-track-index`/sizing attrs into the Studio-facing model.
+  It also owns the temporary `data-rotation` base-transform seam until core
+  exposes base rotation natively, and persists visual clip layer order as CSS
+  `z-index` in `rootHtml`.
 - Root composition boundary: `root-composition.ts` owns new root composition creation and direct root metadata updates without rebuilding the whole composition.
 - Character composition builder: `character/composition.ts` generates native
   HyperFrames sub-composition HTML for Studio Boom character rigs. Root character
@@ -118,9 +133,9 @@ isolated compatibility project following
 
 ## Next Priorities
 
-- Dedicated HyperFrames-family compatibility pass: research a single compatible
-  target for core/engine/player/producer/studio/CLI, then execute the automated
-  and manual matrix in `hyperframes-upgrade-safety-plan.md`.
+- Security follow-up: review and approve a narrowly scoped remediation set for
+  the remaining transitive dependency advisories; do not use a blanket audit
+  fix or mix HyperFrames family versions.
 - Source-visible custom HyperFrames blocks: polish the existing Blocks tab and
   Inspector source panels while keeping all generated output in `project.hf`.
 - Upstream primitive audit: revisit HyperFrames Studio picker, property-panel,

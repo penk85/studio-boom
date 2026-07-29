@@ -19,17 +19,62 @@ export interface CompositionSourceDefaults {
   isSubComposition?: boolean;
 }
 
-export function validateCompositionSourceHtml(
+export async function validateCompositionSourceHtml(
+  html: string,
+  defaults: CompositionSourceDefaults,
+): Promise<CompositionSourceValidation> {
+  const prepared = prepareCompositionSourceValidation(html, defaults);
+  if (!prepared) return { ok: false, errors: ["Composition source is empty."] };
+  const lintErrors = await validateWithHyperframesLinter(
+    prepared.validationSource,
+    prepared.isSubComposition,
+  );
+  return finishCompositionSourceValidation(prepared, lintErrors);
+}
+
+/**
+ * Performs the synchronous structural portion of source validation for generated compositions.
+ * The HyperFrames 0.7 linter is asynchronous; user-authored sources use the full async validator.
+ */
+export function validateCompositionSourceHtmlSync(
   html: string,
   defaults: CompositionSourceDefaults,
 ): CompositionSourceValidation {
+  const prepared = prepareCompositionSourceValidation(html, defaults);
+  if (!prepared) return { ok: false, errors: ["Composition source is empty."] };
+  return finishCompositionSourceValidation(prepared, []);
+}
+
+interface PreparedCompositionSourceValidation {
+  errors: string[];
+  validationSource: string;
+  isSubComposition: boolean;
+  compositionId?: string;
+  duration: number;
+  width: number;
+  height: number;
+  normalized: string;
+}
+
+function prepareCompositionSourceValidation(
+  html: string,
+  defaults: CompositionSourceDefaults,
+): PreparedCompositionSourceValidation | null {
   const errors: string[] = [];
   const trimmed = html.trim();
-  if (!trimmed) {
-    return { ok: false, errors: ["Composition source is empty."] };
-  }
+  if (!trimmed) return null;
   if (typeof DOMParser === "undefined") {
-    return { ok: false, errors: ["DOMParser is not available in this environment."] };
+    return {
+      errors: ["DOMParser is not available in this environment."],
+      validationSource: trimmed,
+      isSubComposition:
+        defaults.isSubComposition ?? trimmed.trimStart().toLowerCase().startsWith("<template"),
+      compositionId: defaults.compositionId,
+      duration: defaults.duration,
+      width: defaults.width,
+      height: defaults.height,
+      normalized: trimmed,
+    };
   }
 
   const validationSource = unwrapSingleTemplateForValidation(trimmed);
@@ -76,30 +121,77 @@ export function validateCompositionSourceHtml(
   if (!Number.isFinite(width) || width <= 0) errors.push("Width must be positive.");
   if (!Number.isFinite(height) || height <= 0) errors.push("Height must be positive.");
 
-  errors.push(
-    ...validateWithHyperframesLinter(
-      trimmed,
-      defaults.isSubComposition ?? trimmed.trimStart().toLowerCase().startsWith("<template"),
-    ),
-  );
   errors.push(...validateTimedClipTracks(doc, root, compositionId));
 
-  if (errors.length > 0) {
-    return { ok: false, errors, compositionId, duration, width, height };
-  }
-
-  const normalized =
-    validationSource === trimmed
-      ? normalizeNativeHyperframesHtml(trimmed, { width, height })
-      : serializeHtmlDocument(trimmed);
+  const normalized = normalizeCompositionSourceForStorage(trimmed, validationSource, width, height);
   return {
-    ok: true,
-    errors: [],
+    errors,
+    validationSource: lintSourceForStudioHtml(normalized, compositionId),
+    isSubComposition:
+      defaults.isSubComposition ?? trimmed.trimStart().toLowerCase().startsWith("<template"),
     compositionId,
     duration,
     width,
     height,
-    html: normalized,
+    normalized,
+  };
+}
+
+function normalizeCompositionSourceForStorage(
+  trimmed: string,
+  validationSource: string,
+  width: number,
+  height: number,
+): string {
+  if (validationSource === trimmed) {
+    return normalizeNativeHyperframesHtml(trimmed, { width, height });
+  }
+
+  const doc = new DOMParser().parseFromString(trimmed, "text/html");
+  const template = doc.querySelector("template");
+  if (template) {
+    const normalizedInner = normalizeNativeHyperframesHtml(validationSource, { width, height });
+    const normalizedDoc = new DOMParser().parseFromString(normalizedInner, "text/html");
+    const normalizedBody = normalizedDoc.body?.innerHTML.trim();
+    template.innerHTML =
+      normalizedBody || normalizedDoc.documentElement?.outerHTML || template.innerHTML;
+  }
+  return `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`;
+}
+
+function lintSourceForStudioHtml(html: string, compositionId: string | undefined): string {
+  if (!compositionId || typeof DOMParser === "undefined") return html;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const stage = doc.getElementById("stage");
+  if (stage?.getAttribute("data-composition-id") === compositionId) {
+    doc.documentElement.removeAttribute("data-composition-id");
+  }
+  return "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
+}
+
+function finishCompositionSourceValidation(
+  prepared: PreparedCompositionSourceValidation,
+  lintErrors: string[],
+): CompositionSourceValidation {
+  const errors = [...prepared.errors, ...lintErrors];
+  if (errors.length > 0) {
+    return {
+      ok: false,
+      errors,
+      compositionId: prepared.compositionId,
+      duration: prepared.duration,
+      width: prepared.width,
+      height: prepared.height,
+    };
+  }
+  return {
+    ok: true,
+    errors: [],
+    compositionId: prepared.compositionId,
+    duration: prepared.duration,
+    width: prepared.width,
+    height: prepared.height,
+    html: prepared.normalized,
   };
 }
 
@@ -147,19 +239,17 @@ function getSingleMeaningfulElementChild(container: ParentNode): Element | null 
   return child;
 }
 
-function serializeHtmlDocument(html: string): string {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  return `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`;
-}
-
 function parsePositiveNumber(value: string | null | undefined): number | undefined {
   if (!value) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-function validateWithHyperframesLinter(html: string, isSubComposition: boolean): string[] {
-  const result = lintHyperframeHtml(html, {
+async function validateWithHyperframesLinter(
+  html: string,
+  isSubComposition: boolean,
+): Promise<string[]> {
+  const result = await lintHyperframeHtml(html, {
     isSubComposition,
   });
   return result.findings
@@ -192,9 +282,10 @@ function validateTimedClipTracks(
     const label = formatElementLabel(el);
     const isCompositionRoot =
       (root !== null && el === root) ||
-      (compositionId !== undefined &&
+      (root === doc.documentElement &&
         el.id === "stage" &&
-        el.getAttribute("data-composition-id") === compositionId);
+        compositionId !== undefined &&
+        root.getAttribute("data-composition-id") === compositionId);
     const track = el.getAttribute("data-track-index");
 
     if (isCompositionRoot && track !== null) {

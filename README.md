@@ -348,11 +348,19 @@ npm ci            # reproducible install from package-lock.json
 - Tailwind CSS - styling
 - ElevenLabs - optional speech generation and forced alignment
 
-The currently installed HyperFrames family is 0.5.3 across core, engine,
-player, producer, studio, and CLI. Upgrade those packages together in a
-dedicated compatibility pass using
-[docs/hyperframes-upgrade-safety-plan.md](docs/hyperframes-upgrade-safety-plan.md);
-do not let an unrelated install silently move only part of the family.
+The currently installed HyperFrames family is pinned to exact version 0.7.73
+across core, engine, player, producer, studio, and CLI. Keep those packages on a
+single version and follow the compatibility and security notes in
+[docs/hyperframes-upgrade-safety-plan.md](docs/hyperframes-upgrade-safety-plan.md)
+before any future family change. HyperFrames 0.7 validation is asynchronous and
+requires one unique `data-composition-id` on each composition's stage root.
+
+The current production audit still reports transitive advisories in the local
+HyperFrames/CLI graph. Do not run a blanket `npm audit fix`; the tracked findings,
+exposure assessment, and approval-gated candidate version set are in
+[docs/code-audit-2026-07-07.md](docs/code-audit-2026-07-07.md). A normal `npm ci`
+is required for a complete install; `--ignore-scripts` is only a diagnostic
+fallback because optional ONNX native-provider setup may run during postinstall.
 
 ## Local Storage
 

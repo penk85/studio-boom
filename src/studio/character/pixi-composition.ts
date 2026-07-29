@@ -1,6 +1,6 @@
 import { generateHyperframesHtml } from "@hyperframes/core";
 import type { CharacterClipMeta, CharacterPreset, MotionPreset } from "../types";
-import { validateCompositionSourceHtml } from "../hyperframes/composition-source";
+import { validateCompositionSourceHtmlSync } from "../hyperframes/composition-source";
 import { normalizeNativeHyperframesHtml } from "../hyperframes/native";
 import { MAX_BEND_DEGREES, bendPlanePositions } from "./mesh-deform";
 import { createLimbRuntime } from "./limb-runtime";
@@ -85,7 +85,7 @@ export function buildPixiCharacterCompositionHtml(args: BuildPixiCharacterCompos
       height,
     },
   );
-  const validation = validateCompositionSourceHtml(normalized, {
+  const validation = validateCompositionSourceHtmlSync(normalized, {
     compositionId: args.compositionId,
     duration,
     width,

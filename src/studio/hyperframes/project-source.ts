@@ -17,7 +17,12 @@ import {
 } from "../scenes";
 import { syncRootKeyframesHtml } from "./keyframes";
 import { normalizeNativeHyperframesHtml } from "./native";
-import { updateStudioElementInHtml } from "./html";
+import {
+  cloneStudioCompositionSource,
+  retargetCompositionIdInHtml,
+  rewriteStudioSourceIds,
+  updateStudioElementInHtml,
+} from "./html";
 import {
   validateCompositionSourceHtml,
   type CompositionSourceValidation,
@@ -145,53 +150,22 @@ export function cloneSceneSource(
       project.hf.width,
       project.hf.height,
     );
-  if (typeof DOMParser === "undefined") {
-    return {
-      html: source.split(sourceCompositionId).join(targetCompositionId),
-      compositionHtml: {},
-      clips: {},
-    };
-  }
-
-  const doc = new DOMParser().parseFromString(source, "text/html");
-  doc.documentElement.setAttribute("data-composition-id", targetCompositionId);
-  const stage = doc.getElementById("stage");
-  if (stage?.getAttribute("data-composition-id")) {
-    stage.setAttribute("data-composition-id", targetCompositionId);
-  }
-
-  const idMap = new Map<string, string>();
-  const compositionIdMap = new Map<string, string>([[sourceCompositionId, targetCompositionId]]);
-  for (const el of Array.from(doc.querySelectorAll<HTMLElement>("[id]"))) {
-    if (el.id === "stage") continue;
-    const oldId = el.id;
-    const newId = uid();
-    idMap.set(oldId, newId);
-    el.id = newId;
-
-    const nestedCompositionId = el.getAttribute("data-composition-id");
-    if (nestedCompositionId && nestedCompositionId !== sourceCompositionId) {
-      const nextCompositionId = clonedCompositionIdForClip(project.editorMeta.clips[oldId], newId);
-      compositionIdMap.set(nestedCompositionId, nextCompositionId);
-      el.setAttribute("data-composition-id", nextCompositionId);
-      if (el.hasAttribute("data-composition-src")) {
-        el.setAttribute("data-composition-src", `compositions/${nextCompositionId}.html`);
-      }
-      const iframe = el.querySelector<HTMLIFrameElement>("iframe[src]");
-      if (iframe) iframe.setAttribute("src", `compositions/${nextCompositionId}.html`);
-    }
-  }
-
-  let html = "<!DOCTYPE html>\n" + doc.documentElement.outerHTML;
-  html = rewriteSourceIds(html, idMap, compositionIdMap);
+  const clonedSource = cloneStudioCompositionSource(source, {
+    sourceCompositionId,
+    targetCompositionId,
+    createElementId: uid,
+    resolveNestedCompositionId: (sourceElementId, targetElementId) =>
+      clonedCompositionIdForClip(project.editorMeta.clips[sourceElementId], targetElementId),
+  });
+  const { html, idMap, compositionIdMap } = clonedSource;
 
   const compositionHtml: Record<string, string> = {};
   for (const [fromCompositionId, toCompositionId] of compositionIdMap) {
     if (fromCompositionId === sourceCompositionId) continue;
     const nestedSource = project.hf.compositionHtml[fromCompositionId];
     if (!nestedSource) continue;
-    compositionHtml[toCompositionId] = rewriteSourceIds(
-      nestedSource.split(fromCompositionId).join(toCompositionId),
+    compositionHtml[toCompositionId] = rewriteStudioSourceIds(
+      retargetCompositionIdInHtml(nestedSource, fromCompositionId, toCompositionId),
       idMap,
       compositionIdMap,
     );
@@ -217,18 +191,6 @@ function clonedCompositionIdForClip(meta: ClipEditorMeta | undefined, clipId: st
   if (meta?.compositionKind === "character") return defaultCharacterCompositionId(clipId);
   if (meta?.compositionKind === "scene") return sceneCompositionId(clipId);
   return `comp_${clipId}`;
-}
-
-function rewriteSourceIds(
-  source: string,
-  idMap: Map<string, string>,
-  compositionIdMap: Map<string, string>,
-): string {
-  let next = source;
-  for (const [from, to] of [...compositionIdMap, ...idMap]) {
-    next = next.split(from).join(to);
-  }
-  return next;
 }
 
 function deriveCompositionEditorClips(project: Project, compositionId: string): EditorClip[] {
@@ -285,7 +247,7 @@ export type ValidCompositionSource = CompositionSourceValidation & {
   compositionId: string;
 };
 
-export function assertValidCompositionSourceHtml(
+export async function assertValidCompositionSourceHtml(
   html: string,
   defaults: {
     compositionId: string;
@@ -294,8 +256,11 @@ export function assertValidCompositionSourceHtml(
     height: number;
   },
   options: { expectedCompositionId?: string } = {},
-): ValidCompositionSource {
-  const result = validateCompositionSourceHtml(html, { ...defaults, isSubComposition: true });
+): Promise<ValidCompositionSource> {
+  const result = await validateCompositionSourceHtml(html, {
+    ...defaults,
+    isSubComposition: true,
+  });
   const errors = [...result.errors];
   const compositionId = result.compositionId ?? defaults.compositionId;
 

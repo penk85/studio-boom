@@ -9,8 +9,8 @@ const defaults = {
 };
 
 describe("validateCompositionSourceHtml", () => {
-  it("accepts a registered HyperFrames composition source", () => {
-    const result = validateCompositionSourceHtml(
+  it("accepts a registered HyperFrames composition source", async () => {
+    const result = await validateCompositionSourceHtml(
       `<!DOCTYPE html>
 <html data-composition-id="ai-title" data-composition-duration="4">
   <body>
@@ -27,14 +27,13 @@ describe("validateCompositionSourceHtml", () => {
 </html>`,
       defaults,
     );
-
     expect(result.ok).toBe(true);
     expect(result.compositionId).toBe("ai-title");
     expect(result.html).toContain('data-composition-id="ai-title"');
   });
 
-  it("accepts a template-wrapped reusable HyperFrames composition source", () => {
-    const result = validateCompositionSourceHtml(
+  it("accepts a template-wrapped reusable HyperFrames composition source", async () => {
+    const result = await validateCompositionSourceHtml(
       `<template id="ai-title-template">
         <div data-composition-id="ai-title" data-width="1920" data-height="1080">
           <div class="title">AI Title</div>
@@ -55,8 +54,8 @@ describe("validateCompositionSourceHtml", () => {
     expect(result.html).toContain('data-composition-id="ai-title"');
   });
 
-  it("rejects timed child clips without track indexes", () => {
-    const result = validateCompositionSourceHtml(
+  it("rejects timed child clips without track indexes", async () => {
+    const result = await validateCompositionSourceHtml(
       `<!DOCTYPE html>
 <html data-composition-id="ai-title" data-composition-duration="4">
   <body>
@@ -79,8 +78,8 @@ describe("validateCompositionSourceHtml", () => {
     );
   });
 
-  it("rejects overlapping internal clips on the same track", () => {
-    const result = validateCompositionSourceHtml(
+  it("rejects overlapping internal clips on the same track", async () => {
+    const result = await validateCompositionSourceHtml(
       `<!DOCTYPE html>
 <html data-composition-id="ai-title" data-composition-duration="4">
   <body>
@@ -104,8 +103,8 @@ describe("validateCompositionSourceHtml", () => {
     );
   });
 
-  it("rejects composition roots that set a render track", () => {
-    const result = validateCompositionSourceHtml(
+  it("rejects composition roots that set a render track", async () => {
+    const result = await validateCompositionSourceHtml(
       `<!DOCTYPE html>
 <html data-composition-id="ai-title" data-composition-duration="4">
   <body>
@@ -136,8 +135,8 @@ describe("validateCompositionSourceHtml", () => {
     );
   });
 
-  it("rejects source without timeline registration", () => {
-    const result = validateCompositionSourceHtml(
+  it("rejects source without timeline registration", async () => {
+    const result = await validateCompositionSourceHtml(
       `<!DOCTYPE html>
 <html data-composition-id="ai-title" data-composition-duration="4">
   <body><div id="stage" data-composition-id="ai-title"></div></body>
@@ -149,8 +148,8 @@ describe("validateCompositionSourceHtml", () => {
     expect(result.errors.join("\n")).toMatch(/window.__timelines/);
   });
 
-  it("rejects a stage composition id that disagrees with the source root", () => {
-    const result = validateCompositionSourceHtml(
+  it("rejects a stage composition id that disagrees with the source root", async () => {
+    const result = await validateCompositionSourceHtml(
       `<!DOCTYPE html>
 <html data-composition-id="ai-title" data-composition-duration="4">
   <body>
@@ -172,8 +171,8 @@ describe("validateCompositionSourceHtml", () => {
     );
   });
 
-  it("rejects source with invalid inline JavaScript", () => {
-    const result = validateCompositionSourceHtml(
+  it("rejects source with invalid inline JavaScript", async () => {
+    const result = await validateCompositionSourceHtml(
       `<!DOCTYPE html>
 <html data-composition-id="ai-title" data-composition-duration="4">
   <body>
@@ -194,8 +193,8 @@ describe("validateCompositionSourceHtml", () => {
     expect(result.errors.join("\n")).toContain("[invalid_inline_script_syntax]");
   });
 
-  it("uses the HyperFrames linter to reject non-deterministic composition code", () => {
-    const result = validateCompositionSourceHtml(
+  it("uses the HyperFrames linter to reject non-deterministic composition code", async () => {
+    const result = await validateCompositionSourceHtml(
       `<!DOCTYPE html>
 <html data-composition-id="ai-title" data-composition-duration="4">
   <body>

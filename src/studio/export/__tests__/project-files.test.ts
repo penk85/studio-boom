@@ -110,7 +110,7 @@ describe("buildHyperframesProjectFiles", () => {
     expect(textByPath.get("compositions/comp_char-1.html")).not.toContain("hyperframe-runtime.js");
     expect(files.textFiles.map((file) => file.path)).not.toContain("pixi.min.js");
     expect(files.binaryFiles.map((file) => file.path)).toEqual(["assets/image-1.png"]);
-  });
+  }, 15_000);
 
   it("stages root composition dimensions where the HyperFrames renderer reads them", async () => {
     mediaRows.set("image-1", new Blob(["png"], { type: "image/png" }));

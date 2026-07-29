@@ -25,8 +25,8 @@ function makeRootHtml(body: string): string {
 }
 
 describe("createProjectFromHyperframesHtml", () => {
-  it("creates a Studio Boom project from top-level HyperFrames clips", () => {
-    const imported = createProjectFromHyperframesHtml(
+  it("creates a Studio Boom project from top-level HyperFrames clips", async () => {
+    const imported = await createProjectFromHyperframesHtml(
       makeRootHtml(`
         <div
           id="title"
@@ -67,8 +67,8 @@ describe("createProjectFromHyperframesHtml", () => {
     expect(imported.mediaFiles).toEqual([]);
   });
 
-  it("rejects asset references that need a project bundle", () => {
-    expect(() =>
+  it("rejects asset references that need a project bundle", async () => {
+    await expect(
       createProjectFromHyperframesHtml(
         makeRootHtml(`
           <img
@@ -82,7 +82,7 @@ describe("createProjectFromHyperframesHtml", () => {
           />
         `),
       ),
-    ).toThrow(/Missing local media assets/);
+    ).rejects.toThrow(/Missing local media assets/);
   });
 });
 

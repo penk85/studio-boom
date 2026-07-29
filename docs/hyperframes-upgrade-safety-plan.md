@@ -1,11 +1,13 @@
 # HyperFrames Compatibility Upgrade Safety Plan
 
-This is the handoff plan for upgrading Studio Boom from its current installed
-HyperFrames family. Run it in a dedicated session and a clean working tree.
+This is the handoff and closeout record for upgrading Studio Boom's HyperFrames
+family. The compatibility migration is complete; keep the historical baseline
+and approval gates below for future family changes.
 
 ## Current Baseline
 
-As of 2026-07-26, `npm ls --depth=0` resolves all six packages to **0.5.3**:
+As of 2026-07-27, `npm ls --depth=0` resolves all six packages to exact
+**0.7.73**:
 
 - `@hyperframes/core`
 - `@hyperframes/engine`
@@ -17,9 +19,33 @@ As of 2026-07-26, `npm ls --depth=0` resolves all six packages to **0.5.3**:
 Vite resolves to **7.3.6**. Do not change Vite and HyperFrames in the same
 compatibility diff.
 
-The package ranges currently use `^0.5.3`, while `package-lock.json` resolves
-0.5.3. Treat the lockfile as the running baseline and choose the new version
-deliberately; do not let an unrelated install silently select a new 0.x release.
+The six HyperFrames package declarations and lockfile are pinned to this one
+version. Treat the lockfile as the running baseline and choose any future 0.x
+release deliberately; do not let an unrelated install silently select a new
+family version.
+
+The original 0.5.3 state is retained below as historical evidence. The current
+security follow-up is intentionally separate from the completed compatibility
+upgrade: no blanket audit fix or unrelated dependency upgrade is authorized.
+
+## Upgrade Closeout (2026-07-27)
+
+- The six-package family was upgraded together from 0.5.3 to exact 0.7.73.
+- The 0.7 parser identity (`data-hf-id`), asynchronous linter, native timing
+  attributes, and composition-root contract were audited at the Studio boundary.
+- A StaticGuard regression involving duplicate `data-composition-id` values was
+  fixed: `native.ts` now leaves the composition ID exactly once on `#stage`, and
+  the regression is covered by `native.test.ts`.
+- Automated verification is green: `npx vitest run` passes 84 files / 746 tests;
+  `npx tsc --noEmit`, `npm run lint`, `npm run build`, and `git diff --check` are
+  clean.
+- Human smoke testing reported that the updated Studio behavior works. The full
+  representative preview/export matrix remains the required human confirmation
+  for a user-visible compatibility release; no saved 0.5.3 MP4 reference is
+  checked into this repository.
+- The post-upgrade production audit reports 11 advisories: 7 high, 3 moderate,
+  1 low, and 0 critical. The remaining dependency work is tracked in
+  `docs/code-audit-2026-07-07.md` and must be approved as a separate version set.
 
 ## Non-Negotiable Contracts
 
@@ -58,9 +84,11 @@ Before editing `package.json`:
 No dependency change is authorized merely by this document; the human must
 approve the proposed target.
 
-## Phase 1: Capture the 0.5.3 Baseline
+## Phase 1: Capture the Historical 0.5.3 Baseline
 
-From a clean tree:
+The following was the baseline checklist before the completed migration. Keep it
+for repeatability; a future upgrade should capture a fresh baseline rather than
+assuming the old results still apply.
 
 ```bash
 npm ls @hyperframes/core @hyperframes/engine @hyperframes/player \
@@ -162,7 +190,8 @@ Run `npm run dev`, open the representative project, and verify:
    disjoint limbs, permanent mesh imprints, or variant displacement.
 5. Speech playback, visemes, trimming, and volume.
 6. TopBar MP4 render/download. Compare the MP4 with Stage playback and the
-   saved 0.5.3 reference.
+   saved baseline reference. The current repository does not contain a saved
+   0.5.3 MP4 artifact, so visual comparison is still a human follow-up.
 
 The compatibility change is not done until this matrix is confirmed by a human.
 
@@ -177,6 +206,13 @@ After compatibility is proven:
 - update comments that say a boundary compensates for 0.5.3;
 - keep unresolved advisories documented with actual exposure rather than
   forcing incompatible transitive overrides.
+
+This closeout has completed those documentation updates. The audit result is
+not a claim of zero vulnerabilities: the current 0.7.73 CLI still pins or
+allows vulnerable transitive paths, including `@hono/node-server`, `adm-zip`,
+`onnxruntime-node`, and `sharp`. Fix-available transitive packages such as
+`hono`, `postcss`, `protobufjs`, and `esbuild` require a reviewed proposal and
+compatibility run before changing the lockfile.
 
 If compatibility fails, revert the isolated upgrade commit and keep 0.5.3.
 Do not stack product fixes on top of an unproven package migration.

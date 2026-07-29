@@ -4,7 +4,7 @@ import {
   extractCompositionOutline,
   type CompositionOutlineItem,
 } from "../hyperframes/composition-outline";
-import { validateCompositionSourceHtml } from "../hyperframes/composition-source";
+import { validateCompositionSourceHtmlSync } from "../hyperframes/composition-source";
 import type { AnyClip, EditorClip, Project } from "../types";
 import { isCharacterCompositionClip } from "../types";
 import type { ProjectTimelineClip } from "../scenes";
@@ -22,7 +22,7 @@ export function buildCompositionSourceErrors(
       errorsByClipId.set(clip.id, [`Missing source for composition "${clip.compositionId}".`]);
       continue;
     }
-    const result = validateCompositionSourceHtml(source, {
+    const result = validateCompositionSourceHtmlSync(source, {
       compositionId: clip.compositionId,
       duration: clip.duration,
       width: clip.width || project.hf.width,

@@ -25,7 +25,7 @@ export function normalizeNativeHyperframesHtml(
   const root = doc.documentElement;
   normalizeCompositionRoot(doc, root, options);
 
-  for (const el of Array.from(doc.querySelectorAll<HTMLElement>("[data-start]"))) {
+  for (const el of Array.from(doc.querySelectorAll<HTMLElement>("[data-start], [data-duration]"))) {
     normalizeTimedElement(el);
     normalizeCompositionHost(el);
   }
@@ -47,10 +47,16 @@ function normalizeCompositionRoot(
     return;
   }
 
-  stage.setAttribute(
-    "data-composition-id",
-    stage.getAttribute("data-composition-id") || compositionId,
-  );
+  root.removeAttribute("data-start");
+
+  const stageCompositionId = stage.getAttribute("data-composition-id");
+  if (!stageCompositionId || stageCompositionId === compositionId) {
+    // HyperFrames 0.7 treats data-composition-id as a unique composition-root
+    // marker. Keep it on the body stage, which the target linter/runtime treats
+    // as the entry root, and remove the 0.5-era <html> mirror.
+    stage.setAttribute("data-composition-id", compositionId);
+    root.removeAttribute("data-composition-id");
+  }
   stage.setAttribute("data-start", stage.getAttribute("data-start") || "0");
 
   const duration = root.getAttribute("data-composition-duration");

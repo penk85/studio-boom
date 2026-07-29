@@ -3,7 +3,7 @@ import {
   validateCompositionSourceHtml,
   type CompositionSourceValidation,
 } from "./hyperframes/composition-source";
-import { parseStudioHtml } from "./hyperframes/html";
+import { parseStudioHtml, retargetCompositionIdInHtml } from "./hyperframes/html";
 import { validateHfProject } from "./hyperframes/validate";
 import { uid } from "./db";
 import type {
@@ -33,11 +33,11 @@ export interface ImportedProjectMediaFile {
   mediaBlob: MediaBlobRow;
 }
 
-export function createProjectFromHyperframesHtml(
+export async function createProjectFromHyperframesHtml(
   source: string,
   options: ImportHyperframesProjectOptions = {},
-): ImportedHyperframesProject {
-  const validation = validateCompositionSourceHtml(source, {
+): Promise<ImportedHyperframesProject> {
+  const validation = await validateCompositionSourceHtml(source, {
     duration: 30,
     width: 1920,
     height: 1080,
@@ -58,7 +58,7 @@ export function createProjectFromHyperframesHtml(
   const id = options.id ?? uid();
   const now = options.now ?? Date.now();
   const tracks = createDefaultTracks();
-  const rootHtml = retargetCompositionId(validation.html, validation.compositionId, id);
+  const rootHtml = retargetCompositionIdInHtml(validation.html, validation.compositionId, id);
   const { clips, warnings } = deriveImportedClipMeta(rootHtml);
   const name = options.name?.trim() || "Imported HyperFrames";
 
@@ -121,7 +121,7 @@ export async function createProjectFromHyperframesZip(
     mediaFiles,
   });
 
-  const rootValidation = validateCompositionSourceHtml(rootRewritten, {
+  const rootValidation = await validateCompositionSourceHtml(rootRewritten, {
     duration: 30,
     width: 1920,
     height: 1080,
@@ -144,7 +144,7 @@ export async function createProjectFromHyperframesZip(
       compositionPaths,
       mediaFiles,
     });
-    const validation = validateCompositionSourceHtml(rewritten, {
+    const validation = await validateCompositionSourceHtml(rewritten, {
       duration: rootValidation.duration ?? 30,
       width: rootValidation.width ?? 1920,
       height: rootValidation.height ?? 1080,
@@ -168,7 +168,11 @@ export async function createProjectFromHyperframesZip(
     compositionHtml[validation.compositionId] = validation.html;
   }
 
-  const rootHtml = retargetCompositionId(rootValidation.html, rootValidation.compositionId, id);
+  const rootHtml = retargetCompositionIdInHtml(
+    rootValidation.html,
+    rootValidation.compositionId,
+    id,
+  );
   const missingRefs = collectMissingPackagedReferences(rootHtml, compositionHtml, mediaFiles);
   if (missingRefs.length > 0) {
     throw new Error(
@@ -742,32 +746,4 @@ function clipKindForElementType(type: string): ClipEditorMeta["kind"] | null {
     return type;
   }
   return null;
-}
-
-function retargetCompositionId(html: string, previousId: string, nextId: string): string {
-  if (previousId === nextId) return html;
-  if (typeof DOMParser === "undefined") return replaceTimelineKey(html, previousId, nextId);
-
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  for (const element of doc.querySelectorAll("[data-composition-id]")) {
-    if (element.getAttribute("data-composition-id") === previousId) {
-      element.setAttribute("data-composition-id", nextId);
-    }
-  }
-
-  return replaceTimelineKey(
-    `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`,
-    previousId,
-    nextId,
-  );
-}
-
-function replaceTimelineKey(html: string, previousId: string, nextId: string): string {
-  const previousJson = JSON.stringify(previousId);
-  const nextJson = JSON.stringify(nextId);
-  let next = html.split(previousJson).join(nextJson);
-  if (!previousId.includes("'")) {
-    next = next.split(`'${previousId}'`).join(`'${nextId}'`);
-  }
-  return next;
 }

@@ -271,13 +271,14 @@ describe("buildCharacterCompositionHtml", () => {
     expect(payload.duration).toBe(4);
   });
 
-  it("generates explicit Pixi character source, asset refs, dimensions, and timeline registration", () => {
+  it("generates explicit Pixi character source, asset refs, dimensions, and timeline registration", async () => {
     const html = build();
-    const validation = validateCompositionSourceHtml(html, {
+    const validation = await validateCompositionSourceHtml(html, {
       compositionId: "char_clip-1",
       duration: 4,
       width: 300,
       height: 450,
+      isSubComposition: true,
     });
 
     expect(validation.ok).toBe(true);
@@ -303,7 +304,7 @@ describe("buildCharacterCompositionHtml", () => {
     expect(payload.scene.partNodeIds["body-idle"]).toBeTruthy();
   });
 
-  it("can generate a Pixi-backed render-ready character composition from the scene graph", () => {
+  it("can generate a Pixi-backed render-ready character composition from the scene graph", async () => {
     const transformPreset: MotionPreset = {
       id: "pixi-body-motion",
       name: "Pixi body motion",
@@ -364,11 +365,12 @@ describe("buildCharacterCompositionHtml", () => {
         [variantPreset.id, variantPreset],
       ]),
     });
-    const validation = validateCompositionSourceHtml(html, {
+    const validation = await validateCompositionSourceHtml(html, {
       compositionId: "char_clip-1",
       duration: 4,
       width: 300,
       height: 450,
+      isSubComposition: true,
     });
 
     expect(validation.ok).toBe(true);
@@ -479,7 +481,7 @@ describe("buildCharacterCompositionHtml", () => {
     expect(html).not.toContain('if (node.kind === "vector") return');
   });
 
-  it("renders flexible limb-path parts as rope meshes with a sprite fallback", () => {
+  it("renders flexible limb-path parts as rope meshes with a sprite fallback", async () => {
     const base = makeCharacter();
     const character: CharacterPreset = {
       ...base,
@@ -514,11 +516,12 @@ describe("buildCharacterCompositionHtml", () => {
       },
       motionPresets: new Map(),
     });
-    const validation = validateCompositionSourceHtml(html, {
+    const validation = await validateCompositionSourceHtml(html, {
       compositionId: "char_clip-1",
       duration: 4,
       width: 300,
       height: 450,
+      isSubComposition: true,
     });
     expect(validation.ok).toBe(true);
 
@@ -641,7 +644,7 @@ describe("buildCharacterCompositionHtml", () => {
     );
   });
 
-  it("ignores a legacy generated mouth rig and lets mouth parts drive lip sync", () => {
+  it("ignores a legacy generated mouth rig and lets mouth parts drive lip sync", async () => {
     const character = {
       ...makeCharacter(),
       mouthStyle: "rig" as const,
@@ -668,11 +671,12 @@ describe("buildCharacterCompositionHtml", () => {
       },
       motionPresets: new Map(),
     });
-    const validation = validateCompositionSourceHtml(html, {
+    const validation = await validateCompositionSourceHtml(html, {
       compositionId: "char_mouth_rig_pixi",
       duration: 4,
       width: 300,
       height: 450,
+      isSubComposition: true,
     });
 
     // The generated mouth rig existed only as puppet DOM and is retired; the

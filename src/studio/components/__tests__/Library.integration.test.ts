@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 const libraryPath = join(process.cwd(), "src/studio/components/Library.tsx");
 const previewPanelPath = join(process.cwd(), "src/studio/components/HyperFramesPreviewPanel.tsx");
 const previewHelperPath = join(process.cwd(), "src/studio/hyperframes/preview.ts");
+const starterPath = join(process.cwd(), "src/studio/character/starter.ts");
 
 describe("Library Blocks integration", () => {
   it("previews validated custom composition source through the bundled HyperFrames path", () => {
@@ -31,5 +32,18 @@ describe("Library Blocks integration", () => {
     expect(panelSource).toContain("transform: `scale(${scale})`");
     expect(helperSource).toContain('fetch("/api/hyperframes/preview-bundle"');
     expect(panelSource).not.toContain('sandbox="allow-scripts allow-same-origin"');
+  });
+
+  it("places the seeded starter character through the registered character preset", () => {
+    const librarySource = readFileSync(libraryPath, "utf8");
+    const starterSource = readFileSync(starterPath, "utf8");
+
+    expect(starterSource).toContain(
+      'export const STARTER_CHARACTER_ID = "builtin-starter-character"',
+    );
+    expect(librarySource).toContain("ensureStarterCharacterSeeded");
+    expect(librarySource).toContain("registerCharacterPreset(starter)");
+    expect(librarySource).toContain("const starter =");
+    expect(librarySource).not.toContain('placeOnTimeline("stub"');
   });
 });

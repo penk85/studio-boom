@@ -1,4 +1,6 @@
 import { uid } from "./db";
+import { retargetCompositionIdInHtml } from "./hyperframes/html";
+import { cloneProject } from "./project-utils";
 import type { Project } from "./types";
 
 interface DuplicateProjectOptions {
@@ -27,7 +29,7 @@ export function createDuplicatedProject(
       ...clone.hf,
       id,
       name,
-      rootHtml: retargetRootCompositionId(clone.hf.rootHtml, previousRootId, id),
+      rootHtml: retargetCompositionIdInHtml(clone.hf.rootHtml, previousRootId, id),
     },
   };
 }
@@ -43,29 +45,4 @@ export function createUniqueProjectName(baseName: string, existingNames: Iterabl
   }
 
   return `${trimmedBase} ${Date.now()}`;
-}
-
-function cloneProject(project: Project): Project {
-  return JSON.parse(JSON.stringify(project)) as Project;
-}
-
-function retargetRootCompositionId(html: string, previousId: string, nextId: string): string {
-  if (!html || previousId === nextId) return html;
-  const previousLiteral = JSON.stringify(previousId);
-  const nextLiteral = JSON.stringify(nextId);
-
-  if (typeof DOMParser === "undefined") {
-    return html.split(previousLiteral).join(nextLiteral);
-  }
-
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  for (const element of doc.querySelectorAll("[data-composition-id]")) {
-    if (element.getAttribute("data-composition-id") === previousId) {
-      element.setAttribute("data-composition-id", nextId);
-    }
-  }
-
-  return `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`
-    .split(previousLiteral)
-    .join(nextLiteral);
 }

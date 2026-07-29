@@ -18,7 +18,10 @@ describe("normalizeNativeHyperframesHtml", () => {
     expect(normalized).toContain('data-duration="3"');
     expect(normalized).toContain('data-track-index="2"');
     expect(normalized).toContain('class="clip"');
-    expect(normalized).toContain('id="stage" data-composition-id="project-1"');
+    const doc = new DOMParser().parseFromString(normalized, "text/html");
+    expect(doc.querySelectorAll('[data-composition-id="project-1"]')).toHaveLength(1);
+    expect(doc.documentElement.hasAttribute("data-composition-id")).toBe(false);
+    expect(doc.getElementById("stage")?.getAttribute("data-composition-id")).toBe("project-1");
     expect(normalized).toContain('data-width="1920"');
     expect(normalized).toContain('data-height="1080"');
     expect(normalized).toContain('data-composition-width="1920"');
