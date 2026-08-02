@@ -4,6 +4,7 @@ import {
   parseStudioHtml,
   retargetCompositionIdInHtml,
   readStudioElementHtml,
+  rewriteStudioSourceIds,
   updateStudioRenderTrackIndicesInHtml,
   updateStudioElementInHtml,
 } from "../html";
@@ -378,5 +379,19 @@ describe("updateStudioRenderTrackIndicesInHtml", () => {
     expect(updated).toContain('<div id="back" data-track-index="2"></div>');
     expect(updated).toContain('<div id="front" data-track-index="1"></div>');
     expect(updateStudioRenderTrackIndicesInHtml(updated, new Map([["back", 2]]))).toBe(updated);
+  });
+});
+
+describe("rewriteStudioSourceIds", () => {
+  it("rewrites overlapping source ids atomically instead of cascading replacements", () => {
+    const rewritten = rewriteStudioSourceIds(
+      `<script>const a = "old-a"; const b = "old-b";</script>`,
+      new Map([["old-a", "old-b"]]),
+      new Map([["old-b", "new-b"]]),
+    );
+
+    expect(rewritten).toContain('"old-b"');
+    expect(rewritten).toContain('"new-b"');
+    expect(rewritten).not.toContain('"old-a"');
   });
 });

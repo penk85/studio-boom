@@ -86,7 +86,7 @@ removal path should verify its native provider after a normal install.
 
 - `npx tsc --noEmit` is clean. The former `activeSceneId` interface hole is fixed.
 - `npm run lint` is clean project-wide.
-- `npx vitest run --testTimeout=10000` passes 85 files / 753 tests in the current
+- `npx vitest run --testTimeout=10000` passes 85 files / 754 tests in the current
   environment. The default 5-second run can time out different store tests under
   full-suite CPU load; the isolated store file passes 50/50. Record exact counts
   in the audit after a full run; counts grow as tests are added and are not a

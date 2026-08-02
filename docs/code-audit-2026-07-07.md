@@ -30,7 +30,7 @@ L5, and part of L7 remain open. L9 is a future-path guard rather than a currentl
 reachable defect.
 
 **Current validation (2026-07-28):** `npx vitest run --testTimeout=10000` passes
-85 files / 753 tests; the default 5-second run is CPU-sensitive under the full
+85 files / 754 tests; the default 5-second run is CPU-sensitive under the full
 suite and can time out different store tests, while the isolated store file
 passes 50/50. `npx tsc --noEmit`, `npm run lint`, `npm run build`, and
 `git diff --check` are clean. The build retains only the known dependency

@@ -230,10 +230,20 @@ export function rewriteStudioSourceIds(
   idMap: Map<string, string>,
   compositionIdMap: Map<string, string>,
 ): string {
+  const entries = [...compositionIdMap, ...idMap].filter(([from, to]) => from && from !== to);
+  const markers = entries.map(([,], index) => {
+    let marker = `__studio_source_rewrite_${index}__`;
+    while (source.includes(marker)) marker += "_";
+    return marker;
+  });
+
   let next = source;
-  for (const [from, to] of [...compositionIdMap, ...idMap]) {
-    next = next.split(from).join(to);
-  }
+  entries.forEach(([from], index) => {
+    next = next.split(from).join(markers[index]!);
+  });
+  entries.forEach(([, to], index) => {
+    next = next.split(markers[index]!).join(to);
+  });
   return next;
 }
 
