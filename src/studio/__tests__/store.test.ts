@@ -1591,7 +1591,7 @@ describe("createBlankProject", () => {
     const clip = currentEditingClips().find((candidate) => candidate.id === clipId);
     expect(clip?.motionSteps).toHaveLength(1);
     expect(clip?.motionSteps[0]).toMatchObject({
-      label: "Motion",
+      label: "Move",
       startTime: 0.5,
     });
     expect(clip?.motionSteps[0]?.checkpointIds).toHaveLength(2);

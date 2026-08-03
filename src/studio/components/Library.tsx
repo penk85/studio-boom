@@ -1,4 +1,4 @@
-// Library panel — Media, Characters (with editor), Motion Presets, Blocks (later).
+// Library panel — Media, Text, Characters (with editor), Actions, Blocks.
 import { useLiveQuery } from "dexie-react-hooks";
 import { db, deleteMediaIfUnused, importMediaFile, uid } from "../db";
 import { useStudio } from "../store";
@@ -44,7 +44,7 @@ const TABS = [
   { id: "media", label: "Media" },
   { id: "text", label: "Text" },
   { id: "characters", label: "Characters" },
-  { id: "presets", label: "Motion presets" },
+  { id: "presets", label: "Actions" },
   { id: "blocks", label: "Blocks" },
 ] as const;
 
@@ -385,7 +385,9 @@ function CharactersTab() {
       )}
 
       <div className="flex items-center gap-2 rounded border border-border bg-panel-2 p-2">
-        <span className="text-[11px] font-medium text-muted-foreground">Generate preset:</span>
+        <span className="text-[11px] font-medium text-muted-foreground">
+          Start from a template:
+        </span>
         {(["male", "female"] as const).map((variant) => (
           <button
             key={variant}
@@ -577,15 +579,14 @@ function PresetsTab() {
   return (
     <div className="space-y-3 p-3 text-xs">
       <div className="rounded border border-border bg-panel-2 p-2 text-muted-foreground">
-        Apply these to a character clip from the Inspector. Built-ins cover expressions
-        ("Surprised", "Happy"), gestures ("Wave", "Nod"), full-body ("Idle bob", "Jump") and camera
-        moves.
+        Actions are what a character does — wave, nod, walk. Expressions are what its face does —
+        happy, surprised. Select a character clip and open the Acting tab to add one.
       </div>
       <button
         onClick={() => useStudio.getState().openModal({ type: "presets" })}
         className="block w-full rounded border border-border bg-panel-2 px-2 py-1.5 text-center hover:bg-panel"
       >
-        Browse all motion presets →
+        Browse all actions →
       </button>
       {Array.from(grouped.entries()).map(([cat, items]) => (
         <div key={cat}>

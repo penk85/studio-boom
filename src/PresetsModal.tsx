@@ -58,7 +58,7 @@ export function PresetsModal({ onClose }: { onClose: () => void }) {
           >
             ← Studio
           </button>
-          <h1 className="text-2xl font-semibold">Action Presets</h1>
+          <h1 className="text-2xl font-semibold">Actions &amp; Expressions</h1>
           <p className="ml-3 text-xs text-muted-foreground">
             Reusable actions, expressions, head turns, and camera cues.
           </p>
@@ -83,7 +83,7 @@ export function PresetsModal({ onClose }: { onClose: () => void }) {
               disabled={!selectedChar}
               className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              + New action preset
+              + New action
             </button>
           </div>
         </header>
@@ -132,7 +132,7 @@ export function PresetsModal({ onClose }: { onClose: () => void }) {
           ))}
           {filtered.length === 0 && (
             <div className="col-span-full rounded border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-              No motion presets in this category yet.
+              No actions in this category yet.
             </div>
           )}
         </div>

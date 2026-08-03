@@ -1,5 +1,5 @@
-// Top bar — project name, MP4 download action, save.
-import { AlertCircle, CheckCircle2, FolderOpen, Loader2, Redo2, Save, Undo2 } from "lucide-react";
+// Top bar — project name, project settings, undo/redo, MP4 download.
+import { AlertCircle, CheckCircle2, FolderOpen, Loader2, Redo2, Undo2 } from "lucide-react";
 import { useState } from "react";
 import { useStudio } from "../store";
 import { renderProjectToMp4 } from "../export/render-client";
@@ -7,9 +7,12 @@ import { ThemeToggle } from "./ThemeToggle";
 
 interface TopBarProps {
   onBackToProjects?: () => void;
+  /** Reveals the Inspector's project settings. The format chip is the only
+   *  discoverable entry point to size/fps/duration, so it has to lead there. */
+  onOpenProjectSettings?: () => void;
 }
 
-export function TopBar({ onBackToProjects }: TopBarProps) {
+export function TopBar({ onBackToProjects, onOpenProjectSettings }: TopBarProps) {
   const project = useStudio((s) => s.project);
   const saveProject = useStudio((s) => s.saveProject);
   const refreshCharacterCompositions = useStudio((s) => s.refreshCharacterCompositions);
@@ -23,10 +26,6 @@ export function TopBar({ onBackToProjects }: TopBarProps) {
   const [rendering, setRendering] = useState(false);
   const [renderError, setRenderError] = useState<string | null>(null);
   if (!project) return null;
-
-  const saveNow = async () => {
-    await saveProject();
-  };
 
   return (
     <header className="flex items-center gap-3 border-b border-border bg-panel px-4 py-2">
@@ -56,12 +55,6 @@ export function TopBar({ onBackToProjects }: TopBarProps) {
         aria-label="Project name"
       />
       <button
-        onClick={() => useStudio.getState().openModal({ type: "presets" })}
-        className="rounded border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-panel-2 hover:text-foreground"
-      >
-        Motion presets
-      </button>
-      <button
         type="button"
         onClick={undo}
         disabled={!canUndo}
@@ -83,19 +76,6 @@ export function TopBar({ onBackToProjects }: TopBarProps) {
         <Redo2 size={13} />
         Redo
       </button>
-      <button
-        onClick={saveNow}
-        disabled={saveStatus === "saving"}
-        className="flex items-center gap-1 rounded border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-panel-2 hover:text-foreground"
-        title={saveError ?? "Save project state locally"}
-      >
-        {saveStatus === "saving" ? (
-          <Loader2 className="animate-spin" size={13} />
-        ) : (
-          <Save size={13} />
-        )}
-        {saveStatus === "saving" ? "Saving" : "Save"}
-      </button>
       <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
         <ThemeToggle />
         <SaveStatusIndicator status={saveStatus} error={saveError} lastSavedAt={lastSavedAt} />
@@ -104,13 +84,15 @@ export function TopBar({ onBackToProjects }: TopBarProps) {
             {renderError}
           </span>
         )}
-        <span>
-          {project.hf.width}×{project.hf.height}
-        </span>
-        <span>·</span>
-        <span>{project.hf.fps}fps</span>
-        <span>·</span>
-        <span>{project.hf.duration}s</span>
+        <button
+          type="button"
+          onClick={onOpenProjectSettings}
+          disabled={!onOpenProjectSettings}
+          title="Change size, frame rate, and length"
+          className="rounded border border-transparent px-2 py-1 tabular-nums hover:border-border hover:bg-panel-2 hover:text-foreground disabled:cursor-default disabled:hover:border-transparent disabled:hover:bg-transparent"
+        >
+          {project.hf.width}×{project.hf.height} · {project.hf.fps}fps · {project.hf.duration}s
+        </button>
         <button
           disabled={rendering}
           title={rendering ? "Rendering…" : "Download MP4 with HyperFrames"}

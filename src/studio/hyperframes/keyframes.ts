@@ -339,7 +339,7 @@ export function deriveClipMotionSteps(
       startTime: start.time,
       endTime: end.time,
       ease: end.ease,
-      label: meta.name ?? "Motion",
+      label: meta.name ?? "Move",
       pathStyle: normalizePathStyle(meta.pathStyle),
     });
   }

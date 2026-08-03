@@ -28,7 +28,7 @@ export function VisualMotionLaneHeader({ clip }: { clip: EditorClip }) {
         style={{ height: visualMotionLaneHeight(clip) - VISUAL_MOTION_PARENT_HEIGHT }}
         className="flex items-center border-t border-border/40 px-3 pl-6 text-[10px] text-muted-foreground"
       >
-        <span className="truncate">Motion</span>
+        <span className="truncate">Move</span>
       </div>
     </div>
   );
@@ -114,8 +114,8 @@ export function VisualMotionLaneSet({
             }}
             className="absolute top-1/2 z-10 flex h-5 w-5 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-border bg-panel text-[12px] leading-none text-muted-foreground hover:bg-primary/20 hover:text-foreground"
             style={{ left: currentTime * zoom }}
-            aria-label="Add motion"
-            title="Add motion"
+            aria-label="Add move"
+            title="Add a move at the playhead"
           >
             +
           </button>
@@ -299,7 +299,7 @@ function VisualMotionBlock({
       style={{ left, width, top: rowIndex * VISUAL_MOTION_ROW_HEIGHT + 3 }}
       title={`${motion.label} ${formatSeconds(motion.startTime)}-${formatSeconds(
         motion.endTime,
-      )}${overlaps ? " overlaps another motion" : ""}`}
+      )}${overlaps ? " overlaps another move" : ""}`}
     >
       <span className="pointer-events-none absolute inset-x-2 top-0 block truncate leading-6">
         {motion.label}
@@ -351,12 +351,12 @@ function VisualMotionBlock({
       <span
         onPointerDown={(event) => startDrag(event, "start")}
         className="absolute left-0 top-0 h-full w-2 cursor-ew-resize rounded-l bg-white/45"
-        title="Move motion"
+        title="Drag to shift this move earlier or later"
       />
       <span
         onPointerDown={(event) => startDrag(event, "end")}
         className="absolute right-0 top-0 h-full w-2 cursor-ew-resize rounded-r bg-white/55"
-        title="Move end"
+        title="Drag to change when this move ends"
       />
       <span className="absolute bottom-0 left-0 top-0 w-px bg-white/70" style={{ left: 6 }} />
       <span className="absolute bottom-0 right-0 top-0 w-px bg-white/80" style={{ right: 6 }} />

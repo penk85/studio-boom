@@ -188,6 +188,12 @@ Do not use a `blob:` URL as the player's `src`: `@hyperframes/player` appends
 shader query params to `src`, which changes object URLs and can make the iframe
 show a broken-file icon. `srcdoc` avoids that URL rewrite for editor preview.
 
+Known limitation: when a scene is active, Stage previews
+`buildSceneEditingProject(...)`, so the player document holds one scene and its
+duration. Playback therefore stops at the scene boundary while the transport
+still shows whole-film duration. Whole-film playback is the `activeSceneId ===
+null` path. See `docs/ux-followups.md` §1 before changing scene scoping.
+
 Shader transition support is deferred. Do not add `shader-capture-scale`,
 `shader-loading`, or shader-specific transition plumbing until Studio Boom has a
 dedicated shader test composition and the standard preview/export path is stable.
@@ -239,7 +245,7 @@ audio `MediaAsset`; character clips place one or more speech entries through
 as a HyperFrames `<audio>` clip. Do not add locked root audio siblings for
 character speech.
 
-Character animation vocabulary:
+Character animation vocabulary (see `docs/ui-vocabulary.md` for the full canon):
 
 - **Pose** is a held variant map with no timing. It chooses semantic slot variants
   such as standing, explaining, folded arms, or open hand.
@@ -250,12 +256,15 @@ Character animation vocabulary:
   subtrack and override facial movement from Actions without double-applying it.
 - **Speech / lip sync** is its own placed audio/viseme track and should remain
   separate from Actions and Expressions.
-- **Stage motion** means moving a whole clip around the canvas. Do not confuse it
-  with character Actions.
+- **Move** means travelling a whole clip around the canvas over time. The UI calls
+  this a Move and its stops Points; it is never called "motion". Do not confuse it
+  with character Actions — a character walking across frame is a Move (the clip
+  travels) plus an Action (the legs walk), authored in two different tabs.
 
-The current persisted names still include `MotionPreset`, `AppliedMotion`, and
-`character.motions`; treat those as legacy internal names for Action/Expression
-data until a mechanical schema rename is done.
+The current persisted names still include `MotionPreset`, `AppliedMotion`,
+`character.motions`, `ClipMotionStep`, and `ClipMotionCheckpoint`; treat those as
+legacy internal names for Action/Expression/Move/Point data until a mechanical
+schema rename is done. They must not surface in any user-visible string.
 
 The generated character source must contain explicit renderable character data:
 stable node identity, `asset:<id>` media refs, base transforms/pivots, and a
@@ -380,11 +389,17 @@ ClipEditorMeta {
 | `src/studio/character/mesh-deform.ts`                      | Legacy Plane-bend math for old saved flexible parts; embedded only for compatibility with legacy `mode: "bend"` mesh nodes                                        |
 | `src/studio/presets/action-terminology.ts`                 | Shared Action/Expression labels, lanes, regions, exclusivity, and role-to-region rules                                                                            |
 | `docs/ai-generated-hyperframes-clips-roadmap.md`           | Roadmap for AI-generated clips, source-visible custom HyperFrames blocks, native text/composition clip support, and nested composition editing                    |
+| `docs/ui-vocabulary.md`                                    | **Canonical user-facing labels.** Read before writing any label, tooltip, placeholder, empty state, or status message                                             |
+| `docs/ux-followups.md`                                     | Open UX/UI issues in priority order, including the scene-scoped playback limitation                                                                              |
 
 ---
 
 ## Rules
 
+- Every user-visible string must use the canon in `docs/ui-vocabulary.md`. One
+  noun per concept, and no noun used for two concepts. Legacy internal names
+  (`MotionPreset`, `motionSteps`, `checkpoint`, `keyframe`) stay in the schema and
+  never reach a label. If a concept is missing from that file, add it there first.
 - Never persist old timing/layer attributes (`data-end`, `data-layer`) as the
   canonical format. Normalize to `data-duration`, `data-track-index`, etc.
   `data-name` is allowed for clip labels.

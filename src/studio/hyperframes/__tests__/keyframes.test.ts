@@ -259,7 +259,7 @@ describe("native clip keyframes", () => {
     expect(steps[0]).toMatchObject({
       startTime: 0.5,
       endTime: 1.4,
-      label: "Motion",
+      label: "Move",
     });
     expect(steps[0]?.checkpointIds).toHaveLength(2);
     expect(steps[0]?.checkpoints.map((checkpoint) => checkpoint.label)).toEqual(["Begin", "End"]);

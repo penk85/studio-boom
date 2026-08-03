@@ -1,4 +1,5 @@
-// MotionPresetRecorder — visual pose-and-capture flow for reusable motion presets.
+// MotionPresetRecorder — visual pose-and-capture flow for reusable Actions and
+// Expressions. The file/type names are legacy; see docs/ui-vocabulary.md.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronLeft,

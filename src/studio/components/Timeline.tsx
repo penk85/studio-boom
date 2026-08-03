@@ -14,7 +14,7 @@ import { db, uid } from "../db";
 import { useStudio, type ProjectMutationOptions } from "../store";
 import { useHfMediaHealth } from "../hooks/useHfMediaHealth";
 import type { CompositionOutlineItem } from "../hyperframes/composition-outline";
-import type { MotionPreset, AnyClip, CompositionClip } from "../types";
+import type { MotionPreset, AnyClip, CompositionClip, TrackKind } from "../types";
 import {
   deriveProjectScenes,
   deriveProjectTimelineClips,
@@ -435,14 +435,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
             {tracks.map((t, i) => {
               const layout = trackLayouts[i];
               const lanes = layout?.lanes ?? [];
-              const lanePrefix =
-                t.kind === "audio"
-                  ? "A"
-                  : t.kind === "background"
-                    ? "BG"
-                    : t.kind === "character"
-                      ? "C"
-                      : "V";
+              const laneNoun = laneNounForTrackKind(t.kind);
               return (
                 <div
                   key={t.id}
@@ -477,7 +470,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                     </button>
                     <button
                       onClick={() => addLane(i)}
-                      title="Add a sub-track lane"
+                      title={`Add another ${laneNoun.toLowerCase()} lane to this track`}
                       className="rounded border border-border px-1.5 text-[10px] leading-tight text-muted-foreground hover:bg-panel hover:text-foreground"
                     >
                       +
@@ -493,9 +486,8 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                             style={{ height: TRACK_HEIGHT - (lane.index === 0 ? 18 : 0) }}
                             className="flex items-center gap-1 px-3 text-[10px] text-muted-foreground"
                           >
-                            <span className="flex-1">
-                              {lanePrefix}
-                              {lane.index + 1}
+                            <span className="min-w-0 flex-1 truncate">
+                              {laneNoun} {lane.index + 1}
                             </span>
                             {lanes.length > 1 && (
                               <button
@@ -772,6 +764,24 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
       </div>
     </div>
   );
+}
+
+/**
+ * Lane rows used to read "V1 / A2 / BG1" — a DAW convention that only lands for
+ * people who already know one. Studio Boom's audience does not, so lanes say
+ * what they hold.
+ */
+function laneNounForTrackKind(kind: TrackKind): string {
+  switch (kind) {
+    case "audio":
+      return "Audio";
+    case "background":
+      return "Background";
+    case "character":
+      return "Character";
+    case "overlay":
+      return "Video";
+  }
 }
 
 function isTimelineSeekTarget(target: EventTarget | null) {

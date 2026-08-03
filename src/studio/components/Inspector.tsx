@@ -70,7 +70,7 @@ import {
   setSlotDepth,
 } from "../character/rig";
 
-type InspectorTab = "clip" | "speech" | "motion" | "advanced";
+type InspectorTab = "clip" | "speech" | "move" | "acting" | "advanced";
 type ClipUpdater = (patch: Partial<AnyClip>) => void;
 type IconComponent = ComponentType<{ size?: number; className?: string }>;
 
@@ -118,10 +118,10 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
   }, [clip?.id]);
 
   useEffect(() => {
-    if (clip?.kind === "audio" && activeTab === "motion") {
+    if (clip?.kind === "audio" && activeTab === "move") {
       setActiveTab("clip");
     }
-    if (!characterClip && activeTab === "speech") {
+    if (!characterClip && (activeTab === "speech" || activeTab === "acting")) {
       setActiveTab("clip");
     }
   }, [activeTab, characterClip, clip?.kind]);
@@ -148,59 +148,55 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
           <div className="space-y-3 text-xs">
             <InspectorTabs
               value={activeTab}
-              canAnimate={clip.kind !== "audio"}
+              canMove={clip.kind !== "audio"}
               canSpeak={!!characterClip}
+              canAct={!!characterClip}
               onChange={setActiveTab}
             />
 
             {activeTab === "clip" && (
-              <>
-                <ClipInspectorTab clip={clip} onUpdate={(patch) => update(clip.id, patch)} />
-                {characterClip && character && <CharacterRigPresetPanel character={character} />}
-              </>
+              <ClipInspectorTab clip={clip} onUpdate={(patch) => update(clip.id, patch)} />
             )}
 
             {activeTab === "speech" && characterClip && <VoiceLipSyncPanel clip={characterClip} />}
 
-            {activeTab === "motion" && clip.kind !== "audio" && (
-              <>
-                <MotionInspector
-                  clip={clip}
-                  currentTime={currentTime}
-                  selectedKeyframe={selectedKeyframe?.clipId === clip.id ? selectedKeyframe : null}
-                  onSelectKeyframe={selectKeyframe}
-                  onSeek={(time) => seek?.(clip.start + time)}
-                  onAddMotion={(time) => {
-                    const selection = addClipMotionStep(clip.id, time);
-                    if (selection) selectKeyframe(selection);
-                  }}
-                  onAddCheckpoint={(motionId, time) => {
-                    const selection = addClipMotionCheckpoint(clip.id, motionId, time);
-                    if (selection) selectKeyframe(selection);
-                    return selection;
-                  }}
-                  onUpdateKeyframe={updateClipKeyframe}
-                  onMoveCheckpoint={moveClipMotionCheckpoint}
-                  onRenameMotion={renameClipMotionStep}
-                  onSetPathStyle={setMotionStepPathStyle}
-                  onRemoveCheckpoint={removeClipMotionCheckpoint}
-                  onRemoveMotion={removeClipMotionStep}
-                />
-                {characterClip && (
-                  <CharacterMotionTab
-                    characterClip={characterClip}
-                    character={character}
-                    onUpdate={(patch) => update(characterClip.id, patch)}
-                  />
-                )}
-              </>
+            {activeTab === "move" && clip.kind !== "audio" && (
+              <MoveInspector
+                clip={clip}
+                currentTime={currentTime}
+                selectedKeyframe={selectedKeyframe?.clipId === clip.id ? selectedKeyframe : null}
+                onSelectKeyframe={selectKeyframe}
+                onSeek={(time) => seek?.(clip.start + time)}
+                onAddMotion={(time) => {
+                  const selection = addClipMotionStep(clip.id, time);
+                  if (selection) selectKeyframe(selection);
+                }}
+                onAddCheckpoint={(motionId, time) => {
+                  const selection = addClipMotionCheckpoint(clip.id, motionId, time);
+                  if (selection) selectKeyframe(selection);
+                  return selection;
+                }}
+                onUpdateKeyframe={updateClipKeyframe}
+                onMoveCheckpoint={moveClipMotionCheckpoint}
+                onRenameMotion={renameClipMotionStep}
+                onSetPathStyle={setMotionStepPathStyle}
+                onRemoveCheckpoint={removeClipMotionCheckpoint}
+                onRemoveMotion={removeClipMotionStep}
+              />
+            )}
+
+            {activeTab === "acting" && characterClip && (
+              <ActingInspectorTab
+                characterClip={characterClip}
+                character={character}
+                onUpdate={(patch) => update(characterClip.id, patch)}
+              />
             )}
 
             {activeTab === "advanced" && (
               <AdvancedInspectorTab
                 clip={clip}
                 project={project}
-                rootProject={rootProject}
                 tracks={tracks}
                 onUpdate={(patch) => update(clip.id, patch)}
                 onRemove={() => remove(clip.id)}
@@ -257,21 +253,49 @@ function EmptyInspectorState() {
 
 function InspectorTabs({
   value,
-  canAnimate,
+  canMove,
   canSpeak,
+  canAct,
   onChange,
 }: {
   value: InspectorTab;
-  canAnimate: boolean;
+  canMove: boolean;
   canSpeak: boolean;
+  canAct: boolean;
   onChange: (value: InspectorTab) => void;
 }) {
-  const tabs: { id: InspectorTab; label: string; icon: IconComponent; disabled?: boolean }[] = [
-    { id: "clip", label: "Clip", icon: SlidersHorizontal },
-    ...(canSpeak ? [{ id: "speech" as const, label: "Speech", icon: Mic2 }] : []),
-    { id: "motion", label: "Motion", icon: Sparkles, disabled: !canAnimate },
-    { id: "advanced", label: "More", icon: Settings2 },
+  const tabs: {
+    id: InspectorTab;
+    label: string;
+    icon: IconComponent;
+    title: string;
+    disabled?: boolean;
+  }[] = [
+    { id: "clip", label: "Clip", icon: SlidersHorizontal, title: "Timing, frame, and look" },
+    ...(canSpeak
+      ? [{ id: "speech" as const, label: "Speech", icon: Mic2, title: "Voice and lip sync" }]
+      : []),
+    {
+      id: "move",
+      label: "Move",
+      icon: Move,
+      title: "Travel this clip across the canvas over time",
+      disabled: !canMove,
+    },
+    ...(canAct
+      ? [
+          {
+            id: "acting" as const,
+            label: "Acting",
+            icon: Sparkles,
+            title: "Actions and expressions performed by this character",
+          },
+        ]
+      : []),
+    { id: "advanced", label: "More", icon: Settings2, title: "Layer, source, and delete" },
   ];
+  // Five tabs in a 288px rail can't fit an icon and a readable label. Labels win.
+  const showIcons = tabs.length < 5;
 
   return (
     <div
@@ -287,13 +311,14 @@ function InspectorTabs({
             type="button"
             disabled={tab.disabled}
             onClick={() => onChange(tab.id)}
+            title={tab.title}
             className={`flex min-w-0 items-center justify-center gap-1 rounded px-1.5 py-1.5 text-[11px] font-medium transition-colors ${
               selected
                 ? "bg-primary text-primary-foreground"
                 : "text-muted-foreground hover:bg-panel hover:text-foreground"
             } disabled:cursor-not-allowed disabled:opacity-35`}
           >
-            <Icon size={13} />
+            {showIcons && <Icon size={13} />}
             <span className="truncate">{tab.label}</span>
           </button>
         );
@@ -429,7 +454,7 @@ function ClipInspectorTab({ clip, onUpdate }: { clip: EditorClip; onUpdate: Clip
   );
 }
 
-function CharacterMotionTab({
+function ActingInspectorTab({
   characterClip,
   character,
   onUpdate,
@@ -533,7 +558,6 @@ function CharacterRigPresetPanel({ character }: { character: CharacterPreset }) 
 function AdvancedInspectorTab({
   clip,
   project,
-  rootProject,
   tracks,
   onUpdate,
   onRemove,
@@ -541,7 +565,6 @@ function AdvancedInspectorTab({
 }: {
   clip: EditorClip;
   project: Project;
-  rootProject: Project;
   tracks: TrackMeta[];
   onUpdate: ClipUpdater;
   onRemove: () => void;
@@ -602,8 +625,6 @@ function AdvancedInspectorTab({
       {isPrimitiveSourceClip(clip) && (
         <RootElementSourceInspector clip={clip} rootHtml={project.hf.rootHtml} />
       )}
-
-      <ProjectSettingsPanel project={rootProject} />
 
       <PanelSection title="Danger" icon={Trash2}>
         <button
@@ -704,7 +725,7 @@ const MOTION_FEELS = [
   { id: "bounce", label: "Bounce", ease: "back.out" },
 ] as const;
 
-function MotionInspector({
+function MoveInspector({
   clip,
   currentTime,
   selectedKeyframe,
@@ -757,9 +778,9 @@ function MotionInspector({
   const selectedValues = keyframe ? keyframeDisplayValues(clip, keyframe) : {};
   const previewState = sampleClipKeyframedState(clip, localPlayheadTime);
   const previewSummary = `${Math.round(previewState.x)}, ${Math.round(previewState.y)}`;
-  // Allow removing any checkpoint as long as we'd leave at least the 2 minimum
-  // a motion step needs. Used to be middle-only, which hid the option for the
-  // first/last point and pushed users to the "Delete motion" button by accident.
+  // Allow removing any point as long as we'd leave at least the 2 minimum a move
+  // needs. Used to be middle-only, which hid the option for the first/last point
+  // and pushed users to the "Delete move" button by accident.
   const canRemoveCheckpoint =
     selectedMotion && selectedCheckpoint && selectedMotion.checkpoints.length > 2;
   const firstMotionCheckpoint = selectedMotion?.checkpoints[0];
@@ -776,7 +797,7 @@ function MotionInspector({
   return (
     <div className="rounded border border-border bg-panel-2 p-3">
       <div className="mb-2 flex items-center justify-between">
-        <div className="font-semibold uppercase tracking-wider text-muted-foreground">Motion</div>
+        <div className="font-semibold uppercase tracking-wider text-muted-foreground">Move</div>
         {selectedKeyframe && (
           <button
             type="button"
@@ -792,9 +813,9 @@ function MotionInspector({
         type="button"
         onClick={() => onAddMotion(localPlayheadTime)}
         className="mb-2 w-full rounded border border-border bg-panel px-2 py-1.5 text-[11px] font-medium text-foreground hover:bg-panel-2"
-        title={`Add motion at ${localPlayheadTime.toFixed(1)}s near ${previewSummary}`}
+        title={`Add a move at ${localPlayheadTime.toFixed(1)}s near ${previewSummary}`}
       >
-        + Motion
+        + Move
       </button>
 
       {clip.motionSteps.length > 0 && (
@@ -881,7 +902,7 @@ function MotionInspector({
                   onRemoveCheckpoint(clip.id, selectedMotion.id, selectedCheckpoint.id)
                 }
                 className="rounded border border-border px-1.5 py-0.5 text-muted-foreground hover:border-primary/60 hover:bg-primary/10 hover:text-foreground"
-                title="Remove just this checkpoint from the motion"
+                title="Remove just this point from the move"
               >
                 Delete point
               </button>
@@ -890,15 +911,15 @@ function MotionInspector({
               type="button"
               onClick={() => onRemoveMotion(clip.id, selectedMotion.id)}
               className="rounded border border-destructive/40 px-1.5 py-0.5 text-destructive hover:bg-destructive/10"
-              title="Remove the entire motion and every checkpoint"
+              title="Remove the whole move and every point in it"
             >
-              Delete motion
+              Delete move
             </button>
           </div>
-          <Field label="Motion name">
+          <Field label="Move name">
             <input
               value={selectedMotion.name ?? ""}
-              placeholder="Motion"
+              placeholder="Move"
               onChange={(event) => onRenameMotion(clip.id, selectedMotion.id, event.target.value)}
               className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
             />
@@ -911,6 +932,51 @@ function MotionInspector({
             />
           </Field>
           <div className="grid grid-cols-2 gap-2">
+            <Field label="Starts (s)">
+              <NumberInput
+                value={selectedMotion.startTime}
+                min={0}
+                step={0.05}
+                onChange={(value) => {
+                  if (!firstMotionCheckpoint || !lastMotionCheckpoint) return;
+                  const nextTime = Math.max(0, Math.min(lastMotionCheckpoint.time - 0.05, value));
+                  const selection = onMoveCheckpoint(
+                    clip.id,
+                    selectedMotion.id,
+                    firstMotionCheckpoint.id,
+                    nextTime,
+                  );
+                  if (selection) {
+                    onSelectKeyframe(selection);
+                    onSeek(nextTime);
+                  }
+                }}
+              />
+            </Field>
+            <Field label="Ends (s)">
+              <NumberInput
+                value={selectedMotion.endTime}
+                min={0}
+                step={0.05}
+                onChange={(value) => {
+                  if (!firstMotionCheckpoint || !lastMotionCheckpoint) return;
+                  const nextTime = Math.max(
+                    firstMotionCheckpoint.time + 0.05,
+                    Math.min(clip.duration, value),
+                  );
+                  const selection = onMoveCheckpoint(
+                    clip.id,
+                    selectedMotion.id,
+                    lastMotionCheckpoint.id,
+                    nextTime,
+                  );
+                  if (selection) {
+                    onSelectKeyframe(selection);
+                    onSeek(nextTime);
+                  }
+                }}
+              />
+            </Field>
             <Field label="Point time (s)">
               <NumberInput
                 value={selectedCheckpoint.time}
@@ -929,51 +995,6 @@ function MotionInspector({
                   }
                 }}
               />
-            </Field>
-            <Field label="Span">
-              <div className="grid grid-cols-2 gap-1">
-                <NumberInput
-                  value={selectedMotion.startTime}
-                  min={0}
-                  step={0.05}
-                  onChange={(value) => {
-                    if (!firstMotionCheckpoint || !lastMotionCheckpoint) return;
-                    const nextTime = Math.max(0, Math.min(lastMotionCheckpoint.time - 0.05, value));
-                    const selection = onMoveCheckpoint(
-                      clip.id,
-                      selectedMotion.id,
-                      firstMotionCheckpoint.id,
-                      nextTime,
-                    );
-                    if (selection) {
-                      onSelectKeyframe(selection);
-                      onSeek(nextTime);
-                    }
-                  }}
-                />
-                <NumberInput
-                  value={selectedMotion.endTime}
-                  min={0}
-                  step={0.05}
-                  onChange={(value) => {
-                    if (!firstMotionCheckpoint || !lastMotionCheckpoint) return;
-                    const nextTime = Math.max(
-                      firstMotionCheckpoint.time + 0.05,
-                      Math.min(clip.duration, value),
-                    );
-                    const selection = onMoveCheckpoint(
-                      clip.id,
-                      selectedMotion.id,
-                      lastMotionCheckpoint.id,
-                      nextTime,
-                    );
-                    if (selection) {
-                      onSelectKeyframe(selection);
-                      onSeek(nextTime);
-                    }
-                  }}
-                />
-              </div>
             </Field>
             <Field label="Feel">
               <select
@@ -994,7 +1015,7 @@ function MotionInspector({
               </select>
             </Field>
           </div>
-          <MotionValueFields
+          <MoveValueFields
             clip={clip}
             values={selectedValues}
             onChange={(property, values) =>
@@ -1007,14 +1028,16 @@ function MotionInspector({
         </div>
       ) : (
         <div className="rounded border border-dashed border-border p-2 text-center text-[11px] text-muted-foreground">
-          No motion selected.
+          No move selected.
         </div>
       )}
     </div>
   );
 }
 
-function MotionValueFields({
+// Property names here must match the Frame and Look sections exactly — the same
+// property under two names in one panel is the fastest way to lose a beginner.
+function MoveValueFields({
   clip,
   values,
   onChange,
@@ -1025,41 +1048,42 @@ function MotionValueFields({
 }) {
   const x = values.x ?? clip.x;
   const y = values.y ?? clip.y;
+  const opacity = values.opacity ?? clip.opacity;
   return (
-    <div className="grid grid-cols-2 gap-2">
-      <Field label="Left">
-        <NumberInput value={x} onChange={(nextX) => onChange("position", { x: nextX, y })} />
-      </Field>
-      <Field label="Top">
-        <NumberInput value={y} onChange={(nextY) => onChange("position", { x, y: nextY })} />
-      </Field>
-      <Field label="Size">
-        <NumberInput
-          value={values.scale ?? 1}
-          min={0.01}
-          step={0.05}
-          onChange={(scale) => onChange("scale", { scale: Math.max(0.01, scale) })}
-        />
-      </Field>
-      <Field label="Angle°">
-        <NumberInput
-          value={values.rotation ?? clip.rotation}
-          step={1}
-          onChange={(rotation) => onChange("rotation", { rotation })}
-        />
-      </Field>
-      <Field label="Visible">
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.05}
-          value={values.opacity ?? clip.opacity}
-          onChange={(event) => onChange("opacity", { opacity: Number(event.target.value) })}
-          className="w-full"
-        />
-      </Field>
-    </div>
+    <>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="X">
+          <NumberInput value={x} onChange={(nextX) => onChange("position", { x: nextX, y })} />
+        </Field>
+        <Field label="Y">
+          <NumberInput value={y} onChange={(nextY) => onChange("position", { x, y: nextY })} />
+        </Field>
+        <Field label="Scale">
+          <NumberInput
+            value={values.scale ?? 1}
+            min={0.01}
+            step={0.05}
+            onChange={(scale) => onChange("scale", { scale: Math.max(0.01, scale) })}
+          />
+        </Field>
+        <Field label="Rotation°">
+          <NumberInput
+            value={values.rotation ?? clip.rotation}
+            step={1}
+            onChange={(rotation) => onChange("rotation", { rotation })}
+          />
+        </Field>
+      </div>
+      <RangeField
+        label="Opacity"
+        value={opacity}
+        min={0}
+        max={1}
+        step={0.05}
+        displayValue={`${Math.round(opacity * 100)}%`}
+        onChange={(value) => onChange("opacity", { opacity: value })}
+      />
+    </>
   );
 }
 

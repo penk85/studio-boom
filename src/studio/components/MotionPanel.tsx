@@ -1,4 +1,6 @@
-// Motion panel — apply/configure reusable motion presets on a character composition clip.
+// Acting panel — apply/configure reusable Actions and Expressions on a character
+// composition clip. The `MotionPreset`/`AppliedMotion` types it reads are legacy
+// internal names for that data; see docs/ui-vocabulary.md.
 import { useEffect, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { usePlayerStore } from "@hyperframes/studio";
@@ -156,7 +158,7 @@ export function MotionPanel({
             addMotion(preset);
             setPanelStatus(`Saved and applied "${preset.name}" at the playhead.`);
           } else {
-            setPanelStatus(`Saved "${preset.name}" to reusable presets.`);
+            setPanelStatus(`Saved "${preset.name}" to the Actions library.`);
           }
         }}
         onClose={() => {
@@ -205,8 +207,8 @@ export function MotionPanel({
         </div>
       </div>
       <div className="mb-2 rounded border border-border bg-panel px-2 py-1 text-[10px] text-muted-foreground">
-        Actions are repeatable body changes. Expressions are facial presets that can layer above an
-        action on the same character clip.
+        An action is what the body does. An expression is what the face does — it can layer on top
+        of an action on the same character.
       </div>
       {panelStatus && (
         <div className="mb-2 rounded border border-primary/30 bg-primary/10 px-2 py-1 text-[10px] text-foreground">
@@ -275,7 +277,7 @@ export function MotionPanel({
         <div className="space-y-1">
           {appliedMotions.length === 0 && (
             <div className="rounded border border-dashed border-border p-2 text-center text-[11px] text-muted-foreground">
-              No clip actions yet.
+              No actions on this character yet.
             </div>
           )}
 

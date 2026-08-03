@@ -81,7 +81,15 @@ export function Studio({ onBackToProjects }: StudioProps) {
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
-      <TopBar onBackToProjects={onBackToProjects} />
+      <TopBar
+        onBackToProjects={onBackToProjects}
+        onOpenProjectSettings={() => {
+          // Project settings live in the Inspector's no-selection state, so
+          // reveal the rail and clear the selection to land on them.
+          setInspectorOpen(true);
+          useStudio.getState().selectClip(null);
+        }}
+      />
       <div className="flex min-h-0 flex-1">
         {libraryOpen && (
           <aside className="w-60 shrink-0 bg-panel">
