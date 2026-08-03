@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { usePlayerStore, useTimelinePlayer } from "@hyperframes/studio";
 import { Timeline } from "../Timeline";
+import { ConfirmDialogProvider } from "../ConfirmDialog";
 import { createBlankProject, useStudio } from "../../store";
 
 vi.mock("@hyperframes/studio", async () => {
@@ -111,7 +112,12 @@ function TimelinePlaybackHarness() {
     };
   }, [iframeRef, onIframeLoad]);
 
-  return <Timeline togglePlay={togglePlay} seek={seek} />;
+  // SceneStrip reads the confirm dialog context for scene deletion.
+  return (
+    <ConfirmDialogProvider>
+      <Timeline togglePlay={togglePlay} seek={seek} />
+    </ConfirmDialogProvider>
+  );
 }
 
 describe("Timeline playback integration", () => {

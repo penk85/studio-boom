@@ -311,7 +311,7 @@ export function AnchorDebugOverlay({
           />
           {marker.label && (
             <div
-              className="absolute left-2 top-2 whitespace-nowrap rounded px-1 text-[9px]"
+              className="absolute left-2 top-2 whitespace-nowrap rounded px-1 text-ui-sm"
               style={{ background: "rgba(0,0,0,0.75)", color: marker.color }}
             >
               {marker.label}

@@ -59,4 +59,14 @@ describe("UI vocabulary", () => {
       expect(offenders, `${pattern} found in:\n${offenders.join("\n")}\n\n${why}`).toEqual([]);
     });
   }
+
+  it("uses the shared type scale instead of arbitrary pixel sizes", () => {
+    // Five ad-hoc sizes (8/9/10/11/12px) across ~275 sites made the UI read as a
+    // pro tool. `text-ui` (13px) and `text-ui-sm` (11px) are the whole scale.
+    const offenders = files
+      .map((file) => ({ file, hits: readFileSync(file, "utf8").match(/text-\[\d+px\]/g) ?? [] }))
+      .filter((entry) => entry.hits.length > 0)
+      .map((entry) => `${entry.file}: ${entry.hits.join(", ")}`);
+    expect(offenders, `Use text-ui / text-ui-sm instead:\n${offenders.join("\n")}`).toEqual([]);
+  });
 });

@@ -38,12 +38,12 @@ export function FlexibleSection({
           onChange={(e) => onSetDeform(e.target.checked ? neutralDeform() : undefined)}
         />
       </label>
-      <div className="mt-1 text-[10px] text-muted-foreground">
+      <div className="mt-1 text-ui-sm text-muted-foreground">
         Uses a point path for stretch-ready limb art instead of swinging like a stiff card — made
         for arms, legs, tails, and hair.
       </div>
       {deform?.mode === "limb-path" && (
-        <div className="mt-2 grid gap-2 rounded border border-border bg-panel p-2 text-[10px] text-muted-foreground">
+        <div className="mt-2 grid gap-2 rounded border border-border bg-panel p-2 text-ui-sm text-muted-foreground">
           <div>Path mesh ready. Start and end points are stored on the character, not actions.</div>
           <div className="grid grid-cols-2 gap-1">
             <button

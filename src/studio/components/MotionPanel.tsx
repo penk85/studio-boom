@@ -184,7 +184,7 @@ export function MotionPanel({
               setRecordingCategory("full-body");
               setEditingMotionId(null);
             }}
-            className="rounded border border-border bg-panel px-2 py-0.5 text-[10px] text-foreground hover:bg-panel-2"
+            className="rounded border border-border bg-panel px-2 py-0.5 text-ui-sm text-foreground hover:bg-panel-2"
           >
             Create action
           </button>
@@ -194,24 +194,24 @@ export function MotionPanel({
               setRecordingCategory("expression");
               setEditingMotionId(null);
             }}
-            className="rounded border border-border bg-panel px-2 py-0.5 text-[10px] text-foreground hover:bg-panel-2"
+            className="rounded border border-border bg-panel px-2 py-0.5 text-ui-sm text-foreground hover:bg-panel-2"
           >
             Create expression
           </button>
           <button
             onClick={() => setPicking((v) => !v)}
-            className="rounded bg-primary/30 px-2 py-0.5 text-[10px] text-foreground hover:bg-primary/50"
+            className="rounded bg-primary/30 px-2 py-0.5 text-ui-sm text-foreground hover:bg-primary/50"
           >
             {picking ? "Cancel" : "+ Add saved action"}
           </button>
         </div>
       </div>
-      <div className="mb-2 rounded border border-border bg-panel px-2 py-1 text-[10px] text-muted-foreground">
+      <div className="mb-2 rounded border border-border bg-panel px-2 py-1 text-ui-sm text-muted-foreground">
         An action is what the body does. An expression is what the face does — it can layer on top
         of an action on the same character.
       </div>
       {panelStatus && (
-        <div className="mb-2 rounded border border-primary/30 bg-primary/10 px-2 py-1 text-[10px] text-foreground">
+        <div className="mb-2 rounded border border-primary/30 bg-primary/10 px-2 py-1 text-ui-sm text-foreground">
           {panelStatus}
         </div>
       )}
@@ -223,7 +223,7 @@ export function MotionPanel({
               <button
                 key={c.id}
                 onClick={() => setFilterCat(c.id)}
-                className={`rounded px-1.5 py-0.5 text-[10px] ${
+                className={`rounded px-1.5 py-0.5 text-ui-sm ${
                   filterCat === c.id
                     ? "bg-primary/30 text-foreground"
                     : "text-muted-foreground hover:text-foreground"
@@ -239,14 +239,14 @@ export function MotionPanel({
               placeholder="Search..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full rounded border border-border bg-input px-2 py-0.5 text-[11px]"
+              className="w-full rounded border border-border bg-input px-2 py-0.5 text-ui-sm"
             />
           </div>
           <div className="max-h-48 overflow-auto">
             {filteredPresets.map((p) => (
               <div
                 key={p.id}
-                className="flex items-center gap-1 border-b border-border px-2 py-1.5 text-[11px]"
+                className="flex items-center gap-1 border-b border-border px-2 py-1.5 text-ui-sm"
               >
                 <button
                   onClick={() => addMotion(p)}
@@ -254,20 +254,20 @@ export function MotionPanel({
                 >
                   <div className="flex items-center gap-2">
                     <span className="flex-1 truncate text-foreground">{p.name}</span>
-                    <span className="text-[10px] text-muted-foreground">{p.duration}s</span>
-                    <span className="text-[10px] text-muted-foreground">{p.category}</span>
+                    <span className="text-ui-sm text-muted-foreground">{p.duration}s</span>
+                    <span className="text-ui-sm text-muted-foreground">{p.category}</span>
                   </div>
                 </button>
                 <button
                   onClick={() => editPreset(p, null, true)}
-                  className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-panel-2 hover:text-foreground"
+                  className="shrink-0 rounded border border-border px-1.5 py-0.5 text-ui-sm text-muted-foreground hover:bg-panel-2 hover:text-foreground"
                 >
                   Customize & add
                 </button>
               </div>
             ))}
             {filteredPresets.length === 0 && (
-              <div className="p-2 text-[11px] text-muted-foreground">No saved presets match.</div>
+              <div className="p-2 text-ui-sm text-muted-foreground">No saved presets match.</div>
             )}
           </div>
         </div>
@@ -276,7 +276,7 @@ export function MotionPanel({
       <div className="rounded border border-border bg-panel p-2">
         <div className="space-y-1">
           {appliedMotions.length === 0 && (
-            <div className="rounded border border-dashed border-border p-2 text-center text-[11px] text-muted-foreground">
+            <div className="rounded border border-dashed border-border p-2 text-center text-ui-sm text-muted-foreground">
               No actions on this character yet.
             </div>
           )}
@@ -291,7 +291,7 @@ export function MotionPanel({
               <button
                 key={motion.id}
                 onClick={() => setSelectedMotionId(motion.id)}
-                className={`flex w-full items-center gap-2 rounded border px-2 py-1 text-left text-[11px] ${
+                className={`flex w-full items-center gap-2 rounded border px-2 py-1 text-left text-ui-sm ${
                   selected ? "border-primary bg-primary/15" : "border-border bg-panel-2"
                 }`}
               >
@@ -299,10 +299,10 @@ export function MotionPanel({
                 <span className="min-w-0 flex-1 truncate text-foreground">
                   {preset?.name ?? "Unknown action"}
                 </span>
-                <span className="shrink-0 text-[10px] text-muted-foreground">
+                <span className="shrink-0 text-ui-sm text-muted-foreground">
                   {formatSeconds(motion.offset)}
                 </span>
-                <span className="shrink-0 text-[10px] text-muted-foreground">
+                <span className="shrink-0 text-ui-sm text-muted-foreground">
                   {formatSeconds(motion.duration ?? preset?.duration ?? 1)}
                 </span>
               </button>
@@ -311,9 +311,9 @@ export function MotionPanel({
         </div>
 
         {selectedMotion && selectedPreset && (
-          <div className="mt-3 rounded border border-border bg-panel-2 p-2 text-[10px]">
+          <div className="mt-3 rounded border border-border bg-panel-2 p-2 text-ui-sm">
             <div className="mb-2 flex items-center gap-2">
-              <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-foreground">
+              <span className="min-w-0 flex-1 truncate text-ui-sm font-medium text-foreground">
                 {selectedPreset.name}
               </span>
               <button

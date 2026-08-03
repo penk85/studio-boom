@@ -188,16 +188,16 @@ export function GroupInspector({
                   ))}
                 </select>
               </Field>
-              <div className="col-span-2 text-[10px] text-muted-foreground">
+              <div className="col-span-2 text-ui-sm text-muted-foreground">
                 <span className="block uppercase tracking-wider">Slot id</span>
-                <span className="font-mono text-[9px] text-foreground">{slotId}</span>
+                <span className="font-mono text-ui-sm text-foreground">{slotId}</span>
               </div>
             </div>
           </div>
         )}
         {phase === "build" && (
           <>
-            <div className="mb-3 text-[11px] text-muted-foreground">
+            <div className="mb-3 text-ui-sm text-muted-foreground">
               Move or resize all {parts.length} variants together. Edit one frame by selecting it
               below.
             </div>
@@ -271,21 +271,21 @@ export function GroupInspector({
                   }
                 >
                   {word}
-                  {hasAudio && <span className="text-[9px] text-primary">♪</span>}
+                  {hasAudio && <span className="text-ui-sm text-primary">♪</span>}
                 </button>
               );
             })}
           </div>
           {otherSamples.length > 0 && (
             <>
-              <div className="mb-1 text-[10px] text-muted-foreground">Or test with a clip:</div>
+              <div className="mb-1 text-ui-sm text-muted-foreground">Or test with a clip:</div>
               <div className="grid grid-cols-2 gap-1">
                 {otherSamples.map((sample) => (
                   <button
                     key={sample.url}
                     type="button"
                     onClick={() => (mouthTestPlaying ? onStopTestAudio() : onTestAudio(sample.url))}
-                    className="truncate rounded border border-border bg-background px-2 py-1 text-[10px] hover:bg-panel"
+                    className="truncate rounded border border-border bg-background px-2 py-1 text-ui-sm hover:bg-panel"
                     title={sample.name}
                   >
                     ▶ {sample.name}
@@ -298,13 +298,13 @@ export function GroupInspector({
             <button
               type="button"
               onClick={onStopTestAudio}
-              className="mt-2 w-full rounded border border-primary bg-primary/10 px-2 py-1 text-[10px] text-primary"
+              className="mt-2 w-full rounded border border-primary bg-primary/10 px-2 py-1 text-ui-sm text-primary"
             >
               ■ Stop
             </button>
           )}
           {lipSyncSamples.length === 0 && (
-            <div className="mt-2 rounded border border-dashed border-border p-2 text-[10px] text-muted-foreground">
+            <div className="mt-2 rounded border border-dashed border-border p-2 text-ui-sm text-muted-foreground">
               Drop audio into <code>src/studio/character/lipsync-samples/</code>. Name a file after
               a word above (e.g. <code>mommy.mp3</code>) to attach it to that button; other clips
               appear here as standalone tests.
@@ -316,13 +316,13 @@ export function GroupInspector({
         <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
           Variants
         </div>
-        <div className="mb-2 text-[10px] text-muted-foreground">
+        <div className="mb-2 text-ui-sm text-muted-foreground">
           Click a variant to show it in place — children re-anchor live.
           {previewedKey && (
             <button
               type="button"
               onClick={() => onClearPreview(slotId)}
-              className="ml-1 rounded border border-border px-1.5 py-0.5 text-[9px] text-muted-foreground hover:text-foreground"
+              className="ml-1 rounded border border-border px-1.5 py-0.5 text-ui-sm text-muted-foreground hover:text-foreground"
             >
               Reset preview
             </button>
@@ -344,7 +344,7 @@ export function GroupInspector({
         </div>
         {missingExpectedVariants.length > 0 && (
           <>
-            <div className="mb-1 mt-2 text-[10px] text-muted-foreground">
+            <div className="mb-1 mt-2 text-ui-sm text-muted-foreground">
               {role === "mouth"
                 ? "Missing mouth shapes — upload to complete lip sync:"
                 : "Missing eye states — open and closed drive blinking:"}
@@ -367,7 +367,7 @@ export function GroupInspector({
             type="button"
             onClick={onMirror}
             disabled={!mirrorPlan.ok}
-            className="mt-2 w-full rounded border border-border bg-background px-2 py-1 text-left text-[10px] text-foreground hover:bg-panel disabled:cursor-default disabled:opacity-60"
+            className="mt-2 w-full rounded border border-border bg-background px-2 py-1 text-left text-ui-sm text-foreground hover:bg-panel disabled:cursor-default disabled:opacity-60"
             title={
               mirrorPlan.ok
                 ? "Duplicate every layer of this slot to the other side with mirrored placement, pivots, and pins. The artwork itself is not flipped."

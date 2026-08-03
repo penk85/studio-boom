@@ -248,17 +248,17 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
   return (
     <div className="space-y-3 rounded border border-border bg-panel-2 p-3">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <span className="text-ui-sm font-semibold uppercase tracking-wider text-muted-foreground">
           Voice & Lip Sync
         </span>
         {visemeCount > 0 && (
-          <span className="text-[10px] text-primary">{visemeCount} viseme keys</span>
+          <span className="text-ui-sm text-primary">{visemeCount} viseme keys</span>
         )}
       </div>
 
       {speeches.length > 0 && (
         <div className="rounded border border-border bg-panel p-2">
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          <div className="mb-1 text-ui-sm font-semibold uppercase tracking-wider text-muted-foreground">
             Voices on this character
           </div>
           <ul className="space-y-1">
@@ -287,11 +287,11 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
                     type="button"
                     onClick={() => selectSpeech(speech.id)}
                     title="Edit lip sync"
-                    className="min-w-0 flex-1 truncate text-left text-[11px] text-foreground"
+                    className="min-w-0 flex-1 truncate text-left text-ui-sm text-foreground"
                   >
                     {asset?.name ?? "Voice"}
                   </button>
-                  <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground">
+                  <label className="flex shrink-0 items-center gap-1 text-ui-sm text-muted-foreground">
                     start
                     <SpeechStartInput
                       speechId={speech.id}
@@ -302,7 +302,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
                   </label>
                   {ready && (
                     <span
-                      className="shrink-0 text-[10px] text-primary"
+                      className="shrink-0 text-ui-sm text-primary"
                       title={`${asset?.visemes?.length} viseme keys`}
                     >
                       ♪
@@ -323,7 +323,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
           </ul>
           {selectedSpeech && (
             <div className="mt-2 border-t border-border pt-2">
-              <label className="mb-2 flex items-center gap-2 text-[10px] text-muted-foreground">
+              <label className="mb-2 flex items-center gap-2 text-ui-sm text-muted-foreground">
                 <Volume2 size={12} className="shrink-0" />
                 <span className="shrink-0">Volume</span>
                 <SpeechVolumeInput
@@ -332,7 +332,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
                   onCommit={(volume) => setSpeechVolume(clip.id, selectedSpeech.id, volume)}
                 />
               </label>
-              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <div className="mb-1 text-ui-sm font-semibold uppercase tracking-wider text-muted-foreground">
                 Lip sync — {selectedAsset?.name ?? "voice"}
               </div>
               <textarea
@@ -343,14 +343,14 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
                 className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
               />
               <div className="mt-1 flex items-center justify-between gap-2">
-                <span className="text-[10px] text-muted-foreground">
+                <span className="text-ui-sm text-muted-foreground">
                   {visemeCount > 0 ? `${visemeCount} viseme keys` : "No timing yet"}
                 </span>
                 <button
                   type="button"
                   onClick={onGenerateLipSync}
                   disabled={!!busyLabel || !voiceText.trim()}
-                  className="rounded bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                  className="rounded bg-primary px-2 py-1 text-ui-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
                 >
                   {visemeCount > 0 ? "Re-generate lip sync" : "Generate lip sync"}
                 </button>
@@ -361,12 +361,12 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
       )}
 
       {error && (
-        <div className="rounded bg-destructive/20 px-2 py-1 text-[11px] text-destructive-foreground">
+        <div className="rounded bg-destructive/20 px-2 py-1 text-ui-sm text-destructive-foreground">
           {error}
         </div>
       )}
       {notice && (
-        <div className="rounded border border-primary/40 bg-primary/10 px-2 py-1 text-[11px] text-primary">
+        <div className="rounded border border-primary/40 bg-primary/10 px-2 py-1 text-ui-sm text-primary">
           {notice}
         </div>
       )}
@@ -380,10 +380,10 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
           className="flex w-full items-center gap-1 px-2 py-1.5"
         >
           {libraryOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-          <span className="flex-1 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          <span className="flex-1 text-left text-ui-sm font-semibold uppercase tracking-wider text-muted-foreground">
             Voice library
           </span>
-          <span className="text-[10px] text-muted-foreground">{audioAssets.length}</span>
+          <span className="text-ui-sm text-muted-foreground">{audioAssets.length}</span>
         </button>
         {libraryOpen && (
           <div className="px-2 pb-2">
@@ -391,7 +391,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
               <button
                 type="button"
                 onClick={() => setCreateOpen(true)}
-                className="w-full rounded border border-dashed border-border bg-panel px-2 py-2 text-left text-[10px] text-muted-foreground hover:text-foreground"
+                className="w-full rounded border border-dashed border-border bg-panel px-2 py-2 text-left text-ui-sm text-muted-foreground hover:text-foreground"
               >
                 No voices yet. Open “Create a new voice” below to generate or upload one.
               </button>
@@ -417,17 +417,17 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
                       >
                         {playing ? <Pause size={12} /> : <Play size={12} />}
                       </button>
-                      <span className="min-w-0 flex-1 truncate text-[11px] text-foreground">
+                      <span className="min-w-0 flex-1 truncate text-ui-sm text-foreground">
                         {asset.name}
                       </span>
                       {asset.duration ? (
-                        <span className="shrink-0 text-[10px] text-muted-foreground">
+                        <span className="shrink-0 text-ui-sm text-muted-foreground">
                           {asset.duration.toFixed(1)}s
                         </span>
                       ) : null}
                       {ready && (
                         <span
-                          className="shrink-0 text-[10px] text-primary"
+                          className="shrink-0 text-ui-sm text-primary"
                           title={`${asset.visemes?.length} viseme keys`}
                         >
                           ♪
@@ -438,7 +438,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
                         onClick={() => void onAttachVoice(asset.id)}
                         disabled={!!busyLabel}
                         title={inUse ? "Add another instance of this voice" : "Add this voice"}
-                        className="shrink-0 rounded border border-border px-2 py-0.5 text-[10px] hover:bg-panel-2 disabled:opacity-50"
+                        className="shrink-0 rounded border border-border px-2 py-0.5 text-ui-sm hover:bg-panel-2 disabled:opacity-50"
                       >
                         Add
                       </button>
@@ -458,14 +458,14 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
           className="flex w-full items-center gap-1 px-2 py-1.5"
         >
           {createOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-          <span className="flex-1 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          <span className="flex-1 text-left text-ui-sm font-semibold uppercase tracking-wider text-muted-foreground">
             Create a new voice
           </span>
         </button>
         {createOpen && (
           <div className="space-y-3 px-2 pb-2">
             <div className="space-y-2">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <div className="text-ui-sm font-semibold uppercase tracking-wider text-muted-foreground">
                 Text to speech
               </div>
               <textarea
@@ -478,7 +478,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
 
               <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
                 <label className="block">
-                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <span className="mb-1 block text-ui-sm uppercase tracking-wider text-muted-foreground">
                     ElevenLabs voice
                   </span>
                   <select
@@ -505,14 +505,14 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
               </div>
 
               {voicesError && (
-                <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-100">
+                <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-ui-sm text-amber-100">
                   {voicesError}
                 </div>
               )}
 
               <div className="grid grid-cols-2 gap-2">
                 <label className="block">
-                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <span className="mb-1 block text-ui-sm uppercase tracking-wider text-muted-foreground">
                     Model
                   </span>
                   <select
@@ -536,7 +536,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
 
               <div className="grid grid-cols-2 gap-2">
                 <label className="block">
-                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <span className="mb-1 block text-ui-sm uppercase tracking-wider text-muted-foreground">
                     Stability {stability.toFixed(2)}
                   </span>
                   <input
@@ -550,7 +550,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
                   />
                 </label>
                 <label className="block">
-                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <span className="mb-1 block text-ui-sm uppercase tracking-wider text-muted-foreground">
                     Similarity {similarity.toFixed(2)}
                   </span>
                   <input
@@ -576,14 +576,14 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
             </div>
 
             <div className="space-y-2 border-t border-border pt-3">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <div className="text-ui-sm font-semibold uppercase tracking-wider text-muted-foreground">
                 Upload audio
               </div>
               <div
                 onDragOver={onDragOver}
                 onDragLeave={() => setDraggingAudio(false)}
                 onDrop={onDrop}
-                className={`rounded border border-dashed px-3 py-3 text-center text-[11px] ${
+                className={`rounded border border-dashed px-3 py-3 text-center text-ui-sm ${
                   draggingAudio
                     ? "border-primary bg-primary/10 text-foreground"
                     : "border-border bg-panel text-muted-foreground"
@@ -607,7 +607,7 @@ export function VoiceLipSyncPanel({ clip }: { clip: CharacterCompositionClip }) 
                 />
               </div>
               <label className="block">
-                <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+                <span className="mb-1 block text-ui-sm uppercase tracking-wider text-muted-foreground">
                   Transcript (optional)
                 </span>
                 <textarea
@@ -731,7 +731,7 @@ function PinnedVoiceControls({
     : undefined;
   return (
     <div className="block">
-      <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+      <span className="mb-1 block text-ui-sm uppercase tracking-wider text-muted-foreground">
         Pinned
       </span>
       <div className="flex gap-1">

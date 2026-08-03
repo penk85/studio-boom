@@ -72,7 +72,7 @@ export function MouthCreator({ isOpen, onClose, onSave, initialRig }: MouthCreat
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <div>
             <h2 className="text-base font-semibold">Choose Generated Mouth Style</h2>
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-ui-sm text-muted-foreground">
               Generated SVG mouth slot — all 10 visemes animate smoothly via GSAP.
             </p>
           </div>
@@ -85,7 +85,7 @@ export function MouthCreator({ isOpen, onClose, onSave, initialRig }: MouthCreat
         <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-4">
           {/* Style selector */}
           <div>
-            <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            <div className="mb-2 text-ui-sm font-semibold uppercase tracking-wider text-muted-foreground">
               Style
             </div>
             <div className="grid grid-cols-3 gap-2">
@@ -107,7 +107,7 @@ export function MouthCreator({ isOpen, onClose, onSave, initialRig }: MouthCreat
 
           {/* Viseme board — all 10 poses, click to edit */}
           <div>
-            <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            <div className="mb-2 text-ui-sm font-semibold uppercase tracking-wider text-muted-foreground">
               All visemes — click to edit pose
             </div>
             <div className="grid grid-cols-5 gap-2">
@@ -230,7 +230,7 @@ function StyleCard({
   return (
     <button
       onClick={onClick}
-      className={`flex flex-col items-center gap-1.5 rounded border px-2 py-2 text-[11px] transition-colors ${
+      className={`flex flex-col items-center gap-1.5 rounded border px-2 py-2 text-ui-sm transition-colors ${
         selected
           ? "border-primary bg-primary/15 text-primary"
           : "border-border bg-background hover:bg-panel-2"
@@ -292,7 +292,7 @@ function VisemeCell({
           lowerCurve={lowerCurve}
         />
       </div>
-      <span className="text-[9px] uppercase tracking-wider text-muted-foreground">{viseme}</span>
+      <span className="text-ui-sm uppercase tracking-wider text-muted-foreground">{viseme}</span>
     </button>
   );
 }
@@ -332,7 +332,7 @@ function PoseEditor({
   return (
     <div className="rounded border border-primary/30 bg-primary/5 p-3">
       <div className="mb-3 flex items-center justify-between">
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-primary">
+        <span className="text-ui-sm font-semibold uppercase tracking-wider text-primary">
           Editing: {viseme}
         </span>
         <div className="flex items-center gap-3">
@@ -349,7 +349,7 @@ function PoseEditor({
           <button
             type="button"
             onClick={onReset}
-            className="text-[10px] text-muted-foreground underline hover:text-foreground"
+            className="text-ui-sm text-muted-foreground underline hover:text-foreground"
           >
             Reset
           </button>
@@ -358,7 +358,7 @@ function PoseEditor({
       <div className="grid grid-cols-2 gap-x-6 gap-y-2">
         {params.map(({ key, label, min, max, step }) => (
           <div key={key} className="flex flex-col gap-0.5">
-            <div className="flex justify-between text-[10px]">
+            <div className="flex justify-between text-ui-sm">
               <span className="text-muted-foreground">{label}</span>
               <span className="tabular-nums text-muted-foreground">{pose[key].toFixed(2)}</span>
             </div>
@@ -395,7 +395,7 @@ function ShapeSlider({
 }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <div className="flex justify-between text-[11px]">
+      <div className="flex justify-between text-ui-sm">
         <span className="text-muted-foreground">{label}</span>
         <span className="tabular-nums text-muted-foreground">{value.toFixed(2)}</span>
       </div>
@@ -423,7 +423,7 @@ function ColorPicker({
 }) {
   return (
     <div className="flex items-center gap-1">
-      <span className="text-[11px] text-muted-foreground">{label}</span>
+      <span className="text-ui-sm text-muted-foreground">{label}</span>
       <input
         type="color"
         value={value}

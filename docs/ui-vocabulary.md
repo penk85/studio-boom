@@ -88,6 +88,18 @@ These persist in the schema and are fine in code. They must not appear in the UI
 | `MotionPanel`, `MotionPresetRecorder`          | Actions & Expressions |
 | `compositionKind: "ai-block"`                  | Block              |
 
+## Type scale
+
+Two sizes, defined as Tailwind utilities in `src/styles.css`. Arbitrary
+`text-[Npx]` values are banned and guarded by a test.
+
+| Utility      | Size | Use for                                                     |
+| ------------ | ---- | ----------------------------------------------------------- |
+| `text-ui`    | 13px | Panel body copy, field values, anything read as a sentence   |
+| `text-ui-sm` | 11px | Metadata, counts, chips, timeline lane labels                |
+
+Section labels are `text-ui-sm uppercase tracking-wider`.
+
 ## Copy conventions
 
 - Sentence case for buttons and labels: "Add to scene", not "Add To Scene".

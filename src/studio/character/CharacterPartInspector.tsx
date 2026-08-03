@@ -168,7 +168,7 @@ export function Inspector({
               <span className="text-muted-foreground"> › </span>
               {variantLabelForPart(part)}
             </div>
-            <div className="text-[10px] text-muted-foreground">{roleLabel(part.role)}</div>
+            <div className="text-ui-sm text-muted-foreground">{roleLabel(part.role)}</div>
           </div>
           {phase === "pose" && (
             <div className="mt-2">
@@ -176,7 +176,7 @@ export function Inspector({
             </div>
           )}
           {phase === "pose" && anchorDragContext && (
-            <div className="mt-2 text-[10px] leading-snug text-muted-foreground">
+            <div className="mt-2 text-ui-sm leading-snug text-muted-foreground">
               Drag this layer on the canvas to adjust its anchor —{" "}
               <button
                 type="button"
@@ -192,7 +192,7 @@ export function Inspector({
       {phase === "build" && (
         <>
           <section className="rounded border border-border bg-panel-2 p-3">
-            <div className="mb-1 text-[10px] text-muted-foreground">
+            <div className="mb-1 text-ui-sm text-muted-foreground">
               <button
                 type="button"
                 onClick={() => onSelectSlot(getPartSlotId(part))}
@@ -226,7 +226,7 @@ export function Inspector({
               </button>
             </div>
             {alignPlan && (
-              <div className="mb-3 rounded border border-border bg-background/60 p-2 text-[11px] leading-snug text-muted-foreground">
+              <div className="mb-3 rounded border border-border bg-background/60 p-2 text-ui-sm leading-snug text-muted-foreground">
                 <div>
                   Swaps in for{" "}
                   <span className="text-foreground">
@@ -433,7 +433,7 @@ export function Inspector({
               <div className="mb-1 font-semibold uppercase tracking-wider text-muted-foreground">
                 Angles
               </div>
-              <div className="mb-2 text-[10px] leading-snug text-muted-foreground">
+              <div className="mb-2 text-ui-sm leading-snug text-muted-foreground">
                 Which views show this drawing. All checked = shared with every angle (props,
                 accessories), including ones added later.
               </div>
@@ -450,7 +450,7 @@ export function Inspector({
                   return (
                     <label
                       key={angle}
-                      className={`flex items-center gap-1 text-[10px] ${
+                      className={`flex items-center gap-1 text-ui-sm ${
                         lastOne ? "opacity-70" : "cursor-pointer"
                       }`}
                       title={
@@ -479,7 +479,7 @@ export function Inspector({
                   );
                 })}
                 {!part.angleIds?.length && !part.angleId && (
-                  <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[9px] text-emerald-300">
+                  <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-ui-sm text-emerald-300">
                     Shared
                   </span>
                 )}
@@ -489,7 +489,7 @@ export function Inspector({
           <button
             type="button"
             onClick={() => onSwitchPhase("rig")}
-            className="w-full rounded border border-dashed border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
+            className="w-full rounded border border-dashed border-border px-2 py-1 text-ui-sm text-muted-foreground hover:text-foreground"
             title="Anchors, movement limits, and the skeleton live in the Rig phase"
           >
             Rig this layer →
@@ -622,7 +622,7 @@ export function Inspector({
             {part.bounds && (
               <button
                 onClick={() => onChange(part.id, { bounds: undefined })}
-                className="mt-2 text-[11px] text-destructive"
+                className="mt-2 text-ui-sm text-destructive"
               >
                 Clear allowed area
               </button>

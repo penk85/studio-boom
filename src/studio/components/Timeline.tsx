@@ -18,6 +18,7 @@ import type { MotionPreset, AnyClip, CompositionClip, TrackKind } from "../types
 import {
   deriveProjectScenes,
   deriveProjectTimelineClips,
+  type ProjectScene,
   type ProjectTimelineClip,
 } from "../scenes";
 import { isCharacterCompositionClip } from "../types";
@@ -29,8 +30,10 @@ import {
   buildCompositionOutlines,
   buildCompositionSourceErrors,
   isKeyframeEditableClip,
+  nearestLaneIndex,
   toSceneLocalClipPatch,
 } from "./timeline-clip-utils";
+import { hasLibraryDragItem, readLibraryDragItem } from "../library-items";
 import {
   buildExpandedClipLayout,
   buildTrackLayout,
@@ -54,6 +57,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const project = rootProject;
   const timelineReady = usePlayerStore((s) => s.timelineReady);
   const currentTime = usePlayerStore((s) => s.currentTime);
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
   const clips = useMemo(
     () => (rootProject ? deriveProjectTimelineClips(rootProject) : []),
     [rootProject],
@@ -90,13 +94,12 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const playheadRef = useRef<HTMLDivElement>(null);
   const timeDisplayRef = useRef<HTMLSpanElement>(null);
   const sceneScrollerRef = useRef<HTMLDivElement>(null);
-  const timelineTimeOffsetRef = useRef(0);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
 
   useEffect(() => {
-    const update = (t: number) => {
-      const projectTime = t + timelineTimeOffsetRef.current;
+    // `t` is already film time — the preview document spans every scene.
+    const update = (projectTime: number) => {
       if (playheadRef.current)
         playheadRef.current.style.left = `${projectTime * zoomRef.current}px`;
       if (timeDisplayRef.current) timeDisplayRef.current.textContent = fmtTime(projectTime);
@@ -114,6 +117,8 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const seekDragPointerIdRef = useRef<number | null>(null);
   const seekDragClientXRef = useRef<number | null>(null);
   const seekDragScrollFrameRef = useRef<number | null>(null);
+  /** Set only for the duration of a "Play this scene" run. */
+  const playUntilRef = useRef<number | null>(null);
   const [expandedClipIds, setExpandedClipIds] = useState<Set<string>>(new Set());
   const [selectedMotionId, setSelectedMotionId] = useState<string | null>(null);
   const queriedPresets = useLiveQuery(() => db.motionPresets.toArray(), []);
@@ -131,13 +136,29 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
     () => (rootProject ? deriveProjectScenes(rootProject) : []),
     [rootProject],
   );
-  const activeSceneStart = scenes.find((scene) => scene.id === activeSceneId)?.start ?? 0;
-  timelineTimeOffsetRef.current = activeSceneStart;
-  const projectCurrentTime = currentTime + activeSceneStart;
+  // Player time is film time now, so there is no scene offset to add back.
+  const projectCurrentTime = currentTime;
   useEffect(() => {
     if (playheadRef.current) playheadRef.current.style.left = `${projectCurrentTime * zoom}px`;
     if (timeDisplayRef.current) timeDisplayRef.current.textContent = fmtTime(projectCurrentTime);
   }, [projectCurrentTime, zoom]);
+
+  // "Play this scene" is a one-shot action, not a mode: it arms a stop time for
+  // exactly one playback run. Nothing stays toggled, so the next press of the
+  // main Play button runs the whole film as usual.
+  useEffect(() => {
+    const unsubscribe = liveTime.subscribe((time) => {
+      const stopAt = playUntilRef.current;
+      if (stopAt == null || time < stopAt - 0.001) return;
+      playUntilRef.current = null;
+      if (!usePlayerStore.getState().isPlaying) return;
+      togglePlay();
+      seek(stopAt);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [seek, togglePlay]);
   const compositionOutlinesByClipId = useMemo(
     () =>
       rootProject
@@ -146,36 +167,51 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
     [rootProject, clips],
   );
 
+  // The player document holds the whole film, so timeline time and player time are
+  // the same clock. Seeking no longer has to switch scenes and remap into scene-local
+  // time — which is also why scrubbing across a boundary no longer reloads the iframe.
   const seekProjectTime = useCallback(
     (projectTime: number) => {
+      // Scrubbing is the user taking over, so it cancels a scene run's stop time.
+      playUntilRef.current = null;
       const boundedTime = Math.max(0, Math.min(projectDuration, projectTime));
-      const scene =
-        scenes.find(
-          (candidate) =>
-            boundedTime >= candidate.start &&
-            boundedTime < candidate.start + candidate.duration - 0.0001,
-        ) ??
-        [...scenes]
-          .reverse()
-          .find(
-            (candidate) =>
-              boundedTime >= candidate.start && boundedTime <= candidate.start + candidate.duration,
-          );
-      if (!scene) {
-        setActiveScene(null);
-        timelineTimeOffsetRef.current = 0;
-        liveTime.notify(boundedTime);
-        seek(boundedTime);
-        return;
-      }
-
-      const localTime = Math.max(0, Math.min(scene.duration, boundedTime - scene.start));
-      if (activeSceneId !== scene.id) setActiveScene(scene.id);
-      timelineTimeOffsetRef.current = scene.start;
-      liveTime.notify(localTime);
-      seek(localTime);
+      liveTime.notify(boundedTime);
+      seek(boundedTime);
     },
-    [activeSceneId, projectDuration, scenes, seek, setActiveScene],
+    [projectDuration, seek],
+  );
+
+  // Dropping a Library item on a track reads the two things the drop already
+  // says: where along the track it landed (start time) and which lane (track +
+  // lane). Clicking in the Library still uses the defaults.
+  const [libraryDropTrack, setLibraryDropTrack] = useState<number | null>(null);
+  const dropLibraryItemOnTrack = useCallback(
+    (event: React.DragEvent<HTMLDivElement>, trackIndex: number, laneTops: number[]) => {
+      setLibraryDropTrack(null);
+      const item = readLibraryDragItem(event.dataTransfer);
+      if (!item) return;
+      event.preventDefault();
+      const rect = event.currentTarget.getBoundingClientRect();
+      const start = Math.max(0, (event.clientX - rect.left) / Math.max(zoomRef.current, 1));
+      void useStudio.getState().addLibraryItem(item, {
+        start: Math.round(start * 100) / 100,
+        trackIndex,
+        laneIndex: nearestLaneIndex(laneTops, event.clientY - rect.top),
+      });
+    },
+    [],
+  );
+
+  const playScene = useCallback(
+    (sceneId: string) => {
+      const scene = scenes.find((candidate) => candidate.id === sceneId);
+      if (!scene) return;
+      playUntilRef.current = scene.start + scene.duration;
+      liveTime.notify(scene.start);
+      seek(scene.start);
+      if (!usePlayerStore.getState().isPlaying) togglePlay();
+    },
+    [scenes, seek, togglePlay],
   );
 
   const seekFromClientX = useCallback(
@@ -408,6 +444,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
       <SceneStrip
         scenes={scenes}
         activeSceneId={activeSceneId}
+        onPlayScene={playScene}
         zoom={zoom}
         scrollRef={sceneScrollerRef}
         onScrollLeft={syncTimelineScrollLeft}
@@ -471,7 +508,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                     <button
                       onClick={() => addLane(i)}
                       title={`Add another ${laneNoun.toLowerCase()} lane to this track`}
-                      className="rounded border border-border px-1.5 text-[10px] leading-tight text-muted-foreground hover:bg-panel hover:text-foreground"
+                      className="rounded border border-border px-1.5 text-ui-sm leading-tight text-muted-foreground hover:bg-panel hover:text-foreground"
                     >
                       +
                     </button>
@@ -484,7 +521,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                         <div key={lane.index}>
                           <div
                             style={{ height: TRACK_HEIGHT - (lane.index === 0 ? 18 : 0) }}
-                            className="flex items-center gap-1 px-3 text-[10px] text-muted-foreground"
+                            className="flex items-center gap-1 px-3 text-ui-sm text-muted-foreground"
                           >
                             <span className="min-w-0 flex-1 truncate">
                               {laneNoun} {lane.index + 1}
@@ -563,7 +600,22 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
                 <div
                   key={t.id}
                   style={{ height: trackHeight(i) }}
-                  className={`relative border-b border-border ${i % 2 ? "bg-track-alt" : "bg-track"}`}
+                  onDragOver={(event) => {
+                    if (!hasLibraryDragItem(event.dataTransfer)) return;
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "copy";
+                    setLibraryDropTrack(i);
+                  }}
+                  onDragLeave={(event) => {
+                    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+                    setLibraryDropTrack((current) => (current === i ? null : current));
+                  }}
+                  onDrop={(event) => dropLibraryItemOnTrack(event, i, laneTops)}
+                  className={`relative border-b border-border ${i % 2 ? "bg-track-alt" : "bg-track"} ${
+                    libraryDropTrack === i
+                      ? "outline outline-2 -outline-offset-2 outline-primary"
+                      : ""
+                  }`}
                 >
                   {/* Grid */}
                   <div

@@ -149,9 +149,12 @@ describe("Stage HyperFrames Studio integration", () => {
     expect(source).toContain("resolvePreviewHtml(current)");
     expect(source).toContain("const projectHf = rootProject?.hf");
     expect(source).toContain("const state = useStudio.getState()");
-    expect(source).toContain("[activeSceneId, projectHf, repairTimelineLanes]");
-    expect(source).not.toContain("[project, projectHf, repairTimelineLanes]");
+    expect(source).toContain("[projectHf, repairTimelineLanes]");
     expect(source).toContain("HyperFrames preview failed");
+    // The preview is the whole film, never one scene — this is what lets playback
+    // cross scene boundaries. See docs/ux-followups.md §1.
+    expect(source).not.toContain("buildSceneEditingProject");
+    expect(source).toContain("const current = state.project");
     expect(previewSource).toContain("buildHyperframesProjectFiles(project)");
     expect(previewSource).toContain('fetch("/api/hyperframes/preview-bundle"');
     expect(previewSource).toContain("assertPreviewBundleResponseHtml(html)");

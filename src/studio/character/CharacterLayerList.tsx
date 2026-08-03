@@ -160,7 +160,7 @@ export function CharacterLayerList({
           </button>
           <span className="min-w-0 flex-1 truncate font-medium">
             {group.name}
-            <span className="ml-1 text-[10px] font-normal text-muted-foreground">
+            <span className="ml-1 text-ui-sm font-normal text-muted-foreground">
               {group.slotParts.length} variants
             </span>
           </span>
@@ -299,7 +299,7 @@ function LayerPartRow({
       <span className="min-w-0 flex-1 truncate">
         {label ?? part.slotName ?? part.name}
         {!label && (
-          <span className="ml-1 text-[10px] text-muted-foreground">{roleLabel(part.role)}</span>
+          <span className="ml-1 text-ui-sm text-muted-foreground">{roleLabel(part.role)}</span>
         )}
       </span>
       {onAddVariant && (

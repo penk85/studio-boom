@@ -9,7 +9,7 @@ import { normalizeCharacterRig, parentSlotIdForSlot } from "./rig";
 function ConstraintPill({ set, label }: { set: boolean; label: string }) {
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-medium ${
+      className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-ui-sm font-medium ${
         set
           ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
           : "border-amber-500/30 bg-amber-500/5 text-amber-300/90"
@@ -109,7 +109,7 @@ export function RestrictMovementPanel({
           ))}
         </select>
       </Field>
-      <p className="mb-2 mt-1 text-[10px] leading-snug text-muted-foreground">
+      <p className="mb-2 mt-1 text-ui-sm leading-snug text-muted-foreground">
         {parentName && pinName
           ? `${pinName} on ${parentName}${pinsReady ? "" : " needs placement on every variant"}.`
           : parentName
@@ -159,13 +159,13 @@ export function RestrictMovementPanel({
           </button>
         </div>
       )}
-      <p className="mb-2 mt-1 text-[10px] leading-snug text-muted-foreground">
+      <p className="mb-2 mt-1 text-ui-sm leading-snug text-muted-foreground">
         {hostName
           ? `Manual drags are clamped so ${slot?.name ?? "this layer"} stays inside ${hostName}. This does not clip pixels in playback or export.`
           : "No drag boundary — manual moves are unrestricted."}
       </p>
 
-      <p className="mb-2 text-[10px] leading-snug text-muted-foreground">
+      <p className="mb-2 text-ui-sm leading-snug text-muted-foreground">
         Reach limits generated or preset motion. It controls how far{" "}
         <span className="text-foreground">{slot?.name ?? "this layer"}</span> may drift and twist
         from {parentName ?? "its parent"}.{" "}
@@ -198,7 +198,7 @@ export function RestrictMovementPanel({
         </div>
       ) : (
         <div className="space-y-2">
-          <div className="rounded border border-amber-400/40 bg-amber-300/10 px-2 py-1.5 text-[10px] leading-snug text-muted-foreground">
+          <div className="rounded border border-amber-400/40 bg-amber-300/10 px-2 py-1.5 text-ui-sm leading-snug text-muted-foreground">
             <span className="text-foreground">Sweep the layer</span> to the farthest spots it should
             reach — the amber outline is its drift. Drag the{" "}
             <span className="text-sky-400">blue knob</span> to twist it to its rotation extremes. It

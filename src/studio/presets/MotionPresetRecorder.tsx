@@ -35,6 +35,7 @@ import {
   motionJsonFilename,
 } from "../character-json/normalize";
 import { buildMotionRequestPrompt } from "../character-json/ai-context";
+import { useConfirm, useNotify } from "../components/ConfirmDialog";
 import {
   ACTION_CATEGORY_TABS,
   ACTION_REGION_OPTIONS,
@@ -131,6 +132,8 @@ export function MotionPresetRecorder({
   onCharacterChange?: (next: CharacterPreset) => void;
   copyOnSave?: boolean;
 }) {
+  const confirm = useConfirm();
+  const notify = useNotify();
   const runtime = useMemo(() => buildCharacterRuntime(character), [character]);
   const rig = runtime.rig;
   const slots = runtime.slots;
@@ -417,12 +420,15 @@ export function MotionPresetRecorder({
     [applySampleToDraft],
   );
 
-  const confirmDiscardDraft = useCallback(() => {
+  const confirmDiscardDraft = useCallback(async () => {
     if (!draftDirty) return true;
-    return window.confirm(
-      "You have unstamped pose edits. Discard them and load a different keyframe?",
-    );
-  }, [draftDirty]);
+    return confirm({
+      title: "Discard unstamped pose edits?",
+      body: ["Loading a different stamp replaces what you have not stamped yet."],
+      confirmLabel: "Discard",
+      destructive: true,
+    });
+  }, [confirm, draftDirty]);
 
   useEffect(() => {
     if (draftDirty) return;
@@ -800,7 +806,7 @@ export function MotionPresetRecorder({
     const selected =
       selectedKeyposeTime == null ? null : findKeyposeAt(keyposes, selectedKeyposeTime);
     if (mode === "update" && !selected) {
-      alert("Select a stamp before updating it.");
+      void notify({ title: "Select a stamp before updating it." });
       return;
     }
     const source = mode === "update" ? selected : undefined;
@@ -809,15 +815,17 @@ export function MotionPresetRecorder({
     const collisionIsSelected =
       !!selected && !!targetCollision && Math.abs(targetCollision.t - selected.t) <= 0.001;
     if (mode === "new" && targetCollision) {
-      alert(
-        `There is already a stamp at ${kp.t.toFixed(2)}s. Move the draft time to add a new stamp, or update the selected stamp.`,
-      );
+      void notify({
+        title: `There is already a stamp at ${kp.t.toFixed(2)}s`,
+        body: ["Move the draft time to add a new stamp, or update the selected one."],
+      });
       return;
     }
     if (mode === "update" && targetCollision && !collisionIsSelected) {
-      alert(
-        `Another stamp already uses ${kp.t.toFixed(2)}s. Choose a different time before updating.`,
-      );
+      void notify({
+        title: `Another stamp already uses ${kp.t.toFixed(2)}s`,
+        body: ["Choose a different time before updating."],
+      });
       return;
     }
     setKeyposes((prev) => {
@@ -847,7 +855,7 @@ export function MotionPresetRecorder({
       (keypose) => Math.abs(keypose.t - from) > 0.001 && Math.abs(keypose.t - clamped) <= 0.001,
     );
     if (collision) {
-      alert(`Another stamp already uses ${clamped.toFixed(2)}s.`);
+      void notify({ title: `Another stamp already uses ${clamped.toFixed(2)}s` });
       return;
     }
     refreshPlaybackPreview(clamped);
@@ -871,8 +879,8 @@ export function MotionPresetRecorder({
     }
   };
 
-  const selectKeypose = (keypose: RecordedKeypose) => {
-    if (!confirmDiscardDraft()) return;
+  const selectKeypose = async (keypose: RecordedKeypose) => {
+    if (!(await confirmDiscardDraft())) return;
     applyKeyposeToDraft(keypose);
   };
 
@@ -880,11 +888,11 @@ export function MotionPresetRecorder({
     const nextIndex = adjacentKeyposeIndex(sortedKeyposes, selectedKeyposeTime, time, direction);
     if (nextIndex < 0) return;
     const nextKeypose = sortedKeyposes[nextIndex];
-    if (nextKeypose) selectKeypose(nextKeypose);
+    if (nextKeypose) void selectKeypose(nextKeypose);
   };
 
-  const loadPlaybackFrameAsDraft = () => {
-    if (!confirmDiscardDraft()) return;
+  const loadPlaybackFrameAsDraft = async () => {
+    if (!(await confirmDiscardDraft())) return;
     applySampleToDraft(sampleKeyposesAtTime(sortedKeyposes, playbackTime), playbackTime, null);
     setDraftDirty(true);
   };
@@ -905,25 +913,34 @@ export function MotionPresetRecorder({
     });
   };
 
-  const requestClose = () => {
-    if (
-      !draftDirty ||
-      window.confirm("Discard unstamped pose edits and close the action editor?")
-    ) {
-      onClose();
+  const requestClose = async () => {
+    if (draftDirty) {
+      const discard = await confirm({
+        title: "Discard unstamped pose edits?",
+        body: ["Closing the action editor loses changes you have not stamped."],
+        confirmLabel: "Discard and close",
+        destructive: true,
+      });
+      if (!discard) return;
     }
+    onClose();
   };
 
   const save = async () => {
     if (sortedKeyposes.length === 0) {
-      alert("Stamp at least one keyframe before saving.");
+      void notify({
+        title: "Stamp at least one pose before saving",
+        body: ["An action needs a pose to animate towards."],
+      });
       return;
     }
-    if (
-      draftDirty &&
-      !window.confirm("Save the action without the current unstamped pose edits?")
-    ) {
-      return;
+    if (draftDirty) {
+      const saveAnyway = await confirm({
+        title: "Save without the unstamped pose edits?",
+        body: ["The edits you have not stamped will not be part of this action."],
+        confirmLabel: "Save anyway",
+      });
+      if (!saveAnyway) return;
     }
     const now = Date.now();
     const savingCopy = !!initialPreset && (!!initialPreset.builtin || !!copyOnSave);
@@ -1107,7 +1124,7 @@ export function MotionPresetRecorder({
       }
       actions={
         <>
-          <div className="flex overflow-hidden rounded border border-border text-[10px]">
+          <div className="flex overflow-hidden rounded border border-border text-ui-sm">
             <button
               onClick={() => setPreviewMode("fit")}
               className={`flex items-center gap-1 px-2 py-1 ${
@@ -1130,7 +1147,7 @@ export function MotionPresetRecorder({
           {import.meta.env.DEV && (
             <button
               onClick={() => setShowAnchorDebug((prev) => !prev)}
-              className={`rounded border border-border px-2 py-1 text-[10px] ${
+              className={`rounded border border-border px-2 py-1 text-ui-sm ${
                 showAnchorDebug ? "bg-primary/25 text-foreground" : "text-muted-foreground"
               }`}
               title="Show bone pivots, variant anchors, and each anchor's resolution path"
@@ -1139,7 +1156,7 @@ export function MotionPresetRecorder({
             </button>
           )}
           <button
-            onClick={requestClose}
+            onClick={() => void requestClose()}
             className="rounded border border-border px-2 py-1 text-xs hover:bg-panel"
           >
             Cancel
@@ -1192,7 +1209,7 @@ export function MotionPresetRecorder({
                 </span>
                 {selectedSavedKeypose && (
                   <span
-                    className={`rounded border px-1.5 py-0.5 text-[10px] ${
+                    className={`rounded border px-1.5 py-0.5 text-ui-sm ${
                       cleanSelectedStamp
                         ? "border-primary/60 bg-primary/20 text-foreground"
                         : "border-border bg-panel-2 text-muted-foreground"
@@ -1202,11 +1219,11 @@ export function MotionPresetRecorder({
                   </span>
                 )}
                 {draftDirty && (
-                  <span className="rounded bg-primary/25 px-1.5 py-0.5 text-[10px] text-foreground">
+                  <span className="rounded bg-primary/25 px-1.5 py-0.5 text-ui-sm text-foreground">
                     unstamped
                   </span>
                 )}
-                <div className="ml-auto flex items-center gap-1 text-[10px]">
+                <div className="ml-auto flex items-center gap-1 text-ui-sm">
                   <button
                     type="button"
                     onClick={() => selectAdjacentKeypose(-1)}
@@ -1256,7 +1273,7 @@ export function MotionPresetRecorder({
                   }}
                 >
                   {cleanSelectedStamp && selectedSavedKeypose && (
-                    <div className="pointer-events-none absolute left-2 top-2 z-10 rounded border border-primary/70 bg-panel/90 px-2 py-1 text-[10px] font-medium text-foreground shadow">
+                    <div className="pointer-events-none absolute left-2 top-2 z-10 rounded border border-primary/70 bg-panel/90 px-2 py-1 text-ui-sm font-medium text-foreground shadow">
                       {selectedStampLabel} · {selectedSavedKeypose.t.toFixed(2)}s
                     </div>
                   )}
@@ -1335,7 +1352,7 @@ export function MotionPresetRecorder({
                 <span className="font-semibold uppercase tracking-wider text-muted-foreground">
                   Playback
                 </span>
-                <span className="text-[10px] text-muted-foreground">stamped keyframes only</span>
+                <span className="text-ui-sm text-muted-foreground">stamped keyframes only</span>
               </div>
               <div className="grid min-h-0 flex-1 place-items-center overflow-hidden p-3">
                 <div
@@ -1367,7 +1384,7 @@ export function MotionPresetRecorder({
                 </div>
               </div>
               <div className="space-y-2 border-t border-border p-3 text-xs">
-                <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                <div className="flex items-center justify-between text-ui-sm text-muted-foreground">
                   <span>{playbackTime.toFixed(2)}s</span>
                   <span>{duration.toFixed(2)}s</span>
                 </div>
@@ -1408,7 +1425,7 @@ export function MotionPresetRecorder({
                   type="button"
                   onClick={loadPlaybackFrameAsDraft}
                   disabled={sortedKeyposes.length === 0}
-                  className="w-full rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:bg-panel-2 disabled:opacity-40"
+                  className="w-full rounded border border-border px-2 py-1 text-ui-sm text-muted-foreground hover:bg-panel-2 disabled:opacity-40"
                 >
                   Load current playback frame as draft
                 </button>
@@ -1505,7 +1522,7 @@ export function MotionPresetRecorder({
                 {draftDirty ? "unstamped" : "clean"}
               </span>
             </div>
-            <label className="grid grid-cols-[64px_1fr] items-center gap-2 text-[10px]">
+            <label className="grid grid-cols-[64px_1fr] items-center gap-2 text-ui-sm">
               <span className="text-muted-foreground">Time</span>
               <input
                 type="number"

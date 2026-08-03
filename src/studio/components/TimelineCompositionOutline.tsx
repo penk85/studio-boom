@@ -22,7 +22,7 @@ export function CompositionOutlineHeader({
       className="border-t border-border/60 bg-panel/50"
     >
       <div
-        className="flex items-center gap-1 px-3 text-[10px] text-foreground"
+        className="flex items-center gap-1 px-3 text-ui-sm text-foreground"
         style={{ height: COMPOSITION_OUTLINE_PARENT_HEIGHT }}
       >
         <span className="text-muted-foreground">↳</span>
@@ -33,7 +33,7 @@ export function CompositionOutlineHeader({
         <div
           key={item.id}
           style={{ height: COMPOSITION_OUTLINE_ROW_HEIGHT, paddingLeft: 24 + item.depth * 10 }}
-          className="flex items-center gap-1 border-t border-border/40 pr-3 text-[10px] text-muted-foreground"
+          className="flex items-center gap-1 border-t border-border/40 pr-3 text-ui-sm text-muted-foreground"
         >
           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${outlineDotColor(item.kind)}`} />
           <span className="min-w-0 flex-1 truncate">{item.name}</span>
@@ -82,7 +82,7 @@ export function CompositionOutlineLaneSet({
             event.stopPropagation();
             onSelect();
           }}
-          className={`absolute h-5 overflow-hidden rounded border px-1.5 text-left text-[10px] text-foreground/90 shadow-sm ${outlineBlockColor(
+          className={`absolute h-5 overflow-hidden rounded border px-1.5 text-left text-ui-sm text-foreground/90 shadow-sm ${outlineBlockColor(
             item.kind,
           )}`}
           style={{

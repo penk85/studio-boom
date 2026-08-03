@@ -104,7 +104,7 @@ export function PixiCharacterPreview({
     <>
       <div ref={hostRef} className={className} />
       {showOverlay && (
-        <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/20 text-[11px] text-muted-foreground">
+        <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/20 text-ui-sm text-muted-foreground">
           {status === "error" ? error || "Unable to load character preview." : loadingLabel}
         </div>
       )}

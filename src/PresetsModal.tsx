@@ -110,23 +110,23 @@ export function PresetsModal({ onClose }: { onClose: () => void }) {
               <div className="mb-1 flex items-center gap-2">
                 <span className="flex-1 font-medium">{p.name}</span>
                 {p.builtin && (
-                  <span className="rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase text-secondary-foreground">
+                  <span className="rounded bg-secondary px-1.5 py-0.5 text-ui-sm uppercase text-secondary-foreground">
                     built-in
                   </span>
                 )}
                 <button
                   onClick={() => openRecorder(p)}
                   disabled={!selectedChar}
-                  className="text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-40"
+                  className="text-ui-sm text-muted-foreground hover:text-foreground disabled:opacity-40"
                 >
                   {p.builtin ? "Customize" : "Edit"}
                 </button>
               </div>
-              <div className="text-[11px] text-muted-foreground">
+              <div className="text-ui-sm text-muted-foreground">
                 {p.category} · {p.duration}s{p.loop ? " · loops" : ""}
               </div>
               {p.description && (
-                <p className="mt-2 text-[11px] text-muted-foreground">{p.description}</p>
+                <p className="mt-2 text-ui-sm text-muted-foreground">{p.description}</p>
               )}
             </div>
           ))}

@@ -136,20 +136,20 @@ export function AiAddonPromptPanel({
           <Sparkles size={12} />
           {title}
         </span>
-        <span className="text-[10px] text-muted-foreground">{open ? "Hide" : "Show"}</span>
+        <span className="text-ui-sm text-muted-foreground">{open ? "Hide" : "Show"}</span>
       </button>
       {open && (
         <div className="mt-2 space-y-2">
-          <div className="rounded border border-border bg-panel p-2 text-[10px] text-muted-foreground">
+          <div className="rounded border border-border bg-panel p-2 text-ui-sm text-muted-foreground">
             {intro}
           </div>
-          <div className="grid grid-cols-3 gap-1 text-[10px] text-muted-foreground">
+          <div className="grid grid-cols-3 gap-1 text-ui-sm text-muted-foreground">
             <StepChip index={1} label="Copy prompt" />
             <StepChip index={2} label="Paste JSON" />
             <StepChip index={3} label="Load preview" />
           </div>
           <label className="block">
-            <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+            <span className="mb-1 block text-ui-sm uppercase tracking-wider text-muted-foreground">
               {requestLabel}
             </span>
             <textarea
@@ -183,11 +183,11 @@ export function AiAddonPromptPanel({
               value={promptText}
               rows={6}
               spellCheck={false}
-              className="w-full resize-y rounded border border-border bg-input px-2 py-1 font-mono text-[10px]"
+              className="w-full resize-y rounded border border-border bg-input px-2 py-1 font-mono text-ui-sm"
             />
           )}
           <label className="block">
-            <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+            <span className="mb-1 block text-ui-sm uppercase tracking-wider text-muted-foreground">
               {pasteLabel}
             </span>
             <textarea
@@ -196,7 +196,7 @@ export function AiAddonPromptPanel({
               rows={pasteRows}
               spellCheck={false}
               placeholder={pastePlaceholder}
-              className="w-full resize-y rounded border border-border bg-input px-2 py-1 font-mono text-[10px]"
+              className="w-full resize-y rounded border border-border bg-input px-2 py-1 font-mono text-ui-sm"
             />
           </label>
           <button
@@ -210,7 +210,7 @@ export function AiAddonPromptPanel({
           {summary && <ArtifactSummary summary={summary} />}
           {status.message && (
             <div
-              className={`whitespace-pre-wrap rounded border px-2 py-1 text-[10px] ${
+              className={`whitespace-pre-wrap rounded border px-2 py-1 text-ui-sm ${
                 status.kind === "error"
                   ? "border-destructive/40 bg-destructive/10 text-destructive"
                   : status.kind === "info"
@@ -224,13 +224,13 @@ export function AiAddonPromptPanel({
           {repairPrompt && (
             <div className="rounded border border-destructive/40 bg-destructive/10 p-2">
               <div className="mb-1 flex items-center justify-between gap-2">
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-destructive">
+                <span className="text-ui-sm font-semibold uppercase tracking-wider text-destructive">
                   Repair prompt
                 </span>
                 <button
                   type="button"
                   onClick={onCopyRepairPrompt}
-                  className="rounded border border-destructive/50 px-2 py-0.5 text-[10px] text-destructive hover:bg-destructive/20"
+                  className="rounded border border-destructive/50 px-2 py-0.5 text-ui-sm text-destructive hover:bg-destructive/20"
                 >
                   Copy repair prompt
                 </button>
@@ -240,7 +240,7 @@ export function AiAddonPromptPanel({
                 value={repairPrompt}
                 rows={5}
                 spellCheck={false}
-                className="w-full resize-y rounded border border-destructive/30 bg-input px-2 py-1 font-mono text-[10px]"
+                className="w-full resize-y rounded border border-destructive/30 bg-input px-2 py-1 font-mono text-ui-sm"
               />
             </div>
           )}
@@ -253,7 +253,7 @@ export function AiAddonPromptPanel({
 function StepChip({ index, label }: { index: number; label: string }) {
   return (
     <div className="flex min-w-0 items-center gap-1 rounded border border-border bg-panel px-1.5 py-1">
-      <span className="grid h-4 w-4 shrink-0 place-items-center rounded bg-primary/20 text-[9px] text-foreground">
+      <span className="grid h-4 w-4 shrink-0 place-items-center rounded bg-primary/20 text-ui-sm text-foreground">
         {index}
       </span>
       <span className="truncate">{label}</span>
@@ -263,7 +263,7 @@ function StepChip({ index, label }: { index: number; label: string }) {
 
 function ArtifactSummary({ summary }: { summary: AiGeneratedArtifactSummary }) {
   return (
-    <div className="rounded border border-primary/30 bg-primary/10 p-2 text-[10px] text-foreground">
+    <div className="rounded border border-primary/30 bg-primary/10 p-2 text-ui-sm text-foreground">
       <div className="font-medium">{summary.title}</div>
       {summary.detail && <div className="mt-1 text-muted-foreground">{summary.detail}</div>}
       {summary.items && summary.items.length > 0 && (

@@ -50,6 +50,7 @@ import {
 import type { Project } from "../types";
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
 import { SOURCE_TRUST_REQUIRED_MESSAGE, SourceTrustConfirmation } from "./SourceTrustConfirmation";
+import { useConfirm } from "./ConfirmDialog";
 
 interface ProjectDashboardProps {
   onCreateBlankProject: () => Promise<void>;
@@ -61,6 +62,7 @@ type ProjectActionState = Record<string, "renaming" | "duplicating" | "deleting"
 
 export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: ProjectDashboardProps) {
   const storedProjects = useLiveQuery(listStoredProjects, []);
+  const confirm = useConfirm();
   const [query, setQuery] = useState("");
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -185,7 +187,13 @@ export function ProjectDashboard({ onCreateBlankProject, onOpenProject }: Projec
   };
 
   const deleteProject = async (project: Project) => {
-    if (!window.confirm(`Delete "${project.name}"? This cannot be undone.`)) return;
+    const confirmed = await confirm({
+      title: `Delete "${project.name}"?`,
+      body: ["This removes the project and everything in it. This cannot be undone."],
+      confirmLabel: "Delete project",
+      destructive: true,
+    });
+    if (!confirmed) return;
 
     setProjectAction(project.id, "deleting");
     setOpenError(null);
@@ -1010,7 +1018,7 @@ function ProjectStarterButton({
         <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-secondary text-secondary-foreground">
           {icon}
         </span>
-        <span className="rounded border border-border px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+        <span className="rounded border border-border px-2 py-0.5 text-ui-sm uppercase tracking-wide text-muted-foreground">
           {loading ? (
             <span className="inline-flex items-center gap-1">
               <Loader2 className="animate-spin" size={10} />
@@ -1086,7 +1094,7 @@ function ProjectPreviewThumbnail({ project }: { project: Project }) {
         </div>
       )}
       {!thumbnailUrl && !failed && (
-        <div className="absolute bottom-2 right-2 rounded bg-background/80 px-2 py-1 text-[10px] text-muted-foreground">
+        <div className="absolute bottom-2 right-2 rounded bg-background/80 px-2 py-1 text-ui-sm text-muted-foreground">
           Thumbnail
         </div>
       )}

@@ -238,6 +238,18 @@ export function compositionRectToCss(
   };
 }
 
+/** Inverse of `compositionPointToCss` — viewport point to project coordinates. */
+export function clientPointToComposition(
+  clientX: number,
+  clientY: number,
+  geometry: StageGeometry,
+): { x: number; y: number } {
+  return {
+    x: (clientX - geometry.rect.left) * geometry.scaleX,
+    y: (clientY - geometry.rect.top) * geometry.scaleY,
+  };
+}
+
 export function compositionPointToCss(point: { x: number; y: number }, geometry: StageGeometry) {
   return {
     x: point.x / geometry.scaleX + geometry.rect.left,

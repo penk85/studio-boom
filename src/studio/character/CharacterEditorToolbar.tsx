@@ -97,7 +97,7 @@ export function CharacterEditorHeader({
           Redo
         </button>
         <span
-          className={`text-[10px] ${
+          className={`text-ui-sm ${
             saveState === "saved" ? "text-emerald-400" : "text-muted-foreground"
           }`}
           title="The editor saves automatically as you work"
@@ -188,7 +188,7 @@ export function CharacterAnglePoseToolbar({
               <button
                 type="button"
                 onClick={() => onActiveAngleChange(angle)}
-                className={`border-b-2 py-2 pl-4 text-[11px] font-medium transition-colors ${
+                className={`border-b-2 py-2 pl-4 text-ui-sm font-medium transition-colors ${
                   canDelete ? "pr-1" : "pr-4"
                 } ${
                   active
@@ -212,7 +212,7 @@ export function CharacterAnglePoseToolbar({
                       if (pendingDeleteAngle === angle) onPendingDeleteAngleChange(null);
                     }, 200);
                   }}
-                  className={`border-b-2 border-primary py-2 pr-2 text-[10px] transition-colors ${
+                  className={`border-b-2 border-primary py-2 pr-2 text-ui-sm transition-colors ${
                     confirmingDelete
                       ? "text-destructive"
                       : "text-muted-foreground/40 hover:text-muted-foreground"
@@ -235,13 +235,13 @@ export function CharacterAnglePoseToolbar({
           <button
             type="button"
             onClick={() => onAddAngleMenuOpenChange(!addAngleMenuOpen)}
-            className="border-b-2 border-transparent px-3 py-2 text-[11px] text-muted-foreground hover:text-foreground"
+            className="border-b-2 border-transparent px-3 py-2 text-ui-sm text-muted-foreground hover:text-foreground"
             title="Add another view of this character — it starts with its own empty set of drawings"
           >
             + Add angle
           </button>
           {addAngleMenuOpen && (
-            <div className="absolute left-0 top-full z-[70] mt-1 min-w-32 rounded border border-border bg-panel p-1 text-[11px] shadow-xl">
+            <div className="absolute left-0 top-full z-[70] mt-1 min-w-32 rounded border border-border bg-panel p-1 text-ui-sm shadow-xl">
               {CHARACTER_ANGLES.filter((angle) => !angles.includes(angle)).map((angle) => (
                 <button
                   key={angle}
@@ -262,13 +262,13 @@ export function CharacterAnglePoseToolbar({
       )}
       {phase === "pose" && (
         <div className="flex min-w-0 flex-1 items-center gap-1 border-l border-border px-4">
-          <span className="mr-1 shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground">
+          <span className="mr-1 shrink-0 text-ui-sm uppercase tracking-wider text-muted-foreground">
             Pose
           </span>
           <button
             type="button"
             onClick={onShowRestPose}
-            className={`rounded-full border px-2.5 py-0.5 text-[11px] ${
+            className={`rounded-full border px-2.5 py-0.5 text-ui-sm ${
               activePoseId === null
                 ? "border-primary bg-primary/20 text-foreground"
                 : "border-border text-muted-foreground hover:bg-panel-2"
@@ -287,7 +287,7 @@ export function CharacterAnglePoseToolbar({
                   type="button"
                   disabled={!availableHere}
                   onClick={() => onApplyPose(preset)}
-                  className={`rounded-full border px-2.5 py-0.5 text-[11px] ${
+                  className={`rounded-full border px-2.5 py-0.5 text-ui-sm ${
                     isActive
                       ? "border-primary bg-primary/20 text-foreground"
                       : "border-border text-muted-foreground hover:bg-panel-2"
@@ -320,7 +320,7 @@ export function CharacterAnglePoseToolbar({
                   </button>
                 )}
                 {poseMenuId === preset.id && (
-                  <div className="absolute left-0 top-full z-[70] mt-1 min-w-36 rounded border border-border bg-panel p-1 text-[11px] shadow-xl">
+                  <div className="absolute left-0 top-full z-[70] mt-1 min-w-36 rounded border border-border bg-panel p-1 text-ui-sm shadow-xl">
                     {[
                       { label: "Rename", action: () => onRenamePose(preset.id) },
                       {
@@ -362,7 +362,7 @@ export function CharacterAnglePoseToolbar({
             <button
               type="button"
               onClick={onUpdateActivePose}
-              className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300 hover:bg-amber-500/20"
+              className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-ui-sm text-amber-300 hover:bg-amber-500/20"
               title={`Save the current arrangement into "${activePose.name}"`}
             >
               Update {activePose.name}
@@ -372,7 +372,7 @@ export function CharacterAnglePoseToolbar({
             <button
               type="button"
               onClick={onSavePoseAsNew}
-              className="rounded border border-dashed border-border px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+              className="rounded border border-dashed border-border px-2 py-0.5 text-ui-sm text-muted-foreground hover:text-foreground"
               title="Save the current arrangement as a new pose"
             >
               + Save pose
@@ -389,19 +389,19 @@ export function CharacterAnglePoseToolbar({
                   }}
                   onFocus={(event) => event.target.select()}
                   placeholder="Pose name"
-                  className="w-32 rounded border border-border bg-input px-2 py-0.5 text-[11px]"
+                  className="w-32 rounded border border-border bg-input px-2 py-0.5 text-ui-sm"
                 />
                 <button
                   type="button"
                   onClick={onConfirmPosePrompt}
-                  className="rounded border border-primary/50 bg-primary/15 px-2 py-0.5 text-[11px]"
+                  className="rounded border border-primary/50 bg-primary/15 px-2 py-0.5 text-ui-sm"
                 >
                   {posePrompt.kind === "new" ? "Save" : "Rename"}
                 </button>
                 <button
                   type="button"
                   onClick={onCancelPosePrompt}
-                  className="rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                  className="rounded border border-border px-1.5 py-0.5 text-ui-sm text-muted-foreground"
                 >
                   ✕
                 </button>

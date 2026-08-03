@@ -11,6 +11,7 @@ import type {
   TrackMeta,
 } from "./types";
 import type { ClipKeyframeDisplayValues, ClipMotionEndpoint } from "./hyperframes/keyframes";
+import type { ClipPlacement, LibraryDragItem } from "./library-items";
 
 export type ModalState =
   | null
@@ -27,6 +28,18 @@ export interface HistoryEntry {
 
 export interface ProjectMutationOptions {
   history?: boolean;
+}
+
+export interface RootHtmlMutationOptions extends ProjectMutationOptions {
+  /**
+   * Which document the HTML belongs to.
+   *
+   * `"editing"` (default) writes into the active scene's composition, matching
+   * the scene-scoped editing model. `"film"` writes the project root even when a
+   * scene is active — the Stage always previews the whole film, so in-iframe
+   * edits synced back from the picker are always film-root edits.
+   */
+  scope?: "editing" | "film";
 }
 
 export type SaveStatus = "saved" | "saving" | "error";
@@ -182,7 +195,13 @@ export interface StudioState {
     options?: ProjectMutationOptions,
   ) => void;
 
-  updateRootHtml: (html: string, options?: ProjectMutationOptions) => void;
+  updateRootHtml: (html: string, options?: RootHtmlMutationOptions) => void;
+  /**
+   * Places a Library entry (media, text block, or character) on the timeline.
+   * One path for both the Library's buttons and drag-and-drop, so a dropped clip
+   * and a clicked clip are built identically.
+   */
+  addLibraryItem: (item: LibraryDragItem, placement?: ClipPlacement) => Promise<void>;
   updateCompositionHtml: (
     compositionId: string,
     html: string,

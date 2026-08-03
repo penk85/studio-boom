@@ -6,7 +6,42 @@ the vocabulary pass from that audit is done and canonized in
 
 ---
 
-## 1. Playback stops at the end of a scene (reported 2026-08-03)
+## 1. Playback stops at the end of a scene — FIXED 2026-08-03 (Option A)
+
+**Resolution.** Stage now previews the whole film at all times
+(`src/studio/components/Stage.tsx`); `activeSceneId` scopes *editing* only.
+Timeline clips already carried absolute film time, so seeking is now plain
+absolute time and scrubbing across a boundary no longer reloads the iframe.
+Playing one scene is a **play button on the scene chip** — an action, not a mode.
+It seeks to the scene start, starts playback, and arms a stop time for that single
+run; nothing stays toggled and the edit scope is untouched. Scrubbing cancels the
+armed stop, so taking over manually never leaves a stale boundary behind.
+
+Two earlier attempts were worse and were removed: a "Stop at end of scene" text
+button in the transport (a sentence-long label among icons, detached from Play),
+then a lock on the scene chip (a mode, and "lock" already means "ignores canvas
+clicks" for tracks and clips — a vocabulary collision).
+
+The change was gated on whether clips inside a scene composition stay addressable
+from the root document. They do: `bundleToSingleHtml` inlines sub-compositions
+into **one document with no nested iframe**, and leaf clip ids survive verbatim
+(the composition's *inner root* is rewritten to `data-hf-authored-id`, but hosts
+and leaves keep their ids). So `contentDocument.getElementById(clipId)` still
+reaches them, and `player-editing.ts` needed no changes.
+
+Two things to remember:
+
+- Anything addressing a *composition root* by authored id will not find it after
+  bundling. Clip-level addressing is unaffected.
+- If one `compositionId` were ever placed by two clips, inner ids would collide
+  in the single document. Studio mints a unique `comp_<sceneId>` / `comp_<clipId>`
+  per clip, so this is currently safe — worth re-checking if `duplicateScene`
+  ever starts sharing a composition.
+
+Locked by `Stage.integration.test.ts` and `Timeline.integration.test.ts`.
+
+<details>
+<summary>Original diagnosis</summary>
 
 **Symptom.** Press play and the film plays one scene, then stops. The transport
 keeps showing the whole-film duration, so it reads as a broken play button.
@@ -70,37 +105,69 @@ is only worth doing as a companion to A or B — not instead of them.
 **Recommendation:** A, gated on the addressability check. B only if A is blocked
 and the fix is needed before nested-composition editing lands.
 
+</details>
+
 ---
 
-## 2. Drag and drop does not exist
+## 2. Drag and drop — FIXED 2026-08-03
 
-The stated human interaction model is drag and drop; every add is a button.
-Media tiles, characters, and text blocks all place at a computed centre position
-with `start: 0`, ignoring the playhead. HTML5 DnD appears only in scene reordering
-and the character editor's SVG import.
+Media tiles, text blocks, and characters are all draggable, onto either target:
 
-Needed: library → stage (drop point sets position, playhead sets start) and
-library → timeline lane (drop x sets start, lane sets track).
+- **Canvas** — the drop point sets position, the playhead sets start time.
+- **Timeline track** — the drop x sets start time, the row and y set track and lane.
 
-## 3. Rigger controls sit in beginner panels
+Clicking still adds at the defaults, so nothing that worked before stopped working.
 
-`CharacterRigPresetPanel` ("Rebuild 12" bones, Root Depth, Slot Depth, angle
-dropdown with `" (add)"` options) writes to the shared character preset, changing
-every clip that uses that character. It belongs in the Character Editor. It now
-renders once, under the Inspector's Acting tab, rather than twice.
+The three tabs each used to build their own clip inline, hardcoding a centred
+position and `start: 0`. That is now one path: `src/studio/library-items.ts` holds
+the drag payload (a custom MIME type so a Library drag is distinguishable from a
+file or URL drop), the text/character clip builders, and the sizing and clamping
+rules; `store.addLibraryItem(item, placement)` is the single entry point both the
+buttons and the drop handlers call. A dropped clip and a clicked clip are
+therefore constructed identically.
 
-## 4. Type scale is a pro-tool scale
+`topLeftFromCenter` clamps to the canvas, so a wide block dropped near an edge
+lands fully on screen instead of hanging off it. Malformed drag payloads are
+rejected rather than producing a broken clip. Covered by
+`src/studio/__tests__/library-items.test.ts` (behavioural) plus source assertions
+in `Library.integration.test.ts`.
 
-274 hardcoded sub-12px sizes (185 × `text-[10px]`, 74 × `text-[11px]`,
-14 × `text-[9px]`, 1 × `text-[8px]`). Collapse to three tokens —
-13px body / 11px meta / 11px uppercase label.
+**Not yet verified in a browser.** Drag-and-drop behaviour — the drop indicator,
+`dragLeave` when moving between tracks, and drops onto the iframe area of the
+canvas — cannot be exercised by these tests.
 
-## 5. Native `confirm()` / `alert()` for destructive actions
+## 3. Rigger controls in beginner panels — FIXED 2026-08-03
 
-Eleven sites, including character, scene, and project deletion. The character
-delete builds a thoughtful multi-paragraph message about downstream clip
-references and renders it as an unstyled OS dialog. One `ConfirmDialog` on the
-existing Radix `Dialog` retires all eleven.
+`CharacterRigPresetPanel` (Rebuild bones, Root Depth, Slot Depth, angle dropdown
+with `" (add)"` options) wrote to the shared character, changing every clip using
+it. Deleted rather than migrated: the Character Editor's `CharacterRigSetupControls`
+already has strictly better versions — Bone Depth and Slot Depth for the *selected*
+bone/slot rather than an arbitrary first binding, a Rebuild skeleton button, and
+angle switching in the toolbar. The Inspector's Acting tab now links to the
+Character Editor instead, with a tooltip saying the change affects every clip.
+
+Delete clip also moved out of "More" → "Danger" into the Inspector header, where
+it is reachable from any tab.
+
+## 4. Type scale — FIXED 2026-08-03
+
+All 275 arbitrary `text-[Npx]` values across 32 files collapsed to two utilities
+defined in `src/styles.css`: `text-ui` (13px) and `text-ui-sm` (11px). Section
+labels are `text-ui-sm uppercase tracking-wider`. The 8/9/10px sizes are gone;
+11px stays 11px. Guarded by `ui-vocabulary.test.ts`.
+
+**Not yet verified visually.** The size increases (8→11, 9→11, 10→11, 12→13) can
+push dense rows — timeline lane headers, pose chips, the recorder's stamp strip —
+into wrapping or overflow. Worth one pass with real content before considering
+this closed.
+
+## 5. Native `confirm()` / `alert()` — FIXED 2026-08-03
+
+All eleven sites now use `ConfirmDialogProvider` / `useConfirm` / `useNotify`
+(`src/studio/components/ConfirmDialog.tsx`), a promise-based replacement that keeps
+the imperative shape of the old calls. Destructive confirms are styled as such and
+name the action ("Delete character") instead of "OK". The character-delete copy
+that used to be `\n`-joined into an OS alert now renders as real paragraphs.
 
 ## 6. The AI JSON surface is buried
 
@@ -111,11 +178,14 @@ has the same single consumer. If AI control is half the product thesis, this nee
 to be a top-level pane with a reviewable per-item approve/tweak diff, reusing the
 existing validate → preview → trust → apply pipeline.
 
-## 7. Library tab grid and character entry points
+## 7. Library tab grid and character entry points — FIXED 2026-08-03
 
-Five tabs in a `grid-cols-3` wrap to two rows with an orphan cell and truncate in
-a 240px rail. The Characters tab opens with three competing "make a character"
-entry points.
+Four tabs in a `grid-cols-2` (Media / Text / Characters / Actions), with Blocks
+demoted to an "Advanced: paste a block" toggle beneath them. The Characters tab
+now leads with one "+ Add a character" button that opens four labelled choices
+(ready-made presenter, male, female, own artwork) instead of three competing peer
+buttons. "Add to scene" also stopped using a washed-out `bg-primary/30` that read
+as disabled.
 
 ## 8. Onboarding
 

@@ -73,14 +73,14 @@ export function KeyposeStrip({
           type="button"
           onClick={onSpaceEvenly}
           disabled={keyposes.length < 2}
-          className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:bg-panel-2 disabled:opacity-40"
+          className="rounded border border-border px-2 py-1 text-ui-sm text-muted-foreground hover:bg-panel-2 disabled:opacity-40"
         >
           Space evenly
         </button>
       </div>
 
       {keyposes.length === 0 ? (
-        <div className="rounded border border-dashed border-border p-3 text-center text-[11px] text-muted-foreground">
+        <div className="rounded border border-dashed border-border p-3 text-center text-ui-sm text-muted-foreground">
           Stamp poses to build this action.
         </div>
       ) : (
@@ -107,7 +107,7 @@ export function KeyposeStrip({
                   } ${stamped ? "ring-2 ring-primary/40" : ""}`}
                 >
                   <div className="mb-1 aspect-video rounded border border-border bg-stage-bg">
-                    <div className="flex h-full items-center justify-center text-[10px] text-muted-foreground">
+                    <div className="flex h-full items-center justify-center text-ui-sm text-muted-foreground">
                       {index + 1}
                     </div>
                   </div>
@@ -124,7 +124,7 @@ export function KeyposeStrip({
                     onClick={(event) => event.stopPropagation()}
                     onKeyDown={(event) => event.stopPropagation()}
                     onChange={(event) => onTimeChange(keypose.t, Number(event.target.value) || 0)}
-                    className="mt-1 w-full rounded border border-border bg-input px-1 py-0.5 text-[10px]"
+                    className="mt-1 w-full rounded border border-border bg-input px-1 py-0.5 text-ui-sm"
                   />
                   <button
                     type="button"
@@ -132,14 +132,14 @@ export function KeyposeStrip({
                       event.stopPropagation();
                       onRemove(keypose.t);
                     }}
-                    className="mt-1 text-[10px] text-destructive"
+                    className="mt-1 text-ui-sm text-destructive"
                   >
                     Remove
                   </button>
                 </div>
 
                 {next && (
-                  <div className="w-28 shrink-0 text-center text-[10px] text-muted-foreground">
+                  <div className="w-28 shrink-0 text-center text-ui-sm text-muted-foreground">
                     <div className="mb-1 h-px bg-border" />
                     <select
                       value={next.ease ?? "easeInOut"}
@@ -237,7 +237,7 @@ export function PartList({
         if (groupSlots.length === 0) return null;
         return (
           <section key={group.title}>
-            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            <div className="mb-1 text-ui-sm font-semibold uppercase tracking-wider text-muted-foreground">
               {group.title}
             </div>
             <div className="space-y-1">
@@ -265,7 +265,7 @@ export function PartList({
                       <span className="min-w-0 flex-1 truncate">
                         {slot.name ?? part?.name ?? roleLabel(slot.role)}
                       </span>
-                      <span className="rounded bg-background/60 px-1 text-[9px]">{slot.role}</span>
+                      <span className="rounded bg-background/60 px-1 text-ui-sm">{slot.role}</span>
                     </button>
                     <button
                       type="button"
@@ -329,7 +329,7 @@ export function PropertiesPanel({
 }) {
   if (!slot || !part || !override) {
     return (
-      <div className="rounded border border-dashed border-border p-3 text-center text-[11px] text-muted-foreground">
+      <div className="rounded border border-dashed border-border p-3 text-center text-ui-sm text-muted-foreground">
         Select a part.
       </div>
     );
@@ -347,11 +347,11 @@ export function PropertiesPanel({
       <div className="mb-2 flex items-center gap-2">
         <div className="min-w-0 flex-1">
           <div className="truncate font-medium text-foreground">{slot.name ?? part.name}</div>
-          <div className="text-[10px] text-muted-foreground">{slot.role}</div>
+          <div className="text-ui-sm text-muted-foreground">{slot.role}</div>
         </div>
         <button
           onClick={onResetAll}
-          className="flex items-center gap-1 rounded border border-border px-2 py-1 text-[10px] hover:bg-panel-2"
+          className="flex items-center gap-1 rounded border border-border px-2 py-1 text-ui-sm hover:bg-panel-2"
         >
           <RotateCcw size={11} />
           Reset all
@@ -360,7 +360,7 @@ export function PropertiesPanel({
 
       <div className="space-y-2">
         {variantOptions.length > 1 && (
-          <label className="grid grid-cols-[64px_1fr] items-center gap-2 text-[10px]">
+          <label className="grid grid-cols-[64px_1fr] items-center gap-2 text-ui-sm">
             <span className="text-muted-foreground">Variant</span>
             <select
               value={override.poseSwap ?? ""}
@@ -420,7 +420,7 @@ export function PropertiesPanel({
           rest={1}
           onChange={(value) => onChange({ scaleY: signedScaleValue(override.scaleY, value) })}
         />
-        <div className="grid grid-cols-[64px_1fr] items-center gap-2 text-[10px]">
+        <div className="grid grid-cols-[64px_1fr] items-center gap-2 text-ui-sm">
           <span className="text-muted-foreground">Orient</span>
           <div className="grid grid-cols-2 gap-1">
             <button
@@ -493,7 +493,7 @@ export function PropertiesPanel({
           </>
         )}
         {rotationLimit && (
-          <div className="flex items-center justify-between gap-2 pl-[72px] text-[10px] text-muted-foreground">
+          <div className="flex items-center justify-between gap-2 pl-[72px] text-ui-sm text-muted-foreground">
             <span
               title={
                 allowOutOfBounds
@@ -519,7 +519,7 @@ export function PropertiesPanel({
       <button
         type="button"
         onClick={() => onAdvancedOpenChange(!advancedOpen)}
-        className="mt-3 flex w-full items-center justify-between rounded border border-border px-2 py-1 text-left text-[11px] hover:bg-panel-2"
+        className="mt-3 flex w-full items-center justify-between rounded border border-border px-2 py-1 text-left text-ui-sm hover:bg-panel-2"
       >
         <span>Advanced transforms</span>
         <span className="text-muted-foreground">{advancedOpen ? "Hide" : "Show"}</span>
@@ -582,7 +582,7 @@ export function PropertyRow({
 }) {
   const isModified = modified ?? Math.abs(value - rest) > 0.0001;
   return (
-    <label className="grid grid-cols-[64px_1fr_56px_22px] items-center gap-2 text-[10px]">
+    <label className="grid grid-cols-[64px_1fr_56px_22px] items-center gap-2 text-ui-sm">
       <span
         className={`flex items-center gap-1 ${isModified ? "text-primary" : "text-muted-foreground"}`}
       >
@@ -640,7 +640,7 @@ function NumberInput({
 }) {
   return (
     <label>
-      <span className="block text-[10px] text-muted-foreground">{label}</span>
+      <span className="block text-ui-sm text-muted-foreground">{label}</span>
       <input
         type="number"
         value={value}

@@ -158,7 +158,7 @@ function SidebarRail({
         <Icon size={15} />
       </button>
       {!open && (
-        <div className="mt-3 select-none text-[10px] font-medium uppercase tracking-wider text-muted-foreground [writing-mode:vertical-rl]">
+        <div className="mt-3 select-none text-ui-sm font-medium uppercase tracking-wider text-muted-foreground [writing-mode:vertical-rl]">
           {label}
         </div>
       )}

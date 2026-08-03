@@ -18,6 +18,13 @@ import type {
   TrackMeta,
 } from "./types";
 import { characterSpeeches, deriveEditorClips, isCharacterCompositionClip } from "./types";
+import {
+  buildCharacterClip,
+  buildTextClip,
+  findTextBlock,
+  nextVisualZIndex,
+  topLeftFromCenter,
+} from "./library-items";
 import { pruneHfAssets, registerHfAsset } from "./hyperframes/assets";
 import { addStudioElementToHtml, updateStudioElementInHtml } from "./hyperframes/html";
 import { projectEditLock } from "./project-lock";
@@ -1778,8 +1785,12 @@ export const useStudio = create<StudioState>((set, get) => ({
     const p = state.project;
     if (!p) return;
     if (options?.history !== false) get().checkpointHistory();
+    // `scope: "film"` commits the project root even while a scene is active. The
+    // Stage previews the whole film, so HTML synced back from the element picker
+    // is film-root HTML and must not be written into a scene composition.
+    const sceneId = options?.scope === "film" ? null : state.activeSceneId;
     set({
-      project: commitEditingRootHtml(p, state.activeSceneId, html),
+      project: commitEditingRootHtml(p, sceneId, html),
     });
     scheduleSave(get, set);
   },
@@ -1859,6 +1870,71 @@ export const useStudio = create<StudioState>((set, get) => ({
       sourceDuration: asset.duration && asset.duration > 0 ? asset.duration : undefined,
     };
     get().addClip(clip);
+  },
+
+  async addLibraryItem(item, placement = {}) {
+    const state = get();
+    const p = state.project;
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return;
+
+    const stage = { width: p.hf.width, height: p.hf.height };
+    const currentClips = deriveEditorClips(editingProject);
+    const tracks = p.editorMeta.tracks;
+
+    if (item.kind === "media") {
+      const asset = state.mediaAssets.get(item.mediaId);
+      if (!asset) return;
+      // Media already had a placement-aware path; reuse it and then nudge the
+      // position, so audio/duration/trim handling stays in one place.
+      const trackIndex =
+        placement.trackIndex ?? trackIndexFor(tracks, asset.kind === "audio" ? "audio" : "overlay");
+      get().addMediaToTimeline(asset, trackIndex, Math.max(0, placement.start ?? 0));
+      if (asset.kind === "audio" || (!placement.center && placement.laneIndex == null)) return;
+      const placed = deriveEditorClips(getEditingProject(get()) ?? editingProject).find(
+        (clip) => clip.mediaId === asset.id && !currentClips.some((prev) => prev.id === clip.id),
+      );
+      if (!placed) return;
+      const { x, y } = topLeftFromCenter(
+        placement.center,
+        { width: placed.width, height: placed.height },
+        stage,
+      );
+      get().updateClip(placed.id, {
+        ...(placement.center ? { x, y } : {}),
+        ...(placement.laneIndex == null ? {} : { laneIndex: placement.laneIndex }),
+      });
+      return;
+    }
+
+    if (item.kind === "text") {
+      const block = findTextBlock(item.presetId);
+      if (!block) return;
+      await get().addClip(
+        buildTextClip({
+          id: uid(),
+          block,
+          stage,
+          placement,
+          trackIndex: placement.trackIndex ?? trackIndexFor(tracks, "overlay"),
+          zIndex: nextVisualZIndex(currentClips),
+        }),
+      );
+      return;
+    }
+
+    const character = state.characters.get(item.characterId);
+    if (!character) return;
+    await get().addClip(
+      buildCharacterClip({
+        id: uid(),
+        character,
+        stage,
+        placement,
+        trackIndex: placement.trackIndex ?? trackIndexFor(tracks, "character"),
+        zIndex: nextVisualZIndex(currentClips),
+      }),
+    );
   },
 
   registerMediaAsset(asset) {

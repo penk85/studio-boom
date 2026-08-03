@@ -2358,7 +2358,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               Parts
             </span>
             <span
-              className="rounded-full border border-border px-2 py-0.5 text-[9px] text-muted-foreground"
+              className="rounded-full border border-border px-2 py-0.5 text-ui-sm text-muted-foreground"
               title="Each angle has its own drawings — new artwork goes into this view"
             >
               {ANGLE_LABELS[editorActiveAngle]}
@@ -2603,7 +2603,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               onEnd={() => setInteracting(false)}
             />
           )}
-          <div className="pointer-events-none absolute bottom-2 right-3 rounded bg-panel/80 px-2 py-1 text-[10px] text-muted-foreground">
+          <div className="pointer-events-none absolute bottom-2 right-3 rounded bg-panel/80 px-2 py-1 text-ui-sm text-muted-foreground">
             {doc.canvasWidth}×{doc.canvasHeight} · {Math.round(scale * 100)}%
           </div>
           <div className="absolute bottom-2 left-3 flex gap-1">
@@ -2613,7 +2613,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   type="button"
                   aria-pressed={showBones}
                   onClick={toggleBones}
-                  className={`flex items-center gap-1 rounded border bg-panel/90 px-2 py-1 text-[10px] ${
+                  className={`flex items-center gap-1 rounded border bg-panel/90 px-2 py-1 text-ui-sm ${
                     showBones
                       ? "border-primary text-primary"
                       : "border-border text-muted-foreground"
@@ -2631,7 +2631,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   <div
                     role="group"
                     aria-label="Bone drag mode"
-                    className="flex overflow-hidden rounded border border-border bg-panel/90 text-[10px]"
+                    className="flex overflow-hidden rounded border border-border bg-panel/90 text-ui-sm"
                   >
                     <button
                       type="button"
@@ -2665,7 +2665,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   type="button"
                   aria-pressed={showAnchors}
                   onClick={() => setShowAnchors((shown) => !shown)}
-                  className={`flex items-center gap-1 rounded border bg-panel/90 px-2 py-1 text-[10px] ${
+                  className={`flex items-center gap-1 rounded border bg-panel/90 px-2 py-1 text-ui-sm ${
                     showAnchors
                       ? "border-primary text-primary"
                       : "border-border text-muted-foreground"
@@ -2689,7 +2689,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                 <button
                   type="button"
                   onClick={modeBanner.cancel}
-                  className="rounded border border-border px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+                  className="rounded border border-border px-2 py-0.5 text-ui-sm text-muted-foreground hover:text-foreground"
                 >
                   {modeBanner.cancelLabel ?? "Cancel"} (Esc)
                 </button>
@@ -2717,7 +2717,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                 <button
                   type="button"
                   onClick={() => armRenderBlockingRigFix(renderBlockingRigFix)}
-                  className="shrink-0 rounded border border-amber-400/60 bg-amber-400/10 px-2 py-0.5 text-[10px] text-amber-100 hover:bg-amber-400/15"
+                  className="shrink-0 rounded border border-amber-400/60 bg-amber-400/10 px-2 py-0.5 text-ui-sm text-amber-100 hover:bg-amber-400/15"
                   title={renderBlockingRigFix.instructions}
                 >
                   Fix this pin
@@ -2729,7 +2729,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   setShowAnchors(true);
                   switchPhase("rig");
                 }}
-                className="shrink-0 rounded border border-border px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+                className="shrink-0 rounded border border-border px-2 py-0.5 text-ui-sm text-muted-foreground hover:text-foreground"
               >
                 Show rig tools
               </button>
@@ -2749,7 +2749,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                     setStatus(null);
                     setStatusUndo(false);
                   }}
-                  className="rounded border border-border px-2 py-0.5 text-[10px] text-primary hover:bg-panel-2"
+                  className="rounded border border-border px-2 py-0.5 text-ui-sm text-primary hover:bg-panel-2"
                 >
                   Undo
                 </button>
@@ -2780,7 +2780,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           {(Object.keys(variantPreview).length > 0 || activePose) && (
             <div className="absolute right-4 top-4 flex max-w-72 flex-col items-end gap-1">
               {activePose && (
-                <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-panel/95 px-2 py-0.5 text-[10px] text-primary shadow-[var(--shadow-panel)]">
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-panel/95 px-2 py-0.5 text-ui-sm text-primary shadow-[var(--shadow-panel)]">
                   <span className="truncate">
                     Pose: {activePose.name}
                     {poseModified ? " · edited" : ""}
@@ -2801,7 +2801,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                 .map(([slotId, key]) => (
                   <span
                     key={slotId}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-panel/95 px-2 py-0.5 text-[10px] text-primary shadow-[var(--shadow-panel)]"
+                    className="inline-flex items-center gap-1.5 rounded-full border border-primary/40 bg-panel/95 px-2 py-0.5 text-ui-sm text-primary shadow-[var(--shadow-panel)]"
                   >
                     <span className="truncate">{slotNameFor(slotId)}</span>
                     <span className="font-mono">{key}</span>
@@ -2825,7 +2825,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                 <button
                   type="button"
                   onClick={() => setVariantPreview({ ...appliedPoseMap })}
-                  className="rounded border border-border bg-panel/95 px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+                  className="rounded border border-border bg-panel/95 px-2 py-0.5 text-ui-sm text-muted-foreground hover:text-foreground"
                 >
                   Reset to pose
                 </button>
@@ -2834,7 +2834,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                 <button
                   type="button"
                   onClick={() => clearVariantPreview()}
-                  className="rounded border border-border bg-panel/95 px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+                  className="rounded border border-border bg-panel/95 px-2 py-0.5 text-ui-sm text-muted-foreground hover:text-foreground"
                 >
                   Reset all previews
                 </button>
@@ -2856,7 +2856,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                 key={ph}
                 type="button"
                 onClick={() => switchPhase(ph)}
-                className={`flex-1 py-2 text-[11px] font-medium ${
+                className={`flex-1 py-2 text-ui-sm font-medium ${
                   editorPhase === ph
                     ? "border-b-2 border-primary text-foreground"
                     : "border-b-2 border-transparent text-muted-foreground hover:text-foreground"

@@ -114,7 +114,7 @@ export function AddPartMenu({
                 key={`${definition.role}:${definition.side ?? "center"}`}
                 type="button"
                 onClick={() => pick(definition)}
-                className="rounded border border-border px-1.5 py-1 text-[10px] text-muted-foreground hover:bg-panel hover:text-foreground"
+                className="rounded border border-border px-1.5 py-1 text-ui-sm text-muted-foreground hover:bg-panel hover:text-foreground"
               >
                 {definition.label}
               </button>
@@ -143,7 +143,7 @@ export function AddPartMenu({
           <button
             type="button"
             onClick={() => setShowMouthPresets((current) => !current)}
-            className="w-full rounded border border-border px-2 py-1 text-left text-[10px] text-muted-foreground hover:text-foreground"
+            className="w-full rounded border border-border px-2 py-1 text-left text-ui-sm text-muted-foreground hover:text-foreground"
           >
             {showMouthPresets ? "Hide mouth presets" : "Talking mouth from a preset…"}
           </button>
@@ -243,9 +243,9 @@ function MouthPresetSelector({
     const preset = MOUTH_PRESETS.find((candidate) => candidate.id === selectedPreset);
     return (
       <div className="mb-3 rounded border border-primary/50 bg-primary/10 p-2">
-        <div className="mb-2 text-[11px] font-medium">Configure {preset?.label} mouth</div>
+        <div className="mb-2 text-ui-sm font-medium">Configure {preset?.label} mouth</div>
         <div className="mb-2">
-          <label className="mb-1 block text-[10px] font-semibold uppercase text-muted-foreground">
+          <label className="mb-1 block text-ui-sm font-semibold uppercase text-muted-foreground">
             Color
           </label>
           <div className="mb-2 flex gap-1">
@@ -266,7 +266,7 @@ function MouthPresetSelector({
             ))}
           </div>
           <div className="flex items-center gap-1">
-            <label className="text-[10px] text-muted-foreground">Custom:</label>
+            <label className="text-ui-sm text-muted-foreground">Custom:</label>
             <input
               type="color"
               value={customColor}
@@ -286,7 +286,7 @@ function MouthPresetSelector({
                 }
               }}
               placeholder="#000000"
-              className="w-20 rounded border border-border bg-background px-1 py-0.5 text-[10px]"
+              className="w-20 rounded border border-border bg-background px-1 py-0.5 text-ui-sm"
             />
           </div>
         </div>
@@ -294,14 +294,14 @@ function MouthPresetSelector({
           <button
             type="button"
             onClick={handleApply}
-            className="flex-1 rounded bg-primary px-2 py-1 text-[10px] font-medium text-primary-foreground hover:opacity-90"
+            className="flex-1 rounded bg-primary px-2 py-1 text-ui-sm font-medium text-primary-foreground hover:opacity-90"
           >
             Add all visemes
           </button>
           <button
             type="button"
             onClick={() => setSelectedPreset(null)}
-            className="rounded border border-border px-2 py-1 text-[10px] hover:bg-panel"
+            className="rounded border border-border px-2 py-1 text-ui-sm hover:bg-panel"
           >
             Cancel
           </button>
@@ -312,7 +312,7 @@ function MouthPresetSelector({
 
   return (
     <div className="mb-3">
-      <div className="mb-1 text-[10px] text-muted-foreground">Quick presets:</div>
+      <div className="mb-1 text-ui-sm text-muted-foreground">Quick presets:</div>
       <div className="grid grid-cols-2 gap-1">
         {MOUTH_PRESETS.map((preset) => (
           <button
@@ -323,7 +323,7 @@ function MouthPresetSelector({
               setCustomColor("#c0392b");
               setSelectedColor("#c0392b");
             }}
-            className="rounded border border-border bg-panel px-2 py-1 text-[10px] hover:bg-primary/10"
+            className="rounded border border-border bg-panel px-2 py-1 text-ui-sm hover:bg-primary/10"
             title={`Use ${preset.label} mouth`}
           >
             {preset.label}

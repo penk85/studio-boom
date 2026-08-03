@@ -35,7 +35,7 @@ function RigHealthWarningRow({
     <button
       type="button"
       onClick={onClick}
-      className={`block w-full rounded border px-2 py-1 text-left text-[10px] leading-snug hover:bg-panel ${
+      className={`block w-full rounded border px-2 py-1 text-left text-ui-sm leading-snug hover:bg-panel ${
         warning.severity === "warning"
           ? "border-amber-500/30 bg-amber-500/5 text-amber-300/90"
           : "border-border text-muted-foreground"
@@ -108,7 +108,7 @@ export function RigHealthPanel({
               <button
                 type="button"
                 onClick={() => setOtherAnglesOpen((previous) => !previous)}
-                className="flex w-full items-center gap-1 text-left text-[10px] text-muted-foreground/60 hover:text-muted-foreground"
+                className="flex w-full items-center gap-1 text-left text-ui-sm text-muted-foreground/60 hover:text-muted-foreground"
               >
                 {otherAnglesOpen ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
                 {otherAngleWarnings.length} checklist item
@@ -129,7 +129,7 @@ export function RigHealthPanel({
           )}
           {report.anchorRows.length > 0 && (
             <div className="space-y-1">
-              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+              <div className="text-ui-sm uppercase tracking-wider text-muted-foreground">
                 Anchors
               </div>
               {report.anchorRows.map((row) => (
@@ -137,7 +137,7 @@ export function RigHealthPanel({
                   key={`${row.childSlotId}:${row.variantKey}`}
                   type="button"
                   onClick={() => onJumpTo(row)}
-                  className="flex w-full items-center gap-1.5 rounded border border-border px-2 py-1 text-left text-[10px] hover:bg-panel"
+                  className="flex w-full items-center gap-1.5 rounded border border-border px-2 py-1 text-left text-ui-sm hover:bg-panel"
                   title="Select the layer, preview the parent variant, and show the anchor"
                 >
                   <span
@@ -210,11 +210,11 @@ export function VariantAnchorSection({
       <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
         Variant pins
       </div>
-      <div className="mb-2 text-[10px] leading-snug text-muted-foreground">
+      <div className="mb-2 text-ui-sm leading-snug text-muted-foreground">
         Each <span className="text-foreground">{parentName}</span> variant provides the output pin
         used by this child bone. Picking one shows that artwork in place.
       </div>
-      <label className="mb-2 grid grid-cols-[64px_1fr] items-center gap-2 text-[10px]">
+      <label className="mb-2 grid grid-cols-[64px_1fr] items-center gap-2 text-ui-sm">
         <span className="text-muted-foreground">Variant</span>
         <select
           value={selectedKey}
@@ -233,7 +233,7 @@ export function VariantAnchorSection({
         </select>
       </label>
       {selectedKey && source && (
-        <div className="mb-2 flex items-center gap-1.5 text-[10px]">
+        <div className="mb-2 flex items-center gap-1.5 text-ui-sm">
           <span
             className="h-1.5 w-1.5 rounded-full"
             style={{ background: ANCHOR_SOURCE_COLORS[source] }}
@@ -244,7 +244,7 @@ export function VariantAnchorSection({
         </div>
       )}
       {selectedKey && (
-        <label className="mb-2 grid grid-cols-[64px_1fr] items-center gap-2 text-[10px]">
+        <label className="mb-2 grid grid-cols-[64px_1fr] items-center gap-2 text-ui-sm">
           <span
             className="text-muted-foreground"
             title="How this layer is angled under the selected variant — a hand on an outstretched arm tilts differently than on a relaxed arm"
@@ -266,20 +266,20 @@ export function VariantAnchorSection({
         </label>
       )}
       {selectedKey && !armed && (
-        <div className="mb-2 text-[10px] leading-snug text-muted-foreground">
+        <div className="mb-2 text-ui-sm leading-snug text-muted-foreground">
           Tip: while the variant is showing, drag the layer on the canvas (or its colored dot) to
           pin this anchor where you drop it.
         </div>
       )}
       {armed ? (
         <div className="space-y-1">
-          <div className="rounded border border-primary/50 bg-primary/10 px-2 py-1 text-[10px] text-primary">
+          <div className="rounded border border-primary/50 bg-primary/10 px-2 py-1 text-ui-sm text-primary">
             Click the canvas where this layer should anchor under {parentName} : {selectedKey}.
           </div>
           <button
             type="button"
             onClick={() => onArmPinPlacement(null)}
-            className="w-full rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
+            className="w-full rounded border border-border px-2 py-1 text-ui-sm text-muted-foreground hover:text-foreground"
           >
             Cancel
           </button>
@@ -293,7 +293,7 @@ export function VariantAnchorSection({
               selectedKey &&
               onArmPinPlacement({ childSlotId, parentSlotId, variantKey: selectedKey })
             }
-            className="flex-1 rounded border border-border px-2 py-1 text-[10px] hover:bg-panel disabled:opacity-40"
+            className="flex-1 rounded border border-border px-2 py-1 text-ui-sm hover:bg-panel disabled:opacity-40"
             title="Then click the canvas where this layer should anchor — or just drag the layer while the variant is previewed"
           >
             Pin anchor{selectedKey ? ` under ${parentName} : ${selectedKey}` : ""}
@@ -302,7 +302,7 @@ export function VariantAnchorSection({
             <button
               type="button"
               onClick={() => onResetPin({ parentSlotId, variantKey: selectedKey, childSlotId })}
-              className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
+              className="rounded border border-border px-2 py-1 text-ui-sm text-muted-foreground hover:text-foreground"
               title="Recalculate this pin from the child artwork's authored pivot"
             >
               Reset
@@ -312,7 +312,7 @@ export function VariantAnchorSection({
             <button
               type="button"
               onClick={() => onClearPin({ parentSlotId, variantKey: selectedKey, childSlotId })}
-              className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:text-foreground"
+              className="rounded border border-border px-2 py-1 text-ui-sm text-muted-foreground hover:text-foreground"
               title="Remove this variant's pin; the rig checklist will mark it unresolved"
             >
               Clear
@@ -344,7 +344,7 @@ export function VariantGridButton({
     <button
       type="button"
       onClick={onClick}
-      className={`flex items-center gap-2 rounded border p-1.5 text-left text-[10px] hover:bg-panel ${
+      className={`flex items-center gap-2 rounded border p-1.5 text-left text-ui-sm hover:bg-panel ${
         previewed ? "border-primary bg-primary/15" : "border-border bg-background"
       }`}
       title={
@@ -357,7 +357,7 @@ export function VariantGridButton({
         {url ? (
           <img src={url} alt="" className="max-h-full max-w-full object-contain" />
         ) : (
-          <span className="text-[8px] text-muted-foreground">…</span>
+          <span className="text-ui-sm text-muted-foreground">…</span>
         )}
       </span>
       <span className="min-w-0">
@@ -365,7 +365,7 @@ export function VariantGridButton({
           {hasWarning && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />}
           <span className="truncate">{variantLabelForPart(part)}</span>
         </span>
-        <span className="block truncate font-mono text-[9px] text-muted-foreground">
+        <span className="block truncate font-mono text-ui-sm text-muted-foreground">
           {resolvedKey}
         </span>
       </span>
@@ -399,7 +399,7 @@ export function VariantKeyChip({
   return (
     <div className="space-y-1">
       <span
-        className={`inline-flex max-w-full items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium ${tone}`}
+        className={`inline-flex max-w-full items-center gap-1.5 rounded-full border px-2 py-0.5 text-ui-sm font-medium ${tone}`}
         title="The key this part answers to at runtime — parent/child pairing matches it exactly."
       >
         <span
@@ -415,7 +415,7 @@ export function VariantKeyChip({
       {issues.map((issue, index) => (
         <div
           key={index}
-          className={`text-[10px] leading-snug ${
+          className={`text-ui-sm leading-snug ${
             issue.severity === "warning" ? "text-amber-300/90" : "text-muted-foreground"
           }`}
         >

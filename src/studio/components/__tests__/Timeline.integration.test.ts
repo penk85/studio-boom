@@ -40,13 +40,36 @@ describe("Timeline selection integration", () => {
     expect(source).toContain("data-timeline-playhead-handle");
     expect(source).toContain("seekDragRef");
     expect(source).toContain("seekProjectTime(nextTime)");
-    expect(source).toContain("liveTime.notify(localTime)");
-    expect(source).toContain("seek(localTime)");
+    // Player time is film time, so seeking is absolute — no scene remapping.
+    expect(source).toContain("liveTime.notify(boundedTime)");
+    expect(source).toContain("seek(boundedTime)");
+    expect(source).not.toContain("seek(localTime)");
     expect(source).toContain("autoScrollDuringSeekDrag");
     expect(source).toContain("isTimelineSeekTarget");
     expect(source).toContain("[data-timeline-clip-id]");
     expect(source).toContain("target instanceof Element");
     expect(source).not.toContain("target instanceof HTMLElement");
+  });
+
+  it("plays the whole film by default, and a scene can be played on its own", () => {
+    const source = readFileSync(timelinePath, "utf8");
+    const sceneStripSource = readFileSync(sceneStripPath, "utf8");
+
+    expect(source).toContain("const projectCurrentTime = currentTime");
+    // No scene offset remap — player time is film time.
+    expect(source).not.toContain("timelineTimeOffsetRef");
+
+    // "Play this scene" is an action on the scene, not a mode on the transport:
+    // it arms a stop time for one run and leaves nothing toggled.
+    expect(source).toContain("const playScene = useCallback");
+    expect(source).toContain("playUntilRef.current = scene.start + scene.duration");
+    expect(source).toContain("if (!usePlayerStore.getState().isPlaying) togglePlay()");
+    expect(source).toContain("playUntilRef.current = null");
+    expect(sceneStripSource).toContain("onPlayScene(scene.id)");
+    expect(sceneStripSource).toContain('title="Play this scene"');
+    // No leftover mode state from earlier attempts at this control.
+    expect(source).not.toContain("stopAtSceneEnd");
+    expect(source).not.toContain("lockedSceneId");
   });
 
   it("renders beginner motion lanes as draggable motion bars", () => {

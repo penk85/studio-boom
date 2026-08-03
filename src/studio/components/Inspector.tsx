@@ -27,12 +27,11 @@ import {
   Volume2,
   WandSparkles,
 } from "lucide-react";
-import { loadCharacter, saveCharacter } from "../character/character-persistence";
+import { loadCharacter } from "../character/character-persistence";
 import { readStudioElementHtml } from "../hyperframes/html";
 import { useStudio } from "../store";
 import type {
   AnyClip,
-  CharacterAngle,
   CharacterCompositionClip,
   ClipKeyframeSelection,
   CharacterPreset,
@@ -61,14 +60,6 @@ import {
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
 import { SourceTrustConfirmation } from "./SourceTrustConfirmation";
 import { buildSceneEditingProject } from "../scenes";
-import {
-  CHARACTER_ANGLES,
-  availableCharacterAngles,
-  buildDefaultRig,
-  normalizeCharacterRig,
-  setBoneDepth,
-  setSlotDepth,
-} from "../character/rig";
 
 type InspectorTab = "clip" | "speech" | "move" | "acting" | "advanced";
 type ClipUpdater = (patch: Partial<AnyClip>) => void;
@@ -137,7 +128,13 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
 
   return (
     <div className="flex h-full flex-col bg-panel">
-      <InspectorHeader clip={clip} project={project} />
+      <InspectorHeader
+        clip={clip}
+        project={project}
+        onRemove={() => {
+          if (clip) remove(clip.id);
+        }}
+      />
       <div className="min-h-0 flex-1 overflow-auto p-3">
         {!clip ? (
           <div className="space-y-3 text-xs">
@@ -199,7 +196,6 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
                 project={project}
                 tracks={tracks}
                 onUpdate={(patch) => update(clip.id, patch)}
-                onRemove={() => remove(clip.id)}
                 updateCompositionHtml={updateCompositionHtml}
               />
             )}
@@ -210,7 +206,15 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
   );
 }
 
-function InspectorHeader({ clip, project }: { clip: EditorClip | undefined; project: Project }) {
+function InspectorHeader({
+  clip,
+  project,
+  onRemove,
+}: {
+  clip: EditorClip | undefined;
+  project: Project;
+  onRemove: () => void;
+}) {
   return (
     <div className="border-b border-border px-3 py-3">
       <div className="flex items-center gap-2">
@@ -218,7 +222,7 @@ function InspectorHeader({ clip, project }: { clip: EditorClip | undefined; proj
           <WandSparkles size={16} />
         </div>
         <div className="min-w-0">
-          <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          <div className="text-ui-sm font-semibold uppercase tracking-wider text-muted-foreground">
             Inspector
           </div>
           <div className="truncate text-sm font-semibold text-foreground">
@@ -228,10 +232,23 @@ function InspectorHeader({ clip, project }: { clip: EditorClip | undefined; proj
       </div>
       {clip && (
         <div className="mt-2 flex items-center gap-2">
-          <span className="rounded-full border border-border bg-panel-2 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          <span className="rounded-full border border-border bg-panel-2 px-2 py-0.5 text-ui-sm font-medium uppercase tracking-wider text-muted-foreground">
             {clipKindLabel(clip)}
           </span>
-          <span className="min-w-0 truncate text-[10px] text-muted-foreground">{clip.id}</span>
+          <span className="min-w-0 flex-1 truncate text-ui-sm text-muted-foreground">
+            {clip.id}
+          </span>
+          {/* Deleting a clip is an everyday action, not an advanced one. It used to
+              sit two levels down under "More" → "Danger". */}
+          <button
+            type="button"
+            onClick={onRemove}
+            title={`Delete ${clip.name || "this clip"}`}
+            aria-label={`Delete ${clip.name || "this clip"}`}
+            className="shrink-0 rounded border border-border p-1 text-muted-foreground hover:border-destructive/50 hover:bg-destructive/10 hover:text-destructive"
+          >
+            <Trash2 size={13} />
+          </button>
         </div>
       )}
     </div>
@@ -312,7 +329,7 @@ function InspectorTabs({
             disabled={tab.disabled}
             onClick={() => onChange(tab.id)}
             title={tab.title}
-            className={`flex min-w-0 items-center justify-center gap-1 rounded px-1.5 py-1.5 text-[11px] font-medium transition-colors ${
+            className={`flex min-w-0 items-center justify-center gap-1 rounded px-1.5 py-1.5 text-ui-sm font-medium transition-colors ${
               selected
                 ? "bg-primary text-primary-foreground"
                 : "text-muted-foreground hover:bg-panel hover:text-foreground"
@@ -396,7 +413,7 @@ function ClipInspectorTab({ clip, onUpdate }: { clip: EditorClip; onUpdate: Clip
                   />
                 </Field>
               </div>
-              <div className="mt-1 text-[10px] text-muted-foreground">
+              <div className="mt-1 text-ui-sm text-muted-foreground">
                 Source length {clip.sourceDuration.toFixed(2)}s
               </div>
             </PanelSection>
@@ -463,6 +480,8 @@ function ActingInspectorTab({
   character: CharacterPreset | undefined;
   onUpdate: ClipUpdater;
 }) {
+  const openModal = useStudio((s) => s.openModal);
+  const characterId = characterClip.character.characterId;
   return (
     <>
       <PanelSection title="Character" icon={Sparkles}>
@@ -479,79 +498,23 @@ function ActingInspectorTab({
               } as Partial<CompositionClip>)
             }
           />
-        </div>
-      </PanelSection>
-      {character && <CharacterRigPresetPanel character={character} />}
-      {character && <MotionPanel clip={characterClip} character={character} />}
-    </>
-  );
-}
-
-function CharacterRigPresetPanel({ character }: { character: CharacterPreset }) {
-  const registerCharacterPreset = useStudio((s) => s.registerCharacterPreset);
-  const rig = normalizeCharacterRig(character);
-  const angles = availableCharacterAngles(character);
-  const rootBone = rig.bones.find((bone) => bone.role === "root") ?? rig.bones[0];
-  const firstBinding = rig.slotBindings[0];
-  const saveCharacterPatch = (patch: Partial<CharacterPreset>) => {
-    const next: CharacterPreset = { ...character, ...patch, updatedAt: Date.now() };
-    void saveCharacter(next).then(registerCharacterPreset);
-  };
-  const selectAngle = (activeAngle: CharacterAngle) => {
-    const nextAngles = CHARACTER_ANGLES.filter(
-      (angle) => angle === activeAngle || angles.includes(angle),
-    );
-    saveCharacterPatch({ angles: nextAngles, rig: { ...rig, activeAngle } });
-  };
-
-  return (
-    <PanelSection title="Rig" icon={SlidersHorizontal}>
-      <div className="grid grid-cols-2 gap-2">
-        <Field label="Angle">
-          <select
-            value={rig.activeAngle}
-            onChange={(event) => selectAngle(event.target.value as CharacterAngle)}
-            className="w-full rounded border border-border bg-input px-2 py-1 text-foreground"
-          >
-            {CHARACTER_ANGLES.map((angle) => (
-              <option key={angle} value={angle}>
-                {angle}
-                {angles.includes(angle) ? "" : " (add)"}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Bones">
+          {/* Rigging (bones, depths, camera angles) used to sit right here, but it
+              writes to the shared character — every other clip using it changes too.
+              That belongs in the Character Editor, where the change is obviously
+              about the character rather than about this one clip. */}
           <button
             type="button"
-            onClick={() => saveCharacterPatch({ rig: buildDefaultRig(character) })}
-            className="w-full rounded border border-border px-2 py-1 hover:bg-panel-2"
+            onClick={() => openModal({ type: "character-editor", characterId })}
+            className="flex w-full items-center justify-center gap-2 rounded border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-panel-2 hover:text-foreground"
+            title="Edit artwork, rig, and poses — affects every clip using this character"
           >
-            Rebuild {rig.bones.length}
+            <SlidersHorizontal size={13} />
+            Edit this character
           </button>
-        </Field>
-        {rootBone && (
-          <Field label="Root Depth">
-            <NumberInput
-              value={rootBone.angleOverrides?.[rig.activeAngle]?.depth ?? rootBone.depth ?? 0}
-              onChange={(depth) =>
-                saveCharacterPatch({ rig: setBoneDepth(rig, rootBone.id, depth) })
-              }
-            />
-          </Field>
-        )}
-        {firstBinding && (
-          <Field label="Slot Depth">
-            <NumberInput
-              value={firstBinding.angleOverrides?.[rig.activeAngle]?.depth ?? firstBinding.depth}
-              onChange={(depth) =>
-                saveCharacterPatch({ rig: setSlotDepth(rig, firstBinding.slotId, depth) })
-              }
-            />
-          </Field>
-        )}
-      </div>
-    </PanelSection>
+        </div>
+      </PanelSection>
+      {character && <MotionPanel clip={characterClip} character={character} />}
+    </>
   );
 }
 
@@ -560,14 +523,12 @@ function AdvancedInspectorTab({
   project,
   tracks,
   onUpdate,
-  onRemove,
   updateCompositionHtml,
 }: {
   clip: EditorClip;
   project: Project;
   tracks: TrackMeta[];
   onUpdate: ClipUpdater;
-  onRemove: () => void;
   updateCompositionHtml: (compositionId: string, html: string) => void;
 }) {
   const toggleClipLock = useStudio((s) => s.toggleClipLock);
@@ -625,17 +586,6 @@ function AdvancedInspectorTab({
       {isPrimitiveSourceClip(clip) && (
         <RootElementSourceInspector clip={clip} rootHtml={project.hf.rootHtml} />
       )}
-
-      <PanelSection title="Danger" icon={Trash2}>
-        <button
-          type="button"
-          onClick={onRemove}
-          className="flex w-full items-center justify-center gap-2 rounded bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground hover:opacity-90"
-        >
-          <Trash2 size={13} />
-          Delete clip
-        </button>
-      </PanelSection>
     </>
   );
 }
@@ -704,7 +654,7 @@ function PanelSection({
         <div className="min-w-0 flex-1 font-semibold uppercase tracking-wider text-muted-foreground">
           {title}
         </div>
-        {meta && <div className="min-w-0 truncate text-[10px] text-muted-foreground">{meta}</div>}
+        {meta && <div className="min-w-0 truncate text-ui-sm text-muted-foreground">{meta}</div>}
       </div>
       {children}
     </section>
@@ -802,7 +752,7 @@ function MoveInspector({
           <button
             type="button"
             onClick={() => onSelectKeyframe(null)}
-            className="rounded border border-border px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-panel hover:text-foreground"
+            className="rounded border border-border px-2 py-0.5 text-ui-sm text-muted-foreground hover:bg-panel hover:text-foreground"
           >
             Done
           </button>
@@ -812,7 +762,7 @@ function MoveInspector({
       <button
         type="button"
         onClick={() => onAddMotion(localPlayheadTime)}
-        className="mb-2 w-full rounded border border-border bg-panel px-2 py-1.5 text-[11px] font-medium text-foreground hover:bg-panel-2"
+        className="mb-2 w-full rounded border border-border bg-panel px-2 py-1.5 text-ui-sm font-medium text-foreground hover:bg-panel-2"
         title={`Add a move at ${localPlayheadTime.toFixed(1)}s near ${previewSummary}`}
       >
         + Move
@@ -837,17 +787,17 @@ function MoveInspector({
                       onSelectKeyframe(selectionForMotionCheckpoint(clip.id, checkpoint));
                       if (checkpoint) onSeek(checkpoint.time);
                     }}
-                    className="min-w-0 flex-1 truncate text-left text-[11px] font-medium text-foreground"
+                    className="min-w-0 flex-1 truncate text-left text-ui-sm font-medium text-foreground"
                   >
                     {motion.label}
                   </button>
-                  <span className="shrink-0 text-[10px] text-muted-foreground">
+                  <span className="shrink-0 text-ui-sm text-muted-foreground">
                     {motion.startTime.toFixed(1)}-{motion.endTime.toFixed(1)}s
                   </span>
                   <button
                     type="button"
                     onClick={() => addPointToMotion(motion)}
-                    className="flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:border-primary/60 hover:bg-primary/10 hover:text-foreground"
+                    className="flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-0.5 text-ui-sm text-muted-foreground hover:border-primary/60 hover:bg-primary/10 hover:text-foreground"
                     title={`Add point at ${pointTimeForMotion(motion, localPlayheadTime).toFixed(
                       1,
                     )}s`}
@@ -865,7 +815,7 @@ function MoveInspector({
                         onSelectKeyframe(selectionForMotionCheckpoint(clip.id, checkpoint));
                         onSeek(checkpoint.time);
                       }}
-                      className={`rounded border px-2 py-0.5 text-[10px] ${
+                      className={`rounded border px-2 py-0.5 text-ui-sm ${
                         selected && selectedKeyframe?.keyframeId === checkpoint.id
                           ? "border-primary bg-primary/20 text-foreground"
                           : "border-border text-muted-foreground hover:text-foreground"
@@ -883,7 +833,7 @@ function MoveInspector({
 
       {selectedMotion && selectedCheckpoint && keyframe ? (
         <div className="space-y-2 rounded border border-border bg-panel p-2">
-          <div className="flex items-center gap-2 text-[11px]">
+          <div className="flex items-center gap-2 text-ui-sm">
             <span className="min-w-0 flex-1 truncate font-medium text-foreground">
               {selectedMotion.label} {selectedCheckpoint.label}
             </span>
@@ -1027,7 +977,7 @@ function MoveInspector({
           />
         </div>
       ) : (
-        <div className="rounded border border-dashed border-border p-2 text-center text-[11px] text-muted-foreground">
+        <div className="rounded border border-dashed border-border p-2 text-center text-ui-sm text-muted-foreground">
           No move selected.
         </div>
       )}
@@ -1154,7 +1104,7 @@ function PathStyleToggle({
               onClick={() => {
                 if (!selected) onChange(option);
               }}
-              className={`px-2 py-1 text-[11px] font-medium capitalize transition-colors ${
+              className={`px-2 py-1 text-ui-sm font-medium capitalize transition-colors ${
                 selected ? "bg-primary/20 text-foreground" : "text-muted-foreground hover:bg-panel"
               }`}
             >
@@ -1164,7 +1114,7 @@ function PathStyleToggle({
         })}
       </div>
       {smoothInactive && (
-        <div className="mt-1 text-[10px] text-muted-foreground">
+        <div className="mt-1 text-ui-sm text-muted-foreground">
           Add a third point to bend the path.
         </div>
       )}
@@ -1182,13 +1132,13 @@ function RootElementSourceInspector({ clip, rootHtml }: { clip: EditorClip; root
         readOnly
         rows={6}
         spellCheck={false}
-        className="w-full resize-y rounded border border-border bg-input px-2 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground"
+        className="w-full resize-y rounded border border-border bg-input px-2 py-2 font-mono text-ui-sm leading-relaxed text-muted-foreground"
       />
       {source && (
         <button
           type="button"
           onClick={() => void navigator.clipboard?.writeText(source)}
-          className="mt-2 rounded border border-border px-2 py-1 text-[10px] text-foreground hover:bg-panel"
+          className="mt-2 rounded border border-border px-2 py-1 text-ui-sm text-foreground hover:bg-panel"
         >
           Copy source
         </button>
@@ -1302,10 +1252,10 @@ function CompositionSourceInspector({
         }}
         rows={10}
         spellCheck={false}
-        className="w-full resize-y rounded border border-border bg-input px-2 py-2 font-mono text-[11px] leading-relaxed text-foreground"
+        className="w-full resize-y rounded border border-border bg-input px-2 py-2 font-mono text-ui-sm leading-relaxed text-foreground"
       />
       {!storedValidation.ok && isEditingStoredSource && errors.length === 0 && (
-        <div className="mt-2 rounded border border-red-400/60 bg-red-500/10 p-2 text-[11px] text-red-100">
+        <div className="mt-2 rounded border border-red-400/60 bg-red-500/10 p-2 text-ui-sm text-red-100">
           <div className="font-semibold">Stored source is malformed.</div>
           <ul className="mt-1 list-inside list-disc space-y-0.5">
             {storedValidation.errors.map((error) => (
@@ -1319,14 +1269,14 @@ function CompositionSourceInspector({
                 buildCompositionRepairPrompt(storedValidation.errors, source),
               )
             }
-            className="mt-2 rounded border border-red-300/60 px-2 py-1 text-[10px] hover:bg-red-500/20"
+            className="mt-2 rounded border border-red-300/60 px-2 py-1 text-ui-sm hover:bg-red-500/20"
           >
             Copy repair prompt
           </button>
         </div>
       )}
       {errors.length > 0 && (
-        <div className="mt-2 rounded border border-destructive/60 bg-destructive/10 p-2 text-[11px] text-destructive-foreground">
+        <div className="mt-2 rounded border border-destructive/60 bg-destructive/10 p-2 text-ui-sm text-destructive-foreground">
           <ul className="list-inside list-disc space-y-0.5">
             {errors.map((error) => (
               <li key={error}>{error}</li>
@@ -1337,14 +1287,14 @@ function CompositionSourceInspector({
             onClick={() =>
               void navigator.clipboard?.writeText(buildCompositionRepairPrompt(errors, draft))
             }
-            className="mt-2 rounded border border-destructive/60 px-2 py-1 text-[10px] hover:bg-destructive/20"
+            className="mt-2 rounded border border-destructive/60 px-2 py-1 text-ui-sm hover:bg-destructive/20"
           >
             Copy repair prompt
           </button>
         </div>
       )}
       {validatedHtml && (
-        <div className="mt-2 rounded border border-primary/50 bg-primary/10 px-2 py-1 text-[11px] text-foreground">
+        <div className="mt-2 rounded border border-primary/50 bg-primary/10 px-2 py-1 text-ui-sm text-foreground">
           Source is valid. Preview it before updating project.hf.compositionHtml.
         </div>
       )}
@@ -1492,7 +1442,7 @@ function TextInspector({
               <input
                 value={clip.color ?? "#f8fafc"}
                 onChange={(e) => update({ color: e.target.value })}
-                className="min-w-0 flex-1 rounded border border-border bg-input px-2 py-1 font-mono text-[11px] text-foreground"
+                className="min-w-0 flex-1 rounded border border-border bg-input px-2 py-1 font-mono text-ui-sm text-foreground"
               />
             </div>
           </Field>
@@ -1543,7 +1493,7 @@ function TextInspector({
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">
+      <span className="mb-1 block text-ui-sm uppercase tracking-wider text-muted-foreground">
         {label}
       </span>
       {children}
@@ -1580,7 +1530,7 @@ function RangeField({
           onChange={(event) => onChange(Number(event.target.value))}
           className="min-w-0 flex-1"
         />
-        <span className="w-10 rounded border border-border bg-input px-1.5 py-1 text-center text-[11px] tabular-nums text-foreground">
+        <span className="w-10 rounded border border-border bg-input px-1.5 py-1 text-center text-ui-sm tabular-nums text-foreground">
           {displayValue}
         </span>
       </div>

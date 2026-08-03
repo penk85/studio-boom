@@ -15,7 +15,8 @@ import { resolveIframe, useElementPicker, usePlayerStore } from "@hyperframes/st
 import { useStudio } from "../store";
 import type { HyperframesPlayerElement } from "../../hyperframes-player";
 import { deriveEditorClips, type EditorClip } from "../types";
-import { buildSceneEditingProject } from "../scenes";
+import { deriveProjectTimelineClips } from "../scenes";
+import { hasLibraryDragItem, readLibraryDragItem } from "../library-items";
 import { sampleClipKeyframedState } from "../hyperframes/keyframes";
 import { hasPickerApi } from "../hyperframes/player-editing";
 import {
@@ -23,6 +24,7 @@ import {
   compositionRectToCss,
   getRenderedElementRect,
   getRenderedPixelCompositionRect,
+  clientPointToComposition,
   getStageGeometry,
   keyboardNudgeDelta,
   pointerAngleDegrees,
@@ -97,10 +99,12 @@ interface StageProps {
 export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const rootProject = useStudio((s) => s.project);
   const activeSceneId = useStudio((s) => s.activeSceneId);
-  const project = useMemo(
-    () => (rootProject ? buildSceneEditingProject(rootProject, activeSceneId) : null),
-    [activeSceneId, rootProject],
-  );
+  // The Stage always previews the whole film, never a single scene. `activeSceneId`
+  // scopes *editing* (which composition a mutation lands in), not what is rendered,
+  // so playback runs from the first scene to the last instead of stopping at a
+  // scene boundary. See docs/ux-followups.md §1.
+  const project = rootProject;
+  const setActiveScene = useStudio((s) => s.setActiveScene);
   const selectClip = useStudio((s) => s.selectClip);
   const selectedClipId = useStudio((s) => s.selectedClipId);
   const selectedClipIds = useStudio((s) => s.selectedClipIds);
@@ -167,8 +171,51 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const [renderedElementRect, setRenderedElementRect] = useState<DOMRect | null>(null);
   const [renderedClickRects, setRenderedClickRects] = useState<Map<string, DOMRect>>(new Map());
 
-  const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
+  // Clips from every scene, with `start` in absolute film time — the same clock the
+  // player now reports, so time-based hit testing and overlays line up. Each clip
+  // carries its owning `sceneId` so an edit can be routed to the right composition.
+  const clips = useMemo(() => (project ? deriveProjectTimelineClips(project) : []), [project]);
   const clipIds = useMemo(() => new Set(clips.map((clip) => clip.id)), [clips]);
+  const sceneIdByClipId = useMemo(
+    () => new Map(clips.map((clip) => [clip.id, clip.sceneId] as const)),
+    [clips],
+  );
+  // Editing is still scene-scoped: point the store at the clip's own scene before
+  // mutating it, otherwise the write lands in whichever composition was last active.
+  const activateClipScene = useCallback(
+    (clipId: string) => {
+      const sceneId = sceneIdByClipId.get(clipId);
+      if (sceneId === undefined) return;
+      if (useStudio.getState().activeSceneId !== sceneId) setActiveScene(sceneId);
+    },
+    [sceneIdByClipId, setActiveScene],
+  );
+  const selectStageClip = useCallback(
+    (clipId: string | null) => {
+      if (clipId) activateClipScene(clipId);
+      selectClip(clipId);
+    },
+    [activateClipScene, selectClip],
+  );
+
+  // Dropping a Library item on the canvas places it where it was dropped, starting
+  // at the playhead — the two things the user has already expressed by dragging
+  // there at that moment. Clicking in the Library still adds at the default spot.
+  const [libraryDropActive, setLibraryDropActive] = useState(false);
+  const handleLibraryDrop = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    setLibraryDropActive(false);
+    const item = readLibraryDragItem(event.dataTransfer);
+    if (!item) return;
+    event.preventDefault();
+    const geometry = lastStageGeometryRef.current;
+    const center = geometry
+      ? clientPointToComposition(event.clientX, event.clientY, geometry)
+      : undefined;
+    void useStudio.getState().addLibraryItem(item, {
+      center,
+      start: usePlayerStore.getState().currentTime,
+    });
+  }, []);
   const stageClickTargets = useMemo(
     () => getStageClickTargets(clips, currentTime, renderedClickRects),
     [clips, currentTime, renderedClickRects],
@@ -355,9 +402,10 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       );
       if (!opts.persist) return;
       if (appliedLive) suppressReloadRef.current = true;
+      activateClipScene(clipId);
       updateClip(clipId, patch, opts.history === undefined ? undefined : { history: opts.history });
     },
-    [iframeRef, updateClip],
+    [activateClipScene, iframeRef, updateClip],
   );
 
   // Snap a single clip's proposed move against canvas + sibling edges, reusing the exact targets and
@@ -545,7 +593,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       if (additive) {
         if (id) toggleClipInSelection(id);
       } else {
-        selectClip(id);
+        selectStageClip(id);
       }
     },
     beginMove: beginBodyMove,
@@ -614,9 +662,9 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const projectHf = rootProject?.hf;
   useEffect(() => {
     const state = useStudio.getState();
-    const current = state.project
-      ? buildSceneEditingProject(state.project, state.activeSceneId)
-      : null;
+    // The whole film, never a single scene — this is what makes playback cross
+    // scene boundaries instead of stopping at the active scene's end.
+    const current = state.project;
     if (!current) {
       setResolvedHtml(null);
       setPreviewError(null);
@@ -643,7 +691,9 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     return () => {
       alive = false;
     };
-  }, [activeSceneId, projectHf, repairTimelineLanes]);
+    // Deliberately not keyed on `activeSceneId`: switching the editing scope must
+    // not reload the preview, because the preview already holds every scene.
+  }, [projectHf, repairTimelineLanes]);
 
   useEffect(() => {
     if (!resolvedHtml) return;
@@ -780,14 +830,16 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   const { pickedElement, enablePick, isPickMode } = useElementPicker(iframeRef, {
     workspaceFiles: project ? { "index.html": project.hf.rootHtml } : undefined,
     onSyncFiles: (files) => {
-      if (files["index.html"]) updateRootHtml(files["index.html"]);
+      // The picker edits the film root we handed it, so commit to the film root —
+      // never into whichever scene composition happens to be the editing scope.
+      if (files["index.html"]) updateRootHtml(files["index.html"], { scope: "film" });
     },
   });
 
   useEffect(() => {
     const clipId = getPickedClipId(iframeRef.current, pickedElement, clipIds);
-    if (clipId) selectClip(clipId);
-  }, [clipIds, iframeRef, pickedElement, selectClip]);
+    if (clipId) selectStageClip(clipId);
+  }, [clipIds, iframeRef, pickedElement, selectStageClip]);
 
   useEffect(() => {
     if (!resolvedHtml) return;
@@ -805,10 +857,10 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         const ownerFrame = doc.defaultView?.frameElement;
         const clipId = resolveTargetClipId(event.target, clipIdsRef.current, ownerFrame);
         if (clipId) {
-          selectClip(clipId);
+          selectStageClip(clipId);
           return;
         }
-        if (isRootFrame) selectClip(null);
+        if (isRootFrame) selectStageClip(null);
       };
 
       const handlePointerDown = (event: PointerEvent) => pickFromEvent(event);
@@ -845,7 +897,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       for (const cleanup of cleanups.values()) cleanup();
       cleanups.clear();
     };
-  }, [iframeRef, onIframeLoad, resolvedHtml, selectClip]);
+  }, [iframeRef, onIframeLoad, resolvedHtml, selectStageClip]);
 
   useEffect(() => {
     if (!resolvedHtml || drag || isPickMode) return;
@@ -1168,7 +1220,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
     event.currentTarget.setPointerCapture(event.pointerId);
 
     // Make the inspector reflect the grabbed checkpoint.
-    selectClip(clipForDrag.id);
+    selectStageClip(clipForDrag.id);
     selectKeyframe({ clipId: clipForDrag.id, keyframeId, property: "position" });
 
     const state = sampleClipKeyframedState(clipForDrag, keyframe.time);
@@ -1226,7 +1278,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
 
     const selection = addClipMotionCheckpoint(clipForDrag.id, motionId, projection.time);
     if (!selection) return;
-    selectClip(clipForDrag.id);
+    selectStageClip(clipForDrag.id);
     selectKeyframe(selection);
 
     // After insertion, the project is updated synchronously by the zustand
@@ -1271,7 +1323,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        selectClip(null);
+        selectStageClip(null);
         return;
       }
 
@@ -1285,6 +1337,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         event.stopPropagation();
         event.stopImmediatePropagation();
 
+        activateClipScene(currentClip.id);
         if (layerShortcut === "front") bringClipToFront(currentClip.id);
         else if (layerShortcut === "back") sendClipToBack(currentClip.id);
         else if (layerShortcut === "forward") bringClipForward(currentClip.id);
@@ -1355,12 +1408,13 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       window.removeEventListener("keydown", handleKeyDown, true);
     };
   }, [
+    activateClipScene,
     applyStageEdit,
     bringClipForward,
     bringClipToFront,
     checkpointHistory,
     iframeRef,
-    selectClip,
+    selectStageClip,
     sendClipBackward,
     sendClipToBack,
     updateClipKeyframe,
@@ -1377,9 +1431,32 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       // (character editor / presets). Containment is the fix; nothing needs to "stand down".
       className="absolute inset-0 isolate overflow-hidden bg-stage-bg"
       onClick={(e) => {
-        if (e.target === e.currentTarget) selectClip(null);
+        if (e.target === e.currentTarget) selectStageClip(null);
       }}
+      onDragOver={(event) => {
+        if (!hasLibraryDragItem(event.dataTransfer)) return;
+        // Required for the drop to fire at all, and it also stops the browser
+        // from navigating away when the payload happens to look like a URL.
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        if (!libraryDropActive) setLibraryDropActive(true);
+      }}
+      onDragLeave={(event) => {
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+        setLibraryDropActive(false);
+      }}
+      onDrop={handleLibraryDrop}
     >
+      {libraryDropActive && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 z-[2500] flex items-start justify-center border-2 border-dashed border-primary bg-primary/10"
+        >
+          <span className="mt-4 rounded-full bg-primary px-3 py-1 text-ui-sm font-medium text-primary-foreground shadow">
+            Drop to place it here
+          </span>
+        </div>
+      )}
       {resolvedHtml && (
         <hyperframes-player
           //key={resolvedHtml}
@@ -1512,7 +1589,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
       )}
       {outlineRect && selectedMotionEndpoint && (
         <div
-          className="pointer-events-none absolute z-40 rounded-full border border-primary/40 bg-panel/95 px-2 py-0.5 text-[11px] font-medium text-foreground shadow-[0_2px_10px_rgba(0,0,0,0.28)]"
+          className="pointer-events-none absolute z-40 rounded-full border border-primary/40 bg-panel/95 px-2 py-0.5 text-ui-sm font-medium text-foreground shadow-[0_2px_10px_rgba(0,0,0,0.28)]"
           style={{
             left: outlineRect.left,
             top: Math.max(4, outlineRect.top - 28),
@@ -1546,7 +1623,7 @@ export function Stage({ iframeRef, onIframeLoad }: StageProps) {
         )}
       {rotationPillStyle && (
         <div
-          className="pointer-events-none absolute z-40 rounded-full border border-border bg-panel/95 px-2 py-0.5 text-[11px] font-medium text-foreground shadow-[0_2px_10px_rgba(0,0,0,0.28)]"
+          className="pointer-events-none absolute z-40 rounded-full border border-border bg-panel/95 px-2 py-0.5 text-ui-sm font-medium text-foreground shadow-[0_2px_10px_rgba(0,0,0,0.28)]"
           style={rotationPillStyle}
         >
           {Math.round(previewRotation)}°

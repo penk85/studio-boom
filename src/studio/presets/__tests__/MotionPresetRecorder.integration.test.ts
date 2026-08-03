@@ -40,7 +40,7 @@ describe("MotionPresetRecorder source integration", () => {
     expect(previewSource).toContain('maxHeight: "none"');
     expect(panelsSource).toContain("export function KeyposeStrip");
     expect(source).toContain("beforeunload");
-    expect(source).toContain("Save the action without the current unstamped pose edits?");
+    expect(source).toContain("Save without the unstamped pose edits?");
     // Playback seeking renders the stamped Pixi payload directly, but the pose
     // editor must not inject or mutate GSAP live while dragging.
     expect(recorderRenderSource).not.toContain("function seekRecorderPlaybackIframe");

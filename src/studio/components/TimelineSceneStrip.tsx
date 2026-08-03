@@ -1,9 +1,10 @@
 // Timeline ruler, scene boundaries, and the scene management strip.
 
-import { Copy, GripVertical, Plus, Trash2, TriangleAlert } from "lucide-react";
+import { Copy, GripVertical, Play, Plus, Trash2, TriangleAlert } from "lucide-react";
 import { useEffect, useState, type RefObject } from "react";
 import type { ProjectMutationOptions } from "../store";
 import type { ProjectScene } from "../scenes";
+import { useConfirm } from "./ConfirmDialog";
 
 export function TimelineRuler({ duration, zoom }: { duration: number; zoom: number }) {
   const step = zoom < 40 ? 5 : zoom < 80 ? 2 : 1;
@@ -14,7 +15,7 @@ export function TimelineRuler({ duration, zoom }: { duration: number; zoom: numb
       {ticks.map((s) => (
         <div
           key={s}
-          className="absolute top-0 h-full border-l border-border text-[10px] text-muted-foreground"
+          className="absolute top-0 h-full border-l border-border text-ui-sm text-muted-foreground"
           style={{ left: s * zoom, paddingLeft: 4 }}
         >
           {s}s
@@ -48,7 +49,7 @@ export function SceneBoundaryOverlay({
             boxShadow: "0 0 0 1px color-mix(in oklch, var(--color-primary) 24%, transparent)",
           }}
         >
-          <span className="absolute left-1 top-1 rounded-sm bg-panel/95 px-1 py-0.5 text-[10px] font-medium text-foreground shadow">
+          <span className="absolute left-1 top-1 rounded-sm bg-panel/95 px-1 py-0.5 text-ui-sm font-medium text-foreground shadow">
             {scene.name || `Scene ${scene.index + 1}`}
           </span>
         </div>
@@ -60,6 +61,7 @@ export function SceneBoundaryOverlay({
 export function SceneStrip({
   scenes,
   activeSceneId,
+  onPlayScene,
   zoom,
   scrollRef,
   onScrollLeft,
@@ -74,6 +76,8 @@ export function SceneStrip({
 }: {
   scenes: ProjectScene[];
   activeSceneId: string | null;
+  /** Plays this scene from its start and stops at its end. */
+  onPlayScene: (sceneId: string) => void;
   zoom: number;
   scrollRef: RefObject<HTMLDivElement | null>;
   onScrollLeft: (scrollLeft: number) => void;
@@ -86,6 +90,7 @@ export function SceneStrip({
   onResizeScene: (sceneId: string, duration: number, options?: ProjectMutationOptions) => void;
   onHistoryCheckpoint: () => void;
 }) {
+  const confirm = useConfirm();
   const [dragSceneId, setDragSceneId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{
     sceneId: string;
@@ -111,13 +116,17 @@ export function SceneStrip({
     };
   }, [contextMenu]);
 
-  const confirmRemoveScene = (scene: ProjectScene) => {
+  const confirmRemoveScene = async (scene: ProjectScene) => {
     setContextMenu(null);
     if (scenes.length <= 1) return;
     const label = scene.name || `Scene ${scene.index + 1}`;
-    if (!window.confirm(`Delete "${label}" and all content inside it? This cannot be undone.`)) {
-      return;
-    }
+    const confirmed = await confirm({
+      title: `Delete "${label}"?`,
+      body: ["Everything inside this scene goes with it. This cannot be undone."],
+      confirmLabel: "Delete scene",
+      destructive: true,
+    });
+    if (!confirmed) return;
     onRemoveScene(scene.id);
   };
 
@@ -127,7 +136,7 @@ export function SceneStrip({
         <button
           type="button"
           onClick={onProjectView}
-          className={`rounded border px-2 py-1 text-[11px] ${
+          className={`rounded border px-2 py-1 text-ui-sm ${
             activeSceneId === null
               ? "border-primary bg-primary text-primary-foreground"
               : "border-border bg-panel text-muted-foreground hover:text-foreground"
@@ -210,7 +219,7 @@ export function SceneStrip({
                   <span className="min-w-0 truncate font-medium text-foreground">
                     {scene.name || `Scene ${scene.index + 1}`}
                   </span>
-                  <span className="shrink-0 text-[10px] text-muted-foreground">
+                  <span className="shrink-0 text-ui-sm text-muted-foreground">
                     {formatSeconds(scene.duration)}
                   </span>
                 </button>
@@ -239,6 +248,20 @@ export function SceneStrip({
                   title="Duplicate scene"
                 >
                   <Copy size={12} />
+                </button>
+                {/* Plays this scene and stops at its end. An action, not a mode —
+                    it does not change the edit scope or leave anything toggled. */}
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onPlayScene(scene.id);
+                  }}
+                  aria-label={`Play scene ${scene.index + 1}`}
+                  title="Play this scene"
+                  className="mr-1 hidden h-6 w-6 shrink-0 items-center justify-center rounded border border-border bg-panel text-muted-foreground hover:border-primary hover:text-primary group-hover:flex"
+                >
+                  <Play size={12} />
                 </button>
                 <div
                   role="separator"
@@ -294,7 +317,7 @@ export function SceneStrip({
             type="button"
             role="menuitem"
             disabled={scenes.length <= 1}
-            onClick={() => confirmRemoveScene(contextScene)}
+            onClick={() => void confirmRemoveScene(contextScene)}
             className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-destructive hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Trash2 size={13} />

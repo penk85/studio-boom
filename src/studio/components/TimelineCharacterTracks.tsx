@@ -31,7 +31,7 @@ export function CharacterMotionHeader({
   return (
     <div
       style={{ height: layout.height }}
-      className="border-t border-border/60 bg-panel/50 text-[10px]"
+      className="border-t border-border/60 bg-panel/50 text-ui-sm"
     >
       <div
         className="flex items-center gap-1 px-3 text-foreground"
@@ -278,7 +278,7 @@ function MotionBlock({
               event.stopPropagation();
               onDelete();
             }}
-            className={`absolute top-1 h-5 overflow-hidden rounded border text-left text-[10px] text-foreground shadow-sm ${
+            className={`absolute top-1 h-5 overflow-hidden rounded border text-left text-ui-sm text-foreground shadow-sm ${
               color
             } ${isPrimary ? "cursor-grab" : "pointer-events-none opacity-45"} ${
               selected && isPrimary ? "ring-1 ring-primary-foreground" : ""
@@ -421,7 +421,7 @@ function VoiceBlock({
   return (
     <div
       onPointerDown={startDrag}
-      className="group absolute top-1 flex h-5 cursor-grab items-center gap-1 overflow-hidden rounded border border-cyan-300/80 bg-cyan-500/70 px-1.5 text-[10px] text-foreground shadow-sm"
+      className="group absolute top-1 flex h-5 cursor-grab items-center gap-1 overflow-hidden rounded border border-cyan-300/80 bg-cyan-500/70 px-1.5 text-ui-sm text-foreground shadow-sm"
       style={{
         left: (clip.start + voice.start) * zoom,
         width,
@@ -450,11 +450,11 @@ function VoiceBlock({
         (voice.volume === 0 ? (
           <VolumeX size={10} className="shrink-0" />
         ) : (
-          <span className="shrink-0 text-[9px] text-foreground/80">
+          <span className="shrink-0 text-ui-sm text-foreground/80">
             {Math.round(voice.volume * 100)}%
           </span>
         ))}
-      {trimmed && <span className="shrink-0 text-[9px]">trim</span>}
+      {trimmed && <span className="shrink-0 text-ui-sm">trim</span>}
       <button
         type="button"
         onPointerDown={(event) => event.stopPropagation()}

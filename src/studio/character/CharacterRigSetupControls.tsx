@@ -37,7 +37,7 @@ export function CanvasSection({
             key={preset.label}
             type="button"
             onClick={() => onChange({ canvasWidth: preset.width, canvasHeight: preset.height })}
-            className={`rounded border px-2 py-1 text-[11px] hover:bg-panel ${
+            className={`rounded border px-2 py-1 text-ui-sm hover:bg-panel ${
               doc.canvasWidth === preset.width && doc.canvasHeight === preset.height
                 ? "border-primary bg-primary/15 text-foreground"
                 : "border-border text-muted-foreground"
@@ -62,7 +62,7 @@ export function CanvasSection({
       <button
         type="button"
         onClick={onFitActiveAngle}
-        className="mt-2 w-full rounded border border-border bg-background px-2 py-1 text-[11px] font-medium text-foreground hover:bg-panel"
+        className="mt-2 w-full rounded border border-border bg-background px-2 py-1 text-ui-sm font-medium text-foreground hover:bg-panel"
         title="Uniformly scale and center this angle using full transparent part frames"
       >
         Fit active angle to canvas
@@ -114,9 +114,9 @@ export function SkeletonCard({
         <span className="font-semibold uppercase tracking-wider text-muted-foreground">
           Skeleton
         </span>
-        <span className="text-[10px] text-muted-foreground">{rig.bones.length} bones</span>
+        <span className="text-ui-sm text-muted-foreground">{rig.bones.length} bones</span>
       </div>
-      <div className="mb-3 rounded border border-border bg-background px-2 py-1.5 text-[10px] leading-snug text-muted-foreground">
+      <div className="mb-3 rounded border border-border bg-background px-2 py-1.5 text-ui-sm leading-snug text-muted-foreground">
         {showBones
           ? selectedBone
             ? `Editing ${selectedBone.name} — drag it on the canvas or fine-tune below.`
@@ -194,7 +194,7 @@ export function SkeletonCard({
             </button>
           </Field>
           {selectedBinding.effectivePartId && (
-            <div className="col-span-2 rounded border border-border bg-background px-2 py-1.5 text-[10px] text-muted-foreground">
+            <div className="col-span-2 rounded border border-border bg-background px-2 py-1.5 text-ui-sm text-muted-foreground">
               Active angle uses part{" "}
               <span className="text-foreground">{selectedBinding.effectivePartId}</span>.
             </div>
@@ -242,7 +242,7 @@ function ConfirmButton({
         setArmed(false);
         onConfirm();
       }}
-      className={`mt-3 w-full rounded border px-2 py-1 text-[10px] ${
+      className={`mt-3 w-full rounded border px-2 py-1 text-ui-sm ${
         armed
           ? "border-amber-500/50 bg-amber-500/10 text-amber-300"
           : "border-border text-muted-foreground hover:text-foreground"

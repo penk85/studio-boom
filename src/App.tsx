@@ -4,6 +4,7 @@ import { CharacterEditor } from "@/studio/character/CharacterEditor";
 import { PresetsModal } from "./PresetsModal";
 import { useStudio } from "@/studio/store";
 import { ProjectDashboard } from "@/studio/components/ProjectDashboard";
+import { ConfirmDialogProvider } from "@/studio/components/ConfirmDialog";
 import { garbageCollectUnusedInternalMedia } from "@/studio/db";
 import { useTheme } from "@/studio/theme";
 
@@ -51,7 +52,7 @@ export default function App() {
   }
 
   return (
-    <>
+    <ConfirmDialogProvider>
       {view === "dashboard" ? (
         <ProjectDashboard onCreateBlankProject={createBlankProject} onOpenProject={openProject} />
       ) : (
@@ -63,6 +64,6 @@ export default function App() {
         </div>
       )}
       {modal?.type === "presets" && <PresetsModal onClose={closeModal} />}
-    </>
+    </ConfirmDialogProvider>
   );
 }

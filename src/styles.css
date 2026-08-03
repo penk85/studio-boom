@@ -216,6 +216,30 @@
   --sidebar-ring: oklch(0.72 0.17 295);
 }
 
+/*
+ * Editor type scale.
+ *
+ * The UI had grown five ad-hoc sizes (8/9/10/11/12px hardcoded as arbitrary
+ * values across ~275 sites). That density reads as a pro tool and is hostile to
+ * someone opening Studio Boom for the first time. Two semantic sizes replace the
+ * sub-12px sprawl:
+ *
+ *   text-ui      13px — panel body copy, field values, anything read as a sentence
+ *   text-ui-sm   11px — metadata, counts, chips, timeline lane labels
+ *
+ * Section labels are `text-ui-sm uppercase tracking-wider`. Do not reintroduce
+ * arbitrary `text-[Npx]` values; see docs/ui-vocabulary.md.
+ */
+@utility text-ui {
+  font-size: 0.8125rem;
+  line-height: 1.15rem;
+}
+
+@utility text-ui-sm {
+  font-size: 0.6875rem;
+  line-height: 1rem;
+}
+
 @layer base {
   * {
     border-color: var(--color-border);

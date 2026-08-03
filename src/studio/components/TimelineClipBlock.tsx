@@ -212,7 +212,7 @@ export function TimelineClipBlock({
       }}
       title={clipTitle}
     >
-      <div className="flex h-full items-center gap-1 px-2 text-[11px] font-medium text-foreground/95 mix-blend-luminosity">
+      <div className="flex h-full items-center gap-1 px-2 text-ui-sm font-medium text-foreground/95 mix-blend-luminosity">
         {canExpand && (
           <button
             type="button"
@@ -236,7 +236,7 @@ export function TimelineClipBlock({
           ))}
         <span className="min-w-0 flex-1 truncate">{clip.name}</span>
         {clip.kind === "audio" && clipVolume < 1 && (
-          <span className="shrink-0 text-[10px] text-foreground/80">
+          <span className="shrink-0 text-ui-sm text-foreground/80">
             {Math.round(clipVolume * 100)}%
           </span>
         )}
@@ -260,7 +260,7 @@ export function TimelineClipBlock({
             )}
             {motionBadge && (
               <span
-                className="flex max-w-28 shrink items-center gap-1 rounded bg-black/25 px-1.5 py-0.5 text-[9px] leading-none text-foreground/95 shadow-sm"
+                className="flex max-w-28 shrink items-center gap-1 rounded bg-black/25 px-1.5 py-0.5 text-ui-sm leading-none text-foreground/95 shadow-sm"
                 title={motionBadge.title}
               >
                 <span

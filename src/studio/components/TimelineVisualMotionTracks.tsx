@@ -18,7 +18,7 @@ export function VisualMotionLaneHeader({ clip }: { clip: EditorClip }) {
       className="border-t border-border/60 bg-panel/50"
     >
       <div
-        className="flex items-center gap-1 px-3 text-[10px] text-foreground"
+        className="flex items-center gap-1 px-3 text-ui-sm text-foreground"
         style={{ height: VISUAL_MOTION_PARENT_HEIGHT }}
       >
         <span className="text-muted-foreground">↳</span>
@@ -26,7 +26,7 @@ export function VisualMotionLaneHeader({ clip }: { clip: EditorClip }) {
       </div>
       <div
         style={{ height: visualMotionLaneHeight(clip) - VISUAL_MOTION_PARENT_HEIGHT }}
-        className="flex items-center border-t border-border/40 px-3 pl-6 text-[10px] text-muted-foreground"
+        className="flex items-center border-t border-border/40 px-3 pl-6 text-ui-sm text-muted-foreground"
       >
         <span className="truncate">Move</span>
       </div>
@@ -112,7 +112,7 @@ export function VisualMotionLaneSet({
               onSelectClip();
               onAddMotion(localPlayheadTime);
             }}
-            className="absolute top-1/2 z-10 flex h-5 w-5 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-border bg-panel text-[12px] leading-none text-muted-foreground hover:bg-primary/20 hover:text-foreground"
+            className="absolute top-1/2 z-10 flex h-5 w-5 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-border bg-panel text-ui leading-none text-muted-foreground hover:bg-primary/20 hover:text-foreground"
             style={{ left: currentTime * zoom }}
             aria-label="Add move"
             title="Add a move at the playhead"
@@ -293,7 +293,7 @@ function VisualMotionBlock({
         event.stopPropagation();
         onDelete();
       }}
-      className={`absolute h-6 overflow-visible rounded border text-left text-[10px] text-foreground shadow-sm ${color} ${
+      className={`absolute h-6 overflow-visible rounded border text-left text-ui-sm text-foreground shadow-sm ${color} ${
         selected ? "ring-1 ring-primary-foreground" : ""
       } ${overlaps ? "outline outline-1 outline-amber-200/70" : ""}`}
       style={{ left, width, top: rowIndex * VISUAL_MOTION_ROW_HEIGHT + 3 }}

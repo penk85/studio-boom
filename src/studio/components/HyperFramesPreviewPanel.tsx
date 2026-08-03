@@ -119,7 +119,7 @@ export function HyperFramesPreviewPanel({
   return (
     <div className="overflow-hidden rounded border border-border bg-stage-bg">
       <div className="flex items-center gap-1 border-b border-border bg-panel-2 px-2 py-1">
-        <div className="min-w-0 flex-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        <div className="min-w-0 flex-1 text-ui-sm font-medium uppercase tracking-wider text-muted-foreground">
           Preview
         </div>
         <button
@@ -165,12 +165,12 @@ export function HyperFramesPreviewPanel({
           />
         )}
         {!html && !error && (
-          <div className="absolute inset-0 grid place-items-center text-[11px] text-muted-foreground">
+          <div className="absolute inset-0 grid place-items-center text-ui-sm text-muted-foreground">
             Bundling preview...
           </div>
         )}
         {error && (
-          <div className="absolute inset-0 overflow-auto bg-destructive/10 p-2 text-[11px] leading-relaxed text-destructive-foreground">
+          <div className="absolute inset-0 overflow-auto bg-destructive/10 p-2 text-ui-sm leading-relaxed text-destructive-foreground">
             {error}
           </div>
         )}

@@ -34,21 +34,27 @@ import { defaultPoseForCharacter } from "../character/pose-presets";
 import { ensureMotionPresetsSeeded } from "../presets/seed";
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
 import { SourceTrustConfirmation } from "./SourceTrustConfirmation";
+import { useConfirm, useNotify } from "./ConfirmDialog";
+import { TEXT_BLOCKS, writeLibraryDragItem } from "../library-items";
 import {
   buildCharacterRuntime,
   resolveRuntimeSlotPart,
   runtimePartPlacement,
 } from "../character/runtime";
 
+// Four tabs fit a 240px rail two-up without truncating. "Blocks" is a
+// paste-HyperFrames-source flow — a developer surface — so it lives behind the
+// Advanced toggle rather than sitting beside Media and Text.
 const TABS = [
   { id: "media", label: "Media" },
   { id: "text", label: "Text" },
   { id: "characters", label: "Characters" },
   { id: "presets", label: "Actions" },
-  { id: "blocks", label: "Blocks" },
 ] as const;
 
-type TabId = (typeof TABS)[number]["id"];
+const ADVANCED_TAB = { id: "blocks", label: "Blocks" } as const;
+
+type TabId = (typeof TABS)[number]["id"] | typeof ADVANCED_TAB.id;
 
 export function Library() {
   const [tab, setTab] = useState<TabId>("media");
@@ -64,7 +70,7 @@ export function Library() {
   return (
     <div className="flex h-full flex-col bg-panel">
       <div className="border-b border-border bg-panel p-2">
-        <div className="grid grid-cols-3 gap-1 rounded-md bg-panel-2 p-1">
+        <div className="grid grid-cols-2 gap-1 rounded-md bg-panel-2 p-1">
           {TABS.map((t) => (
             <button
               key={t.id}
@@ -74,12 +80,24 @@ export function Library() {
                   ? "bg-primary text-primary-foreground shadow-sm"
                   : "text-muted-foreground hover:bg-panel hover:text-foreground"
               }`}
-              title={t.label}
             >
               <span className="block truncate">{t.label}</span>
             </button>
           ))}
         </div>
+        <button
+          type="button"
+          onClick={() => setTab(tab === ADVANCED_TAB.id ? "media" : ADVANCED_TAB.id)}
+          aria-pressed={tab === ADVANCED_TAB.id}
+          title="Paste a HyperFrames composition as a clip"
+          className={`mt-1 w-full rounded px-2 py-1 text-ui-sm transition-colors ${
+            tab === ADVANCED_TAB.id
+              ? "bg-primary/15 text-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          Advanced: paste a block
+        </button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         {tab === "media" && <MediaTab />}
@@ -92,100 +110,33 @@ export function Library() {
   );
 }
 
-const TEXT_BLOCKS = [
-  {
-    id: "title",
-    label: "Title",
-    content: "Add a title",
-    widthFactor: 0.62,
-    heightFactor: 0.16,
-    yFactor: 0.18,
-    fontSize: 88,
-    fontWeight: 800,
-  },
-  {
-    id: "caption",
-    label: "Caption",
-    content: "Add caption text",
-    widthFactor: 0.54,
-    heightFactor: 0.1,
-    yFactor: 0.78,
-    fontSize: 42,
-    fontWeight: 600,
-  },
-  {
-    id: "lower-third",
-    label: "Lower third",
-    content: "Speaker name",
-    widthFactor: 0.38,
-    heightFactor: 0.11,
-    yFactor: 0.68,
-    fontSize: 38,
-    fontWeight: 700,
-  },
-] as const;
-
 function TextTab() {
-  const rootProject = useStudio((s) => s.project);
-  const activeSceneId = useStudio((s) => s.activeSceneId);
-  const project = useMemo(
-    () => (rootProject ? buildSceneEditingProject(rootProject, activeSceneId) : null),
-    [activeSceneId, rootProject],
-  );
-  const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
-  const tracks = useStudio((s) => s.tracks);
-  const addClip = useStudio((s) => s.addClip);
-
-  const addTextBlock = (preset: (typeof TEXT_BLOCKS)[number]) => {
-    if (!project) return;
-    const trackIndex = Math.max(
-      0,
-      tracks.findIndex((t) => t.kind === "overlay"),
-    );
-    const width = Math.round(project.hf.width * preset.widthFactor);
-    const height = Math.round(project.hf.height * preset.heightFactor);
-    const clip: TextClip = {
-      id: uid(),
-      kind: "text",
-      name: preset.label,
-      content: preset.content,
-      trackIndex,
-      start: 0,
-      duration: 4,
-      x: Math.round((project.hf.width - width) / 2),
-      y: Math.round(project.hf.height * preset.yFactor),
-      width,
-      height,
-      rotation: 0,
-      opacity: 1,
-      zIndex: clips.filter((clip) => clip.kind !== "audio").length,
-      color: "#111827",
-      fontSize: preset.fontSize,
-      fontFamily: "Inter",
-      fontWeight: preset.fontWeight,
-      fitToBounds: false,
-    };
-    addClip(clip);
-  };
+  const addLibraryItem = useStudio((s) => s.addLibraryItem);
+  const project = useStudio((s) => s.project);
 
   return (
     <div className="space-y-3 p-3 text-xs">
       <div className="grid grid-cols-1 gap-2">
-        {TEXT_BLOCKS.map((preset) => (
+        {TEXT_BLOCKS.map((block) => (
           <button
-            key={preset.id}
+            key={block.id}
             type="button"
-            onClick={() => addTextBlock(preset)}
+            draggable
+            onDragStart={(event) =>
+              writeLibraryDragItem(event.dataTransfer, { kind: "text", presetId: block.id })
+            }
+            onClick={() => void addLibraryItem({ kind: "text", presetId: block.id })}
             disabled={!project}
-            className="rounded border border-border bg-panel-2 p-3 text-left hover:border-primary hover:bg-panel disabled:cursor-not-allowed disabled:opacity-50"
+            className="cursor-grab rounded border border-border bg-panel-2 p-3 text-left hover:border-primary hover:bg-panel active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <div className="font-medium text-foreground">{preset.label}</div>
-            <div className="mt-1 truncate text-[11px] text-muted-foreground">{preset.content}</div>
+            <div className="font-medium text-foreground">{block.label}</div>
+            <div className="mt-1 truncate text-ui-sm text-muted-foreground">{block.content}</div>
           </button>
         ))}
       </div>
-      <div className="rounded border border-border bg-panel-2 p-2 text-[11px] leading-relaxed text-muted-foreground">
-        Select a text block after adding it to edit copy, color, and type styling in the Inspector.
+      <div className="rounded border border-border bg-panel-2 p-2 text-ui-sm leading-relaxed text-muted-foreground">
+        Drag onto the canvas to place it, or onto the timeline to set when it appears. Clicking adds
+        it at the start.
       </div>
     </div>
   );
@@ -199,8 +150,7 @@ function CharactersTab() {
     [activeSceneId, rootProject],
   );
   const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
-  const tracks = useStudio((s) => s.tracks);
-  const addClip = useStudio((s) => s.addClip);
+  const addLibraryItem = useStudio((s) => s.addLibraryItem);
   const registerCharacterPreset = useStudio((s) => s.registerCharacterPreset);
   const unregisterCharacterPreset = useStudio((s) => s.unregisterCharacterPreset);
   const syncCharacterPresets = useStudio((s) => s.syncCharacterPresets);
@@ -220,6 +170,8 @@ function CharactersTab() {
   }, [characters, queriedCharacters, syncCharacterPresets]);
 
   const openModal = useStudio((s) => s.openModal);
+  const confirm = useConfirm();
+  const [addOpen, setAddOpen] = useState(false);
   const [placingStarter, setPlacingStarter] = useState(false);
   const [characterActionError, setCharacterActionError] = useState<string | null>(null);
 
@@ -245,52 +197,12 @@ function CharactersTab() {
     }
   };
 
-  const placeOnTimeline = async (
-    characterId: string,
-    name: string,
-    canvasWidth = 600,
-    canvasHeight = 900,
-    character?: CharacterPreset,
-  ) => {
+  const placeOnTimeline = async (character: CharacterPreset) => {
     if (!project) return;
     setCharacterActionError(null);
-    const trackIndex = Math.max(
-      0,
-      tracks.findIndex((t) => t.kind === "character"),
-    );
-    const aspect = canvasWidth / Math.max(1, canvasHeight);
-    const maxW = Math.round(project.hf.width * 0.42);
-    const maxH = Math.round(project.hf.height * 0.68);
-    let h = maxH;
-    let w = Math.round(h * aspect);
-    if (w > maxW) {
-      w = maxW;
-      h = Math.round(w / Math.max(0.1, aspect));
-    }
-    const clip: CompositionClip = {
-      id: uid(),
-      kind: "composition",
-      compositionKind: "character",
-      character: {
-        characterId,
-        // Characters start in their default pose — a non-pose doesn't make sense.
-        poses: character ? defaultPoseForCharacter(character) : {},
-        autoBlink: true,
-      },
-      name,
-      trackIndex,
-      start: 0,
-      duration: 4,
-      x: Math.round((project.hf.width - w) / 2),
-      y: Math.round((project.hf.height - h) / 2),
-      width: w,
-      height: h,
-      rotation: 0,
-      opacity: 1,
-      zIndex: clips.length,
-    };
     try {
-      await addClip(clip);
+      registerCharacterPreset(character);
+      await addLibraryItem({ kind: "character", characterId: character.id });
     } catch (error) {
       setCharacterActionError(error instanceof Error ? error.message : String(error));
     }
@@ -304,14 +216,7 @@ function CharactersTab() {
       const starter =
         characters.find((character) => character.id === STARTER_CHARACTER_ID) ??
         (await ensureStarterCharacterSeeded());
-      registerCharacterPreset(starter);
-      await placeOnTimeline(
-        starter.id,
-        starter.name,
-        starter.canvasWidth,
-        starter.canvasHeight,
-        starter,
-      );
+      await placeOnTimeline(starter);
     } catch (error) {
       setCharacterActionError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -323,27 +228,25 @@ function CharactersTab() {
     const references = clips.filter(
       (clip) => isCharacterCompositionClip(clip) && clip.character.characterId === id,
     );
-    const message =
+    const usageLines =
       references.length > 0
         ? [
             `This character is used by ${references.length} timeline clip${
               references.length === 1 ? "" : "s"
-            }.`,
-            "",
-            references
+            }: ${references
               .slice(0, 5)
-              .map((clip) => `- ${clip.name || clip.id}`)
-              .join("\n"),
-            references.length > 5 ? `...and ${references.length - 5} more.` : "",
-            "",
-            "Deleting it removes the reusable rig from the library. Existing timeline clips will keep their generated source, but they cannot refresh from this character preset until you replace or recreate it.",
-            "",
-            "Delete this character anyway?",
+              .map((clip) => clip.name || clip.id)
+              .join(", ")}${references.length > 5 ? `, and ${references.length - 5} more` : ""}.`,
+            "Those clips keep the artwork they already have, but they can no longer be refreshed from this character.",
           ]
-            .filter(Boolean)
-            .join("\n")
-        : "Delete this character from the library?";
-    if (!confirm(message)) return;
+        : ["This removes the reusable character from your library."];
+    const confirmed = await confirm({
+      title: "Delete this character?",
+      body: usageLines,
+      confirmLabel: "Delete character",
+      destructive: true,
+    });
+    if (!confirmed) return;
     const mediaIds = Array.from(await deleteCharacterRecord(id));
     unregisterCharacterPreset(id);
     await Promise.all(
@@ -358,53 +261,58 @@ function CharactersTab() {
 
   return (
     <div className="space-y-3 p-3 text-xs">
-      <div className="flex gap-2">
-        <button
-          onClick={newCharacter}
-          className="flex-1 rounded bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:opacity-90"
-        >
-          + New character
-        </button>
-        <button
-          onClick={() => void placeStarterCharacter()}
-          disabled={!project || placingStarter}
-          title="Drop the built-in presenter character on the timeline"
-          className="rounded border border-border px-2 py-2 text-[11px] text-foreground hover:bg-panel-2 disabled:opacity-50"
-        >
-          {placingStarter ? "…" : "Starter"}
-        </button>
-      </div>
+      {/* One primary action. Three peer buttons ("New character" / "Starter" /
+          "Generate preset: male|female") gave a newcomer no way to tell which one
+          to press first, so the choices now live inside the one thing you click. */}
+      <button
+        type="button"
+        onClick={() => setAddOpen((open) => !open)}
+        aria-expanded={addOpen}
+        className="w-full rounded bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:opacity-90"
+      >
+        + Add a character
+      </button>
+
+      {addOpen && (
+        <div className="space-y-1 rounded border border-border bg-panel-2 p-2">
+          <AddCharacterChoice
+            title="Use the ready-made presenter"
+            detail="Fastest way to see something on the canvas."
+            busy={placingStarter}
+            disabled={!project}
+            onClick={() => void placeStarterCharacter().then(() => setAddOpen(false))}
+          />
+          {(["male", "female"] as const).map((variant) => (
+            <AddCharacterChoice
+              key={variant}
+              title={`Build a ${variant} presenter`}
+              detail="Generates a rigged character you can restyle."
+              busy={generatingPreset === variant}
+              disabled={!!generatingPreset}
+              onClick={() => void newPresetCharacter(variant)}
+            />
+          ))}
+          <AddCharacterChoice
+            title="Start from my own artwork"
+            detail="Upload head, body, arms, and mouth shapes, then align them."
+            onClick={() => void newCharacter()}
+          />
+        </div>
+      )}
 
       {characterActionError && (
         <div
           role="alert"
-          className="rounded border border-destructive/40 bg-destructive/10 p-2 text-[11px] text-destructive"
+          className="rounded border border-destructive/40 bg-destructive/10 p-2 text-ui-sm text-destructive"
         >
           Could not add the character: {characterActionError}
         </div>
       )}
 
-      <div className="flex items-center gap-2 rounded border border-border bg-panel-2 p-2">
-        <span className="text-[11px] font-medium text-muted-foreground">
-          Start from a template:
-        </span>
-        {(["male", "female"] as const).map((variant) => (
-          <button
-            key={variant}
-            onClick={() => newPresetCharacter(variant)}
-            disabled={!!generatingPreset}
-            title={`Generate a rigged ${variant} presenter to customize`}
-            className="flex-1 rounded border border-border px-2 py-1.5 text-[11px] font-medium capitalize text-foreground hover:border-primary hover:bg-panel disabled:opacity-50"
-          >
-            {generatingPreset === variant ? "Generating…" : variant}
-          </button>
-        ))}
-      </div>
-
-      {characters.length === 0 && (
+      {characters.length === 0 && !addOpen && (
         <div className="rounded border border-dashed border-border bg-panel-2 p-3 text-muted-foreground">
-          No characters yet. Click "+ New character" to upload parts (head, mouth shapes, eyes,
-          body, arms, legs), align them on the canvas, and save a reusable rig.
+          No characters yet. "Add a character" starts you with a ready-made presenter or your own
+          artwork.
         </div>
       )}
 
@@ -418,13 +326,13 @@ function CharactersTab() {
                   <span className="flex-1 truncate font-medium text-foreground">{c.name}</span>
                   <button
                     onClick={() => deleteCharacter(c.id)}
-                    className="text-[10px] text-destructive"
+                    className="text-ui-sm text-destructive"
                     title="Delete character"
                   >
                     ✕
                   </button>
                 </div>
-                <div className="text-[10px] text-muted-foreground">
+                <div className="text-ui-sm text-muted-foreground">
                   {c.parts.length} part{c.parts.length !== 1 ? "s" : ""} · {c.canvasWidth}×
                   {c.canvasHeight}
                   {c.parallaxEnabled ? " · parallax" : ""}
@@ -433,18 +341,24 @@ function CharactersTab() {
             </div>
             <div className="flex gap-1">
               <button
-                onClick={() => {
+                draggable
+                onDragStart={(event) => {
                   registerCharacterPreset(c);
-                  void placeOnTimeline(c.id, c.name, c.canvasWidth, c.canvasHeight, c);
+                  writeLibraryDragItem(event.dataTransfer, {
+                    kind: "character",
+                    characterId: c.id,
+                  });
                 }}
+                onClick={() => void placeOnTimeline(c)}
                 disabled={!project}
-                className="flex-1 rounded bg-primary/30 px-2 py-1 text-[11px] hover:bg-primary/50 disabled:opacity-50"
+                title="Drag onto the canvas or the timeline, or click to add"
+                className="flex-1 cursor-grab rounded bg-primary px-2 py-1 text-ui-sm font-medium text-primary-foreground hover:opacity-90 active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Add to scene
               </button>
               <button
                 onClick={() => openModal({ type: "character-editor", characterId: c.id })}
-                className="rounded border border-border px-2 py-1 text-[11px] hover:bg-panel"
+                className="rounded border border-border px-2 py-1 text-ui-sm hover:bg-panel"
               >
                 Edit
               </button>
@@ -453,6 +367,32 @@ function CharactersTab() {
         ))}
       </ul>
     </div>
+  );
+}
+
+function AddCharacterChoice({
+  title,
+  detail,
+  busy,
+  disabled,
+  onClick,
+}: {
+  title: string;
+  detail: string;
+  busy?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled || busy}
+      className="w-full rounded border border-border bg-panel px-2 py-2 text-left hover:border-primary disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      <div className="font-medium text-foreground">{busy ? "Working…" : title}</div>
+      <div className="mt-0.5 text-ui-sm text-muted-foreground">{detail}</div>
+    </button>
   );
 }
 
@@ -590,7 +530,7 @@ function PresetsTab() {
       </button>
       {Array.from(grouped.entries()).map(([cat, items]) => (
         <div key={cat}>
-          <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+          <div className="mb-1 text-ui-sm uppercase tracking-wider text-muted-foreground">
             {cat}
           </div>
           <ul className="space-y-1">
@@ -598,7 +538,7 @@ function PresetsTab() {
               <li key={p.id} className="rounded border border-border bg-panel-2 px-2 py-1.5">
                 <div className="flex items-center gap-2">
                   <span className="flex-1 truncate text-foreground">{p.name}</span>
-                  <span className="text-[10px] text-muted-foreground">{p.duration}s</span>
+                  <span className="text-ui-sm text-muted-foreground">{p.duration}s</span>
                 </div>
               </li>
             ))}
@@ -719,7 +659,7 @@ function BlocksTab() {
 
   return (
     <div className="space-y-3 p-3 text-xs">
-      <div className="rounded border border-border bg-panel-2 p-2 text-[11px] leading-relaxed text-muted-foreground">
+      <div className="rounded border border-border bg-panel-2 p-2 text-ui-sm leading-relaxed text-muted-foreground">
         Paste a self-contained HyperFrames composition. Studio stores it in project.hf and adds one
         composition clip to the timeline.
       </div>
@@ -736,10 +676,10 @@ function BlocksTab() {
         rows={12}
         spellCheck={false}
         placeholder='<html data-composition-id="ai-title" ...>'
-        className="w-full resize-y rounded border border-border bg-input px-2 py-2 font-mono text-[11px] leading-relaxed text-foreground"
+        className="w-full resize-y rounded border border-border bg-input px-2 py-2 font-mono text-ui-sm leading-relaxed text-foreground"
       />
       {errors.length > 0 && (
-        <div className="rounded border border-destructive/60 bg-destructive/10 p-2 text-[11px] text-destructive-foreground">
+        <div className="rounded border border-destructive/60 bg-destructive/10 p-2 text-ui-sm text-destructive-foreground">
           <div className="mb-1 font-medium">Validation failed</div>
           <ul className="list-inside list-disc space-y-0.5">
             {errors.map((error) => (
@@ -751,14 +691,14 @@ function BlocksTab() {
             onClick={() =>
               void navigator.clipboard?.writeText(buildCompositionRepairPrompt(errors, source))
             }
-            className="mt-2 rounded border border-destructive/60 px-2 py-1 text-[10px] hover:bg-destructive/20"
+            className="mt-2 rounded border border-destructive/60 px-2 py-1 text-ui-sm hover:bg-destructive/20"
           >
             Copy repair prompt
           </button>
         </div>
       )}
       {validated?.ok && (
-        <div className="rounded border border-primary/50 bg-primary/10 px-2 py-1 text-[11px] text-foreground">
+        <div className="rounded border border-primary/50 bg-primary/10 px-2 py-1 text-ui-sm text-foreground">
           Source is valid. Preview it before adding it to the timeline.
         </div>
       )}
@@ -827,8 +767,9 @@ function MediaTab() {
   const characters = useLiveQuery(() => db.characters.toArray(), []);
   const project = useStudio((s) => s.project);
   const inputRef = useRef<HTMLInputElement>(null);
-  const addMedia = useStudio((s) => s.addMediaToTimeline);
+  const addLibraryItem = useStudio((s) => s.addLibraryItem);
   const registerMediaAsset = useStudio((s) => s.registerMediaAsset);
+  const notify = useNotify();
 
   const internalMediaIds = useMemo(() => {
     const ids = new Set<string>();
@@ -892,7 +833,7 @@ function MediaTab() {
               key={f.id}
               type="button"
               onClick={() => setKindFilter(f.id)}
-              className={`flex-1 rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+              className={`flex-1 rounded px-2 py-1 text-ui-sm font-medium transition-colors ${
                 active
                   ? "bg-primary text-primary-foreground"
                   : "bg-panel-2 text-muted-foreground hover:text-foreground"
@@ -910,20 +851,24 @@ function MediaTab() {
           <MediaTile
             key={m.id}
             asset={m}
-            onAdd={() => addMedia(m)}
+            onAdd={() => void addLibraryItem({ kind: "media", mediaId: m.id })}
             onDelete={async () => {
               const result = await deleteMediaIfUnused(m.id, {
                 extraProjects: project ? [project] : undefined,
               });
               if (result.deleted) return;
               if (result.usages.length === 0) return;
-              const usageList = result.usages
-                .slice(0, 5)
-                .map((usage) => `${usage.ownerName}${usage.detail ? ` — ${usage.detail}` : ""}`)
-                .join("\n");
-              alert(
-                `This media is still being used and was not deleted.\n\nRemove it from these places first:\n${usageList}`,
-              );
+              void notify({
+                title: "This file is still in use",
+                body: [
+                  "It was not deleted. Remove it from these places first:",
+                  ...result.usages
+                    .slice(0, 5)
+                    .map(
+                      (usage) => `${usage.ownerName}${usage.detail ? ` — ${usage.detail}` : ""}`,
+                    ),
+                ],
+              });
             }}
           />
         ))}
@@ -951,7 +896,15 @@ function MediaTile({
   const url = useMediaUrl(asset.id);
   return (
     <div className="group relative overflow-hidden rounded-md border border-border bg-panel-2">
-      <button onClick={onAdd} className="block w-full" title="Add to timeline">
+      <button
+        draggable
+        onDragStart={(event) =>
+          writeLibraryDragItem(event.dataTransfer, { kind: "media", mediaId: asset.id })
+        }
+        onClick={onAdd}
+        className="block w-full cursor-grab active:cursor-grabbing"
+        title="Drag onto the canvas or the timeline, or click to add"
+      >
         <div className="flex aspect-video items-center justify-center bg-stage-bg">
           {asset.kind === "image" && url && (
             <img src={url} alt={asset.name} className="h-full w-full object-cover" />
@@ -962,8 +915,8 @@ function MediaTile({
           {asset.kind === "audio" && <span className="text-2xl">🎵</span>}
         </div>
         <div className="px-2 py-1.5 text-left">
-          <div className="truncate text-[11px] font-medium text-foreground">{asset.name}</div>
-          <div className="text-[10px] text-muted-foreground">{asset.kind}</div>
+          <div className="truncate text-ui-sm font-medium text-foreground">{asset.name}</div>
+          <div className="text-ui-sm text-muted-foreground">{asset.kind}</div>
         </div>
       </button>
       <button
@@ -971,7 +924,7 @@ function MediaTile({
           e.stopPropagation();
           void onDelete();
         }}
-        className="absolute right-1 top-1 hidden rounded bg-black/60 px-1.5 text-[10px] text-foreground hover:bg-destructive group-hover:block"
+        className="absolute right-1 top-1 hidden rounded bg-black/60 px-1.5 text-ui-sm text-foreground hover:bg-destructive group-hover:block"
         title="Delete"
       >
         ✕
