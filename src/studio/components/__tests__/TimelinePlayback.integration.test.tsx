@@ -146,4 +146,36 @@ describe("Timeline playback integration", () => {
     expect(stopButton).not.toBeNull();
     expect(stopButton?.disabled).toBe(false);
   });
+
+  it("keeps the transport laid out as one row of controls", () => {
+    const project = createBlankProject("Transport layout");
+    project.id = "project-2";
+    project.hf.id = "project-2";
+    useStudio.setState({ project, tracks: project.editorMeta.tracks });
+
+    const host = renderHarness();
+    act(() => {
+      vi.advanceTimersByTime(250);
+    });
+
+    // PlayerControls ships a 3-column grid that centres Play in the middle
+    // column, which put Play out of line with the sibling transport buttons.
+    // styles.css re-lays that root as a flex row and hides column 1 (a duplicate
+    // time readout). Both rules address packaged DOM by structure, so pin the
+    // structure here — otherwise a package update silently breaks the row.
+    const wrapper = host.querySelector("[data-studio-transport]");
+    expect(wrapper).not.toBeNull();
+
+    const controlsRoot = wrapper?.firstElementChild;
+    expect(controlsRoot?.tagName).toBe("DIV");
+    expect(controlsRoot?.className).toContain("grid-cols-");
+
+    const columns = Array.from(controlsRoot?.children ?? []);
+    expect(columns.length).toBeGreaterThanOrEqual(3);
+
+    // The rule hides the first column. Play must never live there.
+    const playButton = host.querySelector('button[aria-label="Play"]');
+    expect(playButton).not.toBeNull();
+    expect(columns[0]?.contains(playButton!)).toBe(false);
+  });
 });

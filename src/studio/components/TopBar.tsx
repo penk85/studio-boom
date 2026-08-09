@@ -1,5 +1,13 @@
 // Top bar — project name, project settings, undo/redo, MP4 download.
-import { AlertCircle, CheckCircle2, FolderOpen, Loader2, Redo2, Undo2 } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  FolderOpen,
+  Loader2,
+  Redo2,
+  Sparkles,
+  Undo2,
+} from "lucide-react";
 import { useState } from "react";
 import { useStudio } from "../store";
 import { renderProjectToMp4 } from "../export/render-client";
@@ -10,9 +18,16 @@ interface TopBarProps {
   /** Reveals the Inspector's project settings. The format chip is the only
    *  discoverable entry point to size/fps/duration, so it has to lead there. */
   onOpenProjectSettings?: () => void;
+  aiOpen?: boolean;
+  onToggleAi?: () => void;
 }
 
-export function TopBar({ onBackToProjects, onOpenProjectSettings }: TopBarProps) {
+export function TopBar({
+  onBackToProjects,
+  onOpenProjectSettings,
+  aiOpen,
+  onToggleAi,
+}: TopBarProps) {
   const project = useStudio((s) => s.project);
   const saveProject = useStudio((s) => s.saveProject);
   const refreshCharacterCompositions = useStudio((s) => s.refreshCharacterCompositions);
@@ -77,6 +92,22 @@ export function TopBar({ onBackToProjects, onOpenProjectSettings }: TopBarProps)
         Redo
       </button>
       <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+        {onToggleAi && (
+          <button
+            type="button"
+            onClick={onToggleAi}
+            aria-pressed={aiOpen}
+            title="Ask AI for changes to this film"
+            className={`flex items-center gap-1 rounded border px-2 py-1 font-medium transition-colors ${
+              aiOpen
+                ? "border-primary bg-primary/15 text-foreground"
+                : "border-border text-muted-foreground hover:bg-panel-2 hover:text-foreground"
+            }`}
+          >
+            <Sparkles size={13} />
+            Ask AI
+          </button>
+        )}
         <ThemeToggle />
         <SaveStatusIndicator status={saveStatus} error={saveError} lastSavedAt={lastSavedAt} />
         {renderError && (

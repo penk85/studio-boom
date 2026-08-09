@@ -12,8 +12,8 @@ export function buildCompositionPreviewProject(
   const width = validation.width ?? baseProject.hf.width;
   const height = validation.height ?? baseProject.hf.height;
   const duration = validation.duration ?? 4;
-  const rootId = "studio_block_preview_root";
-  const hostId = "studio-block-preview-host";
+  const rootId = "studio_composition_preview_root";
+  const hostId = "studio-composition-preview-host";
   const rootHtml = createRootCompositionHtml(rootId, duration, width, height);
   const element: StudioTimelineElement = {
     id: hostId,
@@ -36,12 +36,12 @@ export function buildCompositionPreviewProject(
 
   return {
     ...baseProject,
-    id: `${baseProject.id}-block-preview`,
-    name: `${baseProject.name} block preview`,
+    id: `${baseProject.id}-composition-preview`,
+    name: `${baseProject.name} composition preview`,
     hf: {
       ...baseProject.hf,
       id: rootId,
-      name: "Block preview",
+      name: "Composition preview",
       width,
       height,
       duration,

@@ -7,7 +7,13 @@ import {
 } from "../interaction/select-drag";
 import { startWindowPointerDrag } from "../interaction/pointer-drag";
 import { ChevronDown, ChevronRight, Eye, EyeOff, Lock } from "lucide-react";
-import { getMediaUrl, importMediaFile, uid } from "../db";
+import {
+  CHARACTER_PART_ACCEPT,
+  getMediaUrl,
+  importMediaFile,
+  isSupportedCharacterPartFile,
+  uid,
+} from "../db";
 import { useStudio } from "../store";
 import {
   createBlankCharacter,
@@ -602,7 +608,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     if (addingNewAngle) {
       setStatus(
         `${ANGLE_LABELS[activeAngle]} starts empty — existing artwork stays on its angle. ` +
-          `Upload ${ANGLE_LABELS[activeAngle]} drawings into the same slots, or mark a prop ` +
+          `Add ${ANGLE_LABELS[activeAngle]} artwork to the same parts, or mark a prop ` +
           `as Shared in its Angles row to show it on every angle.`,
       );
     }
@@ -923,7 +929,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     });
   };
 
-  const importSvg = async (file: File, options: CharacterPartImportOptions = {}) => {
+  const importArtwork = async (file: File, options: CharacterPartImportOptions = {}) => {
     try {
       const asset = await importMediaFile(file, { scope: "character-part" });
       useStudio.getState().registerMediaAsset(asset);
@@ -1005,7 +1011,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
             : `${file.name} added`,
       );
     } catch (err) {
-      setStatus(err instanceof Error ? err.message : "Could not import SVG.");
+      setStatus(err instanceof Error ? err.message : "Could not import that image.");
     }
   };
 
@@ -2359,7 +2365,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
             </span>
             <span
               className="rounded-full border border-border px-2 py-0.5 text-ui-sm text-muted-foreground"
-              title="Each angle has its own drawings — new artwork goes into this view"
+              title="Each angle has its own artwork — new parts go into this view"
             >
               {ANGLE_LABELS[editorActiveAngle]}
             </span>
@@ -2393,19 +2399,19 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               doc={doc}
               activeAngle={editorActiveAngle}
               onPickImport={armPartImport}
-              onImport={importSvg}
+              onImport={importArtwork}
             />
           </div>
           <input
             ref={partImportInputRef}
             className="hidden"
             type="file"
-            accept=".svg,image/svg+xml"
+            accept={CHARACTER_PART_ACCEPT}
             onChange={(e) => {
               const file = e.target.files?.[0];
               const options = pendingImportRef.current;
               pendingImportRef.current = null;
-              if (file) void importSvg(file, options ?? {});
+              if (file) void importArtwork(file, options ?? {});
               e.currentTarget.value = "";
             }}
           />
@@ -2416,9 +2422,17 @@ export function CharacterEditor({ characterId, onClose }: Props) {
           className="relative flex min-w-0 flex-1 items-center justify-center bg-stage-bg p-8"
           onDrop={(e) => {
             e.preventDefault();
-            Array.from(e.dataTransfer.files)
-              .filter((file) => file.name.toLowerCase().endsWith(".svg"))
-              .forEach((file) => void importSvg(file));
+            const dropped = Array.from(e.dataTransfer.files);
+            const usable = dropped.filter(isSupportedCharacterPartFile);
+            // Dropping an unusable file used to do nothing at all — no error, no
+            // hint — which read as the editor being broken. Say what happened.
+            const rejected = dropped.filter((file) => !isSupportedCharacterPartFile(file));
+            if (rejected.length > 0) {
+              setStatus(
+                `Skipped ${rejected.map((file) => file.name).join(", ")} — parts can be SVG, PNG, JPG, or WebP.`,
+              );
+            }
+            usable.forEach((file) => void importArtwork(file));
           }}
           onDragOver={(e) => e.preventDefault()}
         >
@@ -2761,17 +2775,20 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               <div className="max-w-xs rounded border border-dashed border-border bg-panel/80 p-4 text-center text-xs text-muted-foreground">
                 {doc.parts.length === 0 ? (
                   <>
-                    <div className="mb-1 font-medium text-foreground">Drop SVG drawings here</div>
-                    …or use the Upload slots on the left. You're building the{" "}
-                    {ANGLE_LABELS[editorActiveAngle]} view.
+                    <div className="mb-1 font-medium text-foreground">Drop artwork here</div>
+                    PNG, JPG, WebP, or SVG — one image per part. Or use "Add part" on the left to
+                    say what each image is. You're building the {
+                      ANGLE_LABELS[editorActiveAngle]
+                    }{" "}
+                    view.
                   </>
                 ) : (
                   <>
                     <div className="mb-1 font-medium text-foreground">
-                      {ANGLE_LABELS[editorActiveAngle]} has no drawings yet
+                      {ANGLE_LABELS[editorActiveAngle]} has no artwork yet
                     </div>
-                    Upload {ANGLE_LABELS[editorActiveAngle]} versions into the same slots — other
-                    angles keep their own artwork.
+                    Add {ANGLE_LABELS[editorActiveAngle]} versions to the same parts — other angles
+                    keep their own artwork.
                   </>
                 )}
               </div>
@@ -2844,27 +2861,20 @@ export function CharacterEditor({ characterId, onClose }: Props) {
         </main>
 
         <aside className="flex w-80 shrink-0 flex-col border-l border-border bg-panel text-xs">
-          <div className="flex shrink-0 border-b border-border">
-            {(
-              [
-                { ph: "build", label: "Build" },
-                { ph: "rig", label: "Rig" },
-                { ph: "pose", label: "Pose" },
-              ] as const
-            ).map(({ ph, label }) => (
-              <button
-                key={ph}
-                type="button"
-                onClick={() => switchPhase(ph)}
-                className={`flex-1 py-2 text-ui-sm font-medium ${
-                  editorPhase === ph
-                    ? "border-b-2 border-primary text-foreground"
-                    : "border-b-2 border-transparent text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+          {/* The phase is chosen once, in the header. This panel only says which
+              phase its contents belong to — two live switchers for one piece of
+              state made it unclear which was in charge. */}
+          <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
+            <span className="text-ui-sm font-semibold uppercase tracking-wider text-muted-foreground">
+              {editorPhase === "build" ? "Build" : editorPhase === "rig" ? "Rig" : "Pose"}
+            </span>
+            <span className="min-w-0 truncate text-ui-sm text-muted-foreground">
+              {editorPhase === "build"
+                ? "Artwork and arrangement"
+                : editorPhase === "rig"
+                  ? "Skeleton, anchors, and limits"
+                  : "Variants and saved poses"}
+            </span>
           </div>
           <div className="flex-1 overflow-auto p-3">
             <div className="space-y-4">
@@ -2928,7 +2938,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   keyIssues={variantKeyIssues}
                   phase={editorPhase}
                   onSwitchPhase={switchPhase}
-                  onImport={importSvg}
+                  onImport={importArtwork}
                   mirrorPlan={mirrorPlanForSlot(selectedSlotId)}
                   onMirror={() => mirrorSlotToOtherSide(selectedSlotId)}
                   onSetDeform={(deform, options) => setSlotDeform(selectedSlotId, deform, options)}

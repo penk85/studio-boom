@@ -100,9 +100,10 @@ an approval-gated follow-up in the code audit.
 - ElevenLabs boundary: `render-plugin.ts` exposes local `/api/elevenlabs/*`
   endpoints during development. The API key is read from server-side
   `ELEVENLABS_API_KEY` and is not bundled into browser code.
-- Source block boundary: Library -> Blocks validates and previews custom
-  HyperFrames composition HTML before adding it to `project.hf.compositionHtml`.
-  Inspector source editing uses the same Validate -> Preview -> Apply rule.
+- Custom composition source boundary: Inspector source editing validates and
+  previews HyperFrames composition HTML before applying it to
+  `project.hf.compositionHtml`. Project import uses the same source boundary;
+  the retired Library Blocks paste surface is no longer available.
 - Removable extra surface: ZIP download support has been removed; MP4 download is the only user-facing export path.
 
 ## Guardrails
@@ -136,8 +137,9 @@ an approval-gated follow-up in the code audit.
 - Security follow-up: review and approve a narrowly scoped remediation set for
   the remaining transitive dependency advisories; do not use a blanket audit
   fix or mix HyperFrames family versions.
-- Source-visible custom HyperFrames blocks: polish the existing Blocks tab and
-  Inspector source panels while keeping all generated output in `project.hf`.
+- Source-visible custom HyperFrames compositions: keep the Inspector source
+  panels aligned with `project.hf`; the retired Library Blocks tab needs no
+  replacement surface.
 - Upstream primitive audit: revisit HyperFrames Studio picker, property-panel,
   file-tree, and nested composition primitives behind a feature flag or isolated
   prototype before wiring them into the stable Stage. The first direct
@@ -165,7 +167,8 @@ an approval-gated follow-up in the code audit.
   but the alignment UI does not always match final parented Pixi placement. Treat
   this as authoring UX debt, not preview/export drift; the fix should align
   variants against the actual rendered rig placement and parent visibility gates.
-- Editable HyperFrames clip-set import after custom block import is stable.
+- Editable HyperFrames clip-set import after custom composition source editing
+  is stable.
 - Runtime script cleanup: audit whether `hyperframe-runtime.js` stripping should
   happen during ZIP import as canonical source normalization, stay only at
   preview/render staging for backwards compatibility, or move upstream into the

@@ -197,11 +197,21 @@ export interface StudioState {
 
   updateRootHtml: (html: string, options?: RootHtmlMutationOptions) => void;
   /**
+   * Applies a named Move (Fade in, Pop, Slow zoom…) to a clip. Writes ordinary
+   * Move data, so the result is editable point-by-point afterwards.
+   */
+  applyEffectPreset: (
+    clipId: string,
+    presetId: string,
+    options?: ProjectMutationOptions,
+  ) => ClipKeyframeSelection | null;
+  /**
    * Places a Library entry (media, text block, or character) on the timeline.
    * One path for both the Library's buttons and drag-and-drop, so a dropped clip
-   * and a clicked clip are built identically.
+   * and a clicked clip are built identically. Resolves to the new clip's id so
+   * callers can act on exactly what they added, or null if nothing was placed.
    */
-  addLibraryItem: (item: LibraryDragItem, placement?: ClipPlacement) => Promise<void>;
+  addLibraryItem: (item: LibraryDragItem, placement?: ClipPlacement) => Promise<string | null>;
   updateCompositionHtml: (
     compositionId: string,
     html: string,

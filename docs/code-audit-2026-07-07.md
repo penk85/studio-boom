@@ -404,26 +404,26 @@ scene-command/gesture orchestration is still substantial but cohesive. Split it
 further only alongside a feature that supplies a real boundary, not to chase a
 line-count target with a giant hook or callback interface.
 
-### M8. Same-origin `srcdoc` means pasted blocks run with full app privileges
+### M8. Same-origin `srcdoc` means imported source runs with full app privileges
 
-**Mitigated 2026-07-19, architectural remainder documented:** Library block,
-pasted root-project, and Inspector composition-source previews run with
-`sandbox="allow-scripts"` and no `allow-same-origin`. Adding a block, applying
-composition source, or importing HTML/ZIP now requires explicit confirmation
+**Mitigated 2026-07-19, Library Blocks removed 2026-08-09, architectural
+remainder documented:** Pasted root-project and Inspector composition-source previews run with
+`sandbox="allow-scripts"` and no `allow-same-origin`. Applying composition
+source or importing HTML/ZIP now requires explicit confirmation
 that the user trusts the executable source; changing the source clears that
 confirmation. The editable Stage remains same-origin because the installed
 `@hyperframes/studio` picker, computed-style reader, timeline bridge, and live
 edit path require direct iframe DOM access. Fully isolating the Stage therefore
 remains a larger postMessage-boundary project, not a safe local attribute change.
 
-- **Where:** `Stage.tsx` (player srcdoc), Library → Blocks paste flow,
-  Inspector → Source, `project-import.ts` (imported `.hf` zips).
+- **Where:** `Stage.tsx` (player srcdoc), Inspector → Source,
+  `project-import.ts` (imported `.hf` zips).
 - **What:** `srcdoc` iframes are same-origin with the editor. That is a
   _requirement_ for the player bridge (`window.__timelines`, picker API), but
-  it also means any pasted custom block or imported project executes arbitrary
+  it also means any custom source or imported project executes arbitrary
   JS that can read/write the entire IndexedDB (all projects, all media) and
   call the local API endpoints (including the ElevenLabs proxy).
-- **Failure scenario:** "here, import my cool title block" on a forum →
+- **Failure scenario:** "here, import my cool title composition" on a forum →
   attacker script exfiltrates or wipes every local project next time the
   stage renders.
 - **Recommendation:** document this as the current trust model (it is a
@@ -453,7 +453,7 @@ transitive dependencies of the local HyperFrames CLI and engine:
 Vite/esbuild development-server finding on the current Linux environment. The
 Hono server adapters are not used as a public deployment surface by Studio. The
 archive, image, parser, and native-runtime findings remain relevant when an
-untrusted project, custom block, media file, or render input reaches the local
+untrusted project, custom composition source, media file, or render input reaches the local
 HyperFrames tooling. Imported/custom HTML remains a trust boundary because it
 executes in the preview document and can access same-origin Studio data.
 

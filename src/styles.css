@@ -281,3 +281,38 @@ button[aria-label="Pause"]:disabled {
 [role="slider"][aria-label="Seek"] > div {
   background: color-mix(in oklab, var(--foreground) 20%, transparent) !important;
 }
+
+/*
+ * Transport row alignment.
+ *
+ * PlayerControls lays itself out as a 3-column grid
+ * (`grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]`) with its own current/total
+ * time in column 1 and Play centred in column 2. Dropped into our transport that
+ * puts Play out of line with the sibling buttons — pushed across by the width of
+ * a time display we already render ourselves, further right. Re-lay it as a plain
+ * row so rewind, play, and the seek bar read as one row of controls.
+ *
+ * This reaches into packaged DOM by structure, so it is pinned by
+ * TimelinePlayback.integration.test.tsx — if the package changes its layout, that
+ * test fails rather than the row silently drifting.
+ */
+[data-studio-transport] > div {
+  display: flex !important;
+  height: 2rem !important;
+  width: 100%;
+  align-items: center;
+  gap: 0.5rem;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+
+/* Column 1 is the package's own time readout — we show ours in the right group. */
+[data-studio-transport] > div > :first-child {
+  display: none !important;
+}
+
+/* Column 3 holds the seek bar; let it take the width the grid used to give it. */
+[data-studio-transport] > div > :last-child {
+  min-width: 0;
+  flex: 1 1 auto;
+}

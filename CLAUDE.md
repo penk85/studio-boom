@@ -388,7 +388,7 @@ ClipEditorMeta {
 | `src/studio/character/character-editor-interactions.ts`    | Pure canvas hit testing and group resize/rotate snapshot calculations                                                                                             |
 | `src/studio/character/mesh-deform.ts`                      | Legacy Plane-bend math for old saved flexible parts; embedded only for compatibility with legacy `mode: "bend"` mesh nodes                                        |
 | `src/studio/presets/action-terminology.ts`                 | Shared Action/Expression labels, lanes, regions, exclusivity, and role-to-region rules                                                                            |
-| `docs/ai-generated-hyperframes-clips-roadmap.md`           | Roadmap for AI-generated clips, source-visible custom HyperFrames blocks, native text/composition clip support, and nested composition editing                    |
+| `docs/ai-generated-hyperframes-clips-roadmap.md`           | Roadmap for AI-generated clips, custom HyperFrames composition source, native text/composition clip support, and nested composition editing                    |
 | `docs/ui-vocabulary.md`                                    | **Canonical user-facing labels.** Read before writing any label, tooltip, placeholder, empty state, or status message                                             |
 | `docs/ux-followups.md`                                     | Open UX/UI issues in priority order, including the scene-scoped playback limitation                                                                              |
 

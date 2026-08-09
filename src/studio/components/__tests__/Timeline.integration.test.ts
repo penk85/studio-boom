@@ -66,7 +66,16 @@ describe("Timeline selection integration", () => {
     expect(source).toContain("if (!usePlayerStore.getState().isPlaying) togglePlay()");
     expect(source).toContain("playUntilRef.current = null");
     expect(sceneStripSource).toContain("onPlayScene(scene.id)");
-    expect(sceneStripSource).toContain('title="Play this scene"');
+    expect(sceneStripSource).toContain('"Pause" : "Play this scene"');
+
+    // Pressing it again pauses where it is rather than restarting the scene, and
+    // the button follows the player so it stops showing Pause when playback ends
+    // for any other reason.
+    expect(source).toContain(
+      "if (playingSceneId === sceneId && usePlayerStore.getState().isPlaying)",
+    );
+    expect(source).toContain("if (!isPlaying) setPlayingSceneId(null)");
+    expect(sceneStripSource).toContain("scene.id === playingSceneId ? <Pause size={12} />");
     // No leftover mode state from earlier attempts at this control.
     expect(source).not.toContain("stopAtSceneEnd");
     expect(source).not.toContain("lockedSceneId");

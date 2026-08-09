@@ -13,6 +13,7 @@ import type {
   PartMotionBehavior,
   PartRole,
 } from "../types";
+import { useStudio } from "../store";
 import { alphaCenterForPart } from "./alpha-bounds";
 import { FlexibleSection } from "./CharacterFlexibleSection";
 import { Field, NumberField } from "./CharacterInspectorFields";
@@ -513,6 +514,7 @@ export function Inspector({
 
       {phase === "build" && (
         <>
+          <ResolutionNotice part={part} />
           <section className="rounded border border-border bg-panel-2 p-3">
             <div className="mb-2 font-semibold uppercase tracking-wider text-muted-foreground">
               Transform
@@ -687,6 +689,35 @@ export function Inspector({
           </div>
         </section>
       )}
+    </div>
+  );
+}
+
+/**
+ * Flags a raster part being drawn larger than the pixels it actually has.
+ *
+ * SVG parts scale losslessly; PNG/JPG/WebP do not. Import never upscales — it
+ * fits artwork to the canvas with `ratio = min(1, …)` — so the softness only
+ * appears once someone resizes a part past its source resolution. That is where
+ * this warns, rather than at import, where it would never be true.
+ */
+function ResolutionNotice({ part }: { part: CharacterPart }) {
+  const asset = useStudio((s) => s.mediaAssets.get(part.mediaId));
+  if (!asset || asset.mimeType === "image/svg+xml") return null;
+
+  const sourceWidth = asset.width ?? 0;
+  const sourceHeight = asset.height ?? 0;
+  if (sourceWidth <= 0 || sourceHeight <= 0) return null;
+
+  // A little upscaling is invisible; this is about the point it starts to show.
+  const upscale = Math.max(part.width / sourceWidth, part.height / sourceHeight);
+  if (upscale < 1.25) return null;
+
+  return (
+    <div className="rounded border border-amber-500/40 bg-amber-500/10 p-2 text-ui-sm text-amber-300">
+      This artwork is {sourceWidth}×{sourceHeight} but is drawn about {Math.round(upscale * 100)}%
+      of that size, so it will look soft. Use a larger image, or an SVG, if this part is meant to be
+      seen close up.
     </div>
   );
 }

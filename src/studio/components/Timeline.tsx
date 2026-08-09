@@ -119,6 +119,8 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
   const seekDragScrollFrameRef = useRef<number | null>(null);
   /** Set only for the duration of a "Play this scene" run. */
   const playUntilRef = useRef<number | null>(null);
+  /** Which scene's play button is currently running, so it can show Pause. */
+  const [playingSceneId, setPlayingSceneId] = useState<string | null>(null);
   const [expandedClipIds, setExpandedClipIds] = useState<Set<string>>(new Set());
   const [selectedMotionId, setSelectedMotionId] = useState<string | null>(null);
   const queriedPresets = useLiveQuery(() => db.motionPresets.toArray(), []);
@@ -151,6 +153,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
       const stopAt = playUntilRef.current;
       if (stopAt == null || time < stopAt - 0.001) return;
       playUntilRef.current = null;
+      setPlayingSceneId(null);
       if (!usePlayerStore.getState().isPlaying) return;
       togglePlay();
       seek(stopAt);
@@ -159,6 +162,13 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
       unsubscribe();
     };
   }, [seek, togglePlay]);
+
+  // Playback can stop for reasons this component did not cause — the main Play
+  // button, the end of the film. Either way the scene button must stop showing
+  // Pause, so it follows the player rather than tracking its own idea of state.
+  useEffect(() => {
+    if (!isPlaying) setPlayingSceneId(null);
+  }, [isPlaying]);
   const compositionOutlinesByClipId = useMemo(
     () =>
       rootProject
@@ -174,6 +184,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
     (projectTime: number) => {
       // Scrubbing is the user taking over, so it cancels a scene run's stop time.
       playUntilRef.current = null;
+      setPlayingSceneId(null);
       const boundedTime = Math.max(0, Math.min(projectDuration, projectTime));
       liveTime.notify(boundedTime);
       seek(boundedTime);
@@ -206,12 +217,21 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
     (sceneId: string) => {
       const scene = scenes.find((candidate) => candidate.id === sceneId);
       if (!scene) return;
+      // Pressing it again while this scene is running pauses where it is, rather
+      // than restarting the scene from the top.
+      if (playingSceneId === sceneId && usePlayerStore.getState().isPlaying) {
+        playUntilRef.current = null;
+        setPlayingSceneId(null);
+        togglePlay();
+        return;
+      }
       playUntilRef.current = scene.start + scene.duration;
+      setPlayingSceneId(sceneId);
       liveTime.notify(scene.start);
       seek(scene.start);
       if (!usePlayerStore.getState().isPlaying) togglePlay();
     },
-    [scenes, seek, togglePlay],
+    [playingSceneId, scenes, seek, togglePlay],
   );
 
   const seekFromClientX = useCallback(
@@ -422,7 +442,9 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
         >
           <SkipBack size={14} />
         </button>
-        <PlayerControls onTogglePlay={togglePlay} onSeek={seek} />
+        <div data-studio-transport className="flex min-w-0 flex-1 items-center">
+          <PlayerControls onTogglePlay={togglePlay} onSeek={seek} />
+        </div>
         <div className="ml-auto flex shrink-0 items-center gap-2">
           <span className="text-muted-foreground">
             <span ref={timeDisplayRef}>{fmtTime(0)}</span>
@@ -445,6 +467,7 @@ export function Timeline({ togglePlay, seek }: TimelineProps) {
         scenes={scenes}
         activeSceneId={activeSceneId}
         onPlayScene={playScene}
+        playingSceneId={playingSceneId}
         zoom={zoom}
         scrollRef={sceneScrollerRef}
         onScrollLeft={syncTimelineScrollLeft}

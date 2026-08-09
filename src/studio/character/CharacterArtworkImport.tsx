@@ -1,6 +1,7 @@
-// Character artwork intake controls: semantic part picker, SVG upload, and mouth presets.
+// Character artwork intake controls: semantic part picker, artwork upload, and mouth presets.
 import { useRef, useState } from "react";
 import { Check, Plus, Upload } from "lucide-react";
+import { CHARACTER_PART_ACCEPT } from "../db";
 import { MOUTH_VISEMES } from "../lipsync/viseme-schema";
 import type {
   CharacterAngle,
@@ -13,44 +14,116 @@ import { defaultSlotIdForRole, listCharacterSlots, partAvailableForAngle } from 
 import { slugCharacterPartKey, type CharacterPartImportOptions } from "./character-part-import";
 import { MOUTH_PRESETS, generatePresetBlob } from "./presets";
 
-const SLOT_DEFINITIONS: Array<{
+interface SlotDefinition {
   label: string;
   role: PartRole;
   side?: CharacterPart["side"];
-}> = [
-  { label: "Head", role: "head" },
-  { label: "Body", role: "body" },
-  { label: "Left Eye", role: "eye", side: "left" },
-  { label: "Right Eye", role: "eye", side: "right" },
-  { label: "Left Iris", role: "iris", side: "left" },
-  { label: "Right Iris", role: "iris", side: "right" },
-  { label: "Left Eyebrow", role: "eyebrow", side: "left" },
-  { label: "Right Eyebrow", role: "eyebrow", side: "right" },
-  { label: "Nose", role: "nose" },
-  { label: "Left Arm", role: "arm", side: "left" },
-  { label: "Right Arm", role: "arm", side: "right" },
-  { label: "Left Upper Arm", role: "upperArm", side: "left" },
-  { label: "Right Upper Arm", role: "upperArm", side: "right" },
-  { label: "Left Lower Arm", role: "lowerArm", side: "left" },
-  { label: "Right Lower Arm", role: "lowerArm", side: "right" },
-  { label: "Left Hand", role: "hand", side: "left" },
-  { label: "Right Hand", role: "hand", side: "right" },
-  { label: "Left Leg", role: "leg", side: "left" },
-  { label: "Right Leg", role: "leg", side: "right" },
-  { label: "Left Upper Leg", role: "upperLeg", side: "left" },
-  { label: "Right Upper Leg", role: "upperLeg", side: "right" },
-  { label: "Left Lower Leg", role: "lowerLeg", side: "left" },
-  { label: "Right Lower Leg", role: "lowerLeg", side: "right" },
-  { label: "Left Foot", role: "foot", side: "left" },
-  { label: "Right Foot", role: "foot", side: "right" },
-  { label: "Hair Back", role: "hair", side: "back" },
-  { label: "Hair Front", role: "hair", side: "front" },
-  { label: "Accessory", role: "accessory" },
+}
+
+/**
+ * The part vocabulary, grouped.
+ *
+ * Every part is optional — a character is whatever you give it, and the rig drops
+ * movement for anything absent. So these are not requirements or a checklist;
+ * they are the named things the rig understands, arranged so you can find one.
+ *
+ * Limbs are the subtle case. "Arm" and "Upper arm + Lower arm" are not two ways
+ * to say the same thing: one is a single rigid piece, the other bends at the
+ * joint. That is a rig decision, so it is asked as a question in `LIMB_GROUPS`
+ * rather than hidden among look-alike chips.
+ */
+const PART_GROUPS: { title: string; parts: SlotDefinition[] }[] = [
+  {
+    title: "Face",
+    parts: [
+      { label: "Left eye", role: "eye", side: "left" },
+      { label: "Right eye", role: "eye", side: "right" },
+      { label: "Left pupil", role: "iris", side: "left" },
+      { label: "Right pupil", role: "iris", side: "right" },
+      { label: "Left eyebrow", role: "eyebrow", side: "left" },
+      { label: "Right eyebrow", role: "eyebrow", side: "right" },
+      { label: "Nose", role: "nose" },
+    ],
+  },
+  {
+    title: "Head & body",
+    parts: [
+      { label: "Head", role: "head" },
+      { label: "Body", role: "body" },
+      { label: "Hair (front)", role: "hair", side: "front" },
+      { label: "Hair (behind)", role: "hair", side: "back" },
+    ],
+  },
+  {
+    title: "Hands & feet",
+    parts: [
+      { label: "Left hand", role: "hand", side: "left" },
+      { label: "Right hand", role: "hand", side: "right" },
+      { label: "Left foot", role: "foot", side: "left" },
+      { label: "Right foot", role: "foot", side: "right" },
+    ],
+  },
+  { title: "Anything else", parts: [{ label: "Accessory", role: "accessory" }] },
 ];
 
-type SlotDefinition = (typeof SLOT_DEFINITIONS)[number];
+/** A limb the user chooses the structure of before adding artwork. */
+interface LimbGroup {
+  title: string;
+  side: "left" | "right";
+  whole: SlotDefinition;
+  jointed: [SlotDefinition, SlotDefinition];
+  jointName: string;
+}
 
-/** Main entry point for adding semantic SVG artwork to a character. */
+const LIMB_GROUPS: LimbGroup[] = [
+  {
+    title: "Left arm",
+    side: "left",
+    whole: { label: "Left arm", role: "arm", side: "left" },
+    jointed: [
+      { label: "Left upper arm", role: "upperArm", side: "left" },
+      { label: "Left lower arm", role: "lowerArm", side: "left" },
+    ],
+    jointName: "elbow",
+  },
+  {
+    title: "Right arm",
+    side: "right",
+    whole: { label: "Right arm", role: "arm", side: "right" },
+    jointed: [
+      { label: "Right upper arm", role: "upperArm", side: "right" },
+      { label: "Right lower arm", role: "lowerArm", side: "right" },
+    ],
+    jointName: "elbow",
+  },
+  {
+    title: "Left leg",
+    side: "left",
+    whole: { label: "Left leg", role: "leg", side: "left" },
+    jointed: [
+      { label: "Left upper leg", role: "upperLeg", side: "left" },
+      { label: "Left lower leg", role: "lowerLeg", side: "left" },
+    ],
+    jointName: "knee",
+  },
+  {
+    title: "Right leg",
+    side: "right",
+    whole: { label: "Right leg", role: "leg", side: "right" },
+    jointed: [
+      { label: "Right upper leg", role: "upperLeg", side: "right" },
+      { label: "Right lower leg", role: "lowerLeg", side: "right" },
+    ],
+    jointName: "knee",
+  },
+];
+
+const SLOT_DEFINITIONS: SlotDefinition[] = [
+  ...PART_GROUPS.flatMap((group) => group.parts),
+  ...LIMB_GROUPS.flatMap((limb) => [limb.whole, ...limb.jointed]),
+];
+
+/** Main entry point for adding semantic artwork to a character. */
 export function AddPartMenu({
   doc,
   activeAngle,
@@ -66,13 +139,10 @@ export function AddPartMenu({
   const [customName, setCustomName] = useState("");
   const [showMouthPresets, setShowMouthPresets] = useState(false);
   const slotRecords = listCharacterSlots(doc, { includeEmpty: true });
-  const missingDefinitions = SLOT_DEFINITIONS.filter(
-    (definition) =>
-      !doc.parts.some(
-        (part) =>
-          matchesSlotDefinition(part, definition) && partAvailableForAngle(part, activeAngle),
-      ),
-  );
+  const isMissing = (definition: SlotDefinition) =>
+    !doc.parts.some(
+      (part) => matchesSlotDefinition(part, definition) && partAvailableForAngle(part, activeAngle),
+    );
   const pick = (definition: SlotDefinition) => {
     const slotRecord = slotRecords.find((slot) => matchesSlotDefinition(slot, definition));
     setOpen(false);
@@ -108,18 +178,39 @@ export function AddPartMenu({
       </button>
       {open && (
         <>
-          <div className="flex flex-wrap gap-1">
-            {missingDefinitions.map((definition) => (
-              <button
-                key={`${definition.role}:${definition.side ?? "center"}`}
-                type="button"
-                onClick={() => pick(definition)}
-                className="rounded border border-border px-1.5 py-1 text-ui-sm text-muted-foreground hover:bg-panel hover:text-foreground"
-              >
-                {definition.label}
-              </button>
-            ))}
-          </div>
+          <p className="text-ui-sm text-muted-foreground">
+            Every part is optional — add only what your character has.
+          </p>
+
+          {LIMB_GROUPS.filter((limb) =>
+            [limb.whole, ...limb.jointed].some((definition) => isMissing(definition)),
+          ).map((limb) => (
+            <LimbChoice key={limb.title} limb={limb} isMissing={isMissing} onPick={pick} />
+          ))}
+
+          {PART_GROUPS.map((group) => {
+            const available = group.parts.filter(isMissing);
+            if (available.length === 0) return null;
+            return (
+              <div key={group.title}>
+                <div className="mb-1 text-ui-sm uppercase tracking-wider text-muted-foreground">
+                  {group.title}
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {available.map((definition) => (
+                    <button
+                      key={`${definition.role}:${definition.side ?? "center"}`}
+                      type="button"
+                      onClick={() => pick(definition)}
+                      className="rounded border border-border px-1.5 py-1 text-ui-sm text-muted-foreground hover:bg-panel hover:text-foreground"
+                    >
+                      {definition.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
           <div className="flex items-center gap-1">
             <input
               value={customName}
@@ -150,6 +241,64 @@ export function AddPartMenu({
           {showMouthPresets && <MouthPresetSelector onImport={onImport} />}
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Asks the one rig question a limb carries: is it a single rigid piece, or does
+ * it bend? Previously "Left arm", "Left upper arm" and "Left lower arm" sat side
+ * by side as look-alike chips, so the choice was made by accident and only
+ * discovered later, when the arm would not bend.
+ */
+function LimbChoice({
+  limb,
+  isMissing,
+  onPick,
+}: {
+  limb: LimbGroup;
+  isMissing: (definition: SlotDefinition) => boolean;
+  onPick: (definition: SlotDefinition) => void;
+}) {
+  const wholeMissing = isMissing(limb.whole);
+  const jointedMissing = limb.jointed.filter(isMissing);
+  // Once artwork exists for one structure, the other is no longer an option —
+  // offering it would silently create a second, conflicting limb.
+  const startedJointed = jointedMissing.length < limb.jointed.length;
+  const startedWhole = !wholeMissing;
+
+  return (
+    <div className="rounded border border-border bg-panel-2 p-2">
+      <div className="mb-1 text-ui-sm font-medium text-foreground">{limb.title}</div>
+      {!startedJointed && !startedWhole && (
+        <p className="mb-1.5 text-ui-sm text-muted-foreground">
+          One piece, or two so it bends at the {limb.jointName}?
+        </p>
+      )}
+      <div className="flex flex-wrap gap-1">
+        {wholeMissing && !startedJointed && (
+          <button
+            type="button"
+            onClick={() => onPick(limb.whole)}
+            title={`One image for the whole ${limb.title.toLowerCase()} — it moves as a single piece`}
+            className="rounded border border-border px-1.5 py-1 text-ui-sm text-muted-foreground hover:bg-panel hover:text-foreground"
+          >
+            One piece
+          </button>
+        )}
+        {!startedWhole &&
+          jointedMissing.map((definition) => (
+            <button
+              key={definition.role}
+              type="button"
+              onClick={() => onPick(definition)}
+              title={`Bends at the ${limb.jointName} — add both halves`}
+              className="rounded border border-border px-1.5 py-1 text-ui-sm text-muted-foreground hover:bg-panel hover:text-foreground"
+            >
+              {definition.label.replace(`${limb.side === "left" ? "Left" : "Right"} `, "")}
+            </button>
+          ))}
+      </div>
     </div>
   );
 }
@@ -192,7 +341,7 @@ export function SlotUpload({
         ref={inputRef}
         className="hidden"
         type="file"
-        accept=".svg,image/svg+xml"
+        accept={CHARACTER_PART_ACCEPT}
         onChange={(event) => {
           const file = event.target.files?.[0];
           if (file) onUpload(file);

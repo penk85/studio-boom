@@ -28,11 +28,10 @@ describe("executable HyperFrames source trust boundary", () => {
     expect(previewSource).not.toContain('sandbox="allow-scripts allow-same-origin"');
   });
 
-  it("requires sandbox preview readiness and trust before adding a custom block", () => {
-    expect(librarySource).toContain('previewStatus === "ready" &&');
-    expect(librarySource).toContain("sourceTrusted");
-    expect(librarySource).toContain("if (!project || !sourceTrusted) return");
-    expect(librarySource).toContain("setSourceTrusted(false)");
+  it("does not expose a separate pasted block trust surface after retirement", () => {
+    expect(librarySource).not.toContain("BlocksTab");
+    expect(librarySource).not.toContain("sourceTrusted");
+    expect(librarySource).not.toContain("SourceTrustConfirmation");
   });
 
   it("requires sandbox preview readiness and trust before applying composition source", () => {

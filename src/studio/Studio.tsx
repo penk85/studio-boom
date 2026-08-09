@@ -8,6 +8,7 @@ import { Stage } from "./components/Stage";
 import { Inspector } from "./components/Inspector";
 import { Timeline } from "./components/Timeline";
 import { TopBar } from "./components/TopBar";
+import { AiPanel } from "./components/AiPanel";
 
 interface StudioProps {
   onBackToProjects?: () => void;
@@ -41,6 +42,7 @@ export function Studio({ onBackToProjects }: StudioProps) {
   const { iframeRef, togglePlay, seek, onIframeLoad } = useTimelinePlayer();
   const [libraryOpen, setLibraryOpen] = usePersistentBoolean("studio-library-open", true);
   const [inspectorOpen, setInspectorOpen] = usePersistentBoolean("studio-inspector-open", true);
+  const [aiOpen, setAiOpen] = useState(false);
   const projectId = project?.id ?? null;
 
   useEffect(() => {
@@ -83,6 +85,13 @@ export function Studio({ onBackToProjects }: StudioProps) {
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <TopBar
         onBackToProjects={onBackToProjects}
+        aiOpen={aiOpen}
+        onToggleAi={() => {
+          // The assistant shares the Inspector rail rather than adding a third
+          // column — opening it must therefore also reveal the rail.
+          setInspectorOpen(true);
+          setAiOpen((open) => !open);
+        }}
         onOpenProjectSettings={() => {
           // Project settings live in the Inspector's no-selection state, so
           // reveal the rail and clear the selection to land on them.
@@ -118,7 +127,7 @@ export function Studio({ onBackToProjects }: StudioProps) {
         />
         {inspectorOpen && (
           <aside className="w-72 shrink-0 bg-panel">
-            <Inspector seek={seek} />
+            {aiOpen ? <AiPanel onClose={() => setAiOpen(false)} /> : <Inspector seek={seek} />}
           </aside>
         )}
       </div>

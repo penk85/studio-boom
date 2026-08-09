@@ -976,6 +976,7 @@ export interface AppliedMotion {
 
 export type NativeClipKind = "image" | "audio" | "video" | "text" | "composition";
 
+/** `ai-block` is retained so projects created by the removed Library Blocks flow still load. */
 export type CompositionKind =
   | "ai-block"
   | "registry-block"

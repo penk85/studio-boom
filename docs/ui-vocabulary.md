@@ -20,10 +20,11 @@ table, add it here first.
 
 | Noun            | Means                                                                | Never call it                                                     |
 | --------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| **Clip**        | One thing placed on the timeline — media, text, character, or block   | element, item, layer                                              |
+| **Clip**        | One thing placed on the timeline — media, text, character, or composition | element, item, layer                                              |
 | **Scene**       | A span of the film containing clips                                   | sequence, section                                                 |
 | **Move**        | A clip travelling across the canvas over time                         | motion, keyframe group, motion step, tween                        |
 | **Point**       | One stop inside a Move. The first and last are **Begin** and **End**  | checkpoint, keyframe, node                                        |
+| **Effect**      | A ready-made thing a clip does — Fade in, Pop, Slow zoom               | transition, animation preset, filter                              |
 | **Action**      | Repeatable body animation performed by a character                    | motion, motion preset, preset, animation                          |
 | **Expression**  | Timed facial animation performed by a character                       | face preset, emotion preset                                       |
 | **Pose**        | A held variant map with no timing (standing, folded arms)             | state, stance                                                     |
@@ -42,6 +43,22 @@ whole reason this file exists:
 A character walking across frame is a **Move** (the clip travels) plus an
 **Action** (the legs walk). They are authored in two different Inspector tabs and
 must never share a label.
+
+**Effect** is the third noun, and the one most users reach for first. An Effect
+is something a clip *does*: appear, disappear, emphasise, drift closer. Most
+Effects do not move the clip at all — Fade is opacity, Pop and Slow zoom are
+scale — which is precisely why they are not called Moves. A Move is the narrower
+thing: the clip travelling a path.
+
+The set is deliberately symmetrical: a character picks an **Action** from a
+library, any clip picks an **Effect** from one. Both expand into ordinary editable
+data — an Action into character motion, an Effect into Points — so neither is a
+special case the rest of the editor has to know about.
+
+Internally an Effect *is* stored as Move data, because that is the only animation
+model the renderer has. That is an implementation detail and must not surface: the
+Inspector tab is **Effects**, and the hand-built path editor inside it is
+**Move along a path**.
 
 ## Property names
 
@@ -66,7 +83,7 @@ Do not reintroduce `Left`, `Top`, `Size`, `Angle°`, or `Visible` as aliases.
 | ---------- | --------------------------------------------------------- | -------------------- |
 | `Clip`     | Name, timing, Frame, Look, type-specific fields            | every clip           |
 | `Speech`   | Voice library, TTS, alignment, placed speech               | character clips      |
-| `Move`     | Moves, their Points, path, feel, per-Point property values | every non-audio clip |
+| `Effects`  | Effects to pick from, then Moves, Points, path, feel        | every non-audio clip |
 | `Acting`   | Auto blink, Rig, Actions & Expressions                     | character clips      |
 | `More`     | Layer, lock, source, delete                                | every clip           |
 
@@ -86,7 +103,8 @@ These persist in the schema and are fine in code. They must not appear in the UI
 | `ClipMotionCheckpoint`, `checkpoint`           | Point              |
 | `Keyframe`, `keyframes`                        | Point              |
 | `MotionPanel`, `MotionPresetRecorder`          | Actions & Expressions |
-| `compositionKind: "ai-block"`                  | Block              |
+| `ClipMotionStep` written by an effect preset   | Effect             |
+| `compositionKind: "ai-block"`                  | Retired composition kind |
 
 ## Type scale
 

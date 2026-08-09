@@ -1,16 +1,11 @@
-// Library panel — Media, Text, Characters (with editor), Actions, Blocks.
+// Library panel — Media, Text, Characters (with editor), and Actions.
 import { useLiveQuery } from "dexie-react-hooks";
 import { db, deleteMediaIfUnused, importMediaFile, uid } from "../db";
 import { useStudio } from "../store";
-import type { CharacterPreset, CompositionClip, MediaAsset, TextClip } from "../types";
+import type { CharacterPreset, MediaAsset, TextClip } from "../types";
 import { deriveEditorClips, isCharacterCompositionClip } from "../types";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMediaUrl } from "../hooks/useMediaUrl";
-import {
-  buildCompositionRepairPrompt,
-  validateCompositionSourceHtml,
-} from "../hyperframes/composition-source";
-import { buildCompositionPreviewProject } from "../hyperframes/composition-preview-project";
 import { buildSceneEditingProject } from "../scenes";
 import {
   createBlankCharacter,
@@ -32,8 +27,6 @@ import {
 import type { PresenterVariant } from "../character/presenter";
 import { defaultPoseForCharacter } from "../character/pose-presets";
 import { ensureMotionPresetsSeeded } from "../presets/seed";
-import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
-import { SourceTrustConfirmation } from "./SourceTrustConfirmation";
 import { useConfirm, useNotify } from "./ConfirmDialog";
 import { TEXT_BLOCKS, writeLibraryDragItem } from "../library-items";
 import {
@@ -42,9 +35,6 @@ import {
   runtimePartPlacement,
 } from "../character/runtime";
 
-// Four tabs fit a 240px rail two-up without truncating. "Blocks" is a
-// paste-HyperFrames-source flow — a developer surface — so it lives behind the
-// Advanced toggle rather than sitting beside Media and Text.
 const TABS = [
   { id: "media", label: "Media" },
   { id: "text", label: "Text" },
@@ -52,9 +42,7 @@ const TABS = [
   { id: "presets", label: "Actions" },
 ] as const;
 
-const ADVANCED_TAB = { id: "blocks", label: "Blocks" } as const;
-
-type TabId = (typeof TABS)[number]["id"] | typeof ADVANCED_TAB.id;
+type TabId = (typeof TABS)[number]["id"];
 
 export function Library() {
   const [tab, setTab] = useState<TabId>("media");
@@ -85,26 +73,12 @@ export function Library() {
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          onClick={() => setTab(tab === ADVANCED_TAB.id ? "media" : ADVANCED_TAB.id)}
-          aria-pressed={tab === ADVANCED_TAB.id}
-          title="Paste a HyperFrames composition as a clip"
-          className={`mt-1 w-full rounded px-2 py-1 text-ui-sm transition-colors ${
-            tab === ADVANCED_TAB.id
-              ? "bg-primary/15 text-foreground"
-              : "text-muted-foreground hover:text-foreground"
-          }`}
-        >
-          Advanced: paste a block
-        </button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         {tab === "media" && <MediaTab />}
         {tab === "text" && <TextTab />}
         {tab === "characters" && <CharactersTab />}
         {tab === "presets" && <PresetsTab />}
-        {tab === "blocks" && <BlocksTab />}
       </div>
     </div>
   );
@@ -545,200 +519,6 @@ function PresetsTab() {
           </ul>
         </div>
       ))}
-    </div>
-  );
-}
-
-function BlocksTab() {
-  const rootProject = useStudio((s) => s.project);
-  const activeSceneId = useStudio((s) => s.activeSceneId);
-  const project = useMemo(
-    () => (rootProject ? buildSceneEditingProject(rootProject, activeSceneId) : null),
-    [activeSceneId, rootProject],
-  );
-  const clips = useMemo(() => (project ? deriveEditorClips(project) : []), [project]);
-  const tracks = useStudio((s) => s.tracks);
-  const addClip = useStudio((s) => s.addClip);
-  const [source, setSource] = useState("");
-  const [errors, setErrors] = useState<string[]>([]);
-  const [validated, setValidated] = useState<Awaited<
-    ReturnType<typeof validateCompositionSourceHtml>
-  > | null>(null);
-  const [previewProject, setPreviewProject] = useState<ReturnType<
-    typeof buildCompositionPreviewProject
-  > | null>(null);
-  const [previewStatus, setPreviewStatus] = useState<"idle" | "loading" | "ready" | "error">(
-    "idle",
-  );
-  const [sourceTrusted, setSourceTrusted] = useState(false);
-  const canPreviewBlock = Boolean(
-    project && source.trim() && validated?.ok && validated.html && validated.compositionId,
-  );
-  const canAddBlock = Boolean(
-    project &&
-    source.trim() &&
-    validated?.ok &&
-    validated.html &&
-    validated.compositionId &&
-    previewStatus === "ready" &&
-    sourceTrusted,
-  );
-  const previewWidth = validated?.width ?? project?.hf.width ?? 1920;
-  const previewHeight = validated?.height ?? project?.hf.height ?? 1080;
-
-  const validateSource = async () => {
-    if (!project) return null;
-    const result = await validateCompositionSourceHtml(source, {
-      compositionId: `ai_block_${Date.now()}`,
-      duration: 4,
-      width: project.hf.width,
-      height: project.hf.height,
-      isSubComposition: true,
-    });
-    setErrors(result.errors);
-    setValidated(result);
-    setPreviewProject(null);
-    setPreviewStatus("idle");
-    return result;
-  };
-
-  const previewBlock = () => {
-    if (!project || !validated?.ok || !validated.html) return;
-    setPreviewStatus("loading");
-    setPreviewProject(buildCompositionPreviewProject(project, validated));
-  };
-
-  const handlePreviewStatusChange = useCallback(
-    (status: "idle" | "loading" | "ready" | "error") => setPreviewStatus(status),
-    [],
-  );
-
-  const addBlock = async () => {
-    if (!project || !sourceTrusted) return;
-    const result = validated;
-    if (!result?.ok || !result.compositionId || !result.html) return;
-
-    const trackIndex = Math.max(
-      0,
-      tracks.findIndex((t) => t.kind === "overlay"),
-    );
-    const width = result.width ?? project.hf.width;
-    const height = result.height ?? project.hf.height;
-
-    try {
-      await addClip({
-        id: uid(),
-        kind: "composition",
-        compositionId: result.compositionId,
-        compositionKind: "ai-block",
-        compositionHtml: result.html,
-        name: result.compositionId,
-        trackIndex,
-        start: 0,
-        duration: result.duration ?? 4,
-        x: Math.round((project.hf.width - width) / 2),
-        y: Math.round((project.hf.height - height) / 2),
-        width,
-        height,
-        rotation: 0,
-        opacity: 1,
-        zIndex: clips.filter((clip) => clip.kind !== "audio").length,
-      });
-      setSource("");
-      setValidated(null);
-      setPreviewProject(null);
-      setPreviewStatus("idle");
-      setSourceTrusted(false);
-    } catch (error) {
-      setErrors([error instanceof Error ? error.message : String(error)]);
-      setValidated(null);
-      setPreviewProject(null);
-      setPreviewStatus("idle");
-    }
-  };
-
-  return (
-    <div className="space-y-3 p-3 text-xs">
-      <div className="rounded border border-border bg-panel-2 p-2 text-ui-sm leading-relaxed text-muted-foreground">
-        Paste a self-contained HyperFrames composition. Studio stores it in project.hf and adds one
-        composition clip to the timeline.
-      </div>
-      <textarea
-        value={source}
-        onChange={(event) => {
-          setSource(event.target.value);
-          if (errors.length > 0) setErrors([]);
-          setValidated(null);
-          setPreviewProject(null);
-          setPreviewStatus("idle");
-          setSourceTrusted(false);
-        }}
-        rows={12}
-        spellCheck={false}
-        placeholder='<html data-composition-id="ai-title" ...>'
-        className="w-full resize-y rounded border border-border bg-input px-2 py-2 font-mono text-ui-sm leading-relaxed text-foreground"
-      />
-      {errors.length > 0 && (
-        <div className="rounded border border-destructive/60 bg-destructive/10 p-2 text-ui-sm text-destructive-foreground">
-          <div className="mb-1 font-medium">Validation failed</div>
-          <ul className="list-inside list-disc space-y-0.5">
-            {errors.map((error) => (
-              <li key={error}>{error}</li>
-            ))}
-          </ul>
-          <button
-            type="button"
-            onClick={() =>
-              void navigator.clipboard?.writeText(buildCompositionRepairPrompt(errors, source))
-            }
-            className="mt-2 rounded border border-destructive/60 px-2 py-1 text-ui-sm hover:bg-destructive/20"
-          >
-            Copy repair prompt
-          </button>
-        </div>
-      )}
-      {validated?.ok && (
-        <div className="rounded border border-primary/50 bg-primary/10 px-2 py-1 text-ui-sm text-foreground">
-          Source is valid. Preview it before adding it to the timeline.
-        </div>
-      )}
-      {previewProject && (
-        <HyperFramesPreviewPanel
-          project={previewProject}
-          width={previewWidth}
-          height={previewHeight}
-          seekTime={Math.min((validated?.duration ?? 4) * 0.35, 1)}
-          title="Sandboxed HyperFrames block preview"
-          onStatusChange={handlePreviewStatusChange}
-        />
-      )}
-      <SourceTrustConfirmation confirmed={sourceTrusted} onConfirmedChange={setSourceTrusted} />
-      <div className="grid grid-cols-3 gap-2">
-        <button
-          type="button"
-          onClick={validateSource}
-          disabled={!project || !source.trim()}
-          className="flex-1 rounded border border-border px-2 py-1.5 text-xs text-foreground hover:bg-panel-2 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Validate
-        </button>
-        <button
-          type="button"
-          onClick={previewBlock}
-          disabled={!canPreviewBlock}
-          className="rounded border border-border px-2 py-1.5 text-xs text-foreground hover:bg-panel-2 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Preview
-        </button>
-        <button
-          type="button"
-          onClick={addBlock}
-          disabled={!canAddBlock}
-          className="flex-1 rounded bg-primary px-2 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Add block
-        </button>
-      </div>
     </div>
   );
 }

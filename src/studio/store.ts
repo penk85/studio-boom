@@ -45,6 +45,7 @@ import {
   updateKeyframeProperty,
   upsertKeyframeProperty,
 } from "./hyperframes/keyframes";
+import { buildEffectPresetKeyframes, findEffectPreset } from "./hyperframes/effect-presets";
 import {
   createRootCompositionHtml,
   updateRootCompositionHtml,
@@ -1586,6 +1587,42 @@ export const useStudio = create<StudioState>((set, get) => ({
     return selectedKeyframe;
   },
 
+  applyEffectPreset(clipId, presetId, options) {
+    const state = get();
+    const p = state.project;
+    const editingProject = getEditingProject(state);
+    if (!p || !editingProject) return null;
+    const clip = deriveEditorClips(editingProject).find((candidate) => candidate.id === clipId);
+    if (!clip || clip.kind === "audio") return null;
+    const preset = findEffectPreset(presetId);
+    if (!preset) return null;
+    if (options?.history !== false) get().checkpointHistory();
+
+    const built = buildEffectPresetKeyframes(preset, clip, uid);
+    // Named moves are ordinary Move data once applied — same commit path as a
+    // hand-built one, so they undo, edit, and export identically.
+    const keyframes = [...(clip.keyframes ?? []), ...built.keyframes];
+    const motionSteps = [...(clip.motionStepMetas ?? []), { ...built.step, name: preset.label }];
+    const rootHtml = setClipMotionModelInRootHtml(
+      editingProject.hf.rootHtml,
+      clipId,
+      keyframes,
+      motionSteps,
+    );
+    const selectedKeyframe: ClipKeyframeSelection = {
+      clipId,
+      keyframeId: built.step.checkpointIds[built.step.checkpointIds.length - 1]!,
+      property: "position",
+    };
+    set({
+      project: commitEditingRootHtml(p, state.activeSceneId, rootHtml),
+      selectedClipId: clipId,
+      selectedKeyframe,
+    });
+    scheduleSave(get, set);
+    return selectedKeyframe;
+  },
+
   addClipMotionCheckpoint(clipId, motionId, time, options) {
     const state = get();
     const p = state.project;
@@ -1876,25 +1913,30 @@ export const useStudio = create<StudioState>((set, get) => ({
     const state = get();
     const p = state.project;
     const editingProject = getEditingProject(state);
-    if (!p || !editingProject) return;
+    if (!p || !editingProject) return null;
 
     const stage = { width: p.hf.width, height: p.hf.height };
     const currentClips = deriveEditorClips(editingProject);
+    const currentIds = new Set(currentClips.map((clip) => clip.id));
     const tracks = p.editorMeta.tracks;
 
     if (item.kind === "media") {
       const asset = state.mediaAssets.get(item.mediaId);
-      if (!asset) return;
+      if (!asset) return null;
       // Media already had a placement-aware path; reuse it and then nudge the
       // position, so audio/duration/trim handling stays in one place.
       const trackIndex =
         placement.trackIndex ?? trackIndexFor(tracks, asset.kind === "audio" ? "audio" : "overlay");
       get().addMediaToTimeline(asset, trackIndex, Math.max(0, placement.start ?? 0));
-      if (asset.kind === "audio" || (!placement.center && placement.laneIndex == null)) return;
+      // The id is minted inside addMediaToTimeline, so recover it by diffing
+      // against the clips that existed a moment ago.
       const placed = deriveEditorClips(getEditingProject(get()) ?? editingProject).find(
-        (clip) => clip.mediaId === asset.id && !currentClips.some((prev) => prev.id === clip.id),
+        (clip) => clip.mediaId === asset.id && !currentIds.has(clip.id),
       );
-      if (!placed) return;
+      if (!placed) return null;
+      if (asset.kind === "audio" || (!placement.center && placement.laneIndex == null)) {
+        return placed.id;
+      }
       const { x, y } = topLeftFromCenter(
         placement.center,
         { width: placed.width, height: placed.height },
@@ -1904,15 +1946,16 @@ export const useStudio = create<StudioState>((set, get) => ({
         ...(placement.center ? { x, y } : {}),
         ...(placement.laneIndex == null ? {} : { laneIndex: placement.laneIndex }),
       });
-      return;
+      return placed.id;
     }
 
     if (item.kind === "text") {
       const block = findTextBlock(item.presetId);
-      if (!block) return;
+      if (!block) return null;
+      const id = uid();
       await get().addClip(
         buildTextClip({
-          id: uid(),
+          id,
           block,
           stage,
           placement,
@@ -1920,14 +1963,15 @@ export const useStudio = create<StudioState>((set, get) => ({
           zIndex: nextVisualZIndex(currentClips),
         }),
       );
-      return;
+      return id;
     }
 
     const character = state.characters.get(item.characterId);
-    if (!character) return;
+    if (!character) return null;
+    const id = uid();
     await get().addClip(
       buildCharacterClip({
-        id: uid(),
+        id,
         character,
         stage,
         placement,
@@ -1935,6 +1979,7 @@ export const useStudio = create<StudioState>((set, get) => ({
         zIndex: nextVisualZIndex(currentClips),
       }),
     );
+    return id;
   },
 
   registerMediaAsset(asset) {

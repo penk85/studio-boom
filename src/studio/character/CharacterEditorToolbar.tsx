@@ -236,7 +236,7 @@ export function CharacterAnglePoseToolbar({
             type="button"
             onClick={() => onAddAngleMenuOpenChange(!addAngleMenuOpen)}
             className="border-b-2 border-transparent px-3 py-2 text-ui-sm text-muted-foreground hover:text-foreground"
-            title="Add another view of this character — it starts with its own empty set of drawings"
+            title="Add another view of this character — it starts with its own artwork"
           >
             + Add angle
           </button>

@@ -60,6 +60,7 @@ import {
 import { HyperFramesPreviewPanel } from "./HyperFramesPreviewPanel";
 import { SourceTrustConfirmation } from "./SourceTrustConfirmation";
 import { buildSceneEditingProject } from "../scenes";
+import { EFFECT_PRESETS, type EffectPresetId } from "../hyperframes/effect-presets";
 
 type InspectorTab = "clip" | "speech" | "move" | "acting" | "advanced";
 type ClipUpdater = (patch: Partial<AnyClip>) => void;
@@ -88,6 +89,7 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
   const removeClipMotionCheckpoint = useStudio((s) => s.removeClipMotionCheckpoint);
   const removeClipMotionStep = useStudio((s) => s.removeClipMotionStep);
   const setMotionStepPathStyle = useStudio((s) => s.setClipMotionStepPathStyle);
+  const applyEffectPreset = useStudio((s) => s.applyEffectPreset);
   const remove = useStudio((s) => s.removeClip);
   const registerCharacterPreset = useStudio((s) => s.registerCharacterPreset);
   const clip = clips.find((c) => c.id === id);
@@ -156,6 +158,15 @@ export function Inspector({ seek }: { seek?: (time: number) => void }) {
             )}
 
             {activeTab === "speech" && characterClip && <VoiceLipSyncPanel clip={characterClip} />}
+
+            {activeTab === "move" && clip.kind !== "audio" && (
+              <EffectPicker
+                onApply={(presetId) => {
+                  const selection = applyEffectPreset(clip.id, presetId);
+                  if (selection) selectKeyframe(selection);
+                }}
+              />
+            )}
 
             {activeTab === "move" && clip.kind !== "audio" && (
               <MoveInspector
@@ -293,10 +304,12 @@ function InspectorTabs({
       ? [{ id: "speech" as const, label: "Speech", icon: Mic2, title: "Voice and lip sync" }]
       : []),
     {
+      // Named for the common case. Most of what lives here is an Effect the user
+      // picks; travelling a path by hand is the advanced half, further down.
       id: "move",
-      label: "Move",
-      icon: Move,
-      title: "Travel this clip across the canvas over time",
+      label: "Effects",
+      icon: Sparkles,
+      title: "What this clip does — appear, emphasise, or travel across the canvas",
       disabled: !canMove,
     },
     ...(canAct
@@ -747,7 +760,9 @@ function MoveInspector({
   return (
     <div className="rounded border border-border bg-panel-2 p-3">
       <div className="mb-2 flex items-center justify-between">
-        <div className="font-semibold uppercase tracking-wider text-muted-foreground">Move</div>
+        <div className="font-semibold uppercase tracking-wider text-muted-foreground">
+          Move along a path
+        </div>
         {selectedKeyframe && (
           <button
             type="button"
@@ -982,6 +997,39 @@ function MoveInspector({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Effects, offered before the point editor.
+ *
+ * Characters get verbs — you pick "Wave" from a library. Everything else used to
+ * get keyframing: add a point, set its time, choose a path and an easing. An
+ * Effect is the same idea as an Action, for any clip. Picking one writes ordinary
+ * Move data, so the Points it creates are editable below exactly like hand-built
+ * ones.
+ */
+function EffectPicker({ onApply }: { onApply: (presetId: EffectPresetId) => void }) {
+  return (
+    <PanelSection title="Effects" icon={Sparkles}>
+      <div className="grid grid-cols-2 gap-1">
+        {EFFECT_PRESETS.map((preset) => (
+          <button
+            key={preset.id}
+            type="button"
+            onClick={() => onApply(preset.id)}
+            title={preset.hint}
+            className="rounded border border-border bg-panel px-2 py-1.5 text-left hover:border-primary hover:bg-panel-2"
+          >
+            <span className="block truncate font-medium text-foreground">{preset.label}</span>
+            <span className="mt-0.5 block truncate text-ui-sm text-muted-foreground">
+              {preset.hint}
+            </span>
+          </button>
+        ))}
+      </div>
+      <p className="mt-2 text-ui-sm text-muted-foreground">Adds points you can adjust below.</p>
+    </PanelSection>
   );
 }
 

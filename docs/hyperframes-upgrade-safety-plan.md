@@ -103,7 +103,7 @@ npm run build
 Also manually preserve one representative project containing:
 
 - image, video, audio, and text clips;
-- multiple scenes and nested composition blocks;
+- multiple scenes and nested compositions;
 - a character with rigid and flexible parts;
 - at least one Action, Expression, motion path, and placed speech;
 - a known-good MP4 render for visual comparison.

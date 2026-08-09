@@ -2,12 +2,13 @@
 
 ## Summary
 
-Use native HyperFrames HTML as the AI interchange format. Do not introduce a
-broad structured AI draft schema unless a concrete limitation forces it.
+Use native HyperFrames HTML as the advanced AI interchange format. Do not
+introduce a broad structured AI draft schema unless a concrete limitation forces
+it. The Library does not expose a pasted custom-composition Blocks surface.
 
 Studio Boom should support AI-generated clips in two native shapes:
 
-- **Custom composition block:** one self-contained HyperFrames composition stored
+- **Custom composition source:** one self-contained HyperFrames composition stored
   in `project.hf.compositionHtml`, hosted by one `composition` clip in
   `project.hf.rootHtml`.
 - **Editable clip set:** top-level HyperFrames `video`, `image`, `audio`,
@@ -15,7 +16,7 @@ Studio Boom should support AI-generated clips in two native shapes:
   individual timeline clips.
 
 The first implementation now exists in a minimal form: Studio Boom can add native
-text clips, import validated custom HyperFrames composition blocks, preview them in
+text clips, import validated custom HyperFrames composition source, preview it in
 a sandbox, and expose source for selected composition clips. The remaining work is
 mostly product polish, richer source editing, and nested composition editing.
 
@@ -28,8 +29,8 @@ Implemented:
 - Non-character `composition` clips can be inserted, selected, moved, resized,
   trimmed, layered, undone/redone, previewed, and exported.
 - Characters are still composition clips with `compositionKind: "character"`.
-- Library -> Blocks accepts self-contained HyperFrames composition HTML, validates
-  it, previews it, and adds it as one `composition` clip.
+- The Library is limited to Media, Text, Characters, and Actions. Inspector source
+  editing and project import remain the advanced paths for custom compositions.
 - The Inspector exposes source for selected composition clips and primitive root
   elements.
 - Validation errors can be copied as repair prompts.
@@ -101,14 +102,15 @@ Acceptance criteria:
   previewed, and exported.
 - Existing character clips still work.
 
-## Phase 2: Source-First Custom AI Block MVP - Mostly Implemented
+## Phase 2: Source-First Custom Composition Source - Retained
 
-The paste/import path exists. Future work should improve editing ergonomics and
-make source validation feedback friendlier.
+The Inspector paste/import path exists. The former Library Blocks paste surface
+was retired on 2026-08-09; future work should improve the remaining source
+editing ergonomics and validation feedback.
 
 User flow:
 
-1. User opens AI/custom block panel.
+1. User opens the Source panel for a composition clip.
 2. User copies a Studio Boom prompt or pastes AI-generated HyperFrames HTML.
 3. Studio Boom validates the composition HTML.
 4. User previews it through the existing HyperFrames player path.
@@ -127,7 +129,7 @@ Source view is part of this phase, not later. Current behavior:
 
 Acceptance criteria:
 
-- Pasted valid composition HTML becomes one editable timeline composition clip.
+- Valid composition HTML becomes one editable timeline composition clip.
 - The source is visible after import and can be edited/reapplied.
 - Validation failures are shown clearly and can be copied back into an AI chat.
 - Applying source changes updates `compositionHtml`, not React-rendered preview
@@ -155,7 +157,7 @@ Prompt pack must include:
 - Character Action/Expression guardrails, including pose vs action vs expression
   vs speech/lip-sync vs Stage motion terminology.
 - Two allowed output modes:
-  - custom composition block
+  - custom composition source
   - editable top-level clip set
 - Current project context:
   - width, height, fps, duration
@@ -178,12 +180,12 @@ Acceptance criteria:
 - User can copy a prompt that includes current project dimensions and asset
   manifest.
 - Validation errors are actionable and copyable.
-- The prompt clearly asks for either a custom composition block or editable clip
+- The prompt clearly asks for either custom composition source or an editable clip
   set.
 
 ## Phase 4: Editable HyperFrames Clip Set Import
 
-After custom block import works, support importing native HyperFrames HTML as
+After custom composition source editing is stable, support importing native HyperFrames HTML as
 individual editable clips.
 
 - Parse top-level timed `video`, `image`, `audio`, `text`, and `composition`
@@ -191,7 +193,7 @@ individual editable clips.
 - Convert them into Studio Boom editor clips while preserving canonical
   HyperFrames HTML.
 - If the HTML is too nested/custom to decompose reliably, import it as one
-  composition block instead.
+  composition clip instead.
 - Do not introduce a broad intermediate JSON schema unless a concrete limitation
   forces it.
 
@@ -200,7 +202,7 @@ Acceptance criteria:
 - Simple AI-generated HyperFrames clip sets appear as individual timeline clips.
 - Dragging/resizing/trimming individual imported clips mutates canonical
   `rootHtml`.
-- Complex custom HTML gracefully falls back to composition-block import.
+- Complex custom HTML gracefully falls back to one composition clip.
 
 ## Phase 5: Asset And Image Flow
 
@@ -230,9 +232,9 @@ Use composition clips as the shared abstraction for rich nested content.
 
 Long-term model:
 
-- AI block = composition clip.
-- Registry block = composition clip.
-- User custom block = composition clip.
+- AI custom composition = composition clip.
+- Registry composition = composition clip.
+- User custom composition = composition clip.
 - Character = composition clip with character-specific tools.
 
 Future UI:
@@ -289,11 +291,11 @@ Defer broad catalog infrastructure until there is a concrete need.
 
 The original first slice has landed. A useful next slice is:
 
-1. Improve the Blocks tab with saved examples and a clearer prompt-copy flow.
+1. Improve the Inspector source workflow with clearer validation feedback.
 2. Add a prompt pack that includes current project dimensions, assets, supported
    clip types, and source-of-truth rules.
 3. Support importing simple generated top-level clip sets as individual editable
-   clips, while falling back to a single composition block for complex HTML.
+   clips, while falling back to a single composition clip for complex HTML.
 4. Add source-edit test coverage around Validate -> Preview -> Apply.
 5. Expand composition clips in the timeline with a read-only nested outline.
 6. Start full nested composition timeline editing only after the source workflow

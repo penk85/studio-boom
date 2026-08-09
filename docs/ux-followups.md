@@ -169,25 +169,71 @@ the imperative shape of the old calls. Destructive confirms are styled as such a
 name the action ("Delete character") instead of "OK". The character-delete copy
 that used to be `\n`-joined into an OS alert now renders as real paragraphs.
 
-## 6. The AI JSON surface is buried
+## 6. The AI JSON surface — FIXED 2026-08-03
 
-`AiAddonPromptPanel` (`src/studio/ai/generated-editor.tsx`) is well designed —
-numbered steps, prompt export, paste target, artifact summary, repair prompt —
-but is used only by `MotionPresetRecorder`, four clicks deep. `character-json/ai-context.ts`
-has the same single consumer. If AI control is half the product thesis, this needs
-to be a top-level pane with a reviewable per-item approve/tweak diff, reusing the
-existing validate → preview → trust → apply pipeline.
+There is now an **Ask AI** pane at the top level (`Ask AI` in the top bar, sharing
+the Inspector rail). Three steps: copy prompt → paste reply → approve.
 
-## 7. Library tab grid and character entry points — FIXED 2026-08-03
+- **Context OUT** — `ai/project-control-surface.ts` builds a JSON document of the
+  film (project settings, scenes, every clip with its timing and transform, plus
+  the available actions and text blocks) and the operations the model may propose.
+  The advertised operation list and the accepted one are the same constant, so
+  what we ask for is exactly what we can apply.
+- **Suggestion IN** — `ai/project-suggestions.ts` parses a pasted reply into
+  reviewable rows. It never throws; malformed JSON, an unknown `op`, a clip id
+  that does not exist, an action aimed at a non-character clip, or a transform
+  with no fields each become a row-level error explaining the problem.
+- **Review** — every operation is a row showing a plain-language summary and its
+  before → after, plus the model's own `why`. Applicable rows start approved, so
+  reviewing means removing what you disagree with. Rows with errors are shown but
+  cannot be approved.
+- **Apply** — approved operations run through the ordinary store actions, so an AI
+  edit lands in undo history exactly like a hand edit.
 
-Four tabs in a `grid-cols-2` (Media / Text / Characters / Actions), with Blocks
-demoted to an "Advanced: paste a block" toggle beneath them. The Characters tab
-now leads with one "+ Add a character" button that opens four labelled choices
-(ready-made presenter, male, female, own artwork) instead of three competing peer
-buttons. "Add to scene" also stopped using a washed-out `bg-primary/30` that read
-as disabled.
+v1 operations: `setClipTiming`, `setClipTransform`, `setTextContent`, `addAction`,
+`addTextBlock`. Covered by `ai/__tests__/project-suggestions.test.ts` (12 cases
+against a real store-built project).
 
-## 8. Onboarding
+Worth extending later: deleting clips, adding characters and media, scene-level
+operations, and a repair-prompt button reusing `buildJsonRepairPrompt` for when
+the model returns something invalid.
+
+## 7. Library tab grid and character entry points — FIXED 2026-08-03; BLOCKS REMOVED 2026-08-09
+
+The Library now has four tabs in a `grid-cols-2` (Media / Text / Characters /
+Actions). The retired pasted-composition Blocks surface and its Advanced toggle
+are gone. The Characters tab now leads with one "+ Add a character" button that
+opens four labelled choices (ready-made presenter, male, female, own artwork)
+instead of three competing peer buttons. "Add to scene" also stopped using a
+washed-out `bg-primary/30` that read as disabled.
+
+## 8. Effects — DONE 2026-08-09
+
+Characters could pick an Action from a library; every other clip had to be
+keyframed by hand. `src/studio/hyperframes/effect-presets.ts` closes that
+asymmetry: Fade in, Fade out, Slide in from left/right, Rise up, Pop, Slow zoom.
+
+They are **Effects**, not Moves. Most of them do not move the clip at all — Fade
+is opacity, Pop and Slow zoom are scale — so filing them under Move named them
+after their storage rather than their meaning. The Inspector tab is now
+`Effects`, with the hand-built path editor beneath as `Move along a path`.
+
+They are not a new concept in the data — `applyEffectPreset` expands one into
+ordinary keyframes plus a Move step and commits it through the same path a
+hand-built Move uses, so the Points it creates are editable, undoable, and
+exportable identically. Distances are expressed in clip widths/heights, so a
+preset lands correctly on any clip size, and spans are capped so an entrance on a
+40s clip is still an entrance.
+
+The AI control surface advertises them as an `addEffect` operation, which gives the
+model something far better to propose than raw coordinates and makes the review
+row read as a sentence ("Title: Fade in") instead of numbers.
+
+Covered by `hyperframes/__tests__/effect-presets.test.ts` — including a case that
+caught a real bug where the minimum-span guard pushed a fade-out past the end of
+a very short clip.
+
+## 9. Onboarding
 
 The Character Editor's Build → Rig → Pose phase model is the best onboarding idea
 in the codebase and has no equivalent at the studio level. The dashboard's

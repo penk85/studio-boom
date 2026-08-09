@@ -61,10 +61,13 @@ describe("Inspector source integration", () => {
   it("separates canvas movement from character performance", () => {
     const source = readFileSync(inspectorPath, "utf8");
 
-    // "Motion" used to name both moving a clip around the canvas and a
-    // character's body/face animation. Move and Acting are now distinct tabs.
-    expect(source).toContain('label: "Move"');
+    // "Motion" used to name both what a clip does and a character's body/face
+    // animation. Those are now distinct tabs: Effects and Acting.
+    expect(source).toContain('label: "Effects"');
     expect(source).toContain('label: "Acting"');
+    // Effects lead; travelling a path by hand is the advanced half below them.
+    expect(source).toContain("<EffectPicker");
+    expect(source).toContain("Move along a path");
     expect(source).toContain('activeTab === "move" && clip.kind !== "audio"');
     expect(source).toContain('activeTab === "acting" && characterClip');
     expect(source).toContain("<ActingInspectorTab");

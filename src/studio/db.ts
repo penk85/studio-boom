@@ -144,15 +144,38 @@ async function probeFile(file: File, kind: MediaAsset["kind"]) {
   return {};
 }
 
+/** Image types a character part can be built from. */
+export const CHARACTER_PART_ACCEPT =
+  ".svg,.png,.jpg,.jpeg,.webp,image/svg+xml,image/png,image/jpeg,image/webp";
+
+export function isSvgFile(file: File): boolean {
+  return file.type === "image/svg+xml" || file.name.toLowerCase().endsWith(".svg");
+}
+
+/**
+ * Character parts render as Pixi textures, so any image works.
+ *
+ * This used to reject everything but SVG, which locked out anyone whose artwork
+ * came from a cutout tool or an image generator — the common case for the people
+ * Studio Boom is for. The restriction protected `CharacterPart.morph` (vector
+ * path data for mouth blending), but no current import path populates `morph`;
+ * it survives only as a read path for older saved characters. Mouth presets ship
+ * SVGs as *textures*, and lip sync swaps a discrete image per viseme, so a raster
+ * mouth behaves the same as a vector one.
+ */
+export function isSupportedCharacterPartFile(file: File): boolean {
+  if (isSvgFile(file)) return true;
+  return /^image\/(png|jpeg|webp)$/.test(file.type) || /\.(png|jpe?g|webp)$/i.test(file.name);
+}
+
 export async function importMediaFile(
   file: File,
   opts: { scope?: MediaAsset["scope"] } = {},
 ): Promise<MediaAsset> {
-  if (opts.scope === "character-part") {
-    const looksSvg = file.type === "image/svg+xml" || file.name.toLowerCase().endsWith(".svg");
-    if (!looksSvg) {
-      throw new Error("Character parts must be SVG files.");
-    }
+  if (opts.scope === "character-part" && !isSupportedCharacterPartFile(file)) {
+    throw new Error(
+      `"${file.name}" is not an image Studio Boom can use. Character parts can be SVG, PNG, JPG, or WebP.`,
+    );
   }
   const kind: MediaAsset["kind"] = file.type.startsWith("image/")
     ? "image"

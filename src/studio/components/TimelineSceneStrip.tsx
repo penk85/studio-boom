@@ -1,6 +1,6 @@
 // Timeline ruler, scene boundaries, and the scene management strip.
 
-import { Copy, GripVertical, Play, Plus, Trash2, TriangleAlert } from "lucide-react";
+import { Copy, GripVertical, Pause, Play, Plus, Trash2, TriangleAlert } from "lucide-react";
 import { useEffect, useState, type RefObject } from "react";
 import type { ProjectMutationOptions } from "../store";
 import type { ProjectScene } from "../scenes";
@@ -62,6 +62,7 @@ export function SceneStrip({
   scenes,
   activeSceneId,
   onPlayScene,
+  playingSceneId,
   zoom,
   scrollRef,
   onScrollLeft,
@@ -76,8 +77,10 @@ export function SceneStrip({
 }: {
   scenes: ProjectScene[];
   activeSceneId: string | null;
-  /** Plays this scene from its start and stops at its end. */
+  /** Plays this scene from its start and stops at its end; pauses if it is running. */
   onPlayScene: (sceneId: string) => void;
+  /** The scene currently playing through its own play button, if any. */
+  playingSceneId: string | null;
   zoom: number;
   scrollRef: RefObject<HTMLDivElement | null>;
   onScrollLeft: (scrollLeft: number) => void;
@@ -250,18 +253,28 @@ export function SceneStrip({
                   <Copy size={12} />
                 </button>
                 {/* Plays this scene and stops at its end. An action, not a mode —
-                    it does not change the edit scope or leave anything toggled. */}
+                    it does not change the edit scope or leave anything toggled.
+                    While running it becomes Pause, and stays visible so you can
+                    reach it without hunting for the hover target. */}
                 <button
                   type="button"
                   onClick={(event) => {
                     event.stopPropagation();
                     onPlayScene(scene.id);
                   }}
-                  aria-label={`Play scene ${scene.index + 1}`}
-                  title="Play this scene"
-                  className="mr-1 hidden h-6 w-6 shrink-0 items-center justify-center rounded border border-border bg-panel text-muted-foreground hover:border-primary hover:text-primary group-hover:flex"
+                  aria-label={
+                    scene.id === playingSceneId
+                      ? `Pause scene ${scene.index + 1}`
+                      : `Play scene ${scene.index + 1}`
+                  }
+                  title={scene.id === playingSceneId ? "Pause" : "Play this scene"}
+                  className={`mr-1 h-6 w-6 shrink-0 items-center justify-center rounded border ${
+                    scene.id === playingSceneId
+                      ? "flex border-primary bg-primary/20 text-primary"
+                      : "hidden border-border bg-panel text-muted-foreground hover:border-primary hover:text-primary group-hover:flex"
+                  }`}
                 >
-                  <Play size={12} />
+                  {scene.id === playingSceneId ? <Pause size={12} /> : <Play size={12} />}
                 </button>
                 <div
                   role="separator"
