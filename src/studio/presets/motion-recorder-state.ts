@@ -7,6 +7,7 @@ import {
 } from "../character/character-utils";
 import type { CharacterRuntime, RuntimeCharacterSlot } from "../character/runtime";
 import type {
+  CharacterBone,
   CharacterPart,
   MotionCategory,
   MotionKeyframe,
@@ -44,6 +45,13 @@ export interface RecorderPartState {
   opacity: number;
 }
 
+export interface RecorderControlState {
+  controlId: string;
+  dx: number;
+  dy: number;
+  rotation: number;
+}
+
 export interface RecorderOverridePatch {
   slotId: string;
   patch: Partial<RecorderPartState>;
@@ -62,6 +70,7 @@ export function recorderPreviewPreset({
   duration,
   keyposes,
   allowOutOfBounds,
+  kinematics = "fk",
 }: {
   name: string;
   category: MotionCategory;
@@ -69,6 +78,7 @@ export function recorderPreviewPreset({
   duration: number;
   keyposes: RecordedKeypose[];
   allowOutOfBounds?: string[];
+  kinematics?: "fk" | "ik";
 }): MotionPreset {
   return {
     id: "__recorder_draft_motion",
@@ -79,11 +89,32 @@ export function recorderPreviewPreset({
     loop: false,
     tracks: [],
     keyposes: cloneKeyposes(keyposes).sort((a, b) => a.t - b.t),
+    kinematics,
     allowOutOfBounds: allowOutOfBounds?.length ? [...allowOutOfBounds] : undefined,
     builtin: false,
     createdAt: 0,
     updatedAt: 0,
   };
+}
+
+export function defaultControlOverride(control: CharacterBone): RecorderControlState {
+  return { controlId: control.id, dx: 0, dy: 0, rotation: 0 };
+}
+
+export function isDirtyControlOverride(override: RecorderControlState | undefined): boolean {
+  return !!override && (override.dx !== 0 || override.dy !== 0 || override.rotation !== 0);
+}
+
+export function controlOverrideMapsEqual(
+  first: Map<string, RecorderControlState>,
+  second: Map<string, RecorderControlState>,
+): boolean {
+  if (first.size !== second.size) return false;
+  for (const [id, a] of first) {
+    const b = second.get(id);
+    if (!b || a.dx !== b.dx || a.dy !== b.dy || a.rotation !== b.rotation) return false;
+  }
+  return true;
 }
 
 const MOTION_VALUE_KEYS = [

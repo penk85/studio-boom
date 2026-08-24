@@ -2,7 +2,7 @@
 
 import { Eye, EyeOff, FlipHorizontal2, FlipVertical2, Lock, RotateCcw, Unlock } from "lucide-react";
 import { limbPathBendSide } from "../character/scene";
-import type { CharacterPart, PartRole, RecordedKeypose } from "../types";
+import type { CharacterBone, CharacterPart, PartRole, RecordedKeypose } from "../types";
 import {
   flexibleActionControlState,
   flexibleBendPatch,
@@ -18,7 +18,9 @@ import {
   toggleSignedScale,
   variantOptionsForSlot,
   type CharacterSlot,
+  type RecorderControlState,
   type RecorderPartState,
+  isDirtyControlOverride,
 } from "./motion-recorder-state";
 
 const EASE_OPTIONS = [
@@ -212,6 +214,9 @@ export function KeyposeStrip({
 }
 
 export function PartList({
+  controls,
+  controlOverrides,
+  selectedControlId,
   slots,
   selectedSlotId,
   overrides,
@@ -220,7 +225,11 @@ export function PartList({
   onToggleLocked,
   onSelect,
   onToggleHidden,
+  onSelectControl,
 }: {
+  controls: CharacterBone[];
+  controlOverrides: Map<string, RecorderControlState>;
+  selectedControlId: string | null;
   slots: CharacterSlot[];
   selectedSlotId: string | null;
   overrides: Map<string, RecorderPartState>;
@@ -229,9 +238,41 @@ export function PartList({
   onToggleLocked: (id: string) => void;
   onSelect: (id: string) => void;
   onToggleHidden: (id: string) => void;
+  onSelectControl: (id: string) => void;
 }) {
   return (
     <div className="space-y-3">
+      {controls.length > 0 && (
+        <section>
+          <div className="mb-1 text-ui-sm font-semibold uppercase tracking-wider text-muted-foreground">
+            Controls
+          </div>
+          <div className="space-y-1">
+            {controls.map((control) => {
+              const override = controlOverrides.get(control.id);
+              const dirty = isDirtyControlOverride(override);
+              return (
+                <button
+                  key={control.id}
+                  type="button"
+                  onClick={() => onSelectControl(control.id)}
+                  className={`flex w-full items-center gap-1 rounded px-1.5 py-1 text-left ${
+                    selectedControlId === control.id
+                      ? "bg-primary/20 text-foreground"
+                      : "text-muted-foreground hover:bg-panel-2 hover:text-foreground"
+                  }`}
+                >
+                  <span className="w-2">{dirty ? "•" : ""}</span>
+                  <span className="min-w-0 flex-1 truncate">{control.name}</span>
+                  <span className="rounded bg-background/60 px-1 text-ui-sm">
+                    {control.controlKind === "ikTarget" ? "IK" : "FK / IK"}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      )}
       {ROLE_GROUPS.map((group) => {
         const groupSlots = slots.filter((slot) => group.roles.includes(slot.role));
         if (groupSlots.length === 0) return null;
@@ -555,6 +596,65 @@ export function PropertiesPanel({
           />
         </div>
       )}
+    </div>
+  );
+}
+
+export function ControlPropertiesPanel({
+  control,
+  override,
+  onChange,
+  onReset,
+}: {
+  control: CharacterBone | null;
+  override: RecorderControlState | null;
+  onChange: (patch: Partial<RecorderControlState>) => void;
+  onReset: () => void;
+}) {
+  if (!control || !override) {
+    return (
+      <div className="rounded border border-dashed border-border p-3 text-center text-ui-sm text-muted-foreground">
+        Select a Part or Control.
+      </div>
+    );
+  }
+  const input = (label: string, value: number, patch: keyof RecorderControlState) => (
+    <label className="grid grid-cols-[72px_1fr] items-center gap-2 text-ui-sm">
+      <span className="text-muted-foreground">{label}</span>
+      <input
+        type="number"
+        step={1}
+        value={value}
+        onChange={(event) => onChange({ [patch]: Number(event.target.value) || 0 })}
+        className="w-full rounded border border-border bg-input px-1 py-0.5"
+      />
+    </label>
+  );
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-medium text-foreground">{control.name}</div>
+          <div className="text-ui-sm text-muted-foreground">
+            {control.controlKind === "ikTarget" ? "IK end control" : "Pelvis control"}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onReset}
+          className="rounded border border-border px-2 py-1 text-ui-sm hover:bg-panel-2"
+        >
+          Reset
+        </button>
+      </div>
+      {input("X", override.dx, "dx")}
+      {input("Y", override.dy, "dy")}
+      {input("Rotation°", override.rotation, "rotation")}
+      <div className="rounded border border-border bg-panel-2 p-2 text-ui-sm text-muted-foreground">
+        {control.controlKind === "ikTarget"
+          ? "Move this Control in an IK Action to place the foot. In FK Actions, pose the leg bones directly."
+          : "Pelvis carries the torso and legs. Its transform works in both FK and IK Actions."}
+      </div>
     </div>
   );
 }

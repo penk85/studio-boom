@@ -77,6 +77,7 @@ export function characterJsonFromPreset(character: CharacterPreset): CharacterJs
       id: bone.semanticBoneId ?? bone.id,
       name: bone.name,
       role: bone.role,
+      controlKind: bone.controlKind,
       aliases: semanticAliases(bone.name, bone.role),
       aiHint:
         bone.role === "root"
@@ -181,6 +182,7 @@ export function angleRigJsonFromPreset(
     slotRelations: rig.slotRelations.map((relation) => ({ ...relation })),
     hostConstraints: rig.hostConstraints.map((constraint) => ({ ...constraint })),
     reaches: rig.reaches.map((reach) => ({ ...reach })),
+    ikConstraints: rig.ikConstraints,
     pinContracts: rig.bones.flatMap((bone) => {
       if (!bone.restSource) return [];
       return [
@@ -207,6 +209,7 @@ export function motionJsonFromPreset(preset: MotionPreset): MotionJson {
     angleIds: preset.angleIds,
     duration: preset.duration,
     loop: preset.loop,
+    kinematics: preset.kinematics,
     targetSpace: "parentRelative",
     tracks: preset.tracks.map((track, index) => motionJsonTrackFromPresetTrack(track, index)),
     constraints: preset.allowOutOfBounds?.length

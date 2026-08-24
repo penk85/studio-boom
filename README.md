@@ -5,7 +5,7 @@ HyperFrames.
 
 The goal is simple: let a human build a movie visually while keeping the movie source
 as canonical, render-ready HyperFrames project source the whole time. You can upload
-media, build rigged characters, add text and custom HyperFrames blocks, generate or
+media, build rigged characters, add text and custom HyperFrames compositions, generate or
 import character speech, edit clips on a timeline, preview the real project, and
 render an MP4.
 
@@ -348,7 +348,7 @@ npm ci            # reproducible install from package-lock.json
 - Tailwind CSS - styling
 - ElevenLabs - optional speech generation and forced alignment
 
-The currently installed HyperFrames family is pinned to exact version 0.7.73
+The currently installed HyperFrames family is pinned to exact version 0.7.103
 across core, engine, player, producer, studio, and CLI. Keep those packages on a
 single version and follow the compatibility and security notes in
 [docs/hyperframes-upgrade-safety-plan.md](docs/hyperframes-upgrade-safety-plan.md)
@@ -356,8 +356,8 @@ before any future family change. HyperFrames 0.7 validation is asynchronous and
 requires one unique `data-composition-id` on each composition's stage root.
 
 The current production audit still reports transitive advisories in the local
-HyperFrames/CLI graph. Do not run a blanket `npm audit fix`; the tracked findings,
-exposure assessment, and approval-gated candidate version set are in
+HyperFrames/CLI graph. Do not run a blanket `npm audit fix`; the tracked findings
+and exposure assessment are in
 [docs/code-audit-2026-07-07.md](docs/code-audit-2026-07-07.md). A normal `npm ci`
 is required for a complete install; `--ignore-scripts` is only a diagnostic
 fallback because optional ONNX native-provider setup may run during postinstall.

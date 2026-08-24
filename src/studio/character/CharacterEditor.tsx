@@ -120,7 +120,7 @@ import {
   type EditorBoundsMode,
   type EditorMode,
 } from "./CharacterInspectorPanels";
-import { CanvasSection, SkeletonCard } from "./CharacterRigSetupControls";
+import { CanvasSection, RigSetupGuide, SkeletonCard } from "./CharacterRigSetupControls";
 import { RigHealthPanel } from "./CharacterVariantControls";
 import { CharacterPartMoveable, PartLayer } from "./CharacterEditorCanvasChrome";
 import { CharacterAnglePoseToolbar, CharacterEditorHeader } from "./CharacterEditorToolbar";
@@ -245,6 +245,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
   const [selectedSlotId, setSelectedSlotId] = useState<ID | null>(null);
   const [selectedBoneId, setSelectedBoneId] = useState<ID | null>(null);
   const [showBones, setShowBones] = useState(false);
+  const [showBoneDetail, setShowBoneDetail] = useState(false);
   const [boneDragMode, setBoneDragMode] = useState<BoneDragMode>("calibrate");
   const [scale, setScale] = useState(0.7);
   const [mode, setMode] = useState<EditorMode>("select");
@@ -346,6 +347,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
     setEditorPhase(phase);
     // Sensible overlay defaults per phase; the floating view toggles can override.
     setShowBones(phase === "rig");
+    setShowBoneDetail(false);
     // Pins remain one click away, but do not cover the artwork while joints are aligned.
     setShowAnchors(false);
     if (phase !== "rig") setSelectedBoneId(null);
@@ -2504,6 +2506,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                   variantPreview={variantPreview}
                   selectedBoneId={selectedBoneId}
                   scale={scale}
+                  showDetail={showBoneDetail}
                   onSelectBone={selectBone}
                   onStartBoneDrag={startBoneDrag}
                 />
@@ -2674,6 +2677,22 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                       Move art
                     </button>
                   </div>
+                )}
+                {showBones && (
+                  <button
+                    type="button"
+                    aria-pressed={showBoneDetail}
+                    onClick={() => setShowBoneDetail((visible) => !visible)}
+                    className={`flex items-center gap-1 rounded border bg-panel/90 px-2 py-1 text-ui-sm ${
+                      showBoneDetail
+                        ? "border-primary text-primary"
+                        : "border-border text-muted-foreground"
+                    }`}
+                    title="Show facial feature joints on the canvas"
+                  >
+                    {showBoneDetail ? <Eye size={11} /> : <EyeOff size={11} />}
+                    Detail
+                  </button>
                 )}
                 <button
                   type="button"
@@ -2887,6 +2906,7 @@ export function CharacterEditor({ characterId, onClose }: Props) {
               )}
               {editorPhase === "rig" && (
                 <>
+                  <RigSetupGuide />
                   <SkeletonCard
                     doc={doc}
                     selectedBoneId={selectedBoneId}
@@ -2895,9 +2915,12 @@ export function CharacterEditor({ characterId, onClose }: Props) {
                     }
                     selectedPart={selectedPart}
                     showBones={showBones}
+                    showBoneDetail={showBoneDetail}
                     activeVariants={variantPreview}
                     onSceneCommand={(command) => commitSceneCommand(command)}
                     onRigChange={(rig) => updateDoc({ rig })}
+                    onSelectBone={selectBone}
+                    onToggleBoneDetail={() => setShowBoneDetail((visible) => !visible)}
                     onResetRig={() => {
                       updateDoc({ rig: buildDefaultRig(doc) });
                       setStatusUndoable("Skeleton reset to default");

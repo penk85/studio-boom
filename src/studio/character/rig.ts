@@ -3,6 +3,7 @@ import type {
   CharacterAngleRig,
   CharacterBone,
   CharacterHostConstraint,
+  CharacterIkConstraint,
   CharacterPart,
   CharacterPreset,
   CharacterReach,
@@ -168,6 +169,7 @@ export function normalizeCharacterRig(character: CharacterPreset): CharacterRig 
     slotRelations: active?.slotRelations ?? inferred.slotRelations,
     hostConstraints: active?.hostConstraints ?? inferred.hostConstraints,
     reaches: active?.reaches ?? inferred.reaches,
+    ikConstraints: active?.ikConstraints ?? inferred.ikConstraints,
     sockets: active?.sockets ?? inferred.sockets,
     mesh: source.mesh?.version === 1 ? source.mesh : undefined,
   };
@@ -197,6 +199,7 @@ export function buildDefaultRig(
     slotRelations: active?.slotRelations ?? [],
     hostConstraints: active?.hostConstraints ?? [],
     reaches: active?.reaches ?? [],
+    ikConstraints: active?.ikConstraints,
     sockets: active?.sockets,
   };
 }
@@ -248,6 +251,7 @@ export function rebuildRigPreservingConstraints(character: CharacterPreset): Cha
       ...fresh,
       reaches: reaches.length > 0 ? reaches : fresh.reaches,
       hostConstraints,
+      ikConstraints: fresh.ikConstraints,
     };
   };
 
@@ -266,6 +270,7 @@ export function rebuildRigPreservingConstraints(character: CharacterPreset): Cha
     angles,
     reaches: active?.reaches ?? rebuilt.reaches,
     hostConstraints: active?.hostConstraints ?? rebuilt.hostConstraints,
+    ikConstraints: active?.ikConstraints ?? rebuilt.ikConstraints,
     sockets: active?.sockets ?? rebuilt.sockets,
   };
 }
@@ -414,6 +419,9 @@ function buildDefaultAngleRig(
     });
   }
 
+  const controlBones = addDefaultControlBones({ root, bones: boneBySlot, slots });
+  const allBones = [root, ...Array.from(boneBySlot.values()), ...controlBones.bones];
+
   const bindings: CharacterSlotBinding[] = [];
   for (const slot of slots) {
     const part = reps.get(slot.id);
@@ -441,12 +449,21 @@ function buildDefaultAngleRig(
     )
     .map((slot) => slot.id);
   const inferredSlotRelations = inferSlotRelations(slots, slotIdByRoleSide, sideBySlotId);
-  const boneIds = new Set([
-    ROOT_BONE_ID,
-    ...Array.from(boneBySlot.values()).map((bone) => bone.id),
-  ]);
+  const slotRelationsWithControls = inferredSlotRelations.map((relation) => {
+    const child = slotById.get(relation.childSlotId);
+    if (
+      controlBones.pelvis &&
+      child &&
+      (child.role === "leg" || child.role === "upperLeg") &&
+      relation.parentRef.type === "slot"
+    ) {
+      return { ...relation, parentRef: { type: "bone" as const, id: controlBones.pelvis.id } };
+    }
+    return relation;
+  });
+  const boneIds = new Set(allBones.map((bone) => bone.id));
   const slotRelations = normalizeSlotRelations(
-    mergeSlotRelations(inferredSlotRelations, authoredRelations),
+    mergeSlotRelations(slotRelationsWithControls, authoredRelations),
     slotIdSet,
     boneIds,
   );
@@ -483,14 +500,153 @@ function buildDefaultAngleRig(
 
   return {
     angleId: angle,
-    bones: [root, ...Array.from(boneBySlot.values())],
+    bones: allBones,
     slotBindings: bindings,
     drawOrder,
     slotRelations,
     hostConstraints,
     reaches: [],
+    ikConstraints: controlBones.ikConstraints,
     sockets: legacySocketData ? sockets : undefined,
   };
+}
+
+function addDefaultControlBones(args: {
+  root: CharacterBone;
+  bones: Map<string, CharacterBone>;
+  slots: SlotLike[];
+}): { bones: CharacterBone[]; pelvis: CharacterBone; ikConstraints: CharacterIkConstraint[] } {
+  const temporaryRig: CharacterRig = {
+    version: 2,
+    activeAngle: "front",
+    bones: [args.root, ...Array.from(args.bones.values())],
+    slotBindings: [],
+    drawOrder: [],
+    slotRelations: [],
+    hostConstraints: [],
+    reaches: [],
+  };
+  const previousWorld = computeBoneWorldTransforms(temporaryRig);
+  const bodyBone = args.slots
+    .filter((slot) => slot.role === "body")
+    .map((slot) => args.bones.get(slot.id))
+    .find((bone): bone is CharacterBone => !!bone);
+  const hipBones = args.slots
+    .filter((slot) => slot.role === "leg" || slot.role === "upperLeg")
+    .map((slot) => args.bones.get(slot.id))
+    .filter((bone): bone is CharacterBone => !!bone)
+    .map((bone) => previousWorld.get(bone.id))
+    .filter((bone): bone is NonNullable<typeof bone> => !!bone);
+  const hipPoint = hipBones.length
+    ? {
+        x: hipBones.reduce((sum, bone) => sum + bone.x, 0) / hipBones.length,
+        y: hipBones.reduce((sum, bone) => sum + bone.y, 0) / hipBones.length,
+      }
+    : bodyBone
+      ? (previousWorld.get(bodyBone.id) ?? { x: bodyBone.x, y: bodyBone.y })
+      : { x: 0, y: 0 };
+  const pelvis: CharacterBone = {
+    id: "bone:pelvis",
+    semanticBoneId: "bone:pelvis",
+    name: "Pelvis",
+    role: "custom",
+    controlKind: "pelvis",
+    parentId: args.root.id,
+    x: Math.round(hipPoint.x),
+    y: Math.round(hipPoint.y),
+    rotation: 0,
+    length: Math.max(24, Math.round(Math.hypot(...hipSpan(hipBones)))),
+    depth: 0,
+  };
+  const carriedByPelvis = new Set<string>([
+    ...(bodyBone ? [bodyBone.id] : []),
+    ...args.slots
+      .filter((slot) => slot.role === "leg" || slot.role === "upperLeg")
+      .map((slot) => args.bones.get(slot.id)?.id)
+      .filter((id): id is string => !!id),
+  ]);
+  for (const [slotId, bone] of args.bones) {
+    if (!carriedByPelvis.has(bone.id)) continue;
+    const world = previousWorld.get(bone.id);
+    if (!world) continue;
+    args.bones.set(slotId, {
+      ...bone,
+      parentId: pelvis.id,
+      restSource: undefined,
+      parentVariantAnchors: undefined,
+      x: Math.round(world.x - pelvis.x),
+      y: Math.round(world.y - pelvis.y),
+      rotation: Math.round((world.rotation - pelvis.rotation) * 10) / 10,
+    });
+  }
+
+  const constraints: CharacterIkConstraint[] = [];
+  const targetBones: CharacterBone[] = [];
+  const sides: Array<CharacterPart["side"]> = ["left", "right"];
+  for (const side of sides) {
+    const upper = findBoneForRole(args.slots, args.bones, ["upperLeg", "leg"], side);
+    const lower = findBoneForRole(args.slots, args.bones, ["lowerLeg"], side);
+    const end = findBoneForRole(args.slots, args.bones, ["foot"], side);
+    if (!upper || !lower || !end) continue;
+    const world = computeBoneWorldTransforms({
+      ...temporaryRig,
+      bones: [args.root, pelvis, ...Array.from(args.bones.values())],
+    });
+    const endWorld = world.get(end.id);
+    if (!endWorld) continue;
+    const targetBone: CharacterBone = {
+      id: `bone:ik-target:${side}-foot`,
+      semanticBoneId: `bone:ik-target:${side}-foot`,
+      name: `${side === "left" ? "Left" : "Right"} Foot target`,
+      role: "custom",
+      controlKind: "ikTarget",
+      parentId: args.root.id,
+      x: Math.round(endWorld.x),
+      y: Math.round(endWorld.y),
+      rotation: 0,
+      depth: 0,
+    };
+    targetBones.push(targetBone);
+    const upperWorld = world.get(upper.id);
+    const lowerWorld = world.get(lower.id);
+    const cross =
+      upperWorld && lowerWorld
+        ? (lowerWorld.x - upperWorld.x) * (endWorld.y - lowerWorld.y) -
+          (lowerWorld.y - upperWorld.y) * (endWorld.x - lowerWorld.x)
+        : 1;
+    constraints.push({
+      id: `ik:${side}-leg`,
+      kind: "twoBone",
+      targetBoneId: targetBone.id,
+      parentBoneId: upper.id,
+      childBoneId: lower.id,
+      endBoneId: end.id,
+      bendDirection: cross < 0 ? -1 : 1,
+    });
+  }
+  return { bones: [pelvis, ...targetBones], pelvis, ikConstraints: constraints };
+}
+
+function hipSpan(hipBones: Array<{ x: number; y: number }>): [number, number] {
+  if (hipBones.length < 2) return [32, 0];
+  return [
+    hipBones[hipBones.length - 1].x - hipBones[0].x,
+    hipBones[hipBones.length - 1].y - hipBones[0].y,
+  ];
+}
+
+function findBoneForRole(
+  slots: SlotLike[],
+  bones: Map<string, CharacterBone>,
+  roles: PartRole[],
+  side: CharacterPart["side"],
+): CharacterBone | undefined {
+  const slot = slots.find((candidate) => {
+    if (!roles.includes(candidate.role)) return false;
+    const part = representativePart(candidate);
+    return !!part && inferSideForSlot(candidate, part) === side;
+  });
+  return slot ? bones.get(slot.id) : undefined;
 }
 
 const warnedAnchorFallbacks = new Set<string>();
@@ -654,7 +810,7 @@ function normalizeAngleRig(
       });
       continue;
     }
-    const socketDriven = !!inferredBone.parentId && inferredBone.parentId !== ROOT_BONE_ID;
+    const socketDriven = !!inferredBone.restSource && inferredBone.parentId !== ROOT_BONE_ID;
     bonesById.set(bone.id, {
       ...inferredBone,
       name: bone.name || inferredBone.name,
@@ -719,6 +875,10 @@ function normalizeAngleRig(
       boneIds,
     ),
     reaches: normalizeReaches(source.reaches ?? inferred.reaches, bindingSlots),
+    ikConstraints: normalizeIkConstraints(
+      source.ikConstraints ?? inferred.ikConstraints ?? [],
+      boneIds,
+    ),
     sockets:
       (source as { sockets?: CharacterSlotSocket[] }).sockets !== undefined
         ? normalizeSockets(source.sockets ?? [], bindingSlots)
@@ -791,6 +951,7 @@ function rigViewToAngleRig(rig: CharacterRig, angle: CharacterAngle): CharacterA
     slotRelations: rig.slotRelations ?? [],
     hostConstraints: rig.hostConstraints ?? [],
     reaches: rig.reaches ?? [],
+    ikConstraints: rig.ikConstraints ?? [],
     sockets: rig.sockets ?? [],
   };
 }
@@ -834,6 +995,7 @@ function legacyRigViewToAngleRig(
     slotRelations: rig.slotRelations ?? [],
     hostConstraints: rig.hostConstraints ?? [],
     reaches: rig.reaches ?? [],
+    ikConstraints: rig.ikConstraints ?? [],
     sockets: rig.sockets ?? [],
   };
 }
@@ -861,6 +1023,7 @@ function withUpdatedAngleRig(
           slotRelations: active.slotRelations,
           hostConstraints: active.hostConstraints,
           reaches: active.reaches,
+          ikConstraints: active.ikConstraints,
           sockets: active.sockets,
         }
       : {}),
@@ -917,6 +1080,7 @@ export function validateCharacterRig(rig: CharacterRig): { ok: boolean; errors: 
       );
     }
   }
+  validateIkConstraints(rig.ikConstraints ?? [], boneIds, "Rig", errors);
   for (const bone of rig.bones) {
     const seen = new Set<string>();
     let current: CharacterBone | undefined = bone;
@@ -987,6 +1151,7 @@ function validateAngleRigGraph(angleRig: CharacterAngleRig, label: string, error
       );
     }
   }
+  validateIkConstraints(angleRig.ikConstraints ?? [], boneIds, label, errors);
   for (const bone of angleRig.bones) {
     const seen = new Set<string>();
     let current: CharacterBone | undefined = bone;
@@ -997,6 +1162,31 @@ function validateAngleRigGraph(angleRig: CharacterAngleRig, label: string, error
       }
       seen.add(current.id);
       current = angleRig.bones.find((candidate) => candidate.id === current?.parentId);
+    }
+  }
+}
+
+function validateIkConstraints(
+  constraints: CharacterIkConstraint[],
+  boneIds: Set<string>,
+  label: string,
+  errors: string[],
+): void {
+  for (const constraint of constraints) {
+    for (const boneId of [
+      constraint.targetBoneId,
+      constraint.parentBoneId,
+      constraint.childBoneId,
+      constraint.endBoneId,
+    ]) {
+      if (boneId && !boneIds.has(boneId)) {
+        errors.push(
+          `${label}: IK constraint "${constraint.id}" references missing bone "${boneId}".`,
+        );
+      }
+    }
+    if (constraint.parentBoneId === constraint.childBoneId) {
+      errors.push(`${label}: IK constraint "${constraint.id}" cannot use one bone twice.`);
     }
   }
 }
@@ -1764,6 +1954,20 @@ function normalizeReaches(reaches: CharacterReach[], slotIds: Set<string>): Char
     out.set(entry.slotId, { ...entry, id: entry.id || `reach:${entry.slotId}` });
   }
   return Array.from(out.values());
+}
+
+function normalizeIkConstraints(
+  constraints: CharacterIkConstraint[],
+  boneIds: Set<string>,
+): CharacterIkConstraint[] {
+  return constraints.filter(
+    (constraint) =>
+      constraint?.kind === "twoBone" &&
+      boneIds.has(constraint.targetBoneId) &&
+      boneIds.has(constraint.parentBoneId) &&
+      boneIds.has(constraint.childBoneId) &&
+      (!constraint.endBoneId || boneIds.has(constraint.endBoneId)),
+  );
 }
 
 function mergeSlotRelations(

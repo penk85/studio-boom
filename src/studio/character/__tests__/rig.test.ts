@@ -330,7 +330,7 @@ describe("CharacterRig V2", () => {
     const foot = rig.bones.find((bone) => bone.id === "bone:slot:left-foot");
     const world = computeBoneWorldTransforms(rig);
 
-    expect(leg?.parentId).toBe("bone:role:body");
+    expect(leg?.parentId).toBe("bone:pelvis");
     expect(foot?.parentId).toBe("bone:slot:left-leg");
     expect(world.get("bone:slot:left-foot")?.rotation).toBeCloseTo(90);
     expect(world.get("bone:slot:left-foot")?.x).not.toBe(foot?.x);
@@ -433,6 +433,11 @@ describe("CharacterRig V2", () => {
     expect(rig.bones.find((bone) => bone.id === "bone:slot:right-foot")?.parentId).toBe(
       "bone:slot:right-lowerLeg",
     );
+    expect(rig.bones.find((bone) => bone.controlKind === "pelvis")?.name).toBe("Pelvis");
+    expect(rig.ikConstraints).toHaveLength(1);
+    expect(
+      rig.bones.find((bone) => bone.id === rig.ikConstraints?.[0]?.targetBoneId)?.controlKind,
+    ).toBe("ikTarget");
     expect(
       upgraded.parts.find((part) => part.id === "lower-arm")?.pins?.["wrist:right"],
     ).toMatchObject({ x: 20, y: 110 });

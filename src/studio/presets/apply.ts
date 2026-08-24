@@ -53,6 +53,8 @@ export interface ComposedMotions {
   faceTurnY: number;
   /** Layers (slotIds / roles) an active movement allows past the character's reach (no clamp). */
   unclampedLayers: Set<string>;
+  /** Active Action's body-solving mode. FK is intentionally the default. */
+  kinematics: "fk" | "ik";
 }
 
 const EASE: Record<string, (x: number) => number> = {
@@ -294,6 +296,7 @@ export function composeMotionsAt(
     faceTurnX: 0,
     faceTurnY: 0,
     unclampedLayers: new Set(),
+    kinematics: "fk",
   };
   const motions: AppliedMotion[] = clip.motions ?? [];
   const activeExclusiveMotionIds = activeExclusiveMotionsAt(
@@ -318,6 +321,7 @@ export function composeMotionsAt(
     const occurrences = generateMotionOccurrences(a, preset, clip.duration);
     const occurrence = occurrences.find((o) => tInClip >= o.start && tInClip <= o.end);
     if (!occurrence) continue;
+    if (preset.kinematics) out.kinematics = preset.kinematics;
     for (const layer of preset.allowOutOfBounds ?? []) out.unclampedLayers.add(layer);
     const local = tInClip - occurrence.start;
     const u = dur > 0 ? Math.max(0, Math.min(1, local / dur)) : 0;

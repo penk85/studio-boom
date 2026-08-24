@@ -97,7 +97,7 @@ export function buildMotionRequestAiOut(args: {
       "Each track is { target, keyframes } with optional track-level `ease` and `perspective`. Keyframes hold a normalized time `t` (0..1) plus only the values that animate.",
       'target is a bare string: "bone:<id>" for a bone, "slot:<id>" or "role:<id>" for a slot, or "camera". Use the exact ids from semantic_bones / semantic_slots below. Do not wrap it in an object.',
       "Do not author originX/originY — the rig owns each joint's pivot. Do not author `channel` — a keyframe with `variant` is a pose swap, one with `visible` is an on/off, otherwise it is a transform.",
-      "Optional top-level hints (prefill the editor, never required): `name`, `category` (one of expression, gesture, full-body, camera, headTurn, custom), and `feel` (a default ease word like smooth, snappy, bouncy, weighty).",
+      "Optional top-level hints (prefill the editor, never required): `name`, `category` (one of expression, gesture, full-body, camera, headTurn, custom), `kinematics` (`fk` or `ik`), and `feel` (a default ease word like smooth, snappy, bouncy, weighty).",
       "Set `duration` (seconds) — it is part of the movement design and changes how the action reads.",
       "IMPORTANT: every track that should animate in from rest must include an explicit t:0 keyframe at the neutral value. A track whose first keyframe is later than 0 starts already displaced at that value.",
       "Author the movement yourself from the native controls in `controls` — there are no named effects. Express flips, spins, swings, twirls, etc. directly as transform keyframes.",
@@ -105,7 +105,7 @@ export function buildMotionRequestAiOut(args: {
       "Shape feel with ease from controls.easings: a per-keyframe `ease` overrides the track `ease`, which overrides the top-level `feel`. For oscillations (swing/pendulum) author multiple keyframes.",
       'Use "bone:" targets for inherited body movement; "slot:"/"role:" targets for variant swaps, visibility, or local offsets.',
       "Use activeAngle.bones[].pivot/restAngle/segmentLength for believable rotations around real joints; local rotation values may be less informative than the derived restAngle.",
-      "Use activeAngle.ground.y and foot-slot contact hints to keep planted feet near the contact line. footLockAvailable=false means the runtime will not solve IK for you.",
+      "Use activeAngle.ground.y and foot-slot contact hints to keep planted feet near the contact line. In an IK Action, move the matching Foot target Control; in an FK Action, rotate the leg bones directly.",
       "Use activeAngle.facing.screenVector to choose the sign of forward/back movement for this view.",
       "Use activeAngle.depthOrdering only as overlap/near-far context. Do not output depth or z-index keyframes; they are not supported controls yet.",
       "Use cadenceHints for walk timing and stride amplitude relative to character height.",
@@ -210,7 +210,9 @@ export function buildMotionRequestPrompt(args: {
       (bone) =>
         `- id=${bone.id}; semantic=${bone.semanticBoneId ?? "none"}; name=${bone.name}; role=${
           bone.role
-        }; side=${bone.side ?? "none"}; parent=${bone.parentId ?? "none"}; pivot=${pointText(
+        }; control=${bone.controlKind ?? "none"}; side=${bone.side ?? "none"}; parent=${
+          bone.parentId ?? "none"
+        }; pivot=${pointText(
           bone.pivot,
         )}; rest_angle=${bone.restAngle}; segment_length=${bone.segmentLength}; segment_child=${
           bone.segmentChildId ?? "none"
@@ -298,8 +300,15 @@ function motionPromptAngle(angle: AngleRigJson): MotionPromptAngleJson {
           ? {
               canPlant: true,
               groundY: ground.y,
-              footLockAvailable: false,
-              hint: "This slot can visually act as a planted foot. Keep it near groundY during stance; Studio Boom does not enforce IK/foot-lock yet.",
+              footLockAvailable:
+                angle.ikConstraints?.some(
+                  (constraint) => constraint.endBoneId === binding?.boneId,
+                ) ?? false,
+              hint: angle.ikConstraints?.some(
+                (constraint) => constraint.endBoneId === binding?.boneId,
+              )
+                ? "Use the matching Foot target Control in an IK Action to plant this foot."
+                : "Keep this foot near groundY during stance; no matching IK chain is available.",
             }
           : undefined,
       variants: slot.variants.map((variant) => ({
@@ -334,6 +343,14 @@ function motionPromptAngle(angle: AngleRigJson): MotionPromptAngleJson {
       hint: "Use this for crossing/overlap decisions. Depth/z keyframes are not supported unless a future controls.transformFields entry explicitly adds them.",
     },
     boneLocks: boneLocksForAngle(angle, slotIdByBoneId),
+    ikConstraints: angle.ikConstraints?.map((constraint) => ({
+      id: constraint.id,
+      targetBoneId: constraint.targetBoneId,
+      parentBoneId: constraint.parentBoneId,
+      childBoneId: constraint.childBoneId,
+      endBoneId: constraint.endBoneId,
+      bendDirection: constraint.bendDirection,
+    })),
     bones: angle.bones.map((bone) => {
       const world = worldBones.get(bone.id) ?? {
         x: bone.x,
@@ -348,6 +365,7 @@ function motionPromptAngle(angle: AngleRigJson): MotionPromptAngleJson {
         semanticBoneId: bone.semanticBoneId,
         name: bone.name,
         role: bone.role,
+        controlKind: bone.controlKind,
         side: inferCharacterSideFromText(`${bone.id} ${bone.name}`),
         parentId: bone.parentId,
         x: bone.x,
@@ -407,8 +425,17 @@ function boneLocksForAngle(
         childBoneId: bone.id,
         ...(childSlotId ? { childSlotId } : {}),
         policy: "fkInheritsParent" as const,
-        ikAvailable: false,
-        hint: "Parent controls placement; child transform is local articulation only. Avoid child dx/dy when the parent or another ancestor is animated.",
+        ikAvailable:
+          angle.ikConstraints?.some(
+            (constraint) =>
+              constraint.parentBoneId === bone.parentId && constraint.childBoneId === bone.id,
+          ) ?? false,
+        hint: angle.ikConstraints?.some(
+          (constraint) =>
+            constraint.parentBoneId === bone.parentId && constraint.childBoneId === bone.id,
+        )
+          ? "FK keeps this joint local; IK Actions solve this chain from its Foot target Control."
+          : "Parent controls placement; child transform is local articulation only. Avoid child dx/dy when the parent or another ancestor is animated.",
       };
     });
   return locks.length ? locks : undefined;
@@ -592,12 +619,19 @@ function groundMetrics(
     })
     .filter((item): item is NonNullable<typeof item> => !!item);
   if (boundedFeet.length) {
+    const footLockAvailable = boundedFeet.some((item) =>
+      angle.ikConstraints?.some(
+        (constraint) => constraint.endBoneId === bindingsBySlot.get(item.slotId)?.boneId,
+      ),
+    );
     return {
       y: round(Math.max(...boundedFeet.map((item) => item.bottom))),
       source: "slotBounds",
       plantedSlotIds: boundedFeet.map((item) => item.slotId),
-      footLockAvailable: false,
-      hint: "Use as the visual contact line for planted feet. The runtime does not enforce planted-foot IK yet.",
+      footLockAvailable,
+      hint: footLockAvailable
+        ? "Use the matching Foot target Control in an IK Action to hold a planted foot here."
+        : "Use as the visual contact line for planted feet; no matching IK chain is available.",
     };
   }
   const footPivots = footSlots
@@ -608,12 +642,19 @@ function groundMetrics(
     })
     .filter((item): item is NonNullable<typeof item> => !!item);
   if (footPivots.length) {
+    const footLockAvailable = footPivots.some((item) =>
+      angle.ikConstraints?.some(
+        (constraint) => constraint.endBoneId === bindingsBySlot.get(item.slotId)?.boneId,
+      ),
+    );
     return {
       y: round(Math.max(...footPivots.map((item) => item.y))),
       source: "bonePivots",
       plantedSlotIds: footPivots.map((item) => item.slotId),
-      footLockAvailable: false,
-      hint: "Inferred from foot pivots because slot bounds were unavailable. Keep stance feet near this line; no IK lock is enforced yet.",
+      footLockAvailable,
+      hint: footLockAvailable
+        ? "Use the matching Foot target Control in an IK Action to hold a planted foot here."
+        : "Keep stance feet near this line; no matching IK chain is available.",
     };
   }
   return {

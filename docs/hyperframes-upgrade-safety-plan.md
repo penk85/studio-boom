@@ -1,13 +1,13 @@
 # HyperFrames Compatibility Upgrade Safety Plan
 
 This is the handoff and closeout record for upgrading Studio Boom's HyperFrames
-family. The compatibility migration is complete; keep the historical baseline
-and approval gates below for future family changes.
+family. The 0.7.103 compatibility migration is in progress; keep the historical
+baseline and approval gates below for future family changes.
 
 ## Current Baseline
 
-As of 2026-07-27, `npm ls --depth=0` resolves all six packages to exact
-**0.7.73**:
+As of 2026-08-09, `npm ls --depth=0` resolves all six packages to exact
+**0.7.103**:
 
 - `@hyperframes/core`
 - `@hyperframes/engine`
@@ -22,13 +22,14 @@ compatibility diff.
 The six HyperFrames package declarations and lockfile are pinned to this one
 version. Treat the lockfile as the running baseline and choose any future 0.x
 release deliberately; do not let an unrelated install silently select a new
-family version.
+family version. The previous 0.7.73 baseline is retained below as historical
+evidence.
 
 The original 0.5.3 state is retained below as historical evidence. The current
 security follow-up is intentionally separate from the completed compatibility
 upgrade: no blanket audit fix or unrelated dependency upgrade is authorized.
 
-## Upgrade Closeout (2026-07-27)
+## Previous Upgrade Closeout (2026-07-27)
 
 - The six-package family was upgraded together from 0.5.3 to exact 0.7.73.
 - The 0.7 parser identity (`data-hf-id`), asynchronous linter, native timing
@@ -46,6 +47,21 @@ upgrade: no blanket audit fix or unrelated dependency upgrade is authorized.
 - The post-upgrade production audit reports 11 advisories: 7 high, 3 moderate,
   1 low, and 0 critical. The remaining dependency work is tracked in
   `docs/code-audit-2026-07-07.md` and must be approved as a separate version set.
+
+## Current Upgrade Checkpoint (2026-08-09)
+
+- The six-package family was upgraded together from 0.7.73 to exact 0.7.103;
+  Vite remains 7.3.6.
+- Published 0.7.103 metadata raises the relevant HyperFrames transitive floors,
+  including `@hono/node-server`, `adm-zip`, and `sharp`.
+- The full automated gate passes: 90 test files / 807 tests, clean typecheck,
+  lint, production build, and diff checks.
+- `npm audit --omit=dev` is reduced to 6 vulnerabilities (4 high, 1 moderate,
+  1 low). `npm audit` including development dependencies reports 10.
+- The manual preview/export matrix is still required before treating this as a
+  completed compatibility release. The clean install used
+  `PUPPETEER_SKIP_DOWNLOAD=1` because the environment's Chrome archive download
+  was corrupt; this does not replace browser-based human confirmation.
 
 ## Non-Negotiable Contracts
 
@@ -207,12 +223,12 @@ After compatibility is proven:
 - keep unresolved advisories documented with actual exposure rather than
   forcing incompatible transitive overrides.
 
-This closeout has completed those documentation updates. The audit result is
-not a claim of zero vulnerabilities: the current 0.7.73 CLI still pins or
-allows vulnerable transitive paths, including `@hono/node-server`, `adm-zip`,
-`onnxruntime-node`, and `sharp`. Fix-available transitive packages such as
-`hono`, `postcss`, `protobufjs`, and `esbuild` require a reviewed proposal and
-compatibility run before changing the lockfile.
+This closeout has completed the documentation updates for the 0.7.103
+checkpoint. The audit result is not a claim of zero vulnerabilities: remaining
+production paths include `hono`, `postcss`, `protobufjs`, `nanoid`, and
+`dompurify`; development-only paths also include `esbuild`. These remain
+transitive and require a reviewed override or upstream fix rather than a
+blanket audit command.
 
 If compatibility fails, revert the isolated upgrade commit and keep 0.5.3.
 Do not stack product fixes on top of an unproven package migration.

@@ -87,7 +87,9 @@ export function CharacterLayerList({
   const hostedSlotsByHostSlotId = new Map<ID, LayerGroup[]>();
   for (const group of groupList) {
     const relation = rig.slotRelations.find((entry) => entry.childSlotId === group.slotId);
-    const hostSlotId = relation ? parentSlotIdForEditorRelation(relation, groupList) : undefined;
+    const hostSlotId = relation
+      ? parentSlotIdForEditorRelation(relation, groupList, rig)
+      : undefined;
     if (!hostSlotId || hostSlotId === group.slotId || !groupBySlotId.has(hostSlotId)) continue;
     hostedSlotIds.add(group.slotId);
     hostedSlotsByHostSlotId.set(hostSlotId, [
@@ -373,6 +375,7 @@ function LayerPartRow({
 function parentSlotIdForEditorRelation(
   relation: CharacterSlotRelation,
   groups: Array<CharacterLayerVariantTarget & { slotParts: CharacterPart[] }>,
+  rig: CharacterRig,
 ): ID | undefined {
   const parentRef = relation.parentRef;
   if (parentRef.type === "slot" || parentRef.type === "semanticSlot") {
@@ -386,6 +389,14 @@ function parentSlotIdForEditorRelation(
           group.side === parentRef.side ||
           group.slotParts.some((part) => part.side === parentRef.side)),
     )?.slotId;
+  }
+  if (parentRef.type === "bone") {
+    const binding = rig.slotBindings.find((candidate) => candidate.boneId === parentRef.id);
+    if (binding) return binding.slotId;
+    const parentBone = rig.bones.find((bone) => bone.id === parentRef.id);
+    if (parentBone?.controlKind === "pelvis") {
+      return groups.find((group) => group.role === "body")?.slotId;
+    }
   }
   return undefined;
 }

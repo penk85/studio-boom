@@ -235,6 +235,7 @@ function remapCharacterRigSlotIds(
       slotRelations: CharacterRig["slotRelations"];
       hostConstraints: CharacterRig["hostConstraints"];
       reaches: CharacterRig["reaches"];
+      ikConstraints?: CharacterRig["ikConstraints"];
       sockets?: CharacterRig["sockets"];
     },
   >(
@@ -272,6 +273,13 @@ function remapCharacterRigSlotIds(
       hostBoneId: boneId(constraint.hostBoneId),
     })),
     reaches: angle.reaches.map((reach) => ({ ...reach, slotId: slotId(reach.slotId) })),
+    ikConstraints: angle.ikConstraints?.map((constraint) => ({
+      ...constraint,
+      targetBoneId: boneId(constraint.targetBoneId) ?? constraint.targetBoneId,
+      parentBoneId: boneId(constraint.parentBoneId) ?? constraint.parentBoneId,
+      childBoneId: boneId(constraint.childBoneId) ?? constraint.childBoneId,
+      endBoneId: boneId(constraint.endBoneId),
+    })),
     sockets: angle.sockets?.map((socket) => ({
       ...socket,
       slotId: slotId(socket.slotId),

@@ -86,12 +86,14 @@ describe("CharacterEditor source integration", () => {
 
     expect(source).toContain('from "./CharacterRigSetupControls"');
     expect(source).toContain("<CanvasSection");
+    expect(source).toContain("<RigSetupGuide />");
     expect(source).toContain("<SkeletonCard");
     expect(inspectorFieldsSource).toContain("export function Field");
     expect(inspectorFieldsSource).toContain("export function NumberField");
     expect(rigSetupSource).toContain('from "./CharacterInspectorFields"');
     expect(rigSetupSource).toContain("export function CanvasSection");
     expect(rigSetupSource).toContain("export function SkeletonCard");
+    expect(rigSetupSource).toContain("export function RigSetupGuide");
     expect(rigSetupSource).toContain('{ label: "Portrait", width: 600, height: 900 }');
     expect(rigSetupSource).toContain('{ label: "Square", width: 1000, height: 1000 }');
     expect(source).not.toContain("function CanvasSection");
@@ -389,6 +391,7 @@ describe("CharacterEditor source integration", () => {
     expect(overlaysSource).toContain("export function RotationReachOverlay");
     expect(overlaysSource).toContain("export function VariantAnchorOverlay");
     expect(overlaysSource).toContain("export function RigBonesOverlay");
+    expect(overlaysSource).toContain("isSkeletonDetailBone");
     expect(overlaysSource).toContain("export function GroupControlsOverlay");
     expect(geometrySource).toContain("export function convexHull");
     expect(geometrySource).toContain("export function composeEditorPartTransform");

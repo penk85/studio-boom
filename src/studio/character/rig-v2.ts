@@ -171,6 +171,7 @@ export function upgradeCharacterRigV2(character: CharacterPreset): CharacterPres
     slotRelations: active?.slotRelations ?? legacyRig.slotRelations,
     hostConstraints: active?.hostConstraints ?? legacyRig.hostConstraints,
     reaches: active?.reaches ?? legacyRig.reaches,
+    ikConstraints: active?.ikConstraints ?? legacyRig.ikConstraints,
     sockets: undefined,
   };
   const parts = character.parts.map((part) => partsById.get(part.id) ?? part);
@@ -784,6 +785,7 @@ function withAngleRig(
             slotRelations: nextAngle.slotRelations,
             hostConstraints: nextAngle.hostConstraints,
             reaches: nextAngle.reaches,
+            ikConstraints: nextAngle.ikConstraints,
             sockets: undefined,
           }
         : {}),

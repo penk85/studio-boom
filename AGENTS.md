@@ -82,15 +82,13 @@ native provider artifacts during its postinstall; do not treat
 diagnostic fallback, and any environment using the HyperFrames AI/background
 removal path should verify its native provider after a normal install.
 
-### Current quality baseline (2026-07-27)
+### Current quality baseline (2026-08-09)
 
 - `npx tsc --noEmit` is clean. The former `activeSceneId` interface hole is fixed.
 - `npm run lint` is clean project-wide.
-- `npx vitest run --testTimeout=10000` passes 85 files / 754 tests in the current
-  environment. The default 5-second run can time out different store tests under
-  full-suite CPU load; the isolated store file passes 50/50. Record exact counts
-  in the audit after a full run; counts grow as tests are added and are not a
-  contract.
+- `npx vitest run` passes 90 files / 807 tests in the current environment. Record
+  exact counts in the audit after a full run; counts grow as tests are added and
+  are not a contract.
 
 Definition of done for any change: `npx vitest run`, `npx tsc --noEmit`, and
 `npm run lint` all green — plus §10's human handoff for anything user-visible.
@@ -450,7 +448,7 @@ majors you must write against (see `package.json` for exact ranges):
 | pixi.js           | **8.x**                                                           | v8 API only: `new Application()` + `await app.init()`, `Assets.load`, `MeshRope`/`MeshPlane`. No v7 idioms. Consult `.claude/skills/pixijs-*`                |
 | gsap              | 3.x                                                               | inside compositions it must stay seek-driven/deterministic                                                                                                   |
 | tailwindcss       | **4.x**                                                           | CSS-first; no config file; `@theme inline` in `src/styles.css`                                                                                               |
-| @hyperframes/\*   | **0.7.73 installed** (core, studio, player, producer, engine, CLI) | Keep the family on one exact version; the 0.7 StaticGuard contract requires one composition ID on the stage root, and validation is asynchronous. Re-audit `hyperframes/html.ts` + `native.ts` for any future family change. |
+| @hyperframes/\*   | **0.7.103 installed** (core, studio, player, producer, engine, CLI) | Keep the family on one exact version; the 0.7 StaticGuard contract requires one composition ID on the stage root, and validation is asynchronous. Re-audit `hyperframes/html.ts` + `native.ts` for any future family change. |
 | eslint            | 9.x flat config                                                   | edit `eslint.config.js`, not `.eslintrc`                                                                                                                     |
 | vitest            | 4.x                                                               | config in `vitest.config.ts`; keep `server.deps.inline` for hyperframes packages                                                                             |
 | react-moveable    | 0.56.x                                                            | only via `interaction/TransformMoveable`                                                                                                                     |
@@ -482,7 +480,7 @@ never import `node:fs`/`node:path`/etc. in app code; only
   discipline and the parity tests do.
 - **`hyperframes/html.ts` + `hyperframes/native.ts` patch layers.** They
   preserve native timing, sizing, layer, and composition-root attributes across
-  the `@hyperframes/core@0.7.73` parser and the Studio/export boundary. The 0.7
+  the `@hyperframes/core@0.7.103` parser and the Studio/export boundary. The 0.7
   StaticGuard contract requires the composition ID exactly once, on the stage
   root; attribute spellings here are load-bearing for preview _and_ export.
 - **`hyperframes/keyframes.ts`.** Rewrites GSAP scripts inside `rootHtml`;

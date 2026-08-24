@@ -193,6 +193,7 @@ export interface AngleBoneJson {
   semanticBoneId?: ID;
   name: string;
   role: PartRole | "root" | "custom";
+  controlKind?: "pelvis" | "ikTarget";
   parentId: ID | null;
   x: number;
   y: number;
@@ -299,6 +300,15 @@ export interface AngleRigJson extends StudioBoomJsonArtifactBase {
   slotRelations?: AngleSlotRelationJson[];
   hostConstraints?: AngleHostConstraintJson[];
   reaches?: AngleReachJson[];
+  ikConstraints?: Array<{
+    id: ID;
+    kind: "twoBone";
+    targetBoneId: ID;
+    parentBoneId: ID;
+    childBoneId: ID;
+    endBoneId?: ID;
+    bendDirection: -1 | 1;
+  }>;
   /** Required output-pin contracts derived from child-bone rest sources. */
   pinContracts?: Array<{
     parentSlotId: ID;
@@ -376,6 +386,7 @@ export interface MotionJson extends StudioBoomJsonArtifactBase {
   angleIds?: CharacterAngle[];
   duration: number;
   loop: boolean;
+  kinematics?: "fk" | "ik";
   targetSpace: "parentRelative";
   tracks: MotionJsonTrack[];
   constraints?: {
@@ -437,6 +448,7 @@ export interface MotionPromptBoneJson {
   semanticBoneId?: ID;
   name: string;
   role: PartRole | "root" | "custom";
+  controlKind?: "pelvis" | "ikTarget";
   side?: CharacterPart["side"];
   parentId: ID | null;
   /** Local rest offset from the parent bone, in canvas pixels. */
@@ -535,6 +547,14 @@ export interface MotionPromptAngleJson {
     policy: "fkInheritsParent";
     ikAvailable: boolean;
     hint: string;
+  }>;
+  ikConstraints?: Array<{
+    id: ID;
+    targetBoneId: ID;
+    parentBoneId: ID;
+    childBoneId: ID;
+    endBoneId?: ID;
+    bendDirection: -1 | 1;
   }>;
   bones: MotionPromptBoneJson[];
   slots: MotionPromptSlotJson[];

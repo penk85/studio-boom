@@ -174,10 +174,21 @@ describe("character runtime resolver", () => {
             bones: [
               { id: "bone:root", name: "Root", role: "root", x: 0, y: 0, rotation: 0, depth: 0 },
               {
+                id: "bone:pelvis",
+                name: "Pelvis",
+                role: "custom",
+                controlKind: "pelvis",
+                parentId: "bone:root",
+                x: 0,
+                y: 0,
+                rotation: 0,
+                depth: 0,
+              },
+              {
                 id: "bone:role:body",
                 name: "Body",
                 role: "body",
-                parentId: "bone:root",
+                parentId: "bone:pelvis",
                 x: 100,
                 y: 100,
                 rotation: 90,

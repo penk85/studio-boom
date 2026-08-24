@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const libraryPath = join(process.cwd(), "src/studio/components/Library.tsx");
 const starterPath = join(process.cwd(), "src/studio/character/starter.ts");
+const testCharacterPath = join(process.cwd(), "src/studio/character/test-character.ts");
 
 describe("Library integration", () => {
   it("does not expose the retired pasted composition block workflow", () => {
@@ -29,6 +30,11 @@ describe("Library integration", () => {
     expect(librarySource).toContain("registerCharacterPreset(character)");
     expect(librarySource).toContain("const starter =");
     expect(librarySource).toContain("placeOnTimeline(starter)");
+    expect(librarySource).toContain("ensureRigTestCharacterSeeded");
+    expect(librarySource).toContain("IK Rig Test");
+    expect(readFileSync(testCharacterPath, "utf8")).toContain(
+      'export const RIG_TEST_CHARACTER_ID = "builtin-ik-rig-test"',
+    );
     expect(librarySource).not.toContain('placeOnTimeline("stub"');
   });
 

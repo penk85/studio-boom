@@ -2,6 +2,7 @@ import type {
   CharacterClipMeta,
   CharacterPart,
   CharacterPreset,
+  CharacterIkConstraint,
   CharacterSlotRelation,
   MediaAsset,
   MotionPreset,
@@ -53,6 +54,7 @@ import {
   type RuntimeCharacterSlot,
 } from "./runtime";
 import { runtimeMotionTargetForSlot } from "./motion-targets";
+import { solveTwoBoneIk } from "./ik";
 import { pinTransformInBoneSpace, registrationForPart } from "./registration";
 import { assertCharacterPinRigReadyForAngle } from "./rig-v2";
 import {
@@ -139,6 +141,7 @@ interface MotionTarget {
   boneId?: string;
   slotId: string;
   role: PartRole;
+  controlKind?: "pelvis" | "ikTarget";
   basePart?: CharacterPart;
   defaultVariantKey?: string;
   variantParts?: Record<string, CharacterPart>;
@@ -279,6 +282,7 @@ export function buildCharacterRenderPayload(
     slotTimelines: timelineInputs.slotTimelines,
     boneAnchorTimelines: timelineInputs.boneAnchorTimelines,
     constraintContext: runtime.constraintContext,
+    ikConstraints: runtime.angleRig.ikConstraints,
     activeAngle: runtime.angle,
   });
   return {
@@ -318,6 +322,7 @@ function buildCharacterTimelineInputs(
     slotRelations: runtime.angleRig.slotRelations,
     hostConstraints: runtime.angleRig.hostConstraints,
     reaches: runtime.angleRig.reaches,
+    ikConstraints: runtime.angleRig.ikConstraints,
     sockets: undefined,
   };
   const out: CharacterTimelineInputs = {
@@ -400,6 +405,22 @@ function buildCharacterTimelineInputs(
     scaleX,
     scaleY,
   );
+  const controlTargets: MotionTarget[] = runtime.angleRig.bones
+    .filter((bone) => bone.controlKind)
+    .map((bone) => ({
+      kind: "bone",
+      acceptsSlotMotion: false,
+      controlKind: bone.controlKind,
+      id: boneElementId(bone.id),
+      selector: `#${boneElementId(bone.id)}`,
+      boneId: bone.id,
+      slotId: bone.id,
+      role: "custom",
+      baseRotation: bone.rotation,
+      baseAnchorX: 0,
+      baseAnchorY: 0,
+      depth: bone.depth,
+    }));
   const resolvedTargets = slotTargets.flatMap((target) => {
     const runtimeTarget = runtimeMotionTargetForSlot(runtime, target.slotId);
     const slotTarget = { ...target, acceptsSlotMotion: runtimeTarget.kind === "slot" };
@@ -413,7 +434,7 @@ function buildCharacterTimelineInputs(
       },
     ];
   });
-  out.motionTargets.push(...uniqueMotionTargets(resolvedTargets));
+  out.motionTargets = [...controlTargets, ...uniqueMotionTargets(resolvedTargets)];
   // Bone targets whose rest rotation follows the parent variant: hand the motion builder the
   // per-key rotations so its absolute rotation vars track the active variant frame by frame.
   const anchorByBoneId = new Map(out.boneAnchorTimelines.map((entry) => [entry.boneId, entry]));
@@ -974,6 +995,7 @@ type CharacterTimelineScriptArgs = {
   slotTimelines: SlotTimeline[];
   boneAnchorTimelines: BoneAnchorTimeline[];
   constraintContext: MotionConstraintContext;
+  ikConstraints?: CharacterIkConstraint[];
   activeAngle: RuntimeRig["activeAngle"];
 };
 
@@ -1004,6 +1026,7 @@ function buildCharacterTimelineScene(args: CharacterTimelineScriptArgs): Charact
       args.slotTimelines,
       blinkWindows,
       args.constraintContext,
+      args.ikConstraints ?? [],
       args.activeAngle,
     ),
   );
@@ -1099,6 +1122,7 @@ function buildMotionFrame(
   slots: SlotTimeline[],
   blinkWindows: Array<{ start: number; end: number }>,
   constraintCtx: MotionConstraintContext,
+  ikConstraints: CharacterIkConstraint[],
   activeAngle: RuntimeRig["activeAngle"],
 ) {
   const composed = composeMotionsAt(
@@ -1137,6 +1161,7 @@ function buildMotionFrame(
       )
       .map((entry) => entry.target.boneId as string),
   );
+  applyIkToTargetFrames(targetFrames, composed, constraintCtx, ikConstraints);
   return {
     time,
     slotStates,
@@ -1150,6 +1175,7 @@ function buildMotionFrame(
         dy: rawDelta.dy,
         animatedBoneIds,
         unclampedLayers: composed.unclampedLayers,
+        control: target.controlKind !== undefined,
       });
       const fkDelta = fkLocked.clamped
         ? { ...rawDelta, dx: fkLocked.dx, dy: fkLocked.dy }
@@ -1166,6 +1192,7 @@ function buildMotionFrame(
         dy: fkDelta.dy,
         rotation: fkDelta.rotation,
         unclampedLayers: composed.unclampedLayers,
+        control: target.controlKind !== undefined,
       });
       const delta = limited.clamped
         ? { ...fkDelta, dx: limited.dx, dy: limited.dy, rotation: limited.rotation }
@@ -1219,6 +1246,84 @@ function buildMotionFrame(
       return { selector: target.selector, sceneNodeId: sceneNodeIdForMotionTarget(target), vars };
     }),
   };
+}
+
+type MotionTargetFrame = { target: MotionTarget; rawDelta: ReturnType<typeof emptyDelta> };
+
+/** Bake IK rotations into ordinary bone target deltas so Pixi preview and export share one path. */
+function applyIkToTargetFrames(
+  targetFrames: MotionTargetFrame[],
+  composed: ReturnType<typeof composeMotionsAt>,
+  constraintCtx: MotionConstraintContext,
+  constraints: CharacterIkConstraint[],
+): void {
+  if (composed.kinematics !== "ik" || constraints.length === 0) return;
+  const frameByBoneId = new Map<string, MotionTargetFrame>();
+  for (const frame of targetFrames) {
+    if (frame.target.kind === "bone" && frame.target.boneId) {
+      frameByBoneId.set(frame.target.boneId, frame);
+    }
+  }
+  const worldByBone = new Map<string, { x: number; y: number; rotation: number }>();
+  const resolving = new Set<string>();
+  const worldForBone = (boneId: string): { x: number; y: number; rotation: number } | undefined => {
+    const cached = worldByBone.get(boneId);
+    if (cached) return cached;
+    const bone = constraintCtx.boneById.get(boneId);
+    if (!bone || resolving.has(boneId)) return undefined;
+    resolving.add(boneId);
+    const delta = frameByBoneId.get(boneId)?.rawDelta ?? emptyDelta();
+    const parent = bone.parentId ? worldForBone(bone.parentId) : undefined;
+    const localX = bone.x + delta.dx;
+    const localY = bone.y + delta.dy;
+    const localRotation = bone.rotation + delta.rotation;
+    const radians = ((parent?.rotation ?? 0) * Math.PI) / 180;
+    const world = parent
+      ? {
+          x: parent.x + localX * Math.cos(radians) - localY * Math.sin(radians),
+          y: parent.y + localX * Math.sin(radians) + localY * Math.cos(radians),
+          rotation: parent.rotation + localRotation,
+        }
+      : { x: localX, y: localY, rotation: localRotation };
+    worldByBone.set(boneId, world);
+    resolving.delete(boneId);
+    return world;
+  };
+  const degrees = (radians: number) => (radians * 180) / Math.PI;
+
+  for (const constraint of constraints) {
+    const parentBone = constraintCtx.boneById.get(constraint.parentBoneId);
+    const childBone = constraintCtx.boneById.get(constraint.childBoneId);
+    const targetBone = constraintCtx.boneById.get(constraint.targetBoneId);
+    const endBone = constraint.endBoneId
+      ? constraintCtx.boneById.get(constraint.endBoneId)
+      : childBone;
+    const parentWorld = parentBone && worldForBone(parentBone.id);
+    const parentParentWorld = parentBone?.parentId ? worldForBone(parentBone.parentId) : undefined;
+    const childWorld = childBone && worldForBone(childBone.id);
+    const targetWorld = targetBone && worldForBone(targetBone.id);
+    const endWorld = endBone && worldForBone(endBone.id);
+    if (!parentBone || !childBone || !targetBone || !parentWorld || !childWorld || !targetWorld) {
+      continue;
+    }
+    const solved = solveTwoBoneIk({
+      root: parentWorld,
+      mid: childWorld,
+      end: endWorld ?? childWorld,
+      target: targetWorld,
+      bendDirection: constraint.bendDirection,
+    });
+    const parentFrame = frameByBoneId.get(parentBone.id);
+    const childFrame = frameByBoneId.get(childBone.id);
+    if (!solved || !parentFrame || !childFrame) continue;
+    parentFrame.rawDelta.rotation =
+      degrees(solved.parentWorldRotation) -
+      (parentParentWorld?.rotation ?? 0) -
+      parentBone.rotation;
+    childFrame.rawDelta.rotation =
+      degrees(solved.childWorldRotation) - solved.parentWorldRotation - childBone.rotation;
+    worldByBone.clear();
+  }
 }
 
 function sceneNodeIdForMotionTarget(target: MotionTarget): string {

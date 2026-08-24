@@ -132,7 +132,12 @@ export function runtimeAncestorMotionTargets(
     .reverse()
     .map<RuntimeMotionTarget | undefined>((ancestorBoneId) => {
       const ancestorSlotId = slotsByBone.get(ancestorBoneId);
-      if (!ancestorSlotId) return undefined;
+      if (!ancestorSlotId) {
+        const control = runtime.boneById.get(ancestorBoneId)?.controlKind;
+        return control
+          ? { kind: "bone", slotId: ancestorBoneId, boneId: ancestorBoneId }
+          : undefined;
+      }
       const target = runtimeMotionTargetForSlot(runtime, ancestorSlotId);
       return target.kind === "bone" && target.boneId === ancestorBoneId ? target : undefined;
     })

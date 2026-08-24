@@ -1,5 +1,6 @@
 import type {
   CharacterBone,
+  CharacterIkConstraint,
   CharacterPart,
   CharacterReach,
   CharacterSlotBinding,
@@ -44,6 +45,9 @@ export interface MotionConstraintContext {
   variantRotationLimitsBySlot: Map<string, Map<string, { min: number; max: number }>>;
   /** child bone id → parent bone id. Used to keep FK joints locked during motion playback. */
   parentBoneByBone: Map<string, string>;
+  /** Rest local transforms used by the deterministic composition-time IK solve. */
+  boneById: Map<string, CharacterBone>;
+  ikConstraints: CharacterIkConstraint[];
 }
 
 export function buildMotionConstraintContext(args: {
@@ -51,6 +55,7 @@ export function buildMotionConstraintContext(args: {
   variantPackages?: CharacterSlotVariantPackage[];
   parts?: CharacterPart[];
   bones?: CharacterBone[];
+  ikConstraints?: CharacterIkConstraint[];
 }): MotionConstraintContext {
   const reachBySlot = new Map(args.reaches.map((reach) => [reach.slotId, reach]));
   const variantRotationLimitsBySlot = new Map<string, Map<string, { min: number; max: number }>>();
@@ -68,7 +73,13 @@ export function buildMotionConstraintContext(args: {
     bySlot.set(key, limits);
     variantRotationLimitsBySlot.set(pkg.slotId, bySlot);
   }
-  return { reachBySlot, variantRotationLimitsBySlot, parentBoneByBone };
+  return {
+    reachBySlot,
+    variantRotationLimitsBySlot,
+    parentBoneByBone,
+    boneById: new Map((args.bones ?? []).map((bone) => [bone.id, bone])),
+    ikConstraints: args.ikConstraints ?? [],
+  };
 }
 
 /**
@@ -136,7 +147,17 @@ export function resolveMotionDelta(args: {
   dy: number;
   rotation: number;
   unclampedLayers?: ReadonlySet<string>;
+  control?: boolean;
 }): ResolvedMotionDelta {
+  if (args.control) {
+    return {
+      dx: args.dx,
+      dy: args.dy,
+      rotation: args.rotation,
+      clamped: false,
+      effectiveReachSource: "none",
+    };
+  }
   const { reach, source } = effectiveReachForSlot(args.ctx, args.slotId, args.activeVariants);
   const overridden =
     !!args.unclampedLayers &&
@@ -189,7 +210,9 @@ export function resolveFkJointDelta(args: {
   dy: number;
   animatedBoneIds: ReadonlySet<string>;
   unclampedLayers?: ReadonlySet<string>;
+  control?: boolean;
 }): ResolvedFkJointDelta {
+  if (args.control) return { dx: args.dx, dy: args.dy, clamped: false };
   const overridden =
     !!args.unclampedLayers &&
     (args.unclampedLayers.has(args.slotId) ||

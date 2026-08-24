@@ -15,7 +15,7 @@ baseline.
 **Historical tree state at audit time:** commit `ed41ff0` plus a ~1,400-line uncommitted
 diff (in-progress flexible-limb "mesh locks" feature; reviewed in §5).
 
-**Current status (2026-07-27):** H1–H4 and M1–M6 are addressed. Project
+**Current status (2026-08-09):** H1–H4 and M1–M6 are addressed. Project
 editing now takes an origin-scoped Web Lock before load-time writes; Dashboard
 rename, duplicate, and delete use the same exclusive boundary and re-read the
 latest stored project after acquiring it. A second tab is refused while the
@@ -25,16 +25,15 @@ controller-heavy files have explicit ownership, and Character Editor's safe
 document, resource, and interaction seams have been extracted without creating
 a second renderer or prop-dump façade. M8 is mitigated with an explicitly
 documented architectural remainder. M9's HyperFrames compatibility pass is
-complete; its remaining security remediation is approval-gated. L1-L3, L6, and L8 are addressed; L4,
+complete through the synchronized 0.7.103 family upgrade; its remaining security remediation is approval-gated. L1-L3, L6, and L8 are addressed; L4,
 L5, and part of L7 remain open. L9 is a future-path guard rather than a currently
 reachable defect.
 
-**Current validation (2026-07-28):** `npx vitest run --testTimeout=10000` passes
-85 files / 754 tests; the default 5-second run is CPU-sensitive under the full
-suite and can time out different store tests, while the isolated store file
-passes 50/50. `npx tsc --noEmit`, `npm run lint`, `npm run build`, and
-`git diff --check` are clean. The build retains only the known dependency
-annotation and large-chunk warnings.
+**Current validation (2026-08-09):** `npx vitest run` passes 90 files / 807
+tests. `npx tsc --noEmit`, `npm run lint`, `npm run build`, and
+`git diff --check` are clean; lint retains two existing Fast Refresh warnings,
+and the build retains the known dependency annotation, externalized Node module,
+and large-chunk warnings.
 
 Severity scale: **High** = data loss, security exposure, or broken gate.
 **Medium** = will bite users/devs under normal use as the app grows.
@@ -434,42 +433,40 @@ remains a larger postMessage-boundary project, not a safe local attribute change
 
 ### M9. The dependency graph carries unresolved security advisories
 
-**Re-verified 2026-07-27 after the HyperFrames family upgrade from 0.5.3 to
-exact 0.7.73.** `npm audit --omit=dev` reports 11 vulnerable dependency entries:
-7 high, 3 moderate, 1 low, and 0 critical. The remaining paths are primarily
-transitive dependencies of the local HyperFrames CLI and engine:
+**Re-verified 2026-08-09 after the synchronized HyperFrames family upgrade from
+0.7.73 to exact 0.7.103.** `npm audit --omit=dev` now reports 6 vulnerable
+production paths: 4 high, 1 moderate, and 1 low. The full `npm audit` report,
+including development dependencies, reports 10.
 
-- `@hono/node-server` is below the fixed 2.0.5 line, with no audit fix available
-  in the current graph.
-- `adm-zip` is below 0.6.0 through `hyperframes` and `onnxruntime-node`, with no
-  audit fix available in the current graph. `onnxruntime-node` is itself reported
-  through that path; `sharp` is also reported below its fixed line.
-- `hono`, `postcss`, `protobufjs`, and `esbuild` have fix-available advisory
-  paths, but they are transitive and a forced override could change HyperFrames
-  rendering, linting, bundling, or native tooling contracts.
+The upgrade removed the previously reported `@hono/node-server`, `adm-zip`,
+`onnxruntime-node`, and `sharp` paths from the production audit. Remaining
+transitive paths are:
+
+- `hono`, `postcss`, `protobufjs`, `nanoid`, and `dompurify` in the HyperFrames
+  runtime/CLI graph.
+- `esbuild` in development-only Vite/tsx paths.
+
+These remain transitive and a forced override could change HyperFrames rendering,
+linting, bundling, or native tooling contracts.
 
 **Actual exposure:** Studio is local-first and its Vite server is bound to
 `127.0.0.1`; this materially limits remote exploitation and the Windows-specific
 Vite/esbuild development-server finding on the current Linux environment. The
 Hono server adapters are not used as a public deployment surface by Studio. The
-archive, image, parser, and native-runtime findings remain relevant when an
-untrusted project, custom composition source, media file, or render input reaches the local
-HyperFrames tooling. Imported/custom HTML remains a trust boundary because it
+remaining parser, runtime, and local-server findings remain relevant when an
+untrusted project, custom composition source, media file, or render input reaches
+the local HyperFrames tooling. Imported/custom HTML remains a trust boundary because it
 executes in the preview document and can access same-origin Studio data.
 
-**Remediation proposal — pending explicit approval:** first evaluate a complete,
-family-synchronized HyperFrames release (the registry currently advertises
-0.7.76 for all six packages) and rerun the compatibility matrix. That release's
-published CLI metadata still pins `onnxruntime-node` 1.23.2 and ranges
-`adm-zip`/`sharp` below their audit fixes, so it is not a security resolution by
-itself. If the family owner does not publish fixed transitive ranges, consider a
-separate, narrowly scoped override set only for the fix-available packages after
-testing the CLI and browser build. No override is proposed for the no-fix paths;
-those require upstream releases or containment.
+**Remediation proposal — pending explicit approval:** do not add overrides yet.
+First complete the 0.7.103 preview/export matrix and confirm whether the
+remaining paths are reachable in Studio's local-only workflow. If fixes are still
+needed, evaluate narrowly scoped overrides one package at a time after testing
+the CLI and browser build. No blanket audit command is appropriate.
 
-Do not run a blanket `npm audit fix`, and do not change `package.json` or
-`package-lock.json` until the exact candidate set is approved. Until then, the
-findings are tracked rather than hidden behind incompatible transitive upgrades.
+Do not run a blanket `npm audit fix` or add transitive overrides without a
+separate compatibility review. Until then, the findings are tracked rather than
+hidden behind incompatible dependency upgrades.
 
 ---
 

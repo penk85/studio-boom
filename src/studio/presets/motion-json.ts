@@ -65,6 +65,7 @@ export function motionJsonToPreset(
     angleIds: motion.angleIds,
     duration,
     loop: motion.loop,
+    kinematics: motion.kinematics ?? "fk",
     tracks: [],
     keyposes,
     allowOutOfBounds: allowOutOfBoundsIds(motion, angleRig),
@@ -399,6 +400,7 @@ export function expandMotionDraft(draft: MotionDraftJson): {
         ? draft.duration
         : 1,
     loop: typeof source.loop === "boolean" ? (source.loop as boolean) : false,
+    kinematics: source.kinematics === "ik" ? "ik" : "fk",
     targetSpace: "parentRelative",
     tracks,
   };

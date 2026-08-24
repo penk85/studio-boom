@@ -63,6 +63,7 @@ import {
 } from "../interaction/select-drag";
 import { startWindowPointerDrag } from "../interaction/pointer-drag";
 import type {
+  CharacterBone,
   CharacterPart,
   CharacterPreset,
   MotionCategory,
@@ -72,7 +73,13 @@ import type {
   RecordedPartOverride,
 } from "../types";
 import type { MotionJson } from "../character-json/schema";
-import { KeyposeStrip, PartList, PropertiesPanel, PropertyRow } from "./MotionPresetRecorderPanels";
+import {
+  ControlPropertiesPanel,
+  KeyposeStrip,
+  PartList,
+  PropertiesPanel,
+  PropertyRow,
+} from "./MotionPresetRecorderPanels";
 import {
   AnchorDebugOverlay,
   ReactPoseCanvas,
@@ -90,18 +97,22 @@ import { recorderPatchEqual, useRafCoalescedCallback } from "./motion-recorder-i
 import {
   adjacentKeyposeIndex,
   cloneKeyposes,
+  controlOverrideMapsEqual,
   customPresetName,
+  defaultControlOverride,
   defaultOverride,
   editorTitle,
   findKeyposeAt,
   initialKeyposesForPreset,
   isDirtyOverride,
+  isDirtyControlOverride,
   keyposeDraftSignature,
   recorderPreviewPreset,
   recorderOverrideMapsEqual,
   recorderOverridesEqual,
   round,
   type CharacterSlot,
+  type RecorderControlState,
   type FlexiblePointChange,
   type RecorderOverridePatch,
   type RecorderPartState,
@@ -137,6 +148,10 @@ export function MotionPresetRecorder({
   const runtime = useMemo(() => buildCharacterRuntime(character), [character]);
   const rig = runtime.rig;
   const slots = runtime.slots;
+  const controls = useMemo(
+    () => runtime.angleRig.bones.filter((bone): bone is CharacterBone => !!bone.controlKind),
+    [runtime.angleRig.bones],
+  );
   // The same resolved runtime boundary the compiled timeline clamps through — editing is WYSIWYG.
   const constraintCtx = runtime.constraintContext;
   const [name, setName] = useState(
@@ -147,6 +162,7 @@ export function MotionPresetRecorder({
   const [category, setCategory] = useState<MotionCategory>(
     initialPreset?.category ?? initialCategory ?? "full-body",
   );
+  const [kinematics, setKinematics] = useState<"fk" | "ik">(initialPreset?.kinematics ?? "fk");
   const [region, setRegion] = useState<MotionRegion | "">(
     initialPreset?.region ??
       defaultActionRegionForCategory(initialPreset?.category ?? initialCategory ?? "full-body"),
@@ -165,6 +181,9 @@ export function MotionPresetRecorder({
     () => initialRecorderKeyposes[0]?.t ?? null,
   );
   const [overrides, setOverrides] = useState<Map<string, RecorderPartState>>(new Map());
+  const [controlOverrides, setControlOverrides] = useState<Map<string, RecorderControlState>>(
+    new Map(),
+  );
   const [draftDirty, setDraftDirty] = useState(false);
   // Layers this action may push past the character's reach (slot ids and/or roles) — the
   // per-action escape hatch. Carried from the loaded preset and saved back with it.
@@ -174,6 +193,7 @@ export function MotionPresetRecorder({
   const [faceTurnX, setFaceTurnX] = useState(initialRecorderKeyposes[0]?.faceTurnX ?? 0);
   const [faceTurnY, setFaceTurnY] = useState(initialRecorderKeyposes[0]?.faceTurnY ?? 0);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
+  const [selectedControlId, setSelectedControlId] = useState<string | null>(null);
   // Transient editor lock for this recording session — locked slots ignore canvas
   // clicks/drags (still selectable from the part list). Parts locked in the character
   // editor (part.locked) are also treated as locked here.
@@ -251,6 +271,7 @@ export function MotionPresetRecorder({
 
         setName(converted.preset.name);
         setCategory(converted.preset.category);
+        setKinematics(converted.preset.kinematics ?? "fk");
         setRegion(
           converted.preset.region ?? defaultActionRegionForCategory(converted.preset.category),
         );
@@ -294,8 +315,8 @@ export function MotionPresetRecorder({
   });
 
   useEffect(() => {
-    if (!selectedSlotId && slots.length > 0) setSelectedSlotId(slots[0].id);
-  }, [selectedSlotId, slots]);
+    if (!selectedSlotId && !selectedControlId && slots.length > 0) setSelectedSlotId(slots[0].id);
+  }, [selectedControlId, selectedSlotId, slots]);
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -341,7 +362,21 @@ export function MotionPresetRecorder({
   const resolveSampleToDraftState = useCallback(
     (sample: ReturnType<typeof sampleKeyposesAtTime>) => {
       const next = new Map<string, RecorderPartState>();
+      const nextControls = new Map<string, RecorderControlState>();
       for (const ov of sample.parts.values()) {
+        const control =
+          ov.target === "bone" && ov.boneId
+            ? controls.find((candidate) => candidate.id === ov.boneId)
+            : undefined;
+        if (control) {
+          nextControls.set(control.id, {
+            ...defaultControlOverride(control),
+            dx: ov.dx ?? 0,
+            dy: ov.dy ?? 0,
+            rotation: ov.rotation ?? 0,
+          });
+          continue;
+        }
         const slotId = slotIdForRecordedOverride(runtime, ov);
         const slot = slotId ? runtime.slotById.get(slotId) : undefined;
         if (!slot) continue;
@@ -385,11 +420,22 @@ export function MotionPresetRecorder({
       });
       return {
         overrides: constrained,
+        controlOverrides: nextControls,
         faceTurnX: sample.faceTurnX,
         faceTurnY: sample.faceTurnY,
       };
     },
-    [activePartForSlot, allowOutOfBounds, basePoses, character, constraintCtx, rig, runtime, slots],
+    [
+      activePartForSlot,
+      allowOutOfBounds,
+      basePoses,
+      character,
+      constraintCtx,
+      controls,
+      rig,
+      runtime,
+      slots,
+    ],
   );
 
   const applySampleToDraft = useCallback(
@@ -401,6 +447,9 @@ export function MotionPresetRecorder({
       const draft = resolveSampleToDraftState(sample);
       setOverrides((prev) =>
         recorderOverrideMapsEqual(prev, draft.overrides) ? prev : draft.overrides,
+      );
+      setControlOverrides((prev) =>
+        controlOverrideMapsEqual(prev, draft.controlOverrides) ? prev : draft.controlOverrides,
       );
       setFaceTurnX(draft.faceTurnX);
       setFaceTurnY(draft.faceTurnY);
@@ -442,6 +491,10 @@ export function MotionPresetRecorder({
 
   const displayScale = previewMode === "export" ? 1 : fitScale;
   const selectedSlot = slots.find((slot) => slot.id === selectedSlotId) ?? null;
+  const selectedControl = controls.find((control) => control.id === selectedControlId) ?? null;
+  const selectedControlOverride = selectedControl
+    ? (controlOverrides.get(selectedControl.id) ?? defaultControlOverride(selectedControl))
+    : null;
   const selectedOverrideFromMap = selectedSlotId ? overrides.get(selectedSlotId) : undefined;
   const selectedPart = selectedSlot
     ? (activePartForSlot(selectedSlot, selectedOverrideFromMap?.poseSwap) ?? null)
@@ -534,8 +587,19 @@ export function MotionPresetRecorder({
       if (ov.opacity !== 1) part.opacity = ov.opacity;
       parts.push(part);
     }
+    for (const controlOverride of controlOverrides.values()) {
+      if (!isDirtyControlOverride(controlOverride)) continue;
+      parts.push({
+        target: "bone",
+        boneId: controlOverride.controlId,
+        partRole: "custom",
+        ...(controlOverride.dx !== 0 ? { dx: controlOverride.dx } : {}),
+        ...(controlOverride.dy !== 0 ? { dy: controlOverride.dy } : {}),
+        ...(controlOverride.rotation !== 0 ? { rotation: controlOverride.rotation } : {}),
+      });
+    }
     return parts;
-  }, [activePartForSlot, overrides, runtime, slots]);
+  }, [activePartForSlot, controlOverrides, overrides, runtime, slots]);
 
   const sortedKeyposes = useMemo(
     () => cloneKeyposes(keyposes).sort((a, b) => a.t - b.t),
@@ -551,8 +615,9 @@ export function MotionPresetRecorder({
       duration,
       keyposes: sortedKeyposes,
       allowOutOfBounds,
+      kinematics,
     });
-  }, [allowOutOfBounds, category, duration, name, region, sortedKeyposes]);
+  }, [allowOutOfBounds, category, duration, kinematics, name, region, sortedKeyposes]);
   const livePreviewPreset = useMemo(
     () =>
       recorderPreviewPreset({
@@ -569,8 +634,18 @@ export function MotionPresetRecorder({
           },
         ],
         allowOutOfBounds,
+        kinematics,
       }),
-    [allowOutOfBounds, category, currentRecordedParts, faceTurnX, faceTurnY, name, region],
+    [
+      allowOutOfBounds,
+      category,
+      currentRecordedParts,
+      faceTurnX,
+      faceTurnY,
+      kinematics,
+      name,
+      region,
+    ],
   );
 
   const commitRecorderPreviewToHtml = useCallback(() => {
@@ -640,6 +715,21 @@ export function MotionPresetRecorder({
     (slotId: string, patch: Partial<RecorderPartState>) => updateOverrides([{ slotId, patch }]),
     [updateOverrides],
   );
+  const updateControlOverride = useCallback(
+    (controlId: string, patch: Partial<RecorderControlState>) => {
+      stopCompiledPreview();
+      setDraftDirty(true);
+      setControlOverrides((prev) => {
+        const control = controls.find((candidate) => candidate.id === controlId);
+        if (!control) return prev;
+        const current = prev.get(controlId) ?? defaultControlOverride(control);
+        const next = new Map(prev);
+        next.set(controlId, { ...current, ...patch });
+        return next;
+      });
+    },
+    [controls, stopCompiledPreview],
+  );
   const handleFlexiblePointChange = useCallback(
     ({ patch }: FlexiblePointChange) => {
       if (!selectedSlotId) return;
@@ -658,6 +748,16 @@ export function MotionPresetRecorder({
     setOverrides((prev) => {
       const next = new Map(prev);
       next.delete(slotId);
+      return next;
+    });
+  };
+
+  const clearControlOverride = (controlId: string) => {
+    stopCompiledPreview();
+    setDraftDirty(true);
+    setControlOverrides((prev) => {
+      const next = new Map(prev);
+      next.delete(controlId);
       return next;
     });
   };
@@ -953,6 +1053,7 @@ export function MotionPresetRecorder({
       loop: initialPreset?.loop ?? false,
       tracks: [],
       keyposes: cloneKeyposes(sortedKeyposes).sort((a, b) => a.t - b.t),
+      kinematics,
       allowOutOfBounds: allowOutOfBounds.length ? [...allowOutOfBounds] : undefined,
       builtin: false,
       createdAt: savingCopy ? now : (initialPreset?.createdAt ?? now),
@@ -1109,6 +1210,18 @@ export function MotionPresetRecorder({
             ))}
           </select>
           <label className="flex items-center gap-1 text-xs text-muted-foreground">
+            Solve
+            <select
+              value={kinematics}
+              onChange={(event) => setKinematics(event.target.value as "fk" | "ik")}
+              className="rounded border border-border bg-input px-1.5 py-1 text-xs text-foreground"
+              title="FK poses bones directly; IK poses limbs from their end Controls"
+            >
+              <option value="fk">FK</option>
+              <option value="ik">IK</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-1 text-xs text-muted-foreground">
             Duration
             <input
               type="number"
@@ -1175,13 +1288,23 @@ export function MotionPresetRecorder({
       }
       leftPanel={
         <PartList
+          controls={controls}
+          controlOverrides={controlOverrides}
           slots={slots}
           selectedSlotId={selectedSlotId}
           overrides={overrides}
           activePartForSlot={activePartForSlot}
           isLocked={isSlotLocked}
           onToggleLocked={toggleSlotLocked}
-          onSelect={setSelectedSlotId}
+          onSelect={(id) => {
+            setSelectedControlId(null);
+            setSelectedSlotId(id);
+          }}
+          selectedControlId={selectedControlId}
+          onSelectControl={(id) => {
+            setSelectedSlotId(null);
+            setSelectedControlId(id);
+          }}
           onToggleHidden={(slotId) => {
             const slot = slots.find((item) => item.id === slotId);
             const part = slot
@@ -1500,18 +1623,27 @@ export function MotionPresetRecorder({
             onLoadSuggestion={aiAddon.loadSuggestion}
           />
 
-          <PropertiesPanel
-            slot={selectedSlot}
-            part={selectedPart}
-            override={selectedOverride}
-            advancedOpen={advancedOpen}
-            rotationLimit={selectedRotationLimit}
-            allowOutOfBounds={selectedAllowsOutOfBounds}
-            onAllowOutOfBoundsChange={setSelectedAllowOutOfBounds}
-            onAdvancedOpenChange={setAdvancedOpen}
-            onChange={(patch) => selectedSlotId && updateOverride(selectedSlotId, patch)}
-            onResetAll={() => selectedSlotId && clearOverride(selectedSlotId)}
-          />
+          {selectedControl ? (
+            <ControlPropertiesPanel
+              control={selectedControl}
+              override={selectedControlOverride}
+              onChange={(patch) => updateControlOverride(selectedControl.id, patch)}
+              onReset={() => clearControlOverride(selectedControl.id)}
+            />
+          ) : (
+            <PropertiesPanel
+              slot={selectedSlot}
+              part={selectedPart}
+              override={selectedOverride}
+              advancedOpen={advancedOpen}
+              rotationLimit={selectedRotationLimit}
+              allowOutOfBounds={selectedAllowsOutOfBounds}
+              onAllowOutOfBoundsChange={setSelectedAllowOutOfBounds}
+              onAdvancedOpenChange={setAdvancedOpen}
+              onChange={(patch) => selectedSlotId && updateOverride(selectedSlotId, patch)}
+              onResetAll={() => selectedSlotId && clearOverride(selectedSlotId)}
+            />
+          )}
 
           <div className="mt-4 rounded border border-border bg-panel-2 p-3">
             <div className="mb-2 flex items-center justify-between gap-2">

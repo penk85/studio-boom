@@ -33,6 +33,10 @@ table, add it here first.
 | **Lane**        | A sub-row inside a track, labelled `<Track noun> <n>`                 | V1, A2, BG1, subtrack                                             |
 | **Part**        | One piece of character artwork                                        | asset, drawing, layer                                             |
 | **Slot**        | A named place on a rig that a Part fills                              | socket, bone (a bone is a different thing)                        |
+| **Control**     | A rig handle with no artwork, such as Pelvis or Foot target           | controller, handle, gizmo                                         |
+| **Pelvis**      | The central body Control that carries the torso and legs              | hip, waist                                                         |
+| **FK**          | Directly posing a bone's rotation                                      | —                                                                  |
+| **IK**          | Posing a limb by moving its end Control                                | —                                                                  |
 
 `Move` and `Action` are the pair most easily confused, and the confusion is the
 whole reason this file exists:

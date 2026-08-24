@@ -24,6 +24,7 @@ import {
   ensureStarterCharacterSeeded,
   STARTER_CHARACTER_ID,
 } from "../character/starter";
+import { ensureRigTestCharacterSeeded, RIG_TEST_CHARACTER_ID } from "../character/test-character";
 import type { PresenterVariant } from "../character/presenter";
 import { defaultPoseForCharacter } from "../character/pose-presets";
 import { ensureMotionPresetsSeeded } from "../presets/seed";
@@ -136,6 +137,7 @@ function CharactersTab() {
 
   useEffect(() => {
     void ensureStarterCharacterSeeded();
+    void ensureRigTestCharacterSeeded();
   }, []);
 
   useEffect(() => {
@@ -191,6 +193,22 @@ function CharactersTab() {
         characters.find((character) => character.id === STARTER_CHARACTER_ID) ??
         (await ensureStarterCharacterSeeded());
       await placeOnTimeline(starter);
+    } catch (error) {
+      setCharacterActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPlacingStarter(false);
+    }
+  };
+
+  const placeRigTestCharacter = async () => {
+    if (!project || placingStarter) return;
+    setPlacingStarter(true);
+    setCharacterActionError(null);
+    try {
+      const testCharacter =
+        characters.find((character) => character.id === RIG_TEST_CHARACTER_ID) ??
+        (await ensureRigTestCharacterSeeded());
+      await placeOnTimeline(testCharacter);
     } catch (error) {
       setCharacterActionError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -255,6 +273,13 @@ function CharactersTab() {
             busy={placingStarter}
             disabled={!project}
             onClick={() => void placeStarterCharacter().then(() => setAddOpen(false))}
+          />
+          <AddCharacterChoice
+            title="Use the IK Rig Test (recommended)"
+            detail="A simple torso, arms, and two-bone legs for learning FK and IK."
+            busy={placingStarter}
+            disabled={!project}
+            onClick={() => void placeRigTestCharacter().then(() => setAddOpen(false))}
           />
           {(["male", "female"] as const).map((variant) => (
             <AddCharacterChoice

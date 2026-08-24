@@ -11,7 +11,7 @@ The packages below are the implementation — read them before writing any code.
 
 ## Current package baseline (2026-07-27)
 
-The HyperFrames family is pinned together at exact version **0.7.73** across
+The HyperFrames family is pinned together at exact version **0.7.103** across
 core, engine, player, producer, studio, and the CLI; Vite remains **7.3.6**.
 HyperFrames 0.7 validation is asynchronous and its StaticGuard contract requires
 each composition file to have exactly one `data-composition-id`, owned by the

@@ -14,13 +14,13 @@ movie. `editorMeta` is editor-only intent and UI state.
 
 ## Compatibility Baseline
 
-All six installed HyperFrames packages currently resolve to exact 0.7.73, with
+All six installed HyperFrames packages currently resolve to exact 0.7.103, with
 Vite at 7.3.6. The 0.7 compatibility pass is complete. The `html.ts` and
 `native.ts` adapters remain load-bearing and must not be removed opportunistically;
 future family changes should follow
 [hyperframes-upgrade-safety-plan.md](./hyperframes-upgrade-safety-plan.md).
 
-### 0.7 Upgrade Closeout (2026-07-27)
+### 0.7.103 Upgrade Closeout (2026-08-09)
 
 The current boundary matches the 0.7 contracts: parser-generated element
 identity is preserved through `data-hf-id`, linter calls are awaited, and each
@@ -29,10 +29,11 @@ composition file has one `data-composition-id` on its stage root. In particular,
 StaticGuard does not reject otherwise valid compositions. The regression is
 covered by `native.test.ts`.
 
-The automated gate is green: 84 test files / 746 tests pass, with clean
+The automated gate is green: 90 test files / 807 tests pass, with clean
 typecheck, lint, production build, and diff checks. The remaining security audit
 findings are transitive HyperFrames/CLI dependency paths and are documented as
-an approval-gated follow-up in the code audit.
+an approval-gated follow-up in the code audit. Manual preview/export confirmation
+is still required for this compatibility release.
 
 ## Layer Classification
 

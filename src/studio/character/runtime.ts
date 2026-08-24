@@ -129,6 +129,7 @@ export function buildCharacterRuntime(
       variantPackages: canonicalCharacter.variantPackages,
       parts: canonicalCharacter.parts,
       bones: angleRig.bones,
+      ikConstraints: angleRig.ikConstraints,
     }),
   };
 }
@@ -254,6 +255,7 @@ function angleRigForRuntime(rig: CharacterRig, angle: CharacterAngle): Character
       slotRelations: rig.slotRelations,
       hostConstraints: rig.hostConstraints,
       reaches: rig.reaches,
+      ikConstraints: rig.ikConstraints,
       sockets: rig.sockets,
     }
   );

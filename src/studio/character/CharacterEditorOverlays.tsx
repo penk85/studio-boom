@@ -16,6 +16,7 @@ import {
 import { limbPathBendSide } from "./scene";
 import { limbPathPointAt, limbPathProjectPointT } from "./mesh-deform";
 import { buildCharacterRuntime, runtimeBoneWorldTransforms } from "./runtime";
+import { isSkeletonDetailBone } from "./skeleton-tree";
 import { anchorSourceForChild } from "./variant-pairing";
 
 export function ReachOverlay({
@@ -576,6 +577,7 @@ export function RigBonesOverlay({
   variantPreview,
   selectedBoneId,
   scale,
+  showDetail,
   onSelectBone,
   onStartBoneDrag,
 }: {
@@ -583,12 +585,14 @@ export function RigBonesOverlay({
   variantPreview: Readonly<Record<ID, string>>;
   selectedBoneId: ID | null;
   scale: number;
+  showDetail: boolean;
   onSelectBone: (boneId: ID) => void;
   onStartBoneDrag: (e: ReactPointerEvent, boneId: ID) => void;
 }) {
   const runtime = buildCharacterRuntime(doc);
   const world = runtimeBoneWorldTransforms(runtime, variantPreview);
-  const bones = runtime.angleRig.bones;
+  const bones = runtime.angleRig.bones.filter((bone) => showDetail || !isSkeletonDetailBone(bone));
+  const visibleBoneIds = new Set(bones.map((bone) => bone.id));
   const radius = Math.max(6, 8 / Math.max(0.0001, scale));
   return (
     <svg
@@ -600,7 +604,7 @@ export function RigBonesOverlay({
       {bones.map((bone) => {
         const point = world.get(bone.id);
         const parent = bone.parentId ? world.get(bone.parentId) : undefined;
-        if (!point || !parent) return null;
+        if (!point || !parent || (bone.parentId && !visibleBoneIds.has(bone.parentId))) return null;
         return (
           <line
             key={`${bone.id}:link`}
@@ -634,7 +638,15 @@ export function RigBonesOverlay({
               cx={point.x}
               cy={point.y}
               r={radius}
-              fill={selected ? "#facc15" : "#38bdf8"}
+              fill={
+                selected
+                  ? "#facc15"
+                  : bone.controlKind === "ikTarget"
+                    ? "#c084fc"
+                    : bone.controlKind === "pelvis"
+                      ? "#fb923c"
+                      : "#38bdf8"
+              }
               stroke="#0f172a"
               strokeWidth={Math.max(1, 1.5 / Math.max(0.0001, scale))}
             />

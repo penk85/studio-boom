@@ -114,7 +114,10 @@ describe.each(PRESENTER_VARIANTS)("presenter character (%s)", (variant) => {
       expect(boneRole(footBone!.parentId)).toBe("lowerLeg");
       const lowerLegBone = rig.bones.find((b) => b.role === "lowerLeg");
       expect(boneRole(lowerLegBone!.parentId)).toBe("leg");
-      expect(boneRole(rig.bones.find((b) => b.role === "leg")!.parentId)).toBe("body");
+      const legParent = rig.bones.find(
+        (b) => b.id === rig.bones.find((bone) => bone.role === "leg")?.parentId,
+      );
+      expect(legParent?.controlKind).toBe("pelvis");
     }
   });
 

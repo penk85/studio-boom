@@ -460,6 +460,8 @@ export interface CharacterBone {
   semanticBoneId?: ID;
   name: string;
   role: PartRole | "root";
+  /** Control-only bones have no artwork slot but remain in the same transform hierarchy. */
+  controlKind?: "pelvis" | "ikTarget";
   side?: CharacterPart["side"];
   parentId?: ID;
   /** Local rest position relative to parent bone, in character canvas pixels. */
@@ -501,6 +503,20 @@ export interface CharacterBone {
     gravity: number;
     method: "baked" | "fixed_step";
   };
+}
+
+export interface CharacterIkConstraint {
+  id: ID;
+  kind: "twoBone";
+  /** Control bone whose world position is the desired end joint. */
+  targetBoneId: ID;
+  /** Proximal and distal bones solved in world space, then converted back to local rotations. */
+  parentBoneId: ID;
+  childBoneId: ID;
+  /** Which side of the chain the bend should prefer. */
+  bendDirection: -1 | 1;
+  /** Optional end bone that carries the foot/hand artwork after the two-bone solve. */
+  endBoneId?: ID;
 }
 
 export interface CharacterSlotBinding {
@@ -570,6 +586,8 @@ export interface CharacterAngleRig {
   /** Host containment for manual drag/bounds metadata only. */
   hostConstraints: CharacterHostConstraint[];
   reaches: CharacterReach[];
+  /** Deterministic two-bone IK chains. FK remains the default unless an Action opts into IK. */
+  ikConstraints?: CharacterIkConstraint[];
   /** Bone-owned joints with per-variant anchor overrides (authored here, per angle). */
   sockets?: CharacterSlotSocket[];
 }
@@ -647,6 +665,8 @@ export interface CharacterRig {
   /** Host containment for manual drag/bounds metadata only. */
   hostConstraints: CharacterHostConstraint[];
   reaches: CharacterReach[];
+  /** Derived active-angle mirror of the per-angle IK chain records. */
+  ikConstraints?: CharacterIkConstraint[];
   /**
    * DERIVED active-angle view of the per-angle socket records (like the other top-level
    * mirrors). Never write this directly — mutate via the angle-rig socket helpers.
@@ -914,6 +934,8 @@ export interface MotionPreset {
   tracks: MotionTrack[];
   /** Visual recorder data — preferred over `tracks` when present. */
   keyposes?: RecordedKeypose[];
+  /** Direct bone posing (FK) or control-target posing (IK) for this Action. */
+  kinematics?: "fk" | "ik";
   /**
    * Layers (slotIds and/or part roles) this movement is allowed to push past the character's
    * authored reach — the per-movement "allow out of bounds" escape hatch. Empty = fully clamped.
